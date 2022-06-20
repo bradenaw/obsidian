@@ -47,7 +47,7 @@ impl Lsm {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Value {
     Regular(Vec<u8>),
     Tombstone,
@@ -104,6 +104,9 @@ struct Run {
 }
 
 impl Run {
+    fn new(kvs: Vec<(Vec<u8>, u64, Value)>) -> Self {
+        Self { kvs }
+    }
     fn get(&self, ts: u64, k: &[u8]) -> Option<(u64, Value)> {
         let entry = match self
             .kvs
@@ -123,6 +126,8 @@ impl Run {
 #[cfg(test)]
 mod test {
     use crate::Lsm;
+    use crate::Run;
+    use crate::Value;
 
     #[test]
     fn test_put_get() {
@@ -137,5 +142,34 @@ mod test {
         assert_eq!(lsm.get(write_ts - 1, not_k), None);
         assert_eq!(lsm.get(write_ts, not_k), None);
         assert_eq!(lsm.get(write_ts + 1, not_k), None);
+    }
+
+    #[test]
+    fn test_run_get() {
+        let run = Run::new(vec![
+            (b"a".to_vec(), 10, Value::Regular(b"a10".to_vec())),
+            (b"a".to_vec(), 15, Value::Regular(b"a15".to_vec())),
+            (b"b".to_vec(), 10, Value::Regular(b"b10".to_vec())),
+            (b"b".to_vec(), 15, Value::Regular(b"b15".to_vec())),
+        ]);
+
+        assert_eq!(run.get(9, b"a"), None);
+        assert_eq!(
+            run.get(10, b"a"),
+            Some((10, Value::Regular(b"a10".to_vec())))
+        );
+        assert_eq!(
+            run.get(11, b"a"),
+            Some((10, Value::Regular(b"a10".to_vec())))
+        );
+        assert_eq!(
+            run.get(16, b"a"),
+            Some((15, Value::Regular(b"a15".to_vec())))
+        );
+        assert_eq!(run.get(9, b"b"), None);
+        assert_eq!(
+            run.get(17, b"b"),
+            Some((15, Value::Regular(b"b15".to_vec())))
+        );
     }
 }
