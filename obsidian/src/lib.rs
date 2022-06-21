@@ -4,6 +4,7 @@ use std::time::SystemTime;
 struct Lsm {
     last_ts: u64,
     l0: Memtable,
+    l0_max_size: usize,
     levels: Vec<Level>,
 }
 
@@ -11,10 +12,12 @@ impl Lsm {
     fn new() -> Self {
         Self {
             last_ts: 0,
+            l0_max_size: 1024,
             l0: Memtable::new(),
             levels: (0..7).map(|_| Level::new()).collect(),
         }
     }
+
     fn get(&self, ts: u64, k: &[u8]) -> Option<Vec<u8>> {
         if let Some((_, v)) = self.l0.get(ts, k) {
             return match v {
@@ -43,6 +46,9 @@ impl Lsm {
         );
         self.last_ts = ts;
         self.l0.put(k, ts, v);
+        if self.l0.size() > self.l0_max_size {
+            // compact!
+        }
         ts
     }
 }
@@ -54,14 +60,20 @@ enum Value {
 }
 
 struct Memtable {
+    size: usize,
     kvs: BTreeMap<Vec<u8>, BTreeMap<u64, Value>>,
 }
 
 impl Memtable {
     fn new() -> Self {
         Self {
+            size: 0,
             kvs: BTreeMap::new(),
         }
+    }
+
+    fn size(&self) -> usize {
+        self.size
     }
 
     fn get(&self, ts: u64, k: &[u8]) -> Option<(u64, Value)> {
@@ -70,6 +82,7 @@ impl Memtable {
     }
 
     fn put(&mut self, k: Vec<u8>, ts: u64, v: Vec<u8>) {
+        self.size += k.len() + v.len() + 8;
         self.kvs
             .entry(k)
             .or_insert(BTreeMap::default())
