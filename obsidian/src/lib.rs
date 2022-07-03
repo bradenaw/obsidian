@@ -1,10 +1,13 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::collections::BinaryHeap;
 use std::time::SystemTime;
 
 struct Lsm {
     last_ts: u64,
     l0: Memtable,
     l0_max_size: usize,
+    // levels[0] is empty and unused, to make the naming easier.
     levels: Vec<Level>,
 }
 
@@ -47,9 +50,55 @@ impl Lsm {
         self.last_ts = ts;
         self.l0.put(k, ts, v);
         if self.l0.size() > self.l0_max_size {
-            // compact!
+            self.compact_l0();
         }
         ts
+    }
+
+    fn compact_l0(&mut self) {
+        let (min_key, max_key) = match self.l0.range() {
+            Some(r) => r,
+            // l0 is empty, nothing to do
+            None => return,
+        };
+
+        let overlapping_runs = self.levels[1].take_overlapping_runs(min_key, max_key);
+        let mut iters: Vec<_> = overlapping_runs
+            .into_iter()
+            .map(|run| {
+                Box::new(run.into_iter().map(|(k, ts, v)| OrdEqByFirst((k, ts), v)))
+                    as Box<dyn Iterator<Item = _>>
+            })
+            .collect();
+
+        let l0 = std::mem::take(&mut self.l0);
+        iters.push(Box::new(
+            l0.into_iter().map(|(k, ts, v)| OrdEqByFirst((k, ts), v)),
+        ));
+
+        let sorted = merge_sorted(iters);
+
+        let mut runs = Vec::new();
+        let mut curr: Vec<(Vec<u8>, u64, Value)> = Vec::new();
+        let mut curr_size = 0;
+        for OrdEqByFirst((k, ts), v) in sorted {
+            let elem_size = k.len() + 8 + v.len();
+            if curr.len() > 0
+                && curr_size + elem_size > self.l0_max_size
+                && curr.last().unwrap().0 != k
+            {
+                runs.push(Run::new(curr));
+                curr = Vec::new();
+                curr_size = 0;
+            }
+            curr.push((k, ts, v));
+            curr_size += elem_size;
+        }
+        if curr.len() > 0 {
+            runs.push(Run::new(curr));
+        }
+
+        self.levels[1].add_all(runs);
     }
 }
 
@@ -57,6 +106,15 @@ impl Lsm {
 enum Value {
     Regular(Vec<u8>),
     Tombstone,
+}
+
+impl Value {
+    fn len(&self) -> usize {
+        match self {
+            Value::Regular(v) => v.len(),
+            Value::Tombstone => 0,
+        }
+    }
 }
 
 struct Memtable {
@@ -88,6 +146,27 @@ impl Memtable {
             .or_insert(BTreeMap::default())
             .insert(ts, Value::Regular(v));
     }
+
+    fn range(&self) -> Option<(Vec<u8>, Vec<u8>)> {
+        unimplemented!()
+    }
+
+    fn into_iter(self) -> impl Iterator<Item = (Vec<u8>, u64, Value)> {
+        self.kvs
+            .into_iter()
+            .map(|(key, entries)| {
+                entries
+                    .into_iter()
+                    .map(move |(ts, value)| (key.clone(), ts, value))
+            })
+            .flatten()
+    }
+}
+
+impl Default for Memtable {
+    fn default() -> Self {
+        Memtable::new()
+    }
 }
 
 struct Level {
@@ -109,6 +188,14 @@ impl Level {
         }
         None
     }
+
+    fn take_overlapping_runs(&mut self, min_key: Vec<u8>, max_key: Vec<u8>) -> Vec<Run> {
+        unimplemented!()
+    }
+
+    fn add_all(&mut self, runs: Vec<Run>) {
+        unimplemented!()
+    }
 }
 
 struct Run {
@@ -120,6 +207,7 @@ impl Run {
     fn new(kvs: Vec<(Vec<u8>, u64, Value)>) -> Self {
         Self { kvs }
     }
+
     fn get(&self, ts: u64, k: &[u8]) -> Option<(u64, Value)> {
         let entry = match self
             .kvs
@@ -133,6 +221,48 @@ impl Run {
             return None;
         }
         Some((entry.1, entry.2.clone()))
+    }
+
+    fn into_iter(self) -> impl Iterator<Item = (Vec<u8>, u64, Value)> {
+        self.kvs.into_iter()
+    }
+}
+
+pub fn merge_sorted<'a, T: Ord + 'a>(
+    mut iters: Vec<impl Iterator<Item = T> + 'a>,
+) -> impl Iterator<Item = T> + 'a {
+    let mut h: BinaryHeap<(std::cmp::Reverse<T>, usize)> = BinaryHeap::new();
+    h.reserve_exact(iters.len());
+    for i in 0..iters.len() {
+        if let Some(t) = iters[i].next() {
+            h.push((std::cmp::Reverse(t), i));
+        }
+    }
+    std::iter::from_fn(move || {
+        let (t, i) = h.pop()?;
+        if let Some(t) = iters[i].next() {
+            h.push((std::cmp::Reverse(t), i));
+        }
+        Some(t.0)
+    })
+}
+
+pub struct OrdEqByFirst<A, B>(pub A, pub B);
+
+impl<A: Eq, B> Eq for OrdEqByFirst<A, B> {}
+impl<A: Eq, B> PartialEq for OrdEqByFirst<A, B> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl<A: Ord, B> Ord for OrdEqByFirst<A, B> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+impl<A: Ord, B> PartialOrd for OrdEqByFirst<A, B> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
