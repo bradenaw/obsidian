@@ -1,7 +1,11 @@
+#![allow(dead_code)]
+
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
 use std::time::SystemTime;
+
+use rand::Rng;
 
 struct Lsm {
     last_ts: u64,
@@ -15,7 +19,7 @@ impl Lsm {
     fn new() -> Self {
         Self {
             last_ts: 0,
-            l0_max_size: 1024,
+            l0_max_size: 64,
             l0: Memtable::new(),
             levels: (0..7).map(|_| Level::new()).collect(),
         }
@@ -51,6 +55,13 @@ impl Lsm {
         self.l0.put(k, ts, v);
         if self.l0.size() > self.l0_max_size {
             self.compact_l0();
+
+            for i in 1..self.levels.len() - 1 {
+                if self.levels[i].size() <= self.l0_max_size * 10_usize.pow(i as u32) {
+                    break;
+                }
+                self.compact_from(i);
+            }
         }
         ts
     }
@@ -62,7 +73,35 @@ impl Lsm {
             None => return,
         };
 
-        let overlapping_runs = self.levels[1].take_overlapping_runs(min_key, max_key);
+        let l0 = std::mem::take(&mut self.l0);
+
+        self.compact_inner(1, min_key, max_key, l0.into_iter())
+    }
+
+    fn compact_from(&mut self, level: usize) {
+        if self.levels[level].runs.is_empty() {
+            return;
+        }
+        let idx = rand::thread_rng().gen_range(0..self.levels[level].runs.len());
+        let run = self.levels[level].runs.remove(idx);
+        let (min_key, max_key) = match run.range() {
+            Some((min_key, max_key)) => (min_key, max_key),
+            None => return,
+        };
+        self.compact_inner(level + 1, min_key, max_key, run.into_iter());
+    }
+
+    fn compact_inner(
+        &mut self,
+        into_level: usize,
+        min_key: Vec<u8>,
+        max_key: Vec<u8>,
+        entries: impl Iterator<Item = (Vec<u8>, u64, Value)>,
+    ) {
+        let overlapping_runs = self.levels[into_level].take_overlapping_runs(min_key, max_key);
+
+        // TODO: These are already contiguous, so we could chain them instead of adding all of them
+        // to the merge independently.
         let mut iters: Vec<_> = overlapping_runs
             .into_iter()
             .map(|run| {
@@ -71,10 +110,7 @@ impl Lsm {
             })
             .collect();
 
-        let l0 = std::mem::take(&mut self.l0);
-        iters.push(Box::new(
-            l0.into_iter().map(|(k, ts, v)| OrdEqByFirst((k, ts), v)),
-        ));
+        iters.push(Box::new(entries.map(|(k, ts, v)| OrdEqByFirst((k, ts), v))));
 
         let sorted = merge_sorted(iters);
 
@@ -98,7 +134,7 @@ impl Lsm {
             runs.push(Run::new(curr));
         }
 
-        self.levels[1].add_all(runs);
+        self.levels[into_level].add_all(runs);
     }
 }
 
@@ -148,7 +184,10 @@ impl Memtable {
     }
 
     fn range(&self) -> Option<(Vec<u8>, Vec<u8>)> {
-        unimplemented!()
+        Some((
+            self.kvs.iter().next()?.0.clone(),
+            self.kvs.iter().next_back()?.0.clone(),
+        ))
     }
 
     fn into_iter(self) -> impl Iterator<Item = (Vec<u8>, u64, Value)> {
@@ -189,23 +228,55 @@ impl Level {
         None
     }
 
+    fn size(&self) -> usize {
+        self.runs.iter().map(|run| run.size()).sum()
+    }
+
     fn take_overlapping_runs(&mut self, min_key: Vec<u8>, max_key: Vec<u8>) -> Vec<Run> {
-        unimplemented!()
+        let start_idx = match self
+            .runs
+            .binary_search_by_key(&min_key, |run| run.range().unwrap().1)
+        {
+            Ok(idx) => idx,
+            Err(idx) => idx,
+        };
+
+        let end_idx = match self
+            .runs
+            .binary_search_by_key(&max_key, |run| run.range().unwrap().0)
+        {
+            Ok(idx) => idx,
+            Err(idx) => idx,
+        };
+        self.runs.drain(start_idx..end_idx).collect()
     }
 
     fn add_all(&mut self, runs: Vec<Run>) {
-        unimplemented!()
+        let idx = match self
+            .runs
+            .binary_search_by_key(&runs[0].range().unwrap().0, |run| run.range().unwrap().0)
+        {
+            Ok(idx) => idx,
+            Err(idx) => idx,
+        };
+        self.runs.splice(idx..idx, runs).for_each(|_| {});
     }
 }
 
 struct Run {
     // Sorted by (k, ts).
     kvs: Vec<(Vec<u8>, u64, Value)>,
+    size: usize,
 }
 
 impl Run {
     fn new(kvs: Vec<(Vec<u8>, u64, Value)>) -> Self {
-        Self { kvs }
+        let size = kvs.iter().map(|(k, _, v)| k.len() + 8 + v.len()).sum();
+        Self { kvs, size }
+    }
+
+    fn size(&self) -> usize {
+        self.size
     }
 
     fn get(&self, ts: u64, k: &[u8]) -> Option<(u64, Value)> {
@@ -221,6 +292,10 @@ impl Run {
             return None;
         }
         Some((entry.1, entry.2.clone()))
+    }
+
+    fn range(&self) -> Option<(Vec<u8>, Vec<u8>)> {
+        Some((self.kvs.first()?.0.clone(), self.kvs.last()?.0.clone()))
     }
 
     fn into_iter(self) -> impl Iterator<Item = (Vec<u8>, u64, Value)> {
@@ -268,6 +343,8 @@ impl<A: Ord, B> PartialOrd for OrdEqByFirst<A, B> {
 
 #[cfg(test)]
 mod test {
+    use std::collections::BTreeMap;
+
     use crate::Lsm;
     use crate::Run;
     use crate::Value;
@@ -314,5 +391,57 @@ mod test {
             run.get(17, b"b"),
             Some((15, Value::Regular(b"b15".to_vec())))
         );
+    }
+
+    #[test]
+    fn test_compact_l0() {
+        let mut lsm = Lsm::new();
+        let mut map = BTreeMap::new();
+        let mut last_ts = 0;
+        let mut runs_in_l1 = 0;
+        for _ in 0..10 {
+            for i in 0..usize::MAX {
+                let v = (i % 179) as u8;
+                let put_ts = lsm.put(vec![i as u8], vec![v]);
+                last_ts = std::cmp::max(put_ts, last_ts);
+                map.insert(i as u8, v);
+
+                // Insert until we trigger a compaction.
+                if lsm.levels[1].runs.len() != runs_in_l1 {
+                    runs_in_l1 = lsm.levels[1].runs.len();
+                    break;
+                }
+            }
+
+            for (k, v) in &map {
+                assert_eq!(lsm.get(last_ts, &[*k]), Some(vec![*v]));
+            }
+        }
+    }
+
+    #[test]
+    fn test_compact_l1() {
+        let mut lsm = Lsm::new();
+        let mut map = BTreeMap::new();
+        let mut last_ts = 0;
+        let mut runs_in_l2 = 0;
+        for _ in 0..3 {
+            for i in 0..usize::MAX {
+                let v = (i % 179) as u8;
+                let put_ts = lsm.put(vec![i as u8], vec![v]);
+                last_ts = std::cmp::max(put_ts, last_ts);
+                map.insert(i as u8, v);
+
+                // Insert until we trigger a compaction.
+                if lsm.levels[2].runs.len() != runs_in_l2 {
+                    runs_in_l2 = lsm.levels[2].runs.len();
+                    break;
+                }
+            }
+
+            for (k, v) in &map {
+                assert_eq!(lsm.get(last_ts, &[*k]), Some(vec![*v]));
+            }
+        }
     }
 }

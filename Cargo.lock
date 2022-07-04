@@ -121,6 +121,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "proptest",
+ "rand",
 ]
 
 [[package]]
