@@ -218,13 +218,17 @@ impl Level {
     }
 
     fn get(&self, ts: u64, k: &[u8]) -> Option<(u64, Value)> {
-        // TODO: binary search instead of linear
-        for run in &self.runs {
-            if let Some(r) = run.get(ts, k) {
-                return Some(r);
-            }
+        let idx = match self
+            .runs
+            .binary_search_by_key(&k.to_vec(), |run| run.range().unwrap().1)
+        {
+            Ok(idx) => idx,
+            Err(idx) => idx,
+        };
+        if idx >= self.runs.len() {
+            return None;
         }
-        None
+        self.runs[idx].get(ts, k)
     }
 
     fn size(&self) -> usize {
