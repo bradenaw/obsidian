@@ -100,19 +100,18 @@ impl Lsm {
     ) {
         let overlapping_runs = self.levels[into_level].take_overlapping_runs(min_key, max_key);
 
-        // TODO: These are already contiguous, so we could chain them instead of adding all of them
-        // to the merge independently.
-        let mut iters: Vec<_> = overlapping_runs
+        let existing_iter = overlapping_runs
             .into_iter()
-            .map(|run| {
-                Box::new(run.into_iter().map(|(k, ts, v)| OrdEqByFirst((k, ts), v)))
-                    as Box<dyn Iterator<Item = _>>
-            })
-            .collect();
+            .map(|run| run.into_iter())
+            .flatten()
+            .map(|(k, ts, v)| OrdEqByFirst((k, ts), v));
 
-        iters.push(Box::new(entries.map(|(k, ts, v)| OrdEqByFirst((k, ts), v))));
-
-        let sorted = merge_sorted(iters);
+        let sorted = merge_sorted(vec![
+            Box::new(existing_iter)
+                as Box<dyn Iterator<Item = OrdEqByFirst<(Vec<u8>, u64), Value>>>,
+            Box::new(entries.map(|(k, ts, v)| OrdEqByFirst((k, ts), v)))
+                as Box<dyn Iterator<Item = _>>,
+        ]);
 
         let mut runs = Vec::new();
         let mut curr: Vec<(Vec<u8>, u64, Value)> = Vec::new();
