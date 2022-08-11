@@ -111,47 +111,38 @@ impl BitStream {
 }
 
 struct Louds {
-    // hl ─   jk │   jl ┌   hj ┐   kl └   hk ┘   jkl ├   hjk ┤  hjl ┬   hkl ┴   hjkl ┼
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                          •                                                //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
-    //                                                                                           //
+    // bad
+    // ban
+    // bank
+    // bar
+    // bog
+    // boo
+    // book
+    // boot
+    //
+    //                                          □0                                               //
+    //                                          │                                               //
+    //                                         b│                                                //
+    //                                          │                                               //
+    //                                          □1                                                //
+    //                                     ┌────┴───────┐                                        //
+    //                                    a│           o│                                       //
+    //                                     │            │                                       //
+    //                                     □2           □3                                       //
+    //                                 ┌───┼───┐     ┌──┴──┐                                    //
+    //                                d│  n│  r│    g│    o│                                    //
+    //                                 │   │   │     │     │                                     //
+    //                                 ■4  ■5  ■6    ■7    ■8                                    //
+    //                                     │            ┌──┴──┐                                  //
+    //                                    k│           k│    t│                                  //
+    //                                     │            │     │                                 //
+    //                                     ■9           ■10   ■12                               //
+    //
+    // node number: 0    1    2    3    4    5    6    7    8    9    10   11
+    // n children:  1    2    3    2    0    1    0    0    2    0    0    0
+    // louds:       10   110  1110 110  0    10   0    0    110  0    0    0
+    // labels:      b    ao   dnr  go        k              kt
+    // terminal:    0    0    0    0    1    1    1    1    0    1    1    1
     louds: Vec<u8>,
     labels: Vec<u8>,
     terminal: Vec<u8>,
@@ -164,6 +155,10 @@ impl Louds {
 
     fn n_children(&self, node_idx: usize) -> Option<usize> {
         Some(first_zero(&self.louds[..], node_idx)? - node_idx)
+    }
+
+    fn nth_child(&self, node_idx: usize, idx: usize) -> Option<usize> {
+        unimplemented!()
     }
 
     fn child(&self, node_idx: usize, label: u8) -> Option<usize> {
