@@ -187,7 +187,7 @@ impl Louds {
     }
 
     fn n_children(&self, node_idx: usize) -> Option<usize> {
-        Some(first_zero(&self.louds[..], node_idx)? - node_idx)
+        Some(select_0(&self.louds[..], rank_0(&self.louds[..], node_idx) + 1)? - node_idx)
     }
 
     fn kth_child(&self, node_idx: usize, k: usize) -> Option<usize> {
@@ -225,16 +225,6 @@ impl Louds {
             rank_0(&self.louds[..], node_idx),
         )?)
     }
-}
-
-// Returns the index of the first zero bit in b after idx.
-fn first_zero(b: &[u8], idx: usize) -> Option<usize> {
-    for i in idx..b.len() * 8 {
-        if bit(b, i) == 0 {
-            return Some(i);
-        }
-    }
-    None
 }
 
 // Returns the number of zero bits to the left of n.
