@@ -163,6 +163,9 @@ impl Louds {
     }
 
     fn node_num_to_idx(&self, node_num: usize) -> Option<usize> {
+        if node_num == 0 {
+            return Some(0);
+        }
         Some(select_0(&self.louds[..], node_num)? + 1)
     }
 
@@ -332,6 +335,11 @@ mod test {
 
         for word in &words {
             assert_eq!(louds.get(word.clone().into()), Some(()), "word: {}", word);
+        }
+
+        let not_words = vec!["a", "b", "baa", "bang", "bark", "boo", "booking", "boots"];
+        for word in &not_words {
+            assert_eq!(louds.get(word.clone().into()), None, "not word: {}", word);
         }
     }
 
