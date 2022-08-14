@@ -141,6 +141,7 @@ struct Louds {
     // node number: 0    1    2    3    4    5    6    7    8    9    10   11
     // n children:  1    2    3    2    0    1    0    0    2    0    0    0
     // louds:       10   110  1110 110  0    10   0    0    110  0    0    0           (23 bits)
+    // node_idx:    0    2    5    9    12   13   15   16   17   20   21   22
     // labels:      b    ao   dnr  go        k              kt                         (11 bytes = 88 bits)
     // terminal:    0    0    0    0    1    1    1    1    0    1    1    1           (12 bits)
     //                                                                                 ~= 16 bytes
@@ -169,6 +170,12 @@ impl Louds {
         let mut node_idx = 0;
         for b in k {
             node_idx = self.child(node_idx, b)?;
+            println!(
+                "followed {} to child {}@{}",
+                b,
+                self.node_idx_to_num(node_idx),
+                node_idx
+            );
         }
         if bit(&self.terminal[..], self.node_idx_to_num(node_idx)) == 1 {
             return Some(());
@@ -181,18 +188,31 @@ impl Louds {
     }
 
     fn kth_child(&self, node_idx: usize, k: usize) -> Option<usize> {
-        let child_node_num = rank_1(&self.louds[..], node_idx) + k;
+        let child_node_num = rank_1(&self.louds[..], node_idx) + k + 1;
         Some(self.node_num_to_idx(child_node_num)?)
     }
 
     fn child(&self, node_idx: usize, label: u8) -> Option<usize> {
         let n = self.n_children(node_idx)?;
         let label_start = rank_1(&self.louds[..], node_idx);
+        println!(
+            "labels for node {}@{} start at {}, there are {} of them",
+            self.node_idx_to_num(node_idx),
+            node_idx,
+            label_start,
+            n
+        );
         for i in 0..n {
             if self.labels[label_start + i] == label {
                 return self.kth_child(node_idx, i);
             }
         }
+        println!(
+            "did not find label {} in node {}@{}",
+            label,
+            self.node_idx_to_num(node_idx),
+            node_idx
+        );
         None
     }
 
@@ -300,6 +320,15 @@ mod test {
         assert_eq!(louds.louds, vec![0b10110111, 0b01100100, 0b01100000]);
         assert_eq!(louds.labels, Into::<Vec<u8>>::into("baodnrgokkt"));
         assert_eq!(louds.terminal, vec![0b00001111, 0b01110000]);
+
+        assert_eq!(louds.node_num_to_idx(0), Some(0));
+        assert_eq!(louds.node_num_to_idx(1), Some(2));
+        assert_eq!(louds.node_num_to_idx(2), Some(5));
+        assert_eq!(louds.node_num_to_idx(3), Some(9));
+        assert_eq!(louds.node_idx_to_num(0), 0);
+        assert_eq!(louds.node_idx_to_num(2), 1);
+        assert_eq!(louds.node_idx_to_num(5), 2);
+        assert_eq!(louds.node_idx_to_num(9), 3);
 
         for word in &words {
             assert_eq!(louds.get(word.clone().into()), Some(()), "word: {}", word);
