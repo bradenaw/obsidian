@@ -1,0 +1,16 @@
+distribtued kv store
+    1. single box solution
+        aws ec2 like machine, cpu, mem, local ssd at least 3TB
+    2. replication
+    3. sharding
+
+get
+put
+delete
+must be durable
+handle process crash, recovery
+don't worry about the whole 
+
+
+
+
