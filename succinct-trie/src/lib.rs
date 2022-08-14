@@ -256,7 +256,7 @@ fn select_0(b: &[u8], n: usize) -> Option<usize> {
     for i in 0..b.len() * 8 {
         count += 1 - bit(b, i);
         if count == n {
-            return Some(n);
+            return Some(i);
         }
     }
     None
@@ -269,7 +269,7 @@ fn select_1(b: &[u8], n: usize) -> Option<usize> {
     for i in 0..b.len() * 8 {
         count += bit(b, i);
         if count == n {
-            return Some(n);
+            return Some(i);
         }
     }
     None
@@ -281,7 +281,7 @@ fn bit(b: &[u8], idx: usize) -> usize {
 
 #[cfg(test)]
 mod test {
-    use crate::{BitStream, Trie};
+    use crate::{bit, rank_0, rank_1, select_0, select_1, BitStream, Trie};
 
     #[test]
     fn test_bit_stream() {
@@ -333,5 +333,97 @@ mod test {
         for word in &words {
             assert_eq!(louds.get(word.clone().into()), Some(()), "word: {}", word);
         }
+    }
+
+    #[test]
+    fn test_bit() {
+        let v = vec![0b11011000, 0b01101101];
+        //             01234567    89012345
+        //                           1
+
+        assert_eq!(bit(&v[..], 0), 1);
+        assert_eq!(bit(&v[..], 1), 1);
+        assert_eq!(bit(&v[..], 2), 0);
+        assert_eq!(bit(&v[..], 3), 1);
+        assert_eq!(bit(&v[..], 4), 1);
+        assert_eq!(bit(&v[..], 5), 0);
+        assert_eq!(bit(&v[..], 6), 0);
+        assert_eq!(bit(&v[..], 7), 0);
+        assert_eq!(bit(&v[..], 8), 0);
+        assert_eq!(bit(&v[..], 9), 1);
+        assert_eq!(bit(&v[..], 10), 1);
+        assert_eq!(bit(&v[..], 11), 0);
+        assert_eq!(bit(&v[..], 12), 1);
+        assert_eq!(bit(&v[..], 13), 1);
+        assert_eq!(bit(&v[..], 14), 0);
+        assert_eq!(bit(&v[..], 15), 1);
+    }
+
+    #[test]
+    fn test_rank() {
+        let v = vec![0b11011000, 0b01101101];
+        //             01234567    89012345
+        //                           1
+
+        assert_eq!(rank_0(&v[..], 0), 0);
+        assert_eq!(rank_0(&v[..], 1), 0);
+        assert_eq!(rank_0(&v[..], 2), 0);
+        assert_eq!(rank_0(&v[..], 3), 1);
+        assert_eq!(rank_0(&v[..], 4), 1);
+        assert_eq!(rank_0(&v[..], 5), 1);
+        assert_eq!(rank_0(&v[..], 6), 2);
+        assert_eq!(rank_0(&v[..], 7), 3);
+        assert_eq!(rank_0(&v[..], 8), 4);
+        assert_eq!(rank_0(&v[..], 9), 5);
+        assert_eq!(rank_0(&v[..], 10), 5);
+        assert_eq!(rank_0(&v[..], 11), 5);
+        assert_eq!(rank_0(&v[..], 12), 6);
+        assert_eq!(rank_0(&v[..], 13), 6);
+        assert_eq!(rank_0(&v[..], 14), 6);
+        assert_eq!(rank_0(&v[..], 15), 7);
+
+        assert_eq!(rank_1(&v[..], 0), 0);
+        assert_eq!(rank_1(&v[..], 1), 1);
+        assert_eq!(rank_1(&v[..], 2), 2);
+        assert_eq!(rank_1(&v[..], 3), 2);
+        assert_eq!(rank_1(&v[..], 4), 3);
+        assert_eq!(rank_1(&v[..], 5), 4);
+        assert_eq!(rank_1(&v[..], 6), 4);
+        assert_eq!(rank_1(&v[..], 7), 4);
+        assert_eq!(rank_1(&v[..], 8), 4);
+        assert_eq!(rank_1(&v[..], 9), 4);
+        assert_eq!(rank_1(&v[..], 10), 5);
+        assert_eq!(rank_1(&v[..], 11), 6);
+        assert_eq!(rank_1(&v[..], 12), 6);
+        assert_eq!(rank_1(&v[..], 13), 7);
+        assert_eq!(rank_1(&v[..], 14), 8);
+        assert_eq!(rank_1(&v[..], 15), 8);
+    }
+
+    #[test]
+    fn test_select() {
+        let v = vec![0b11011000, 0b01101101];
+        //             01234567    89012345
+        //                           1
+
+        assert_eq!(select_0(&v[..], 1), Some(2));
+        assert_eq!(select_0(&v[..], 2), Some(5));
+        assert_eq!(select_0(&v[..], 3), Some(6));
+        assert_eq!(select_0(&v[..], 4), Some(7));
+        assert_eq!(select_0(&v[..], 5), Some(8));
+        assert_eq!(select_0(&v[..], 6), Some(11));
+        assert_eq!(select_0(&v[..], 7), Some(14));
+        assert_eq!(select_0(&v[..], 9), None);
+
+        assert_eq!(select_1(&v[..], 1), Some(0));
+        assert_eq!(select_1(&v[..], 2), Some(1));
+        assert_eq!(select_1(&v[..], 3), Some(3));
+        assert_eq!(select_1(&v[..], 4), Some(4));
+        assert_eq!(select_1(&v[..], 5), Some(9));
+        assert_eq!(select_1(&v[..], 6), Some(10));
+        assert_eq!(select_1(&v[..], 7), Some(12));
+        assert_eq!(select_1(&v[..], 8), Some(13));
+        assert_eq!(select_1(&v[..], 9), Some(15));
+        assert_eq!(select_1(&v[..], 10), None);
     }
 }
