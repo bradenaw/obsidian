@@ -118,7 +118,7 @@ struct Louds {
     // bog
     // book
     // boot
-    // 27 bytes in total, plus lengths
+    // 24 bytes in total, plus lengths
     //
     //                                            □0                                              //
     //                                            │                                               //
