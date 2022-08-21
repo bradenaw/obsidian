@@ -210,6 +210,35 @@ impl Louds {
     }
 }
 
+fn gen_rank_select_index(b: &[u8]) -> (Vec<u16>, Vec<u16>) {
+    const RANK_BLOCK_BITS: usize = 512;
+    const SELECT_SAMPLE_BITS: usize = 4096;
+    let mut rank_index = Vec::with_capacity(b.len() / 512);
+    let mut select_index = vec![];
+    let mut count = 0;
+    let mut last_select_entry = 0;
+    for (i, block) in b.chunks_exact(RANK_BLOCK_BITS / 8).enumerate() {
+        for (j, sub_block) in block.chunks_exact(8).enumerate() {
+            let sub_block_start_idx = i * RANK_BLOCK_BITS / 8 + j * 8;
+            let sub_block_count = NativeEndian::read_u64(sub_block).count_ones() as usize;
+            if count + sub_block_count >= last_select_entry + SELECT_SAMPLE_BITS {
+                let select_entry = select_1(
+                    &b[sub_block_start_idx..],
+                    last_select_entry + SELECT_SAMPLE_BITS - count,
+                )
+                .expect("already know that count surpasses in the next 64 bits")
+                    + sub_block_start_idx * 8;
+                select_index.push(select_entry as u16);
+                last_select_entry = select_entry;
+            }
+            count += sub_block_count;
+        }
+        rank_index.push(count as u16);
+    }
+
+    (rank_index, select_index)
+}
+
 // Returns the number of zero bits to the left of n.
 fn rank_0(b: &[u8], idx: usize) -> usize {
     idx - rank_1(b, idx)
@@ -362,7 +391,7 @@ fn bit(b: &[u8], idx: usize) -> usize {
 mod test {
     use proptest::prelude::*;
 
-    use crate::{bit, rank_0, rank_1, select_0, select_1, BitStream, Trie};
+    use crate::{bit, gen_rank_select_index, rank_0, rank_1, select_0, select_1, BitStream, Trie};
 
     #[test]
     fn test_bit_stream() {
@@ -571,6 +600,17 @@ mod test {
 
             for n in 0..=b.len()*8 {
                 assert_eq!(rank_1(&b[..], n), rank_1_basic(&b[..], n), "n: {}", n);
+            }
+        }
+
+        #[test]
+        fn proptest_gen_rank_select_index(b in any::<Vec<u8>>()) {
+            let (rank_index, select_index) = gen_rank_select_index(&b[..]);
+            for (i, rank_entry) in rank_index.iter().enumerate() {
+                assert_eq!(*rank_entry as usize, rank_1(&b[..], (i + 1) * 512));
+            }
+            for (i, select_entry) in select_index.iter().enumerate() {
+                assert_eq!(*select_entry as usize, select_1(&b[..], (i + 1) * 4096).unwrap());
             }
         }
     }
