@@ -258,6 +258,10 @@ dependencies = [
 [[package]]
 name = "succinct-trie"
 version = "0.1.0"
+dependencies = [
+ "byteorder",
+ "proptest",
+]
 
 [[package]]
 name = "syn"

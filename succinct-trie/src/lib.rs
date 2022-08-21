@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 use std::collections::VecDeque;
 
+use byteorder::{ByteOrder, NativeEndian};
+
 struct Trie {
     root: Node,
 }
@@ -173,12 +175,6 @@ impl Louds {
         let mut node_idx = 0;
         for b in k {
             node_idx = self.child(node_idx, b)?;
-            println!(
-                "followed {} to child {}@{}",
-                b,
-                self.node_idx_to_num(node_idx),
-                node_idx
-            );
         }
         if bit(&self.terminal[..], self.node_idx_to_num(node_idx)) == 1 {
             return Some(());
@@ -198,24 +194,11 @@ impl Louds {
     fn child(&self, node_idx: usize, label: u8) -> Option<usize> {
         let n = self.n_children(node_idx)?;
         let label_start = rank_1(&self.louds[..], node_idx);
-        println!(
-            "labels for node {}@{} start at {}, there are {} of them",
-            self.node_idx_to_num(node_idx),
-            node_idx,
-            label_start,
-            n
-        );
         for i in 0..n {
             if self.labels[label_start + i] == label {
                 return self.kth_child(node_idx, i);
             }
         }
-        println!(
-            "did not find label {} in node {}@{}",
-            label,
-            self.node_idx_to_num(node_idx),
-            node_idx
-        );
         None
     }
 
@@ -233,23 +216,86 @@ fn rank_0(b: &[u8], idx: usize) -> usize {
 }
 
 // Returns the number of one bits to the left of n.
-fn rank_1(b: &[u8], idx: usize) -> usize {
-    // TODO: This can be accelerated with some std::arch and lookup table shenanigans.
-    let mut count = 0;
-    for i in 0..idx {
-        count += bit(b, i);
+pub fn rank_1(b: &[u8], idx: usize) -> usize {
+    if idx == 0 {
+        return 0;
     }
-    count
+    let mut count = 0;
+    let iter = b[0..idx / 8].chunks_exact(8);
+    for chunk in iter {
+        count += NativeEndian::read_u64(chunk).count_ones();
+    }
+    if idx % 64 == 0 {
+        // No partial chunk to speak of, idx landed right on a boundary.
+        return count as usize;
+    }
+    let partial_chunk_start = idx / 8 / 8 * 8;
+    let partial_chunk_end = std::cmp::min(b.len(), partial_chunk_start + 8);
+    let partial_chunk = &b[partial_chunk_start..partial_chunk_end];
+    let mask = u64::MAX << (64 - (idx % 64));
+    let mut rem_u64 = 0u64;
+    for (i, b) in partial_chunk.iter().enumerate() {
+        rem_u64 |= (*b as u64) << (64 - 8 - i * 8);
+    }
+    count += (rem_u64 & mask).count_ones();
+    count as usize
 }
 
 // Returns the index of the nth zero bit.
 fn select_0(b: &[u8], n: usize) -> Option<usize> {
-    // TODO: This can be accelerated with some std::arch and lookup table shenanigans.
-    let mut count = 0;
-    for i in 0..b.len() * 8 {
-        count += 1 - bit(b, i);
+    // Make use of the fact that count_zeros() on large chunks is pretty quick, so first figure out
+    // which 8-byte chunk the answer is in, then the 8-bit byte, then which bit within that byte.
+    //
+    // Note: using u128 may be faster, worth a benchmark, and messing with
+    // _mm{256,512}_popcnt_epi64 may be a little faster especially on repeated calls when stuff is
+    // already in cache.
+
+    fn find_chunk(b: &[u8], n: usize) -> Option<(usize, usize)> {
+        let mut count = 0;
+        let iter = b.chunks_exact(8);
+        let rem = iter.remainder();
+        for (i, chunk) in iter.enumerate() {
+            let chunk_count = NativeEndian::read_u64(chunk).count_zeros() as usize;
+            if count + chunk_count >= n {
+                return Some((i * 8, count));
+            }
+            count += chunk_count;
+        }
+        if rem.len() > 0 {
+            // Not sure if the last chunk actually does have n in it, but we can blindly return
+            // Some here and let find_byte figure it out.
+            return Some((b.len() - rem.len(), count));
+        }
+        None
+    }
+
+    fn find_byte(b: &[u8], n: usize) -> Option<(usize, usize)> {
+        let mut count = 0;
+        for (i, byte) in b.iter().enumerate() {
+            let byte_count = byte.count_zeros() as usize;
+            if count + byte_count >= n {
+                return Some((i, count));
+            }
+            count += byte_count;
+        }
+        None
+    }
+
+    let (chunk_idx, count_at_chunk_idx) = find_chunk(b, n)?;
+    let (byte_idx, count_at_byte_idx) = {
+        let (byte_idx_in_chunk, count_at_byte_in_chunk) =
+            find_byte(&b[chunk_idx..], n - count_at_chunk_idx)?;
+        (
+            chunk_idx + byte_idx_in_chunk,
+            count_at_chunk_idx + count_at_byte_in_chunk,
+        )
+    };
+    let byte = b[byte_idx];
+    let mut count = count_at_byte_idx;
+    for i in 0..8 {
+        count += 1 - ((byte >> (7 - i)) & 1) as usize;
         if count == n {
-            return Some(i);
+            return Some(byte_idx * 8 + i);
         }
     }
     None
@@ -257,12 +303,52 @@ fn select_0(b: &[u8], n: usize) -> Option<usize> {
 
 // Returns the index of the nth one bit.
 fn select_1(b: &[u8], n: usize) -> Option<usize> {
-    // TODO: This can be accelerated with some std::arch and lookup table shenanigans.
-    let mut count = 0;
-    for i in 0..b.len() * 8 {
-        count += bit(b, i);
+    fn find_chunk(b: &[u8], n: usize) -> Option<(usize, usize)> {
+        let mut count = 0;
+        let iter = b.chunks_exact(8);
+        let rem = iter.remainder();
+        for (i, chunk) in iter.enumerate() {
+            let chunk_count = NativeEndian::read_u64(chunk).count_ones() as usize;
+            if count + chunk_count >= n {
+                return Some((i * 8, count));
+            }
+            count += chunk_count;
+        }
+        if rem.len() > 0 {
+            // Not sure if the last chunk actually does have n in it, but we can blindly return
+            // Some here and let find_byte figure it out.
+            return Some((b.len() - rem.len(), count));
+        }
+        None
+    }
+
+    fn find_byte(b: &[u8], n: usize) -> Option<(usize, usize)> {
+        let mut count = 0;
+        for (i, byte) in b.iter().enumerate() {
+            let byte_count = byte.count_ones() as usize;
+            if count + byte_count >= n {
+                return Some((i, count));
+            }
+            count += byte_count;
+        }
+        None
+    }
+
+    let (chunk_idx, count_at_chunk_idx) = find_chunk(b, n)?;
+    let (byte_idx, count_at_byte_idx) = {
+        let (byte_idx_in_chunk, count_at_byte_in_chunk) =
+            find_byte(&b[chunk_idx..], n - count_at_chunk_idx)?;
+        (
+            chunk_idx + byte_idx_in_chunk,
+            count_at_chunk_idx + count_at_byte_in_chunk,
+        )
+    };
+    let byte = b[byte_idx];
+    let mut count = count_at_byte_idx;
+    for i in 0..8 {
+        count += ((byte >> (7 - i)) & 1) as usize;
         if count == n {
-            return Some(i);
+            return Some(byte_idx * 8 + i);
         }
     }
     None
@@ -274,6 +360,8 @@ fn bit(b: &[u8], idx: usize) -> usize {
 
 #[cfg(test)]
 mod test {
+    use proptest::prelude::*;
+
     use crate::{bit, rank_0, rank_1, select_0, select_1, BitStream, Trie};
 
     #[test]
@@ -396,6 +484,15 @@ mod test {
         assert_eq!(rank_1(&v[..], 13), 7);
         assert_eq!(rank_1(&v[..], 14), 8);
         assert_eq!(rank_1(&v[..], 15), 8);
+
+        let v = vec![0, 0, 0, 0, 0, 0, 0, 0, 0b01000000, 0b00010000];
+        //                                     ^64         ^72
+        assert_eq!(rank_1(&v[..], 64), 0);
+        assert_eq!(rank_1(&v[..], 65), 0);
+        assert_eq!(rank_1(&v[..], 66), 1);
+        assert_eq!(rank_1(&v[..], 74), 1);
+        assert_eq!(rank_1(&v[..], 75), 1);
+        assert_eq!(rank_1(&v[..], 76), 2);
     }
 
     #[test]
@@ -423,5 +520,58 @@ mod test {
         assert_eq!(select_1(&v[..], 8), Some(13));
         assert_eq!(select_1(&v[..], 9), Some(15));
         assert_eq!(select_1(&v[..], 10), None);
+    }
+
+    proptest! {
+        #[test]
+        fn proptest_select_0(b in any::<Vec<u8>>()) {
+            fn select_0_basic(b: &[u8], n: usize) -> Option<usize> {
+                let mut count = 0;
+                for i in 0..b.len() * 8 {
+                    count += 1 - bit(b, i);
+                    if count == n {
+                        return Some(i);
+                    }
+                }
+                None
+            }
+
+            for n in 0..b.len()*8 {
+                assert_eq!(select_0(&b[..], n), select_0_basic(&b[..], n), "n: {}", n);
+            }
+        }
+
+        #[test]
+        fn proptest_select_1(b in any::<Vec<u8>>()) {
+            fn select_1_basic(b: &[u8], n: usize) -> Option<usize> {
+                let mut count = 0;
+                for i in 0..b.len() * 8 {
+                    count += bit(b, i);
+                    if count == n {
+                        return Some(i);
+                    }
+                }
+                None
+            }
+
+            for n in 0..b.len()*8 {
+                assert_eq!(select_1(&b[..], n), select_1_basic(&b[..], n), "n: {}", n);
+            }
+        }
+
+        #[test]
+        fn proptest_rank_1(b in any::<Vec<u8>>()) {
+            fn rank_1_basic(b: &[u8], idx: usize) -> usize {
+                let mut count = 0;
+                for i in 0..idx {
+                    count += bit(b, i);
+                }
+                count
+            }
+
+            for n in 0..=b.len()*8 {
+                assert_eq!(rank_1(&b[..], n), rank_1_basic(&b[..], n), "n: {}", n);
+            }
+        }
     }
 }
