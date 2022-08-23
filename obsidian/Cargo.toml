@@ -8,6 +8,7 @@ edition = "2018"
 [dependencies]
 anyhow = "1.0.58"
 async-trait = "0.1.56"
+byteorder = "1.4.3"
 rand = "0.8.5"
 
 [dev-dependencies]

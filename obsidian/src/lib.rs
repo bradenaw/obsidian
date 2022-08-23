@@ -1,10 +1,14 @@
 #![allow(dead_code)]
+#![feature(map_first_last)]
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
+use std::convert::TryFrom;
 use std::time::SystemTime;
 
+use anyhow::anyhow;
+use byteorder::{ByteOrder, LittleEndian};
 use rand::Rng;
 
 struct Lsm {
@@ -342,6 +346,92 @@ impl<A: Ord, B> PartialOrd for OrdEqByFirst<A, B> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
+}
+
+fn encode_block(kvs: BTreeMap<Vec<u8>, Vec<(u64, Vec<u8>)>>) -> anyhow::Result<Vec<u8>> {
+    const HEADER_SIZE: usize = 25;
+    let mut block = [0u8; HEADER_SIZE].to_vec();
+
+    let prefix: Vec<u8> = {
+        let (first_key, _) = kvs
+            .first_key_value()
+            .ok_or_else(|| anyhow!("empty block"))?;
+        let (last_key, _) = kvs.last_key_value().ok_or_else(|| anyhow!("empty block"))?;
+        std::iter::zip(first_key, last_key)
+            .take_while(|(a, b)| *a == *b)
+            .map(|(a, _)| *a)
+            .collect()
+    };
+    let (min_ts, bytes_per_ts_offset) = {
+        let mut min_ts = u64::MAX;
+        let mut max_ts = 0;
+        for (_, versions) in &kvs {
+            min_ts = std::cmp::min(
+                min_ts,
+                versions
+                    .last()
+                    .ok_or_else(|| anyhow!("key has no versions"))?
+                    .0,
+            );
+            max_ts = std::cmp::max(
+                max_ts,
+                versions
+                    .first()
+                    .ok_or_else(|| anyhow!("key has no versions"))?
+                    .0,
+            );
+        }
+        (
+            min_ts,
+            (((64 - (max_ts - min_ts).leading_zeros()) + 7) / 8) as usize,
+        )
+    };
+
+    let n_keys = kvs.len();
+    let mut n_versions = 0;
+    let mut suffixes = Vec::new();
+    let mut suffix_offsets = Vec::new();
+    let mut ts_value_offsets = Vec::new();
+    for (key, versions) in kvs.iter() {
+        let mut suffix_offsets_buf = [0u8; 4];
+        LittleEndian::write_u16(&mut suffix_offsets_buf[..], u16::try_from(suffixes.len())?);
+        LittleEndian::write_u16(
+            &mut suffix_offsets_buf[2..],
+            u16::try_from(ts_value_offsets.len())?,
+        );
+        suffix_offsets.extend_from_slice(&suffix_offsets_buf[..]);
+        suffixes.extend_from_slice(&key[prefix.len()..]);
+        for (ts, value) in versions {
+            let mut buf = [0u8; 10];
+            LittleEndian::write_u64(&mut buf[..], ts - min_ts);
+            LittleEndian::write_u16(
+                &mut buf[bytes_per_ts_offset..],
+                u16::try_from(block.len() - HEADER_SIZE)?,
+            );
+            ts_value_offsets.extend_from_slice(&buf[..bytes_per_ts_offset + 2]);
+            block.extend((&value).iter());
+        }
+        n_versions += versions.len();
+    }
+
+    let block_size =
+        block.len() + prefix.len() + suffixes.len() + suffix_offsets.len() + ts_value_offsets.len();
+    LittleEndian::write_u32(&mut block[0..4], block_size as u32);
+    LittleEndian::write_u16(&mut block[4..6], n_keys as u16);
+    LittleEndian::write_u16(&mut block[6..8], prefix.len() as u16);
+    LittleEndian::write_u16(&mut block[8..10], suffixes.len() as u16);
+    LittleEndian::write_u16(&mut block[10..12], n_versions as u16);
+    LittleEndian::write_u64(&mut block[12..20], min_ts);
+    block[20] = bytes_per_ts_offset as u8;
+    let values_len = block.len() - HEADER_SIZE;
+    LittleEndian::write_u32(&mut block[21..25], values_len as u32);
+
+    block.extend(&prefix[..]);
+    block.extend(&suffixes[..]);
+    block.extend(&suffix_offsets[..]);
+    block.extend(&ts_value_offsets[..]);
+
+    Ok(block)
 }
 
 #[cfg(test)]
