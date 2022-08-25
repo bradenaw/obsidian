@@ -407,24 +407,24 @@ impl<'a> Block<'a> {
         let mut n_versions = 0;
         let mut suffixes = Vec::new();
         let mut suffix_offsets = Vec::new();
-        let mut ts_value_offsets = Vec::new();
-        for (key, versions) in kvs.iter() {
+        let mut versions = Vec::new();
+        for (key, key_versions) in kvs.iter() {
             let mut suffix_offsets_buf = [0u8; 4];
             LittleEndian::write_u16(&mut suffix_offsets_buf[..], u16::try_from(suffixes.len())?);
             LittleEndian::write_u16(&mut suffix_offsets_buf[2..], u16::try_from(n_versions)?);
             suffix_offsets.extend_from_slice(&suffix_offsets_buf[..]);
             suffixes.extend_from_slice(&key[prefix.len()..]);
-            for (ts, value) in versions {
+            for (ts, value) in key_versions {
                 let mut buf = [0u8; 10];
                 LittleEndian::write_u64(&mut buf[..], ts - min_ts);
                 LittleEndian::write_u16(
                     &mut buf[bytes_per_ts_offset..],
                     u16::try_from(block.len() - 4)?,
                 );
-                ts_value_offsets.extend_from_slice(&buf[..bytes_per_ts_offset + 2]);
+                versions.extend_from_slice(&buf[..bytes_per_ts_offset + 2]);
                 block.extend((&value).iter());
             }
-            n_versions += versions.len();
+            n_versions += key_versions.len();
         }
         let values_len = block.len() - 4;
         LittleEndian::write_u32(&mut block[0..4], values_len as u32);
@@ -442,7 +442,7 @@ impl<'a> Block<'a> {
         block.extend(&prefix[..]);
         block.extend(&suffixes[..]);
         block.extend(&suffix_offsets[..]);
-        block.extend(&ts_value_offsets[..]);
+        block.extend(&versions[..]);
 
         Ok(block)
     }
@@ -468,49 +468,22 @@ impl<'a> Block<'a> {
         }
     }
 
-    fn suffixes(&self) -> &[u8] {
-        let start = 4 + self.values_len + Self::BLOCK_INDEX_HEADER_SIZE + self.prefix.len();
-        &self.b[start..start + self.suffixes_len]
-    }
-
-    fn suffix_offsets(&self) -> &[u8] {
-        let start = 4
-            + self.values_len
-            + Self::BLOCK_INDEX_HEADER_SIZE
-            + self.prefix.len()
-            + self.suffixes_len;
-        &self.b[start..start + self.n_keys * 4]
-    }
-
-    fn ts_value_offsets(&self) -> &[u8] {
-        let start = 4
-            + self.values_len
-            + Self::BLOCK_INDEX_HEADER_SIZE
-            + self.prefix.len()
-            + self.suffixes_len
-            + self.suffixes_len * 4;
-        &self.b[start..start + self.n_versions * (self.ts_bytes + 2)]
-    }
-
-    fn ts_value_offset(&self, ts_value_offsets: &[u8], idx: usize) -> (u64, usize) {
-        let width = self.ts_bytes + 2;
-        let elem = &ts_value_offsets[width * idx..width * (idx + 1)];
-        let mut ts_offset = [0u8; 8];
-        ts_offset[..self.ts_bytes].copy_from_slice(&elem[..self.ts_bytes]);
-        (
-            LittleEndian::read_u64(&ts_offset[..]) + self.min_ts,
-            LittleEndian::read_u16(&elem[elem.len() - 2..]) as usize,
-        )
-    }
-
-    fn suffix<'b>(suffix_offsets: &[u8], suffixes: &'b [u8], idx: usize) -> &'b [u8] {
-        let start = LittleEndian::read_u16(&suffix_offsets[idx * 4..idx * 4 + 2]) as usize;
-        let end = if idx == suffix_offsets.len() / 4 - 1 {
-            suffixes.len()
-        } else {
-            LittleEndian::read_u16(&suffix_offsets[(idx + 1) * 4..(idx + 1) * 4 + 2]) as usize
-        };
-        &suffixes[start..end]
+    fn suffixes(&self) -> BlockSuffixes<'_> {
+        let suffixes_start =
+            4 + self.values_len + Self::BLOCK_INDEX_HEADER_SIZE + self.prefix.len();
+        let suffix_offsets_start = suffixes_start + self.suffixes_len;
+        let versions_start = suffix_offsets_start + self.n_keys * 4;
+        BlockSuffixes {
+            n: self.n_keys,
+            suffixes: &self.b[suffixes_start..suffixes_start + self.suffixes_len],
+            suffix_offsets: &self.b[suffix_offsets_start..suffix_offsets_start + self.n_keys * 4],
+            versions: BlockVersions {
+                ts_bytes: self.ts_bytes,
+                min_ts: self.min_ts,
+                end_offset: self.values_len,
+                b: &self.b[versions_start..versions_start + self.n_versions * (self.ts_bytes + 2)],
+            },
+        }
     }
 
     pub fn get(&self, ts: u64, k: &[u8]) -> Option<(u64, Vec<u8>)> {
@@ -519,47 +492,112 @@ impl<'a> Block<'a> {
         }
         let suffix = &k[self.prefix.len()..];
         let suffixes = self.suffixes();
-        let suffix_offsets = self.suffix_offsets();
 
-        let key_idx = binary_search_by_idx(self.n_keys, suffix, |idx| {
-            Self::suffix(suffix_offsets, suffixes, idx)
-        })
-        .ok()?;
-        let ts_value_offsets_start =
-            LittleEndian::read_u16(&suffix_offsets[key_idx * 4 + 2..key_idx * 4 + 4]) as usize;
-        let n_versions = if key_idx == self.n_keys - 1 {
-            self.n_versions - ts_value_offsets_start
-        } else {
-            let ts_value_offsets_end = LittleEndian::read_u16(
-                &suffix_offsets[(key_idx + 1) * 4 + 2..(key_idx + 1) * 4 + 4],
-            ) as usize;
-            ts_value_offsets_end - ts_value_offsets_start
-        };
-        println!("n_versions for key {} = {}", hexlify(k), n_versions);
-        let ts_value_offsets = self.ts_value_offsets();
-        let ts_val_idx = binary_search_by_idx(n_versions, Reverse(ts), |idx| {
-            Reverse(
-                self.ts_value_offset(ts_value_offsets, ts_value_offsets_start + idx)
-                    .0,
-            )
+        let key_idx = binary_search_by_idx(self.n_keys, suffix, |idx| suffixes.suffix(idx)).ok()?;
+        let key_versions = suffixes.key_versions(key_idx);
+
+        println!("n_versions for key {} = {}", hexlify(k), key_versions.len());
+        let version_idx = binary_search_by_idx(key_versions.len(), Reverse(ts), |idx| {
+            Reverse(key_versions.ts(idx))
         })
         .into_ok_or_err();
-        if ts_val_idx == n_versions {
+        if version_idx == key_versions.len() {
             return None;
         }
-
-        let (record_ts, value_start) =
-            self.ts_value_offset(ts_value_offsets, ts_value_offsets_start + ts_val_idx);
-        println!("n_versions = {}", self.n_versions);
-        println!("ts_val_idx = {}", ts_val_idx);
-        let value_end = if ts_value_offsets_start + ts_val_idx == self.n_versions - 1 {
-            self.values_len
-        } else {
-            println!("idx of next = {}", ts_value_offsets_start + ts_val_idx + 1);
-            self.ts_value_offset(ts_value_offsets, ts_value_offsets_start + ts_val_idx + 1)
-                .1
-        };
+        let record_ts = key_versions.ts(version_idx);
+        let (value_start, value_end) = key_versions.value_offsets(version_idx);
         Some((record_ts, self.b[4 + value_start..4 + value_end].to_vec()))
+    }
+}
+
+struct BlockSuffixes<'a> {
+    n: usize,
+    suffix_offsets: &'a [u8],
+    suffixes: &'a [u8],
+    versions: BlockVersions<'a>,
+}
+
+impl<'a> BlockSuffixes<'a> {
+    fn len(&self) -> usize {
+        self.n
+    }
+
+    fn suffix(&self, idx: usize) -> &'a [u8] {
+        let start = LittleEndian::read_u16(&self.suffix_offsets[idx * 4..idx * 4 + 2]) as usize;
+        let end = if idx == self.suffix_offsets.len() / 4 - 1 {
+            self.suffixes.len()
+        } else {
+            LittleEndian::read_u16(&self.suffix_offsets[(idx + 1) * 4..(idx + 1) * 4 + 2]) as usize
+        };
+        &self.suffixes[start..end]
+    }
+
+    fn versions_offset(&self, idx: usize) -> u16 {
+        LittleEndian::read_u16(&self.suffix_offsets[idx * 4 + 2..idx * 4 + 4])
+    }
+
+    fn key_versions(&self, idx: usize) -> BlockVersions<'a> {
+        let versions_start = self.versions_offset(idx) as usize;
+        let versions_end = if idx == self.n - 1 {
+            self.versions.len()
+        } else {
+            self.versions_offset(idx + 1) as usize
+        };
+        self.versions.slice(versions_start, versions_end)
+    }
+}
+
+struct BlockVersions<'a> {
+    ts_bytes: usize,
+    min_ts: u64,
+    end_offset: usize,
+    b: &'a [u8],
+}
+
+impl<'a> BlockVersions<'a> {
+    fn len(&self) -> usize {
+        self.b.len() / (self.ts_bytes + 2)
+    }
+
+    fn elem(&self, idx: usize) -> (u64, usize) {
+        let width = self.ts_bytes + 2;
+        let elem = &self.b[width * idx..width * (idx + 1)];
+        let mut ts_offset = [0u8; 8];
+        ts_offset[..self.ts_bytes].copy_from_slice(&elem[..self.ts_bytes]);
+        (
+            LittleEndian::read_u64(&ts_offset[..]) + self.min_ts,
+            LittleEndian::read_u16(&elem[elem.len() - 2..]) as usize,
+        )
+    }
+
+    fn slice(&self, start_idx: usize, end_idx: usize) -> BlockVersions<'a> {
+        let width = self.ts_bytes + 2;
+        let b = &self.b[start_idx * width..end_idx * width];
+        let end_offset = if end_idx == self.len() {
+            self.end_offset
+        } else {
+            self.elem(end_idx).1
+        };
+        BlockVersions {
+            ts_bytes: self.ts_bytes,
+            min_ts: self.min_ts,
+            end_offset,
+            b,
+        }
+    }
+
+    fn ts(&self, idx: usize) -> u64 {
+        self.elem(idx).0
+    }
+
+    fn value_offsets(&self, idx: usize) -> (usize, usize) {
+        let (_, start) = self.elem(idx);
+        let end = if idx == self.len() - 1 {
+            self.end_offset
+        } else {
+            self.elem(idx + 1).1
+        };
+        (start, end)
     }
 }
 
@@ -588,8 +626,6 @@ mod test {
     use crate::Lsm;
     use crate::Run;
     use crate::Value;
-
-    use byteorder::{ByteOrder, LittleEndian};
 
     #[test]
     fn test_put_get() {
@@ -722,36 +758,41 @@ mod test {
         .unwrap();
 
         let block = Block::open(&encoded[..]);
-        println!("{}", hexlify(&encoded[..]));
-        println!(
-            "{}^{}^",
-            (0..8).map(|_| " ").collect::<String>(),
-            (0..block.values_len * 2).map(|_| " ").collect::<String>()
-        );
 
-        println!("n_keys = {}", block.n_keys);
-        println!("prefix = {}", hexlify(block.prefix));
-        let suffix_offsets = block.suffix_offsets();
-        println!("suffix_offsets = {}", hexlify(suffix_offsets));
-        println!(
-            "{}",
-            suffix_offsets
-                .chunks_exact(4)
-                .map(|chunk| format!(
-                    "  suffix_offset = {}, versions_idx = {}\n",
-                    LittleEndian::read_u16(&chunk),
-                    LittleEndian::read_u16(&chunk[2..]),
-                ))
-                .collect::<String>()
-        );
         let suffixes = block.suffixes();
-        println!("suffixes       = {}", hexlify(suffixes));
-        println!("n_versions     = {}", block.n_versions);
-        let ts_value_offsets = block.ts_value_offsets();
-        for i in 0..block.n_versions {
-            let (ts, value_offset) = block.ts_value_offset(ts_value_offsets, i);
-            println!("  {} ts {} value @ {}", i, ts, value_offset);
+        println!("prefix = {}", hexlify(block.prefix));
+        println!("n_versions = {}", suffixes.versions.len());
+        for i in 0..suffixes.versions.len() {
+            let (value_start, value_end) = suffixes.versions.value_offsets(i);
+            println!(
+                "  {} {} ({}, {})",
+                i,
+                suffixes.versions.ts(i),
+                value_start,
+                value_end
+            );
         }
+        println!("n_keys = {}", suffixes.len());
+        for i in 0..suffixes.len() {
+            let versions = suffixes.key_versions(i);
+            println!(
+                "  {} {}  {} versions",
+                i,
+                hexlify(suffixes.suffix(i)),
+                versions.len()
+            );
+            for j in 0..versions.len() {
+                let (value_start, value_end) = versions.value_offsets(j);
+                println!(
+                    "    {} {} ({}, {})",
+                    j,
+                    versions.ts(j),
+                    value_start,
+                    value_end
+                );
+            }
+        }
+
         assert_eq!(block.get(279, &aa[..]), Some(aa_279.clone()));
         assert_eq!(block.get(265, &aa[..]), Some(aa_265.clone()));
         assert_eq!(block.get(123, &aa[..]), None);
