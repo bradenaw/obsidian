@@ -518,7 +518,7 @@ impl<'a> Block<'a> {
         let suffixes = self.suffixes();
         let suffix_offsets = self.suffix_offsets();
 
-        let key_idx = binary_search_by_key(self.n_keys, suffix, |idx| {
+        let key_idx = binary_search_by_idx(self.n_keys, suffix, |idx| {
             Self::suffix(suffix_offsets, suffixes, idx)
         })
         .ok()?;
@@ -534,7 +534,7 @@ impl<'a> Block<'a> {
         };
         println!("n_versions for key {} = {}", hexlify(k), n_versions);
         let ts_value_offsets = self.ts_value_offsets();
-        let ts_val_idx = binary_search_by_key(n_versions, Reverse(ts), |idx| {
+        let ts_val_idx = binary_search_by_idx(n_versions, Reverse(ts), |idx| {
             Reverse(
                 self.ts_value_offset(ts_value_offsets, ts_value_offsets_start + idx)
                     .0,
@@ -547,9 +547,12 @@ impl<'a> Block<'a> {
 
         let (record_ts, value_start) =
             self.ts_value_offset(ts_value_offsets, ts_value_offsets_start + ts_val_idx);
-        let value_end = if ts_val_idx == self.n_versions - 1 {
+        println!("n_versions = {}", self.n_versions);
+        println!("ts_val_idx = {}", ts_val_idx);
+        let value_end = if ts_value_offsets_start + ts_val_idx == self.n_versions - 1 {
             self.values_len
         } else {
+            println!("idx of next = {}", ts_value_offsets_start + ts_val_idx + 1);
             self.ts_value_offset(ts_value_offsets, ts_value_offsets_start + ts_val_idx + 1)
                 .1
         };
@@ -557,7 +560,7 @@ impl<'a> Block<'a> {
     }
 }
 
-fn binary_search_by_key<K: Ord, F: Fn(usize) -> K>(n: usize, k: K, f: F) -> Result<usize, usize> {
+fn binary_search_by_idx<K: Ord, F: Fn(usize) -> K>(n: usize, k: K, f: F) -> Result<usize, usize> {
     let mut lower = 0;
     let mut upper = n;
     while lower < upper {
@@ -578,7 +581,7 @@ fn binary_search_by_key<K: Ord, F: Fn(usize) -> K>(n: usize, k: K, f: F) -> Resu
 mod test {
     use std::collections::BTreeMap;
 
-    use crate::binary_search_by_key;
+    use crate::binary_search_by_idx;
     use crate::encode_block;
     use crate::hexlify;
     use crate::Block;
@@ -686,14 +689,14 @@ mod test {
 
     #[test]
     fn test_binary_search_by_key() {
-        for n in 1..16 {
+        for n in 1..32 {
             for i in 0..n {
-                assert_eq!(binary_search_by_key(n, i, |x| x), Ok(i));
+                assert_eq!(binary_search_by_idx(n, i, |x| x), Ok(i));
             }
         }
-        for n in 1..16 {
+        for n in 1..32 {
             for i in 0..=n {
-                assert_eq!(binary_search_by_key(n, 2 * i, |x| 2 * x + 1), Err(i));
+                assert_eq!(binary_search_by_idx(n, 2 * i, |x| 2 * x + 1), Err(i));
             }
         }
     }
@@ -763,7 +766,7 @@ mod test {
 
         assert_eq!(block.get(500, &ab[..]), Some(ab_341.clone()));
         assert_eq!(block.get(340, &ab[..]), Some(ab_302.clone()));
-        assert_eq!(block.get(300, &aa[..]), Some(ab_290.clone()));
+        assert_eq!(block.get(300, &ab[..]), Some(ab_290.clone()));
     }
 }
 
