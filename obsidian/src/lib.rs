@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 #![feature(map_first_last)]
+#![feature(result_into_ok_or_err)]
 
 use std::cmp::Ordering;
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
 use std::convert::TryFrom;
@@ -348,9 +350,11 @@ impl<A: Ord, B> PartialOrd for OrdEqByFirst<A, B> {
     }
 }
 
+const BLOCK_INDEX_HEADER_SIZE: usize = 21;
+
+// Assumed that kvs values are in reverse order by timestamp.
 fn encode_block(kvs: BTreeMap<Vec<u8>, Vec<(u64, Vec<u8>)>>) -> anyhow::Result<Vec<u8>> {
-    const HEADER_SIZE: usize = 25;
-    let mut block = [0u8; HEADER_SIZE].to_vec();
+    let mut block = [0u8; 4].to_vec();
 
     let prefix: Vec<u8> = {
         let (first_key, _) = kvs
@@ -395,10 +399,7 @@ fn encode_block(kvs: BTreeMap<Vec<u8>, Vec<(u64, Vec<u8>)>>) -> anyhow::Result<V
     for (key, versions) in kvs.iter() {
         let mut suffix_offsets_buf = [0u8; 4];
         LittleEndian::write_u16(&mut suffix_offsets_buf[..], u16::try_from(suffixes.len())?);
-        LittleEndian::write_u16(
-            &mut suffix_offsets_buf[2..],
-            u16::try_from(ts_value_offsets.len())?,
-        );
+        LittleEndian::write_u16(&mut suffix_offsets_buf[2..], u16::try_from(n_versions)?);
         suffix_offsets.extend_from_slice(&suffix_offsets_buf[..]);
         suffixes.extend_from_slice(&key[prefix.len()..]);
         for (ts, value) in versions {
@@ -406,26 +407,26 @@ fn encode_block(kvs: BTreeMap<Vec<u8>, Vec<(u64, Vec<u8>)>>) -> anyhow::Result<V
             LittleEndian::write_u64(&mut buf[..], ts - min_ts);
             LittleEndian::write_u16(
                 &mut buf[bytes_per_ts_offset..],
-                u16::try_from(block.len() - HEADER_SIZE)?,
+                u16::try_from(block.len() - 4)?,
             );
             ts_value_offsets.extend_from_slice(&buf[..bytes_per_ts_offset + 2]);
             block.extend((&value).iter());
         }
         n_versions += versions.len();
     }
+    let values_len = block.len() - 4;
+    LittleEndian::write_u32(&mut block[0..4], values_len as u32);
 
-    let block_size =
-        block.len() + prefix.len() + suffixes.len() + suffix_offsets.len() + ts_value_offsets.len();
-    LittleEndian::write_u32(&mut block[0..4], block_size as u32);
-    LittleEndian::write_u16(&mut block[4..6], n_keys as u16);
-    LittleEndian::write_u16(&mut block[6..8], prefix.len() as u16);
-    LittleEndian::write_u16(&mut block[8..10], suffixes.len() as u16);
-    LittleEndian::write_u16(&mut block[10..12], n_versions as u16);
-    LittleEndian::write_u64(&mut block[12..20], min_ts);
-    block[20] = bytes_per_ts_offset as u8;
-    let values_len = block.len() - HEADER_SIZE;
-    LittleEndian::write_u32(&mut block[21..25], values_len as u32);
+    let mut header = [0u8; BLOCK_INDEX_HEADER_SIZE];
+    LittleEndian::write_u32(&mut header[0..4], values_len as u32);
+    LittleEndian::write_u16(&mut header[4..6], n_keys as u16);
+    LittleEndian::write_u16(&mut header[6..8], prefix.len() as u16);
+    LittleEndian::write_u16(&mut header[8..10], suffixes.len() as u16);
+    LittleEndian::write_u16(&mut header[10..12], n_versions as u16);
+    LittleEndian::write_u64(&mut header[12..20], min_ts);
+    header[20] = bytes_per_ts_offset as u8;
 
+    block.extend(&header[..]);
     block.extend(&prefix[..]);
     block.extend(&suffixes[..]);
     block.extend(&suffix_offsets[..]);
@@ -434,13 +435,158 @@ fn encode_block(kvs: BTreeMap<Vec<u8>, Vec<(u64, Vec<u8>)>>) -> anyhow::Result<V
     Ok(block)
 }
 
+struct Block<'a> {
+    values_len: usize,
+    n_keys: usize,
+    prefix: &'a [u8],
+    suffixes_len: usize,
+    n_versions: usize,
+    min_ts: u64,
+    ts_bytes: usize,
+    b: &'a [u8],
+}
+
+impl<'a> Block<'a> {
+    pub fn new(b: &'a [u8]) -> Self {
+        let values_len = LittleEndian::read_u32(&b[0..4]) as usize;
+        println!("values_len = {}", values_len);
+        let header_idx = values_len + 4;
+        let header = &b[header_idx..header_idx + 21];
+
+        let prefix_len = LittleEndian::read_u16(&header[6..8]) as usize;
+
+        Self {
+            b,
+            values_len,
+            n_keys: LittleEndian::read_u16(&header[4..6]) as usize,
+            prefix: &b[header_idx + BLOCK_INDEX_HEADER_SIZE
+                ..header_idx + BLOCK_INDEX_HEADER_SIZE + prefix_len],
+            suffixes_len: LittleEndian::read_u16(&header[8..10]) as usize,
+            n_versions: LittleEndian::read_u16(&header[10..12]) as usize,
+            min_ts: LittleEndian::read_u64(&header[12..20]),
+            ts_bytes: header[20] as usize,
+        }
+    }
+
+    fn suffixes(&self) -> &[u8] {
+        let start = 4 + self.values_len + BLOCK_INDEX_HEADER_SIZE + self.prefix.len();
+        &self.b[start..start + self.suffixes_len]
+    }
+
+    fn suffix_offsets(&self) -> &[u8] {
+        let start =
+            4 + self.values_len + BLOCK_INDEX_HEADER_SIZE + self.prefix.len() + self.suffixes_len;
+        &self.b[start..start + self.n_keys * 4]
+    }
+
+    fn ts_value_offsets(&self) -> &[u8] {
+        let start = 4
+            + self.values_len
+            + BLOCK_INDEX_HEADER_SIZE
+            + self.prefix.len()
+            + self.suffixes_len
+            + self.suffixes_len * 4;
+        &self.b[start..start + self.n_versions * (self.ts_bytes + 2)]
+    }
+
+    fn ts_value_offset(&self, ts_value_offsets: &[u8], idx: usize) -> (u64, usize) {
+        let width = self.ts_bytes + 2;
+        let elem = &ts_value_offsets[width * idx..width * (idx + 1)];
+        let mut ts_offset = [0u8; 8];
+        ts_offset[..self.ts_bytes].copy_from_slice(&elem[..self.ts_bytes]);
+        (
+            LittleEndian::read_u64(&ts_offset[..]) + self.min_ts,
+            LittleEndian::read_u16(&elem[elem.len() - 2..]) as usize,
+        )
+    }
+
+    fn suffix<'b>(suffix_offsets: &[u8], suffixes: &'b [u8], idx: usize) -> &'b [u8] {
+        let start = LittleEndian::read_u16(&suffix_offsets[idx * 4..idx * 4 + 2]) as usize;
+        let end = if idx == suffix_offsets.len() / 4 - 1 {
+            suffixes.len()
+        } else {
+            LittleEndian::read_u16(&suffix_offsets[(idx + 1) * 4..(idx + 1) * 4 + 2]) as usize
+        };
+        &suffixes[start..end]
+    }
+
+    pub fn get(&self, ts: u64, k: &[u8]) -> Option<(u64, Vec<u8>)> {
+        if !k.starts_with(self.prefix) {
+            return None;
+        }
+        let suffix = &k[self.prefix.len()..];
+        let suffixes = self.suffixes();
+        let suffix_offsets = self.suffix_offsets();
+
+        let key_idx = binary_search_by_key(self.n_keys, suffix, |idx| {
+            Self::suffix(suffix_offsets, suffixes, idx)
+        })
+        .ok()?;
+        let ts_value_offsets_start =
+            LittleEndian::read_u16(&suffix_offsets[key_idx * 4 + 2..key_idx * 4 + 4]) as usize;
+        let n_versions = if key_idx == self.n_keys - 1 {
+            self.n_versions - ts_value_offsets_start
+        } else {
+            let ts_value_offsets_end = LittleEndian::read_u16(
+                &suffix_offsets[(key_idx + 1) * 4 + 2..(key_idx + 1) * 4 + 4],
+            ) as usize;
+            ts_value_offsets_end - ts_value_offsets_start
+        };
+        println!("n_versions for key {} = {}", hexlify(k), n_versions);
+        let ts_value_offsets = self.ts_value_offsets();
+        let ts_val_idx = binary_search_by_key(n_versions, Reverse(ts), |idx| {
+            Reverse(
+                self.ts_value_offset(ts_value_offsets, ts_value_offsets_start + idx)
+                    .0,
+            )
+        })
+        .into_ok_or_err();
+        if ts_val_idx == n_versions {
+            return None;
+        }
+
+        let (record_ts, value_start) =
+            self.ts_value_offset(ts_value_offsets, ts_value_offsets_start + ts_val_idx);
+        let value_end = if ts_val_idx == self.n_versions - 1 {
+            self.values_len
+        } else {
+            self.ts_value_offset(ts_value_offsets, ts_value_offsets_start + ts_val_idx + 1)
+                .1
+        };
+        Some((record_ts, self.b[4 + value_start..4 + value_end].to_vec()))
+    }
+}
+
+fn binary_search_by_key<K: Ord, F: Fn(usize) -> K>(n: usize, k: K, f: F) -> Result<usize, usize> {
+    let mut lower = 0;
+    let mut upper = n;
+    while lower < upper {
+        let mid = (lower + upper) / 2;
+        println!("lower={} upper={} mid={}", lower, upper, mid);
+        let at_mid = f(mid);
+        match k.cmp(&at_mid) {
+            Ordering::Equal => return Ok(mid),
+            Ordering::Less => upper = mid,
+            Ordering::Greater => lower = mid + 1,
+        }
+    }
+    // XXX: not sure if correct
+    Err(lower)
+}
+
 #[cfg(test)]
 mod test {
     use std::collections::BTreeMap;
 
+    use crate::binary_search_by_key;
+    use crate::encode_block;
+    use crate::hexlify;
+    use crate::Block;
     use crate::Lsm;
     use crate::Run;
     use crate::Value;
+
+    use byteorder::{ByteOrder, LittleEndian};
 
     #[test]
     fn test_put_get() {
@@ -537,4 +683,90 @@ mod test {
             }
         }
     }
+
+    #[test]
+    fn test_binary_search_by_key() {
+        for n in 1..16 {
+            for i in 0..n {
+                assert_eq!(binary_search_by_key(n, i, |x| x), Ok(i));
+            }
+        }
+        for n in 1..16 {
+            for i in 0..=n {
+                assert_eq!(binary_search_by_key(n, 2 * i, |x| 2 * x + 1), Err(i));
+            }
+        }
+    }
+
+    #[test]
+    fn test_block() {
+        let aa: Vec<u8> = "aa".into();
+        let ab: Vec<u8> = "ab".into();
+        let aa_279 = (279, "foo".into());
+        let aa_265 = (265, "bar".into());
+        let ab_341 = (341, "baz".into());
+        let ab_302 = (302, "qux".into());
+        let ab_290 = (290, "garply".into());
+        let encoded = encode_block({
+            let mut kvs = BTreeMap::new();
+            kvs.insert(aa.clone(), vec![aa_279.clone(), aa_265.clone()]);
+            kvs.insert(
+                ab.clone(),
+                vec![ab_341.clone(), ab_302.clone(), ab_290.clone()],
+            );
+            kvs
+        })
+        .unwrap();
+
+        let block = Block::new(&encoded[..]);
+        println!("{}", hexlify(&encoded[..]));
+        println!(
+            "{}^{}^",
+            (0..8).map(|_| " ").collect::<String>(),
+            (0..block.values_len * 2).map(|_| " ").collect::<String>()
+        );
+
+        println!("n_keys = {}", block.n_keys);
+        println!("prefix = {}", hexlify(block.prefix));
+        let suffix_offsets = block.suffix_offsets();
+        println!("suffix_offsets = {}", hexlify(suffix_offsets));
+        println!(
+            "{}",
+            suffix_offsets
+                .chunks_exact(4)
+                .map(|chunk| format!(
+                    "  suffix_offset = {}, versions_idx = {}\n",
+                    LittleEndian::read_u16(&chunk),
+                    LittleEndian::read_u16(&chunk[2..]),
+                ))
+                .collect::<String>()
+        );
+        let suffixes = block.suffixes();
+        println!("suffixes       = {}", hexlify(suffixes));
+        println!("n_versions     = {}", block.n_versions);
+        let ts_value_offsets = block.ts_value_offsets();
+        for i in 0..block.n_versions {
+            let (ts, value_offset) = block.ts_value_offset(ts_value_offsets, i);
+            println!("  {} ts {} value @ {}", i, ts, value_offset);
+        }
+        assert_eq!(block.get(279, &aa[..]), Some(aa_279.clone()));
+        assert_eq!(block.get(265, &aa[..]), Some(aa_265.clone()));
+        assert_eq!(block.get(123, &aa[..]), None);
+
+        assert_eq!(block.get(295, &aa[..]), Some(aa_279.clone()));
+        assert_eq!(block.get(269, &aa[..]), Some(aa_265.clone()));
+
+        assert_eq!(block.get(341, &ab[..]), Some(ab_341.clone()));
+        assert_eq!(block.get(302, &ab[..]), Some(ab_302.clone()));
+        assert_eq!(block.get(290, &ab[..]), Some(ab_290.clone()));
+        assert_eq!(block.get(289, &ab[..]), None);
+
+        assert_eq!(block.get(500, &ab[..]), Some(ab_341.clone()));
+        assert_eq!(block.get(340, &ab[..]), Some(ab_302.clone()));
+        assert_eq!(block.get(300, &aa[..]), Some(ab_290.clone()));
+    }
+}
+
+fn hexlify(b: &[u8]) -> String {
+    b.iter().map(|b| format!("{:02x}", b)).collect()
 }
