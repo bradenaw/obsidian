@@ -350,91 +350,6 @@ impl<A: Ord, B> PartialOrd for OrdEqByFirst<A, B> {
     }
 }
 
-const BLOCK_INDEX_HEADER_SIZE: usize = 21;
-
-// Assumed that kvs values are in reverse order by timestamp.
-fn encode_block(kvs: BTreeMap<Vec<u8>, Vec<(u64, Vec<u8>)>>) -> anyhow::Result<Vec<u8>> {
-    let mut block = [0u8; 4].to_vec();
-
-    let prefix: Vec<u8> = {
-        let (first_key, _) = kvs
-            .first_key_value()
-            .ok_or_else(|| anyhow!("empty block"))?;
-        let (last_key, _) = kvs.last_key_value().ok_or_else(|| anyhow!("empty block"))?;
-        std::iter::zip(first_key, last_key)
-            .take_while(|(a, b)| *a == *b)
-            .map(|(a, _)| *a)
-            .collect()
-    };
-    let (min_ts, bytes_per_ts_offset) = {
-        let mut min_ts = u64::MAX;
-        let mut max_ts = 0;
-        for (_, versions) in &kvs {
-            min_ts = std::cmp::min(
-                min_ts,
-                versions
-                    .last()
-                    .ok_or_else(|| anyhow!("key has no versions"))?
-                    .0,
-            );
-            max_ts = std::cmp::max(
-                max_ts,
-                versions
-                    .first()
-                    .ok_or_else(|| anyhow!("key has no versions"))?
-                    .0,
-            );
-        }
-        (
-            min_ts,
-            (((64 - (max_ts - min_ts).leading_zeros()) + 7) / 8) as usize,
-        )
-    };
-
-    let n_keys = kvs.len();
-    let mut n_versions = 0;
-    let mut suffixes = Vec::new();
-    let mut suffix_offsets = Vec::new();
-    let mut ts_value_offsets = Vec::new();
-    for (key, versions) in kvs.iter() {
-        let mut suffix_offsets_buf = [0u8; 4];
-        LittleEndian::write_u16(&mut suffix_offsets_buf[..], u16::try_from(suffixes.len())?);
-        LittleEndian::write_u16(&mut suffix_offsets_buf[2..], u16::try_from(n_versions)?);
-        suffix_offsets.extend_from_slice(&suffix_offsets_buf[..]);
-        suffixes.extend_from_slice(&key[prefix.len()..]);
-        for (ts, value) in versions {
-            let mut buf = [0u8; 10];
-            LittleEndian::write_u64(&mut buf[..], ts - min_ts);
-            LittleEndian::write_u16(
-                &mut buf[bytes_per_ts_offset..],
-                u16::try_from(block.len() - 4)?,
-            );
-            ts_value_offsets.extend_from_slice(&buf[..bytes_per_ts_offset + 2]);
-            block.extend((&value).iter());
-        }
-        n_versions += versions.len();
-    }
-    let values_len = block.len() - 4;
-    LittleEndian::write_u32(&mut block[0..4], values_len as u32);
-
-    let mut header = [0u8; BLOCK_INDEX_HEADER_SIZE];
-    LittleEndian::write_u32(&mut header[0..4], values_len as u32);
-    LittleEndian::write_u16(&mut header[4..6], n_keys as u16);
-    LittleEndian::write_u16(&mut header[6..8], prefix.len() as u16);
-    LittleEndian::write_u16(&mut header[8..10], suffixes.len() as u16);
-    LittleEndian::write_u16(&mut header[10..12], n_versions as u16);
-    LittleEndian::write_u64(&mut header[12..20], min_ts);
-    header[20] = bytes_per_ts_offset as u8;
-
-    block.extend(&header[..]);
-    block.extend(&prefix[..]);
-    block.extend(&suffixes[..]);
-    block.extend(&suffix_offsets[..]);
-    block.extend(&ts_value_offsets[..]);
-
-    Ok(block)
-}
-
 struct Block<'a> {
     values_len: usize,
     n_keys: usize,
@@ -447,7 +362,92 @@ struct Block<'a> {
 }
 
 impl<'a> Block<'a> {
-    pub fn new(b: &'a [u8]) -> Self {
+    const BLOCK_INDEX_HEADER_SIZE: usize = 21;
+
+    // Assumes that kvs values are in reverse order by timestamp.
+    pub fn encode(kvs: BTreeMap<Vec<u8>, Vec<(u64, Vec<u8>)>>) -> anyhow::Result<Vec<u8>> {
+        let mut block = [0u8; 4].to_vec();
+
+        let prefix: Vec<u8> = {
+            let (first_key, _) = kvs
+                .first_key_value()
+                .ok_or_else(|| anyhow!("empty block"))?;
+            let (last_key, _) = kvs.last_key_value().ok_or_else(|| anyhow!("empty block"))?;
+            std::iter::zip(first_key, last_key)
+                .take_while(|(a, b)| *a == *b)
+                .map(|(a, _)| *a)
+                .collect()
+        };
+        let (min_ts, bytes_per_ts_offset) = {
+            let mut min_ts = u64::MAX;
+            let mut max_ts = 0;
+            for (_, versions) in &kvs {
+                min_ts = std::cmp::min(
+                    min_ts,
+                    versions
+                        .last()
+                        .ok_or_else(|| anyhow!("key has no versions"))?
+                        .0,
+                );
+                max_ts = std::cmp::max(
+                    max_ts,
+                    versions
+                        .first()
+                        .ok_or_else(|| anyhow!("key has no versions"))?
+                        .0,
+                );
+            }
+            (
+                min_ts,
+                (((64 - (max_ts - min_ts).leading_zeros()) + 7) / 8) as usize,
+            )
+        };
+
+        let n_keys = kvs.len();
+        let mut n_versions = 0;
+        let mut suffixes = Vec::new();
+        let mut suffix_offsets = Vec::new();
+        let mut ts_value_offsets = Vec::new();
+        for (key, versions) in kvs.iter() {
+            let mut suffix_offsets_buf = [0u8; 4];
+            LittleEndian::write_u16(&mut suffix_offsets_buf[..], u16::try_from(suffixes.len())?);
+            LittleEndian::write_u16(&mut suffix_offsets_buf[2..], u16::try_from(n_versions)?);
+            suffix_offsets.extend_from_slice(&suffix_offsets_buf[..]);
+            suffixes.extend_from_slice(&key[prefix.len()..]);
+            for (ts, value) in versions {
+                let mut buf = [0u8; 10];
+                LittleEndian::write_u64(&mut buf[..], ts - min_ts);
+                LittleEndian::write_u16(
+                    &mut buf[bytes_per_ts_offset..],
+                    u16::try_from(block.len() - 4)?,
+                );
+                ts_value_offsets.extend_from_slice(&buf[..bytes_per_ts_offset + 2]);
+                block.extend((&value).iter());
+            }
+            n_versions += versions.len();
+        }
+        let values_len = block.len() - 4;
+        LittleEndian::write_u32(&mut block[0..4], values_len as u32);
+
+        let mut header = [0u8; Self::BLOCK_INDEX_HEADER_SIZE];
+        LittleEndian::write_u32(&mut header[0..4], values_len as u32);
+        LittleEndian::write_u16(&mut header[4..6], n_keys as u16);
+        LittleEndian::write_u16(&mut header[6..8], prefix.len() as u16);
+        LittleEndian::write_u16(&mut header[8..10], suffixes.len() as u16);
+        LittleEndian::write_u16(&mut header[10..12], n_versions as u16);
+        LittleEndian::write_u64(&mut header[12..20], min_ts);
+        header[20] = bytes_per_ts_offset as u8;
+
+        block.extend(&header[..]);
+        block.extend(&prefix[..]);
+        block.extend(&suffixes[..]);
+        block.extend(&suffix_offsets[..]);
+        block.extend(&ts_value_offsets[..]);
+
+        Ok(block)
+    }
+
+    pub fn open(b: &'a [u8]) -> Self {
         let values_len = LittleEndian::read_u32(&b[0..4]) as usize;
         println!("values_len = {}", values_len);
         let header_idx = values_len + 4;
@@ -459,8 +459,8 @@ impl<'a> Block<'a> {
             b,
             values_len,
             n_keys: LittleEndian::read_u16(&header[4..6]) as usize,
-            prefix: &b[header_idx + BLOCK_INDEX_HEADER_SIZE
-                ..header_idx + BLOCK_INDEX_HEADER_SIZE + prefix_len],
+            prefix: &b[header_idx + Self::BLOCK_INDEX_HEADER_SIZE
+                ..header_idx + Self::BLOCK_INDEX_HEADER_SIZE + prefix_len],
             suffixes_len: LittleEndian::read_u16(&header[8..10]) as usize,
             n_versions: LittleEndian::read_u16(&header[10..12]) as usize,
             min_ts: LittleEndian::read_u64(&header[12..20]),
@@ -469,20 +469,23 @@ impl<'a> Block<'a> {
     }
 
     fn suffixes(&self) -> &[u8] {
-        let start = 4 + self.values_len + BLOCK_INDEX_HEADER_SIZE + self.prefix.len();
+        let start = 4 + self.values_len + Self::BLOCK_INDEX_HEADER_SIZE + self.prefix.len();
         &self.b[start..start + self.suffixes_len]
     }
 
     fn suffix_offsets(&self) -> &[u8] {
-        let start =
-            4 + self.values_len + BLOCK_INDEX_HEADER_SIZE + self.prefix.len() + self.suffixes_len;
+        let start = 4
+            + self.values_len
+            + Self::BLOCK_INDEX_HEADER_SIZE
+            + self.prefix.len()
+            + self.suffixes_len;
         &self.b[start..start + self.n_keys * 4]
     }
 
     fn ts_value_offsets(&self) -> &[u8] {
         let start = 4
             + self.values_len
-            + BLOCK_INDEX_HEADER_SIZE
+            + Self::BLOCK_INDEX_HEADER_SIZE
             + self.prefix.len()
             + self.suffixes_len
             + self.suffixes_len * 4;
@@ -580,7 +583,6 @@ mod test {
     use std::collections::BTreeMap;
 
     use crate::binary_search_by_idx;
-    use crate::encode_block;
     use crate::hexlify;
     use crate::Block;
     use crate::Lsm;
@@ -708,7 +710,7 @@ mod test {
         let ab_341 = (341, "baz".into());
         let ab_302 = (302, "qux".into());
         let ab_290 = (290, "garply".into());
-        let encoded = encode_block({
+        let encoded = Block::encode({
             let mut kvs = BTreeMap::new();
             kvs.insert(aa.clone(), vec![aa_279.clone(), aa_265.clone()]);
             kvs.insert(
@@ -719,7 +721,7 @@ mod test {
         })
         .unwrap();
 
-        let block = Block::new(&encoded[..]);
+        let block = Block::open(&encoded[..]);
         println!("{}", hexlify(&encoded[..]));
         println!(
             "{}^{}^",
