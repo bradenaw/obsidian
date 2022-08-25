@@ -565,7 +565,6 @@ fn binary_search_by_idx<K: Ord, F: Fn(usize) -> K>(n: usize, k: K, f: F) -> Resu
     let mut upper = n;
     while lower < upper {
         let mid = (lower + upper) / 2;
-        println!("lower={} upper={} mid={}", lower, upper, mid);
         let at_mid = f(mid);
         match k.cmp(&at_mid) {
             Ordering::Equal => return Ok(mid),
@@ -573,7 +572,6 @@ fn binary_search_by_idx<K: Ord, F: Fn(usize) -> K>(n: usize, k: K, f: F) -> Resu
             Ordering::Greater => lower = mid + 1,
         }
     }
-    // XXX: not sure if correct
     Err(lower)
 }
 
