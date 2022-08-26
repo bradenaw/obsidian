@@ -365,7 +365,7 @@ impl<'a> Block<'a> {
     const BLOCK_INDEX_HEADER_SIZE: usize = 21;
 
     // Assumes that kvs values are in reverse order by timestamp.
-    pub fn encode(kvs: BTreeMap<Vec<u8>, Vec<(u64, Vec<u8>)>>) -> anyhow::Result<Vec<u8>> {
+    pub fn encode(kvs: BTreeMap<Vec<u8>, Vec<(u64, Option<Vec<u8>>)>>) -> anyhow::Result<Vec<u8>> {
         let mut block = [0u8; 4].to_vec();
 
         let prefix: Vec<u8> = {
@@ -399,7 +399,8 @@ impl<'a> Block<'a> {
             }
             (
                 min_ts,
-                (((64 - (max_ts - min_ts).leading_zeros()) + 7) / 8) as usize,
+                // +8 instead of +7, since we pack an extra tombstone bit in there
+                (((64 - (max_ts - min_ts).leading_zeros()) + 8) / 8) as usize,
             )
         };
 
@@ -414,15 +415,24 @@ impl<'a> Block<'a> {
             LittleEndian::write_u16(&mut suffix_offsets_buf[2..], u16::try_from(n_versions)?);
             suffix_offsets.extend_from_slice(&suffix_offsets_buf[..]);
             suffixes.extend_from_slice(&key[prefix.len()..]);
-            for (ts, value) in key_versions {
+            for (ts, maybe_value) in key_versions {
                 let mut buf = [0u8; 10];
-                LittleEndian::write_u64(&mut buf[..], ts - min_ts);
+                let value_offset = block.len() - 4;
+                let tombstone_bit = match maybe_value {
+                    Some(value) => {
+                        block.extend((&value).iter());
+                        0
+                    }
+                    None => 1,
+                };
+                let ts_offset_and_tombstone = ((ts - min_ts) << 1) | tombstone_bit;
+                assert!(ts_offset_and_tombstone < 1 << (8 * bytes_per_ts_offset));
+                LittleEndian::write_u64(&mut buf[..], ts_offset_and_tombstone);
                 LittleEndian::write_u16(
                     &mut buf[bytes_per_ts_offset..],
-                    u16::try_from(block.len() - 4)?,
+                    u16::try_from(value_offset)?,
                 );
                 versions.extend_from_slice(&buf[..bytes_per_ts_offset + 2]);
-                block.extend((&value).iter());
             }
             n_versions += key_versions.len();
         }
@@ -505,7 +515,7 @@ impl<'a> Block<'a> {
             return None;
         }
         let record_ts = key_versions.ts(version_idx);
-        let (value_start, value_end) = key_versions.value_offsets(version_idx);
+        let (value_start, value_end) = key_versions.value_offsets(version_idx)?;
         Some((record_ts, self.b[4 + value_start..4 + value_end].to_vec()))
     }
 }
@@ -559,13 +569,17 @@ impl<'a> BlockVersions<'a> {
         self.b.len() / (self.ts_bytes + 2)
     }
 
-    fn elem(&self, idx: usize) -> (u64, usize) {
+    fn elem(&self, idx: usize) -> (u64, bool, usize) {
         let width = self.ts_bytes + 2;
         let elem = &self.b[width * idx..width * (idx + 1)];
-        let mut ts_offset = [0u8; 8];
-        ts_offset[..self.ts_bytes].copy_from_slice(&elem[..self.ts_bytes]);
+        let mut ts_offset_buf = [0u8; 8];
+        ts_offset_buf[..self.ts_bytes].copy_from_slice(&elem[..self.ts_bytes]);
+        let ts_offset_and_tombstone = LittleEndian::read_u64(&ts_offset_buf[..]);
+        let tombstone = ts_offset_and_tombstone & 1 == 1;
+        let ts = (ts_offset_and_tombstone >> 1) + self.min_ts;
         (
-            LittleEndian::read_u64(&ts_offset[..]) + self.min_ts,
+            ts,
+            tombstone,
             LittleEndian::read_u16(&elem[elem.len() - 2..]) as usize,
         )
     }
@@ -576,7 +590,7 @@ impl<'a> BlockVersions<'a> {
         let end_offset = if end_idx == self.len() {
             self.end_offset
         } else {
-            self.elem(end_idx).1
+            self.elem(end_idx).2
         };
         BlockVersions {
             ts_bytes: self.ts_bytes,
@@ -590,14 +604,17 @@ impl<'a> BlockVersions<'a> {
         self.elem(idx).0
     }
 
-    fn value_offsets(&self, idx: usize) -> (usize, usize) {
-        let (_, start) = self.elem(idx);
+    fn value_offsets(&self, idx: usize) -> Option<(usize, usize)> {
+        let (_, tombstone, start) = self.elem(idx);
+        if tombstone {
+            return None;
+        }
         let end = if idx == self.len() - 1 {
             self.end_offset
         } else {
-            self.elem(idx + 1).1
+            self.elem(idx + 1).2
         };
-        (start, end)
+        Some((start, end))
     }
 }
 
@@ -741,17 +758,24 @@ mod test {
     fn test_block() {
         let aa: Vec<u8> = "aa".into();
         let ab: Vec<u8> = "ab".into();
-        let aa_279 = (279, "foo".into());
-        let aa_265 = (265, "bar".into());
-        let ab_341 = (341, "baz".into());
-        let ab_302 = (302, "qux".into());
-        let ab_290 = (290, "garply".into());
+        let aa_279: Vec<u8> = "foo".into();
+        let aa_265: Vec<u8> = "bar".into();
+        let ab_341: Vec<u8> = "baz".into();
+        let ab_302: Vec<u8> = "qux".into();
+        let ab_290: Vec<u8> = "garply".into();
         let encoded = Block::encode({
             let mut kvs = BTreeMap::new();
-            kvs.insert(aa.clone(), vec![aa_279.clone(), aa_265.clone()]);
+            kvs.insert(
+                aa.clone(),
+                vec![(279, Some(aa_279.clone())), (265, Some(aa_265.clone()))],
+            );
             kvs.insert(
                 ab.clone(),
-                vec![ab_341.clone(), ab_302.clone(), ab_290.clone()],
+                vec![
+                    (341, Some(ab_341.clone())),
+                    (302, Some(ab_302.clone())),
+                    (290, Some(ab_290.clone())),
+                ],
             );
             kvs
         })
@@ -763,14 +787,11 @@ mod test {
         println!("prefix = {}", hexlify(block.prefix));
         println!("n_versions = {}", suffixes.versions.len());
         for i in 0..suffixes.versions.len() {
-            let (value_start, value_end) = suffixes.versions.value_offsets(i);
-            println!(
-                "  {} {} ({}, {})",
-                i,
-                suffixes.versions.ts(i),
-                value_start,
-                value_end
-            );
+            let value_str = match suffixes.versions.value_offsets(i) {
+                Some((value_start, value_end)) => format!("({}, {})", value_start, value_end),
+                None => "<TOMBSTONE>".into(),
+            };
+            println!("  {} {} {}", i, suffixes.versions.ts(i), value_str,);
         }
         println!("n_keys = {}", suffixes.len());
         for i in 0..suffixes.len() {
@@ -782,32 +803,29 @@ mod test {
                 versions.len()
             );
             for j in 0..versions.len() {
-                let (value_start, value_end) = versions.value_offsets(j);
-                println!(
-                    "    {} {} ({}, {})",
-                    j,
-                    versions.ts(j),
-                    value_start,
-                    value_end
-                );
+                let value_str = match suffixes.versions.value_offsets(j) {
+                    Some((value_start, value_end)) => format!("({}, {})", value_start, value_end),
+                    None => "<TOMBSTONE>".into(),
+                };
+                println!("    {} {} {}", j, suffixes.versions.ts(j), value_str,);
             }
         }
 
-        assert_eq!(block.get(279, &aa[..]), Some(aa_279.clone()));
-        assert_eq!(block.get(265, &aa[..]), Some(aa_265.clone()));
+        assert_eq!(block.get(279, &aa[..]), Some((279, aa_279.clone())));
+        assert_eq!(block.get(265, &aa[..]), Some((265, aa_265.clone())));
         assert_eq!(block.get(123, &aa[..]), None);
 
-        assert_eq!(block.get(295, &aa[..]), Some(aa_279.clone()));
-        assert_eq!(block.get(269, &aa[..]), Some(aa_265.clone()));
+        assert_eq!(block.get(295, &aa[..]), Some((279, aa_279.clone())));
+        assert_eq!(block.get(269, &aa[..]), Some((265, aa_265.clone())));
 
-        assert_eq!(block.get(341, &ab[..]), Some(ab_341.clone()));
-        assert_eq!(block.get(302, &ab[..]), Some(ab_302.clone()));
-        assert_eq!(block.get(290, &ab[..]), Some(ab_290.clone()));
+        assert_eq!(block.get(341, &ab[..]), Some((341, ab_341.clone())));
+        assert_eq!(block.get(302, &ab[..]), Some((302, ab_302.clone())));
+        assert_eq!(block.get(290, &ab[..]), Some((290, ab_290.clone())));
         assert_eq!(block.get(289, &ab[..]), None);
 
-        assert_eq!(block.get(500, &ab[..]), Some(ab_341.clone()));
-        assert_eq!(block.get(340, &ab[..]), Some(ab_302.clone()));
-        assert_eq!(block.get(300, &ab[..]), Some(ab_290.clone()));
+        assert_eq!(block.get(500, &ab[..]), Some((341, ab_341.clone())));
+        assert_eq!(block.get(340, &ab[..]), Some((302, ab_302.clone())));
+        assert_eq!(block.get(300, &ab[..]), Some((290, ab_290.clone())));
     }
 }
 
