@@ -365,7 +365,7 @@ impl<'a> Block<'a> {
     const BLOCK_INDEX_HEADER_SIZE: usize = 21;
 
     // Assumes that kvs values are in reverse order by timestamp.
-    pub fn encode(kvs: BTreeMap<Vec<u8>, Vec<(u64, Option<Vec<u8>>)>>) -> anyhow::Result<Vec<u8>> {
+    pub fn encode(kvs: BTreeMap<Vec<u8>, Vec<(u64, Value)>>) -> anyhow::Result<Vec<u8>> {
         let mut block = [0u8; 4].to_vec();
 
         let prefix: Vec<u8> = {
@@ -415,15 +415,15 @@ impl<'a> Block<'a> {
             LittleEndian::write_u16(&mut suffix_offsets_buf[2..], u16::try_from(n_versions)?);
             suffix_offsets.extend_from_slice(&suffix_offsets_buf[..]);
             suffixes.extend_from_slice(&key[prefix.len()..]);
-            for (ts, maybe_value) in key_versions {
+            for (ts, value) in key_versions {
                 let mut buf = [0u8; 10];
                 let value_offset = block.len() - 4;
-                let tombstone_bit = match maybe_value {
-                    Some(value) => {
+                let tombstone_bit = match value {
+                    Value::Regular(value) => {
                         block.extend((&value).iter());
                         0
                     }
-                    None => 1,
+                    Value::Tombstone => 1,
                 };
                 let ts_offset_and_tombstone = ((ts - min_ts) << 1) | tombstone_bit;
                 assert!(ts_offset_and_tombstone < 1 << (8 * bytes_per_ts_offset));
@@ -767,14 +767,18 @@ mod test {
             let mut kvs = BTreeMap::new();
             kvs.insert(
                 aa.clone(),
-                vec![(279, Some(aa_279.clone())), (265, Some(aa_265.clone()))],
+                vec![
+                    (279, Value::Regular(aa_279.clone())),
+                    (265, Value::Regular(aa_265.clone())),
+                ],
             );
             kvs.insert(
                 ab.clone(),
                 vec![
-                    (341, Some(ab_341.clone())),
-                    (302, Some(ab_302.clone())),
-                    (290, Some(ab_290.clone())),
+                    (341, Value::Regular(ab_341.clone())),
+                    (302, Value::Regular(ab_302.clone())),
+                    (297, Value::Tombstone),
+                    (290, Value::Regular(ab_290.clone())),
                 ],
             );
             kvs
@@ -820,12 +824,14 @@ mod test {
 
         assert_eq!(block.get(341, &ab[..]), Some((341, ab_341.clone())));
         assert_eq!(block.get(302, &ab[..]), Some((302, ab_302.clone())));
+        assert_eq!(block.get(297, &ab[..]), None);
         assert_eq!(block.get(290, &ab[..]), Some((290, ab_290.clone())));
         assert_eq!(block.get(289, &ab[..]), None);
 
         assert_eq!(block.get(500, &ab[..]), Some((341, ab_341.clone())));
         assert_eq!(block.get(340, &ab[..]), Some((302, ab_302.clone())));
-        assert_eq!(block.get(300, &ab[..]), Some((290, ab_290.clone())));
+        assert_eq!(block.get(300, &ab[..]), None);
+        assert_eq!(block.get(296, &ab[..]), Some((290, ab_290.clone())));
     }
 }
 
