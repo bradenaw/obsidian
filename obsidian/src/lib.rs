@@ -10,8 +10,14 @@ use std::convert::TryFrom;
 use std::time::SystemTime;
 
 use anyhow::anyhow;
-use byteorder::{ByteOrder, LittleEndian};
+use byteorder::ByteOrder;
+use byteorder::LittleEndian;
+use futures::pin_mut;
+use futures::stream::Stream;
+use futures::stream::StreamExt;
 use rand::Rng;
+use tokio::io::AsyncWrite;
+use tokio::io::AsyncWriteExt;
 
 struct Lsm {
     last_ts: u64,
@@ -365,7 +371,9 @@ impl<'a> Block<'a> {
     const BLOCK_INDEX_HEADER_SIZE: usize = 21;
 
     // Assumes that kvs values are in reverse order by timestamp.
-    pub fn encode(kvs: BTreeMap<Vec<u8>, Vec<(u64, Value)>>) -> anyhow::Result<Vec<u8>> {
+    //
+    // Returns the encoded block and the offset of the header within the block.
+    pub fn encode(kvs: &BTreeMap<Vec<u8>, Vec<(u64, Value)>>) -> anyhow::Result<(Vec<u8>, usize)> {
         let mut block = [0u8; 4].to_vec();
 
         let prefix: Vec<u8> = {
@@ -381,7 +389,7 @@ impl<'a> Block<'a> {
         let (min_ts, bytes_per_ts_offset) = {
             let mut min_ts = u64::MAX;
             let mut max_ts = 0;
-            for (_, versions) in &kvs {
+            for (_, versions) in kvs {
                 min_ts = std::cmp::min(
                     min_ts,
                     versions
@@ -448,13 +456,14 @@ impl<'a> Block<'a> {
         LittleEndian::write_u64(&mut header[12..20], min_ts);
         header[20] = bytes_per_ts_offset as u8;
 
+        let header_idx = block.len();
         block.extend(&header[..]);
         block.extend(&prefix[..]);
         block.extend(&suffixes[..]);
         block.extend(&suffix_offsets[..]);
         block.extend(&versions[..]);
 
-        Ok(block)
+        Ok((block, header_idx))
     }
 
     pub fn open(b: &'a [u8]) -> Self {
@@ -618,6 +627,110 @@ impl<'a> BlockVersions<'a> {
     }
 }
 
+struct RunFile {}
+
+struct Record {
+    key: Vec<u8>,
+    ts: u64,
+    value: Value,
+}
+
+impl RunFile {
+    // Assumes S is in (key, rev(ts)) order, and assumes termination at a reasonable size limit.
+    async fn write<W: AsyncWrite + Unpin, S: Stream<Item = anyhow::Result<Record>>>(
+        w: &mut W,
+        keyspace_id: u64,
+        s: S,
+    ) -> anyhow::Result<()> {
+        async fn flush<W: AsyncWrite + Unpin>(
+            w: &mut W,
+            bytes_written: &mut usize,
+            index: &mut BTreeMap<Vec<u8>, usize>,
+            buffer: &BTreeMap<Vec<u8>, Vec<(u64, Value)>>,
+            continuation: bool,
+        ) -> anyhow::Result<()> {
+            let (block, header_offset_in_block) = Block::encode(buffer)?;
+            w.write_all(&block[..]).await?;
+            let header_offset_in_file = *bytes_written + header_offset_in_block;
+
+            let (first_key, _) = buffer
+                .first_key_value()
+                .ok_or_else(|| anyhow!("empty block"))?;
+            index.insert(first_key.clone(), header_offset_in_file);
+
+            *bytes_written += block.len();
+
+            Ok(())
+        }
+
+        const BLOCK_SIZE_LIMIT: usize = 32768;
+
+        pin_mut!(s);
+
+        let mut buffer: BTreeMap<Vec<u8>, Vec<(u64, Value)>> = BTreeMap::new();
+        let mut bytes_written = 0;
+        let mut buffer_size = Block::BLOCK_INDEX_HEADER_SIZE;
+        let mut prev_continuation = false;
+        let mut index: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
+        let mut min_ts = u64::MAX;
+        let mut max_ts = 0;
+        while let Some(record) = s.next().await.transpose()? {
+            let record_size = {
+                let key_len = if buffer.contains_key(&record.key) {
+                    0
+                } else {
+                    record.key.len() + 4
+                };
+                key_len + 10 + record.value.len()
+            };
+
+            if !buffer.is_empty()
+                && (buffer_size + record_size > BLOCK_SIZE_LIMIT
+                    || (prev_continuation && !buffer.contains_key(&record.key)))
+            {
+                let mut this_key_versions = None;
+                let mut continuation = false;
+                if buffer.contains_key(&record.key) {
+                    if buffer.len() == 1 {
+                        // flush with continuation bit set
+                        continuation = true;
+                    } else {
+                        // flush everything but last key
+                        this_key_versions = buffer.remove(&record.key);
+                    }
+                }
+                flush(w, &mut bytes_written, &mut index, &buffer, continuation).await?;
+                buffer.clear();
+                prev_continuation = continuation;
+                if let Some(versions) = this_key_versions {
+                    buffer.insert(record.key.clone(), versions);
+                }
+            }
+
+            buffer
+                .entry(record.key)
+                .or_insert_with(Vec::new)
+                .push((record.ts, record.value));
+            buffer_size += record_size;
+
+            min_ts = std::cmp::min(min_ts, record.ts);
+            max_ts = std::cmp::max(max_ts, record.ts);
+        }
+        if !buffer.is_empty() {
+            flush(w, &mut bytes_written, &mut index, &buffer, false).await?;
+        }
+
+        todo!("write trailer");
+
+        Ok(())
+    }
+
+    fn to_stream(&self) -> impl Stream<Item = anyhow::Result<Record>> {
+        todo!();
+        futures::stream::empty()
+    }
+}
+
 fn binary_search_by_idx<K: Ord, F: Fn(usize) -> K>(n: usize, k: K, f: F) -> Result<usize, usize> {
     let mut lower = 0;
     let mut upper = n;
@@ -763,7 +876,7 @@ mod test {
         let ab_341: Vec<u8> = "baz".into();
         let ab_302: Vec<u8> = "qux".into();
         let ab_290: Vec<u8> = "garply".into();
-        let encoded = Block::encode({
+        let kvs = {
             let mut kvs = BTreeMap::new();
             kvs.insert(
                 aa.clone(),
@@ -782,8 +895,8 @@ mod test {
                 ],
             );
             kvs
-        })
-        .unwrap();
+        };
+        let encoded = Block::encode(&kvs).unwrap();
 
         let block = Block::open(&encoded[..]);
 

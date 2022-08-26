@@ -9,7 +9,9 @@ edition = "2018"
 anyhow = "1.0.58"
 async-trait = "0.1.56"
 byteorder = "1.4.3"
+futures = "0.3.23"
 rand = "0.8.5"
+tokio = { version = "1.20.1", features = ["io-util"] }
 
 [dev-dependencies]
 proptest = "1.0.0"
