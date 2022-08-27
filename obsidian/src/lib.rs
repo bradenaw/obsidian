@@ -381,10 +381,7 @@ impl<'a> Block<'a> {
                 .first_key_value()
                 .ok_or_else(|| anyhow!("empty block"))?;
             let (last_key, _) = kvs.last_key_value().ok_or_else(|| anyhow!("empty block"))?;
-            std::iter::zip(first_key, last_key)
-                .take_while(|(a, b)| *a == *b)
-                .map(|(a, _)| *a)
-                .collect()
+            longest_shared_prefix(&first_key[..], &last_key[..])
         };
         let (min_ts, bytes_per_ts_offset) = {
             let mut min_ts = u64::MAX;
@@ -639,7 +636,7 @@ impl RunFile {
     // Assumes S is in (key, rev(ts)) order, and assumes termination at a reasonable size limit.
     async fn write<W: AsyncWrite + Unpin, S: Stream<Item = anyhow::Result<Record>>>(
         w: &mut W,
-        keyspace_id: u64,
+        keyspace_id: u32,
         s: S,
     ) -> anyhow::Result<()> {
         async fn flush<W: AsyncWrite + Unpin>(
@@ -649,6 +646,10 @@ impl RunFile {
             buffer: &BTreeMap<Vec<u8>, Vec<(u64, Value)>>,
             continuation: bool,
         ) -> anyhow::Result<()> {
+            if continuation {
+                todo!();
+            }
+
             let (block, header_offset_in_block) = Block::encode(buffer)?;
             w.write_all(&block[..]).await?;
             let header_offset_in_file = *bytes_written + header_offset_in_block;
@@ -674,6 +675,7 @@ impl RunFile {
         let mut index: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
         let mut min_ts = u64::MAX;
         let mut max_ts = 0;
+        let mut last_key = vec![];
         while let Some(record) = s.next().await.transpose()? {
             let record_size = {
                 let key_len = if buffer.contains_key(&record.key) {
@@ -701,11 +703,15 @@ impl RunFile {
                 }
                 flush(w, &mut bytes_written, &mut index, &buffer, continuation).await?;
                 buffer.clear();
+                buffer_size = 0;
                 prev_continuation = continuation;
                 if let Some(versions) = this_key_versions {
+                    buffer_size = versions.iter().map(|(_, value)| 10 + value.len()).sum();
                     buffer.insert(record.key.clone(), versions);
                 }
             }
+            // TODO: could just only grab this from the last key in a block
+            last_key = record.key.clone();
 
             buffer
                 .entry(record.key)
@@ -719,6 +725,39 @@ impl RunFile {
         if !buffer.is_empty() {
             flush(w, &mut bytes_written, &mut index, &buffer, false).await?;
         }
+
+        let (first_key, _) = index
+            .first_key_value()
+            .ok_or_else(|| anyhow!("empty run"))?;
+
+        let prefix = longest_shared_prefix(first_key, &last_key);
+
+        let mut suffixes = Vec::with_capacity(first_key.len() * index.len());
+        let mut suffix_offsets = Vec::with_capacity(index.len() * 8);
+        for (key, block_offset) in index {
+            let mut buf = [0u8; 8];
+            LittleEndian::write_u32(&mut buf[0..4], suffixes.len() as u32);
+            LittleEndian::write_u32(&mut buf[4..8], block_offset as u32);
+            suffix_offsets.extend_from_slice(&buf[..]);
+            suffixes.extend_from_slice(&key[..]);
+        }
+
+        const INDEX_BLOCK_HEADER_SIZE: usize = 26;
+        let index_block_offset = bytes_written;
+        let mut index_block = [0u8; INDEX_BLOCK_HEADER_SIZE];
+        LittleEndian::write_u32(&mut index_block[0..4], keyspace_id);
+        LittleEndian::write_u64(&mut index_block[4..12], min_ts);
+        LittleEndian::write_u64(&mut index_block[12..20], max_ts);
+        LittleEndian::write_u16(&mut index_block[20..22], prefix.len() as u16);
+        LittleEndian::write_u32(&mut index_block[22..26], suffixes.len() as u32);
+        w.write_all(&index_block[..]).await?;
+        w.write_all(&prefix).await?;
+        w.write_all(&suffix_offsets).await?;
+        w.write_all(&suffixes[..]).await?;
+
+        let mut index_block_offset_buf = [0u8; 4];
+        LittleEndian::write_u32(&mut index_block_offset_buf[..], index_block_offset as u32);
+        w.write_all(&index_block_offset_buf[..]).await?;
 
         todo!("write trailer");
 
@@ -744,6 +783,13 @@ fn binary_search_by_idx<K: Ord, F: Fn(usize) -> K>(n: usize, k: K, f: F) -> Resu
         }
     }
     Err(lower)
+}
+
+fn longest_shared_prefix(a: &[u8], b: &[u8]) -> Vec<u8> {
+    std::iter::zip(a.iter(), b.iter())
+        .take_while(|(a, b)| *a == *b)
+        .map(|(a, _)| *a)
+        .collect()
 }
 
 #[cfg(test)]
