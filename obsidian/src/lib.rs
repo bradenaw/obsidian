@@ -734,10 +734,10 @@ impl RunFile {
 
         let mut suffixes = Vec::with_capacity(first_key.len() * index.len());
         let mut suffix_offsets = Vec::with_capacity(index.len() * 8);
-        for (key, block_offset) in index {
+        for (key, block_offset) in index.iter().chain(std::iter::once((&last_key, &0))) {
             let mut buf = [0u8; 8];
             LittleEndian::write_u32(&mut buf[0..4], suffixes.len() as u32);
-            LittleEndian::write_u32(&mut buf[4..8], block_offset as u32);
+            LittleEndian::write_u32(&mut buf[4..8], *block_offset as u32);
             suffix_offsets.extend_from_slice(&buf[..]);
             suffixes.extend_from_slice(&key[..]);
         }
@@ -942,7 +942,7 @@ mod test {
             );
             kvs
         };
-        let encoded = Block::encode(&kvs).unwrap();
+        let encoded = Block::encode(&kvs).unwrap().0;
 
         let block = Block::open(&encoded[..]);
 
