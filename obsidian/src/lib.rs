@@ -7,15 +7,21 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
 use std::convert::TryFrom;
+use std::io::SeekFrom;
 use std::time::SystemTime;
 
 use anyhow::anyhow;
+use async_trait::async_trait;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use futures::pin_mut;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
 use rand::Rng;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncSeek;
+use tokio::io::AsyncSeekExt;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 
@@ -624,15 +630,33 @@ impl<'a> BlockVersions<'a> {
     }
 }
 
-struct RunFile {}
-
 struct Record {
     key: Vec<u8>,
     ts: u64,
     value: Value,
 }
 
-impl RunFile {
+struct RunFile<R> {
+    r: R,
+
+    size: usize,
+    keyspace_id: u32,
+    min_ts: u64,
+    max_ts: u64,
+    prefix: Vec<u8>,
+    suffixes_offset: usize,
+    suffixes_len: usize,
+    n_index_keys: usize,
+    index_values_offset: usize,
+
+    min_key: Vec<u8>,
+    max_key: Vec<u8>,
+}
+
+const INDEX_BLOCK_HEADER_SIZE: usize = 30;
+const BLOCK_SIZE_LIMIT: usize = 32768;
+
+impl<R> RunFile<R> {
     // Assumes S is in (key, rev(ts)) order, and assumes termination at a reasonable size limit.
     async fn write<W: AsyncWrite + Unpin, S: Stream<Item = anyhow::Result<Record>>>(
         w: &mut W,
@@ -642,7 +666,7 @@ impl RunFile {
         async fn flush<W: AsyncWrite + Unpin>(
             w: &mut W,
             bytes_written: &mut usize,
-            index: &mut BTreeMap<Vec<u8>, usize>,
+            index: &mut BTreeMap<Vec<u8>, u32>,
             buffer: &BTreeMap<Vec<u8>, Vec<(u64, Value)>>,
             continuation: bool,
         ) -> anyhow::Result<()> {
@@ -657,14 +681,12 @@ impl RunFile {
             let (first_key, _) = buffer
                 .first_key_value()
                 .ok_or_else(|| anyhow!("empty block"))?;
-            index.insert(first_key.clone(), header_offset_in_file);
+            index.insert(first_key.clone(), header_offset_in_file as u32);
 
             *bytes_written += block.len();
 
             Ok(())
         }
-
-        const BLOCK_SIZE_LIMIT: usize = 32768;
 
         pin_mut!(s);
 
@@ -672,7 +694,7 @@ impl RunFile {
         let mut bytes_written = 0;
         let mut buffer_size = Block::BLOCK_INDEX_HEADER_SIZE;
         let mut prev_continuation = false;
-        let mut index: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
+        let mut index: BTreeMap<Vec<u8>, u32> = BTreeMap::new();
         let mut min_ts = u64::MAX;
         let mut max_ts = 0;
         let mut last_key = vec![];
@@ -726,15 +748,19 @@ impl RunFile {
             flush(w, &mut bytes_written, &mut index, &buffer, false).await?;
         }
 
-        let (first_key, _) = index
+        let first_key = index
             .first_key_value()
-            .ok_or_else(|| anyhow!("empty run"))?;
+            .ok_or_else(|| anyhow!("empty run"))?
+            .0
+            .clone();
 
-        let prefix = longest_shared_prefix(first_key, &last_key);
+        index.insert(last_key.clone(), u32::MAX);
+
+        let prefix = longest_shared_prefix(&first_key, &last_key);
 
         let mut suffixes = Vec::with_capacity(first_key.len() * index.len());
         let mut suffix_offsets = Vec::with_capacity(index.len() * 8);
-        for (key, block_offset) in index.iter().chain(std::iter::once((&last_key, &0))) {
+        for (key, block_offset) in &index {
             let mut buf = [0u8; 8];
             LittleEndian::write_u32(&mut buf[0..4], suffixes.len() as u32);
             LittleEndian::write_u32(&mut buf[4..8], *block_offset as u32);
@@ -742,14 +768,14 @@ impl RunFile {
             suffixes.extend_from_slice(&key[..]);
         }
 
-        const INDEX_BLOCK_HEADER_SIZE: usize = 26;
         let index_block_offset = bytes_written;
         let mut index_block = [0u8; INDEX_BLOCK_HEADER_SIZE];
         LittleEndian::write_u32(&mut index_block[0..4], keyspace_id);
         LittleEndian::write_u64(&mut index_block[4..12], min_ts);
         LittleEndian::write_u64(&mut index_block[12..20], max_ts);
         LittleEndian::write_u16(&mut index_block[20..22], prefix.len() as u16);
-        LittleEndian::write_u32(&mut index_block[22..26], suffixes.len() as u32);
+        LittleEndian::write_u16(&mut index_block[22..24], index.len() as u16);
+        LittleEndian::write_u32(&mut index_block[24..30], suffixes.len() as u32);
         w.write_all(&index_block[..]).await?;
         w.write_all(&prefix).await?;
         w.write_all(&suffix_offsets).await?;
@@ -759,12 +785,65 @@ impl RunFile {
         LittleEndian::write_u32(&mut index_block_offset_buf[..], index_block_offset as u32);
         w.write_all(&index_block_offset_buf[..]).await?;
 
-        todo!("write trailer");
-
         Ok(())
     }
+}
 
-    fn to_stream(&self) -> impl Stream<Item = anyhow::Result<Record>> {
+impl<R: AsyncRead + AsyncSeek + Unpin> RunFile<R> {
+    async fn open(mut r: R, size: usize) -> anyhow::Result<Self> {
+        r.seek(SeekFrom::End(-4)).await?;
+        let index_block_offset = r.read_u32_le().await?;
+        r.seek(SeekFrom::Start(index_block_offset as u64)).await?;
+        let mut header = [0u8; INDEX_BLOCK_HEADER_SIZE];
+        if r.read_exact(&mut header[..]).await? != header.len() {
+            anyhow::bail!("incomplete header");
+        }
+
+        let keyspace_id = LittleEndian::read_u32(&header[0..4]);
+        let min_ts = LittleEndian::read_u64(&header[4..12]);
+        let max_ts = LittleEndian::read_u64(&header[12..20]);
+        let prefix_len = LittleEndian::read_u16(&header[20..22]);
+        let n_index_keys = LittleEndian::read_u16(&header[22..24]);
+        let suffixes_len = LittleEndian::read_u32(&header[24..30]);
+
+        let mut prefix = vec![0u8; prefix_len as usize];
+        r.read_exact(&mut prefix[..]).await?;
+
+        let index_values_offset = (index_block_offset as usize)
+            + (INDEX_BLOCK_HEADER_SIZE as usize)
+            + (prefix_len as usize);
+        let suffixes_offset = index_values_offset + (n_index_keys as usize) * 8;
+
+        Ok(Self {
+            r,
+            size,
+            keyspace_id,
+            min_ts,
+            max_ts,
+            prefix,
+            suffixes_len: suffixes_len as usize,
+            suffixes_offset,
+            index_values_offset,
+            n_index_keys: n_index_keys as usize,
+
+            min_key: todo!(),
+            max_key: todo!(),
+        })
+    }
+
+    fn size(&self) -> usize {
+        self.size
+    }
+
+    fn get(&self, ts: u64, k: &[u8]) -> Option<(u64, Value)> {
+        todo!();
+    }
+
+    fn range(&self) -> Option<(Vec<u8>, Vec<u8>)> {
+        Some((self.min_key.clone(), self.max_key.clone()))
+    }
+
+    fn into_stream(self) -> impl Stream<Item = anyhow::Result<Record>> {
         todo!();
         futures::stream::empty()
     }
