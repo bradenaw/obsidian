@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 #![feature(map_first_last)]
-#![feature(result_into_ok_or_err)]
 
 use std::cmp::Ordering;
 use std::cmp::Reverse;
@@ -8,10 +7,10 @@ use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
 use std::convert::TryFrom;
 use std::io::SeekFrom;
+use std::marker::PhantomData;
 use std::time::SystemTime;
 
 use anyhow::anyhow;
-use async_trait::async_trait;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use futures::pin_mut;
@@ -522,7 +521,7 @@ impl<'a> Block<'a> {
         let version_idx = binary_search_by_idx(key_versions.len(), Reverse(ts), |idx| {
             Reverse(key_versions.ts(idx))
         })
-        .into_ok_or_err();
+        .unwrap_or_else(core::convert::identity);
         if version_idx == key_versions.len() {
             return None;
         }
@@ -789,6 +788,89 @@ impl<R> RunFile<R> {
     }
 }
 
+struct PrefixCompressedKeys<'a, O> {
+    o: PhantomData<O>,
+    prefix: Vec<u8>,
+    suffixes: &'a [u8],
+    offset_and_values: &'a [u8],
+    data_width: usize,
+}
+
+impl<'a, O: PrefixCompressedOffset> PrefixCompressedKeys<'a, O> {
+    fn len(&self) -> usize {
+        self.offset_and_values.len() / (O::width() + self.data_width)
+    }
+
+    fn search(&self, k: &[u8]) -> Result<usize, usize> {
+        if !k.starts_with(&self.prefix) {
+            match k.cmp(&self.prefix) {
+                Ordering::Equal => unreachable!(),
+                Ordering::Less => return Err(0),
+                Ordering::Greater => return Err(self.len()),
+            }
+        }
+        let suffix = &k[self.prefix.len()..];
+        binary_search_by_idx(self.len(), suffix, |idx| self.get_suffix(idx))
+    }
+
+    fn get_suffix(&self, idx: usize) -> &[u8] {
+        let width = O::width() + self.data_width;
+        let offset_start = idx * width;
+        let start =
+            O::read(&self.offset_and_values[offset_start..offset_start + O::width()]).as_usize();
+        let end = if idx == self.len() - 1 {
+            self.suffixes.len()
+        } else {
+            let offset_start = (idx + 1) * width;
+            O::read(&self.offset_and_values[offset_start..offset_start + O::width()]).as_usize()
+        };
+        &self.suffixes[start..end]
+    }
+
+    fn get_key(&self, idx: usize) -> Vec<u8> {
+        let suffix = self.get_suffix(idx);
+        let mut k = Vec::with_capacity(self.prefix.len() + suffix.len());
+        k.extend_from_slice(&self.prefix[..]);
+        k.extend_from_slice(&suffix[..]);
+        k
+    }
+
+    fn get_value(&self, idx: usize) -> &[u8] {
+        let width = O::width() + self.data_width;
+        &self.offset_and_values[idx * width + O::width()..(idx + 1) * width]
+    }
+}
+
+trait PrefixCompressedOffset {
+    fn width() -> usize;
+    fn read(b: &[u8]) -> Self;
+    fn as_usize(&self) -> usize;
+}
+
+impl PrefixCompressedOffset for u16 {
+    fn width() -> usize {
+        2
+    }
+    fn read(b: &[u8]) -> Self {
+        LittleEndian::read_u16(b)
+    }
+    fn as_usize(&self) -> usize {
+        *self as usize
+    }
+}
+
+impl PrefixCompressedOffset for u32 {
+    fn width() -> usize {
+        4
+    }
+    fn read(b: &[u8]) -> Self {
+        LittleEndian::read_u32(b)
+    }
+    fn as_usize(&self) -> usize {
+        *self as usize
+    }
+}
+
 fn search_suffixes<'a>(
     k: &[u8],
     prefix: &[u8],
@@ -797,12 +879,6 @@ fn search_suffixes<'a>(
     offset_width: usize,
     padding: usize,
 ) -> Option<&'a [u8]> {
-    if !k.starts_with(prefix) {
-        return None;
-    }
-
-    let suffix = &k[prefix.len()..];
-
     todo!();
 }
 
