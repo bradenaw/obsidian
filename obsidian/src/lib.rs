@@ -789,6 +789,23 @@ impl<R> RunFile<R> {
     }
 }
 
+fn search_suffixes<'a>(
+    k: &[u8],
+    prefix: &[u8],
+    suffixes: &[u8],
+    suffix_offsets: &'a [u8],
+    offset_width: usize,
+    padding: usize,
+) -> Option<&'a [u8]> {
+    if !k.starts_with(prefix) {
+        return None;
+    }
+
+    let suffix = &k[prefix.len()..];
+
+    todo!();
+}
+
 impl<R: AsyncRead + AsyncSeek + Unpin> RunFile<R> {
     async fn open(mut r: R, size: usize) -> anyhow::Result<Self> {
         r.seek(SeekFrom::End(-4)).await?;
