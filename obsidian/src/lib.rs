@@ -635,103 +635,196 @@ struct Record {
     value: Value,
 }
 
-struct PrefixCompressedKV<'a, O, V> {
-    o: PhantomData<O>,
+struct PrefixCompressedKV<V> {
     v: PhantomData<V>,
-    prefix: &'a [u8],
-    suffixes: &'a [u8],
-    offset_and_values: &'a [u8],
-    data_width: usize,
+    offset_width: usize,
+    prefix_len: usize,
+    n: usize,
+    suffixes_len: usize,
+    data: Vec<u8>,
 }
 
-impl<'a, O: PrefixCompressedOffset, V: From<&'a [u8]>> PrefixCompressedKV<'a, O, V> {
-    fn new(
-        prefix: &'a [u8],
-        suffixes: &'a [u8],
-        offset_and_values: &'a [u8],
-        data_width: usize,
-    ) -> Self {
+const PREFIX_COMPRESSED_KV_HEADER_SIZE: usize = 0;
+
+impl<V: FixedSizeSerializable> PrefixCompressedKV<V> {
+    fn encode(m: BTreeMap<Vec<u8>, V>) -> Vec<u8> {
+        let prefix: Vec<u8> = match (m.first_key_value(), m.last_key_value()) {
+            (Some((first_key, _)), Some((last_key, _))) => {
+                longest_shared_prefix(&first_key[..], &last_key[..])
+            }
+            _ => vec![],
+        };
+        let suffixes_len: usize = m.keys().map(|k| k.len() - prefix.len()).sum();
+
+        let offset_width = if suffixes_len < 1 << 8 {
+            1
+        } else if suffixes_len < 1 << 16 {
+            2
+        } else {
+            4
+        };
+
+        let mut suffixes = Vec::with_capacity(suffixes_len);
+        let mut offset_and_values = Vec::with_capacity(m.len() * (offset_width + V::size()));
+
+        let offset_and_value_width = offset_width + V::size();
+        let mut offset_and_value = vec![0u8; std::cmp::max(4, offset_and_value_width)];
+        for (k, v) in m {
+            let offset = suffixes.len();
+
+            suffixes.extend_from_slice(&k[prefix.len()..]);
+
+            LittleEndian::write_u32(&mut offset_and_value[0..offset_width], offset as u32);
+            v.write(&mut offset_and_value[offset_width..]);
+            offset_and_values.extend_from_slice(&offset_and_value[..offset_and_value_width]);
+        }
+
+        let mut header = [0u8; PREFIX_COMPRESSED_KV_HEADER_SIZE];
+        header[0] = offset_width as u8;
+        LittleEndian::write_u16(&mut header[2..4], m.len() as u16);
+        LittleEndian::write_u16(&mut header[4..6], prefix.len() as u16);
+        LittleEndian::write_u32(&mut header[6..10], suffixes.len() as u32);
+
+        let mut out = Vec::with_capacity(
+            header.len() + prefix.len() + offset_and_values.len() + suffixes.len(),
+        );
+
+        out.extend_from_slice(&header[..]);
+        out.extend_from_slice(&prefix[..]);
+        out.extend_from_slice(&offset_and_values[..]);
+        out.extend_from_slice(&suffixes[..]);
+
+        out
+    }
+
+    fn new(data: Vec<u8>) -> Self {
+        let header = &data[0..PREFIX_COMPRESSED_KV_HEADER_SIZE];
+        let offset_width = header[0] as usize;
+        let n = LittleEndian::read_u16(&header[2..4]) as usize;
+        let prefix_len = LittleEndian::read_u16(&header[4..6]) as usize;
+        let suffixes_len = LittleEndian::read_u32(&header[6..10]) as usize;
+
         Self {
-            o: PhantomData,
+            offset_width,
+            n,
+            prefix_len,
+            suffixes_len,
+            data,
             v: PhantomData,
-            prefix,
-            suffixes,
-            offset_and_values,
-            data_width,
         }
     }
 
     fn len(&self) -> usize {
-        self.offset_and_values.len() / (O::width() + self.data_width)
+        self.n
+    }
+
+    fn prefix(&self) -> &[u8] {
+        &self.data
+            [PREFIX_COMPRESSED_KV_HEADER_SIZE..PREFIX_COMPRESSED_KV_HEADER_SIZE + self.prefix_len]
+    }
+
+    fn suffixes(&self) -> &[u8] {
+        let start = PREFIX_COMPRESSED_KV_HEADER_SIZE
+            + self.prefix_len
+            + self.n * (self.offset_width + V::size());
+        &self.data[start..]
+    }
+
+    fn offset_and_values(&self) -> &[u8] {
+        let start = PREFIX_COMPRESSED_KV_HEADER_SIZE + self.prefix_len;
+        let end = start + self.n * (self.offset_width + V::size());
+        &self.data[start..end]
     }
 
     fn search(&self, k: &[u8]) -> Result<usize, usize> {
-        if !k.starts_with(&self.prefix) {
-            match k.cmp(&self.prefix) {
+        let prefix = self.prefix();
+        if !k.starts_with(&prefix) {
+            match k.cmp(&prefix) {
                 Ordering::Equal => unreachable!(),
                 Ordering::Less => return Err(0),
                 Ordering::Greater => return Err(self.len()),
             }
         }
-        let suffix = &k[self.prefix.len()..];
+        let suffix = &k[prefix.len()..];
         binary_search_by_idx(self.len(), suffix, |idx| self.get_suffix(idx))
     }
 
-    fn get_suffix(&self, idx: usize) -> &[u8] {
-        let width = O::width() + self.data_width;
+    fn offset(&self, idx: usize) -> usize {
+        let width = self.offset_width + V::size();
         let offset_start = idx * width;
-        let start =
-            O::read(&self.offset_and_values[offset_start..offset_start + O::width()]).as_usize();
+        let offset_end = offset_start + self.offset_width;
+        let mut offset: u32 = 0;
+        for (i, b) in self.offset_and_values()[offset_start..offset_end]
+            .iter()
+            .enumerate()
+        {
+            offset |= (*b as u32) << (i * 8);
+        }
+        offset as usize
+    }
+
+    fn get_suffix(&self, idx: usize) -> &[u8] {
+        let start = self.offset(idx);
         let end = if idx == self.len() - 1 {
-            self.suffixes.len()
+            self.suffixes_len
         } else {
-            let offset_start = (idx + 1) * width;
-            O::read(&self.offset_and_values[offset_start..offset_start + O::width()]).as_usize()
+            self.offset(idx + 1)
         };
-        &self.suffixes[start..end]
+        &self.suffixes()[start..end]
     }
 
     fn get_key(&self, idx: usize) -> Vec<u8> {
+        let prefix = self.prefix();
         let suffix = self.get_suffix(idx);
-        let mut k = Vec::with_capacity(self.prefix.len() + suffix.len());
-        k.extend_from_slice(self.prefix);
-        k.extend_from_slice(&suffix[..]);
+        let mut k = Vec::with_capacity(prefix.len() + suffix.len());
+        k.extend_from_slice(prefix);
+        k.extend_from_slice(suffix);
         k
     }
 
     fn get_value(&self, idx: usize) -> V {
-        let width = O::width() + self.data_width;
-        V::from(&self.offset_and_values[idx * width + O::width()..(idx + 1) * width])
+        let width = self.offset_width + V::size();
+        let offset_start = idx * width;
+        let offset_end = offset_start + self.offset_width;
+        V::read(&self.offset_and_values()[idx * width + V::size()..(idx + 1) * width])
     }
 }
 
-trait PrefixCompressedOffset {
-    fn width() -> usize;
+trait FixedSizeSerializable {
+    fn size() -> usize;
     fn read(b: &[u8]) -> Self;
-    fn as_usize(&self) -> usize;
+    fn write(&self, b: &mut [u8]);
 }
 
-impl PrefixCompressedOffset for u16 {
-    fn width() -> usize {
+impl FixedSizeSerializable for u16 {
+    fn size() -> usize {
         2
     }
     fn read(b: &[u8]) -> Self {
         LittleEndian::read_u16(b)
     }
-    fn as_usize(&self) -> usize {
-        *self as usize
+    fn write(&self, b: &mut [u8]) {
+        LittleEndian::write_u16(&mut b, *self);
     }
 }
 
-impl PrefixCompressedOffset for u32 {
-    fn width() -> usize {
+impl FixedSizeSerializable for u32 {
+    fn size() -> usize {
         4
     }
     fn read(b: &[u8]) -> Self {
         LittleEndian::read_u32(b)
     }
-    fn as_usize(&self) -> usize {
-        *self as usize
+    fn write(&self, b: &mut [u8]) {
+        LittleEndian::write_u32(&mut b, *self);
+    }
+}
+
+struct LittleEndianU32(u32);
+
+impl From<&[u8]> for LittleEndianU32 {
+    fn from(b: &[u8]) -> Self {
+        LittleEndianU32(LittleEndian::read_u32(b))
     }
 }
 
@@ -742,11 +835,8 @@ struct RunFile<R> {
     keyspace_id: u32,
     min_ts: u64,
     max_ts: u64,
-    prefix: Vec<u8>,
-    suffixes_offset: usize,
-    suffixes_len: usize,
-    n_index_keys: usize,
-    index_values_offset: usize,
+
+    index: PrefixCompressedKV<LittleEndianU32>,
 
     min_key: Vec<u8>,
     max_key: Vec<u8>,
