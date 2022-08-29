@@ -357,7 +357,7 @@ impl<A: Ord, B> PartialOrd for OrdEqByFirst<A, B> {
     }
 }
 
-struct Block<R> {
+struct Block<'a, R> {
     values_len: usize,
     n_versions: usize,
     min_ts: u64,
@@ -365,12 +365,12 @@ struct Block<R> {
     index: PrefixCompressedKV<u16>,
     versions_bytes: Vec<u8>,
     header_offset: u64,
-    r: R,
+    r: &'a R,
 }
 
 const BLOCK_INDEX_HEADER_SIZE: usize = 17;
 
-impl<R> Block<R> {
+impl<'a, R> Block<'a, R> {
     // Assumes that kvs values are in reverse order by timestamp.
     //
     // Returns the encoded block and the offset of the header within the block.
@@ -448,8 +448,8 @@ impl<R> Block<R> {
     }
 }
 
-impl<R: AsyncReadExactAt> Block<R> {
-    pub async fn open(r: R, header_offset: u64) -> anyhow::Result<Self> {
+impl<'a, R: AsyncReadExactAt> Block<'a, R> {
+    pub async fn open(r: &'a R, header_offset: u64) -> anyhow::Result<Block<'a, R>> {
         let mut header = [0u8; BLOCK_INDEX_HEADER_SIZE];
 
         r.read_exact_at(&mut header[..], header_offset).await?;
@@ -954,7 +954,7 @@ impl<R> RunFile<R> {
 }
 
 impl<R: AsyncReadExactAt> RunFile<R> {
-    async fn open(mut r: R, size: usize) -> anyhow::Result<Self> {
+    async fn open(r: R, size: usize) -> anyhow::Result<Self> {
         let file_len = r.len().await?;
         let mut index_block_offset_buf = [0u8; 4];
         r.read_exact_at(&mut index_block_offset_buf[..], file_len - 4)
@@ -1000,9 +1000,15 @@ impl<R: AsyncReadExactAt> RunFile<R> {
         self.size
     }
 
-    fn get(&self, ts: u64, k: &[u8]) -> Option<(u64, Value)> {
-        let block_header_start = self.index.search(k).ok()?;
-        todo!();
+    async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<(u64, Vec<u8>)>> {
+        let mut block_header_idx = self.index.search(k).unwrap_or_else(core::convert::identity);
+        // Might be equal to the max key.
+        if block_header_idx == self.index.len() {
+            block_header_idx -= 1;
+        }
+        let block_header_offset = self.index.get_value(block_header_idx);
+        let block = Block::open(&self.r, block_header_offset as u64).await?;
+        block.get(ts, k).await
     }
 
     fn range(&self) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -1206,7 +1212,7 @@ mod test {
         };
         let (encoded, header_offset) = Block::<()>::encode(&kvs)?;
 
-        let block = Block::open(encoded.clone(), header_offset as u64).await?;
+        let block = Block::open(&encoded, header_offset as u64).await?;
 
         println!("encoded  = {}", hexlify(&encoded[..]));
         println!(
