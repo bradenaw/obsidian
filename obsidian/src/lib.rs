@@ -644,10 +644,10 @@ struct PrefixCompressedKV<V> {
     data: Vec<u8>,
 }
 
-const PREFIX_COMPRESSED_KV_HEADER_SIZE: usize = 0;
+const PREFIX_COMPRESSED_KV_HEADER_SIZE: usize = 9;
 
 impl<V: FixedSizeSerializable> PrefixCompressedKV<V> {
-    fn encode(m: BTreeMap<Vec<u8>, V>) -> Vec<u8> {
+    fn encode(m: &BTreeMap<Vec<u8>, V>) -> Vec<u8> {
         let prefix: Vec<u8> = match (m.first_key_value(), m.last_key_value()) {
             (Some((first_key, _)), Some((last_key, _))) => {
                 longest_shared_prefix(&first_key[..], &last_key[..])
@@ -681,9 +681,9 @@ impl<V: FixedSizeSerializable> PrefixCompressedKV<V> {
 
         let mut header = [0u8; PREFIX_COMPRESSED_KV_HEADER_SIZE];
         header[0] = offset_width as u8;
-        LittleEndian::write_u16(&mut header[2..4], m.len() as u16);
-        LittleEndian::write_u16(&mut header[4..6], prefix.len() as u16);
-        LittleEndian::write_u32(&mut header[6..10], suffixes.len() as u32);
+        LittleEndian::write_u16(&mut header[1..3], m.len() as u16);
+        LittleEndian::write_u16(&mut header[3..5], prefix.len() as u16);
+        LittleEndian::write_u32(&mut header[5..9], suffixes.len() as u32);
 
         let mut out = Vec::with_capacity(
             header.len() + prefix.len() + offset_and_values.len() + suffixes.len(),
@@ -697,7 +697,7 @@ impl<V: FixedSizeSerializable> PrefixCompressedKV<V> {
         out
     }
 
-    fn new(data: Vec<u8>) -> Self {
+    fn decode(data: Vec<u8>) -> Self {
         let header = &data[0..PREFIX_COMPRESSED_KV_HEADER_SIZE];
         let offset_width = header[0] as usize;
         let n = LittleEndian::read_u16(&header[2..4]) as usize;
@@ -804,7 +804,7 @@ impl FixedSizeSerializable for u16 {
         LittleEndian::read_u16(b)
     }
     fn write(&self, b: &mut [u8]) {
-        LittleEndian::write_u16(&mut b, *self);
+        LittleEndian::write_u16(b, *self);
     }
 }
 
@@ -816,7 +816,7 @@ impl FixedSizeSerializable for u32 {
         LittleEndian::read_u32(b)
     }
     fn write(&self, b: &mut [u8]) {
-        LittleEndian::write_u32(&mut b, *self);
+        LittleEndian::write_u32(b, *self);
     }
 }
 
@@ -836,13 +836,13 @@ struct RunFile<R> {
     min_ts: u64,
     max_ts: u64,
 
-    index: PrefixCompressedKV<LittleEndianU32>,
+    index: PrefixCompressedKV<u32>,
 
     min_key: Vec<u8>,
     max_key: Vec<u8>,
 }
 
-const INDEX_BLOCK_HEADER_SIZE: usize = 30;
+const INDEX_BLOCK_HEADER_SIZE: usize = 24;
 const BLOCK_SIZE_LIMIT: usize = 32768;
 
 impl<R> RunFile<R> {
@@ -937,38 +937,18 @@ impl<R> RunFile<R> {
             flush(w, &mut bytes_written, &mut index, &buffer, false).await?;
         }
 
-        let first_key = index
-            .first_key_value()
-            .ok_or_else(|| anyhow!("empty run"))?
-            .0
-            .clone();
-
         index.insert(last_key.clone(), u32::MAX);
 
-        let prefix = longest_shared_prefix(&first_key, &last_key);
-
-        let mut suffixes = Vec::with_capacity(first_key.len() * index.len());
-        let mut suffix_offsets = Vec::with_capacity(index.len() * 8);
-        for (key, block_offset) in &index {
-            let mut buf = [0u8; 8];
-            LittleEndian::write_u32(&mut buf[0..4], suffixes.len() as u32);
-            LittleEndian::write_u32(&mut buf[4..8], *block_offset as u32);
-            suffix_offsets.extend_from_slice(&buf[..]);
-            suffixes.extend_from_slice(&key[..]);
-        }
+        let index_compressed = PrefixCompressedKV::encode(&index);
 
         let index_block_offset = bytes_written;
-        let mut index_block = [0u8; INDEX_BLOCK_HEADER_SIZE];
-        LittleEndian::write_u32(&mut index_block[0..4], keyspace_id);
-        LittleEndian::write_u64(&mut index_block[4..12], min_ts);
-        LittleEndian::write_u64(&mut index_block[12..20], max_ts);
-        LittleEndian::write_u16(&mut index_block[20..22], prefix.len() as u16);
-        LittleEndian::write_u16(&mut index_block[22..24], index.len() as u16);
-        LittleEndian::write_u32(&mut index_block[24..30], suffixes.len() as u32);
-        w.write_all(&index_block[..]).await?;
-        w.write_all(&prefix).await?;
-        w.write_all(&suffix_offsets).await?;
-        w.write_all(&suffixes[..]).await?;
+        let mut header = [0u8; INDEX_BLOCK_HEADER_SIZE];
+        LittleEndian::write_u32(&mut header[0..4], keyspace_id);
+        LittleEndian::write_u64(&mut header[4..12], min_ts);
+        LittleEndian::write_u64(&mut header[12..20], max_ts);
+        LittleEndian::write_u32(&mut header[20..24], index_compressed.len() as u32);
+        w.write_all(&header[..]).await?;
+        w.write_all(&index_compressed).await?;
 
         let mut index_block_offset_buf = [0u8; 4];
         LittleEndian::write_u32(&mut index_block_offset_buf[..], index_block_offset as u32);
@@ -991,17 +971,16 @@ impl<R: AsyncRead + AsyncSeek + Unpin> RunFile<R> {
         let keyspace_id = LittleEndian::read_u32(&header[0..4]);
         let min_ts = LittleEndian::read_u64(&header[4..12]);
         let max_ts = LittleEndian::read_u64(&header[12..20]);
-        let prefix_len = LittleEndian::read_u16(&header[20..22]);
-        let n_index_keys = LittleEndian::read_u16(&header[22..24]);
-        let suffixes_len = LittleEndian::read_u32(&header[24..30]);
+        let index_len = LittleEndian::read_u32(&header[20..24]);
 
-        let mut prefix = vec![0u8; prefix_len as usize];
-        r.read_exact(&mut prefix[..]).await?;
+        let index = {
+            let mut index_bytes = vec![0u8; index_len as usize];
+            r.read_exact(&mut index_bytes[..]).await?;
+            PrefixCompressedKV::decode(index_bytes)
+        };
 
-        let index_values_offset = (index_block_offset as usize)
-            + (INDEX_BLOCK_HEADER_SIZE as usize)
-            + (prefix_len as usize);
-        let suffixes_offset = index_values_offset + (n_index_keys as usize) * 8;
+        let min_key = index.get_key(0);
+        let max_key = index.get_key(index.len() - 1);
 
         Ok(Self {
             r,
@@ -1009,14 +988,10 @@ impl<R: AsyncRead + AsyncSeek + Unpin> RunFile<R> {
             keyspace_id,
             min_ts,
             max_ts,
-            prefix,
-            suffixes_len: suffixes_len as usize,
-            suffixes_offset,
-            index_values_offset,
-            n_index_keys: n_index_keys as usize,
+            index,
 
-            min_key: todo!(),
-            max_key: todo!(),
+            min_key,
+            max_key,
         })
     }
 
