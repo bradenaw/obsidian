@@ -6,21 +6,17 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
 use std::convert::TryFrom;
-use std::io::SeekFrom;
 use std::marker::PhantomData;
 use std::time::SystemTime;
 
 use anyhow::anyhow;
+use async_trait::async_trait;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use futures::pin_mut;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
 use rand::Rng;
-use tokio::io::AsyncRead;
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncSeek;
-use tokio::io::AsyncSeekExt;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 
@@ -361,19 +357,20 @@ impl<A: Ord, B> PartialOrd for OrdEqByFirst<A, B> {
     }
 }
 
-struct Block<'a> {
+struct Block<R> {
     values_len: usize,
     n_versions: usize,
     min_ts: u64,
     ts_bytes: usize,
     index: PrefixCompressedKV<u16>,
-    versions_start: usize,
-    b: &'a [u8],
+    versions_bytes: Vec<u8>,
+    header_offset: u64,
+    r: R,
 }
 
-impl<'a> Block<'a> {
-    const BLOCK_INDEX_HEADER_SIZE: usize = 17;
+const BLOCK_INDEX_HEADER_SIZE: usize = 17;
 
+impl<R> Block<R> {
     // Assumes that kvs values are in reverse order by timestamp.
     //
     // Returns the encoded block and the offset of the header within the block.
@@ -435,7 +432,7 @@ impl<'a> Block<'a> {
         let values_len = block.len();
         let encoded_index = PrefixCompressedKV::encode(&index);
 
-        let mut header = [0u8; Self::BLOCK_INDEX_HEADER_SIZE];
+        let mut header = [0u8; BLOCK_INDEX_HEADER_SIZE];
         LittleEndian::write_u32(&mut header[0..4], values_len as u32);
         LittleEndian::write_u16(&mut header[4..6], n_versions as u16);
         LittleEndian::write_u64(&mut header[6..14], min_ts);
@@ -445,35 +442,50 @@ impl<'a> Block<'a> {
         let header_idx = block.len();
         block.extend_from_slice(&header[..]);
         block.extend_from_slice(&encoded_index[..]);
-        println!("Block::encode");
-        println!("  versions = {}", hexlify(&versions));
         block.extend_from_slice(&versions[..]);
 
         Ok((block, header_idx))
     }
+}
 
-    pub fn open(b: &'a [u8], header_offset: usize) -> Self {
-        let header = &b[header_offset..header_offset + Self::BLOCK_INDEX_HEADER_SIZE];
+impl<R: AsyncReadExactAt> Block<R> {
+    pub async fn open(r: R, header_offset: u64) -> anyhow::Result<Self> {
+        let mut header = [0u8; BLOCK_INDEX_HEADER_SIZE];
+
+        r.read_exact_at(&mut header[..], header_offset).await?;
 
         let values_len = LittleEndian::read_u32(&header[0..4]) as usize;
         let n_versions = LittleEndian::read_u16(&header[4..6]) as usize;
         let min_ts = LittleEndian::read_u64(&header[6..14]);
         let index_len = LittleEndian::read_u16(&header[14..16]) as usize;
         let bytes_per_ts_offset = header[16] as usize;
+        let versions_len = n_versions * (bytes_per_ts_offset + 2);
 
-        let index_start = header_offset + Self::BLOCK_INDEX_HEADER_SIZE;
-        let index = PrefixCompressedKV::decode(b[index_start..index_start + index_len].into());
-        let versions_start = index_start + index_len;
+        let mut index_bytes = vec![0u8; index_len];
+        r.read_exact_at(
+            &mut index_bytes[..],
+            header_offset + (BLOCK_INDEX_HEADER_SIZE as u64),
+        )
+        .await?;
+        let index = PrefixCompressedKV::decode(index_bytes);
 
-        Self {
-            b,
+        let mut versions_bytes = vec![0u8; versions_len];
+        r.read_exact_at(
+            &mut versions_bytes[..],
+            header_offset + (BLOCK_INDEX_HEADER_SIZE as u64) + (index_len as u64),
+        )
+        .await?;
+
+        Ok(Self {
+            r,
             values_len,
             n_versions,
             min_ts,
             index,
-            versions_start,
+            versions_bytes,
+            header_offset,
             ts_bytes: bytes_per_ts_offset,
-        }
+        })
     }
 
     fn versions(&self) -> BlockVersions<'_> {
@@ -481,7 +493,7 @@ impl<'a> Block<'a> {
             ts_bytes: self.ts_bytes,
             min_ts: self.min_ts,
             end_offset: self.values_len,
-            b: &self.b[self.versions_start..],
+            b: &self.versions_bytes[..],
         }
     }
 
@@ -495,21 +507,38 @@ impl<'a> Block<'a> {
         self.versions().slice(start_idx, end_idx)
     }
 
-    pub fn get(&self, ts: u64, k: &[u8]) -> Option<(u64, Vec<u8>)> {
-        let key_idx = self.index.search(k).ok()?;
+    pub async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<(u64, Vec<u8>)>> {
+        let key_idx = match self.index.search(k) {
+            Ok(idx) => idx,
+            Err(_) => return Ok(None),
+        };
         let key_versions = self.versions_for_key(key_idx);
 
-        println!("n_versions for key {} = {}", hexlify(k), key_versions.len());
         let version_idx = binary_search_by_idx(key_versions.len(), Reverse(ts), |idx| {
             Reverse(key_versions.ts(idx))
         })
         .unwrap_or_else(core::convert::identity);
         if version_idx == key_versions.len() {
-            return None;
+            return Ok(None);
         }
         let record_ts = key_versions.ts(version_idx);
-        let (value_start, value_end) = key_versions.value_offsets(version_idx)?;
-        Some((record_ts, self.b[value_start..value_end].to_vec()))
+        println!("n_versions for key {} = {}", hexlify(k), key_versions.len());
+        println!("version_idx = {}", version_idx);
+        let (value_start, value_end) = match key_versions.value_offsets(version_idx) {
+            Some(v) => v,
+            None => return Ok(None), // tombstone
+        };
+        let value_len = value_end - value_start;
+
+        let mut value = vec![0u8; value_len];
+        self.r
+            .read_exact_at(
+                &mut value[..],
+                self.header_offset - (self.values_len as u64) + (value_start as u64),
+            )
+            .await?;
+
+        Ok(Some((record_ts, value)))
     }
 }
 
@@ -818,7 +847,7 @@ impl<R> RunFile<R> {
             };
             *last_key = last_key_.clone();
 
-            let (block, header_offset_in_block) = Block::encode(buffer)?;
+            let (block, header_offset_in_block) = Block::<()>::encode(buffer)?;
             w.write_all(&block[..]).await?;
             let header_offset_in_file = *bytes_written + header_offset_in_block;
 
@@ -833,7 +862,7 @@ impl<R> RunFile<R> {
 
         let mut buffer: BTreeMap<Vec<u8>, Vec<(u64, Value)>> = BTreeMap::new();
         let mut bytes_written = 0;
-        let mut buffer_size = Block::BLOCK_INDEX_HEADER_SIZE;
+        let mut buffer_size = BLOCK_INDEX_HEADER_SIZE;
         let mut prev_continuation = false;
         let mut index: BTreeMap<Vec<u8>, u32> = BTreeMap::new();
         let mut min_ts = u64::MAX;
@@ -924,15 +953,17 @@ impl<R> RunFile<R> {
     }
 }
 
-impl<R: AsyncRead + AsyncSeek + Unpin> RunFile<R> {
+impl<R: AsyncReadExactAt> RunFile<R> {
     async fn open(mut r: R, size: usize) -> anyhow::Result<Self> {
-        r.seek(SeekFrom::End(-4)).await?;
-        let index_block_offset = r.read_u32_le().await?;
-        r.seek(SeekFrom::Start(index_block_offset as u64)).await?;
+        let file_len = r.len().await?;
+        let mut index_block_offset_buf = [0u8; 4];
+        r.read_exact_at(&mut index_block_offset_buf[..], file_len - 4)
+            .await?;
+        let index_block_offset = LittleEndian::read_u32(&index_block_offset_buf[..]);
+
         let mut header = [0u8; INDEX_BLOCK_HEADER_SIZE];
-        if r.read_exact(&mut header[..]).await? != header.len() {
-            anyhow::bail!("incomplete header");
-        }
+        r.read_exact_at(&mut header[..], index_block_offset as u64)
+            .await?;
 
         let keyspace_id = LittleEndian::read_u32(&header[0..4]);
         let min_ts = LittleEndian::read_u64(&header[4..12]);
@@ -941,7 +972,11 @@ impl<R: AsyncRead + AsyncSeek + Unpin> RunFile<R> {
 
         let index = {
             let mut index_bytes = vec![0u8; index_len as usize];
-            r.read_exact(&mut index_bytes[..]).await?;
+            r.read_exact_at(
+                &mut index_bytes[..],
+                (index_block_offset as u64) + (header.len() as u64),
+            )
+            .await?;
             PrefixCompressedKV::decode(index_bytes)
         };
 
@@ -980,6 +1015,22 @@ impl<R: AsyncRead + AsyncSeek + Unpin> RunFile<R> {
     }
 }
 
+#[async_trait]
+trait AsyncReadExactAt {
+    async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()>;
+    async fn len(&self) -> anyhow::Result<u64>;
+}
+
+#[async_trait]
+impl AsyncReadExactAt for Vec<u8> {
+    async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
+        Ok(buf.copy_from_slice(&self[(offset as usize)..(offset as usize) + buf.len()]))
+    }
+    async fn len(&self) -> anyhow::Result<u64> {
+        Ok(self.len() as u64)
+    }
+}
+
 fn binary_search_by_idx<K: Ord, F: Fn(usize) -> K>(n: usize, k: K, f: F) -> Result<usize, usize> {
     let mut lower = 0;
     let mut upper = n;
@@ -1012,6 +1063,7 @@ mod test {
     use crate::Lsm;
     use crate::Run;
     use crate::Value;
+    use crate::BLOCK_INDEX_HEADER_SIZE;
 
     #[test]
     fn test_put_get() {
@@ -1123,8 +1175,8 @@ mod test {
         }
     }
 
-    #[test]
-    fn test_block() {
+    #[tokio::test]
+    async fn test_block() -> anyhow::Result<()> {
         let aa: Vec<u8> = "aa".into();
         let ab: Vec<u8> = "ab".into();
         let aa_279: Vec<u8> = "foo".into();
@@ -1152,19 +1204,23 @@ mod test {
             );
             kvs
         };
-        let (encoded, header_offset) = Block::encode(&kvs).unwrap();
+        let (encoded, header_offset) = Block::<()>::encode(&kvs)?;
 
-        let block = Block::open(&encoded[..], header_offset);
+        let block = Block::open(encoded.clone(), header_offset as u64).await?;
 
         println!("encoded  = {}", hexlify(&encoded[..]));
         println!(
             "header   = {}",
-            hexlify(&encoded[header_offset..header_offset + Block::BLOCK_INDEX_HEADER_SIZE])
+            hexlify(&encoded[header_offset..header_offset + BLOCK_INDEX_HEADER_SIZE])
         );
-        //println!(
-        //    "index    = {}"
-        //    hexlify(&encoded[header_offset + Block::BLOCK_INDEX_HEADER_SIZE..header_offset+Block::BLOCK_INDEX_HEADER_SIZE+block.index_len]
-        println!("versions = {}", hexlify(&encoded[block.versions_start..]));
+        // println!(
+        //     "index    = {}",
+        //     hexlify(
+        //         &encoded[header_offset + BLOCK_INDEX_HEADER_SIZE
+        //             ..header_offset + BLOCK_INDEX_HEADER_SIZE + block.index_len]
+        //     ),
+        // );
+        println!("versions = {}", hexlify(&block.versions_bytes));
         println!("prefix = {}", hexlify(block.index.prefix()));
         println!("n_versions = {}", block.n_versions);
         let versions = block.versions();
@@ -1175,47 +1231,49 @@ mod test {
             };
             println!("  {} {} {}", i, versions.ts(i), value_str,);
         }
-        println!("n_keys = {}", block.index.len());
-        for i in 0..block.index.len() {
-            println!(
-                "  {} {} {}",
-                i,
-                hexlify(&block.index.get_key(i)),
-                block.index.get_value(i)
-            );
-            //let key_versions = block.versions_for_key(i);
-            //println!(
-            //    "  {} {}  {} versions",
-            //    i,
-            //    hexlify(&block.index.get_key(i)),
-            //    key_versions.len()
-            //);
-            //for j in 0..key_versions.len() {
-            //    let value_str = match key_versions.value_offsets(j) {
-            //        Some((value_start, value_end)) => format!("({}, {})", value_start, value_end),
-            //        None => "<TOMBSTONE>".into(),
-            //    };
-            //    println!("    {} {} {}", j, key_versions.ts(j), value_str);
-            //}
-        }
+        //println!("n_keys = {}", block.index.len());
+        //for i in 0..block.index.len() {
+        //    println!(
+        //        "  {} {} {}",
+        //        i,
+        //        hexlify(&block.index.get_key(i)),
+        //        block.index.get_value(i)
+        //    );
+        //    //let key_versions = block.versions_for_key(i);
+        //    //println!(
+        //    //    "  {} {}  {} versions",
+        //    //    i,
+        //    //    hexlify(&block.index.get_key(i)),
+        //    //    key_versions.len()
+        //    //);
+        //    //for j in 0..key_versions.len() {
+        //    //    let value_str = match key_versions.value_offsets(j) {
+        //    //        Some((value_start, value_end)) => format!("({}, {})", value_start, value_end),
+        //    //        None => "<TOMBSTONE>".into(),
+        //    //    };
+        //    //    println!("    {} {} {}", j, key_versions.ts(j), value_str);
+        //    //}
+        //}
 
-        assert_eq!(block.get(279, &aa[..]), Some((279, aa_279.clone())));
-        assert_eq!(block.get(265, &aa[..]), Some((265, aa_265.clone())));
-        assert_eq!(block.get(123, &aa[..]), None);
+        assert_eq!(block.get(279, &aa[..]).await?, Some((279, aa_279.clone())));
+        assert_eq!(block.get(265, &aa[..]).await?, Some((265, aa_265.clone())));
+        assert_eq!(block.get(123, &aa[..]).await?, None);
 
-        assert_eq!(block.get(295, &aa[..]), Some((279, aa_279.clone())));
-        assert_eq!(block.get(269, &aa[..]), Some((265, aa_265.clone())));
+        assert_eq!(block.get(295, &aa[..]).await?, Some((279, aa_279.clone())));
+        assert_eq!(block.get(269, &aa[..]).await?, Some((265, aa_265.clone())));
 
-        assert_eq!(block.get(341, &ab[..]), Some((341, ab_341.clone())));
-        assert_eq!(block.get(302, &ab[..]), Some((302, ab_302.clone())));
-        assert_eq!(block.get(297, &ab[..]), None);
-        assert_eq!(block.get(290, &ab[..]), Some((290, ab_290.clone())));
-        assert_eq!(block.get(289, &ab[..]), None);
+        assert_eq!(block.get(341, &ab[..]).await?, Some((341, ab_341.clone())));
+        assert_eq!(block.get(302, &ab[..]).await?, Some((302, ab_302.clone())));
+        assert_eq!(block.get(297, &ab[..]).await?, None);
+        assert_eq!(block.get(290, &ab[..]).await?, Some((290, ab_290.clone())));
+        assert_eq!(block.get(289, &ab[..]).await?, None);
 
-        assert_eq!(block.get(500, &ab[..]), Some((341, ab_341.clone())));
-        assert_eq!(block.get(340, &ab[..]), Some((302, ab_302.clone())));
-        assert_eq!(block.get(300, &ab[..]), None);
-        assert_eq!(block.get(296, &ab[..]), Some((290, ab_290.clone())));
+        assert_eq!(block.get(500, &ab[..]).await?, Some((341, ab_341.clone())));
+        assert_eq!(block.get(340, &ab[..]).await?, Some((302, ab_302.clone())));
+        assert_eq!(block.get(300, &ab[..]).await?, None);
+        assert_eq!(block.get(296, &ab[..]).await?, Some((290, ab_290.clone())));
+
+        Ok(())
     }
 }
 
