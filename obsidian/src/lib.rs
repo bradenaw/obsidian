@@ -785,8 +785,8 @@ impl<V: FixedSizeSerializable> PrefixCompressedKV<V> {
     fn get_value(&self, idx: usize) -> V {
         let width = self.offset_width + V::size();
         let offset_start = idx * width;
-        let offset_end = offset_start + self.offset_width;
-        V::read(&self.offset_and_values()[idx * width + V::size()..(idx + 1) * width])
+        let offset_end = offset_start + width;
+        V::read(&self.offset_and_values()[offset_start..offset_end])
     }
 }
 
@@ -856,6 +856,7 @@ impl<R> RunFile<R> {
             w: &mut W,
             bytes_written: &mut usize,
             index: &mut BTreeMap<Vec<u8>, u32>,
+            last_key: &mut Vec<u8>,
             buffer: &BTreeMap<Vec<u8>, Vec<(u64, Value)>>,
             continuation: bool,
         ) -> anyhow::Result<()> {
@@ -863,13 +864,16 @@ impl<R> RunFile<R> {
                 todo!();
             }
 
+            let (first_key, last_key_) = match (index.first_key_value(), index.last_key_value()) {
+                (Some((first_key, _)), Some((last_key, _))) => (first_key, last_key),
+                _ => anyhow::bail!("empty block"),
+            };
+            *last_key = last_key_.clone();
+
             let (block, header_offset_in_block) = Block::encode(buffer)?;
             w.write_all(&block[..]).await?;
             let header_offset_in_file = *bytes_written + header_offset_in_block;
 
-            let (first_key, _) = buffer
-                .first_key_value()
-                .ok_or_else(|| anyhow!("empty block"))?;
             index.insert(first_key.clone(), header_offset_in_file as u32);
 
             *bytes_written += block.len();
@@ -912,7 +916,15 @@ impl<R> RunFile<R> {
                         this_key_versions = buffer.remove(&record.key);
                     }
                 }
-                flush(w, &mut bytes_written, &mut index, &buffer, continuation).await?;
+                flush(
+                    w,
+                    &mut bytes_written,
+                    &mut index,
+                    &mut last_key,
+                    &buffer,
+                    continuation,
+                )
+                .await?;
                 buffer.clear();
                 buffer_size = 0;
                 prev_continuation = continuation;
@@ -921,8 +933,6 @@ impl<R> RunFile<R> {
                     buffer.insert(record.key.clone(), versions);
                 }
             }
-            // TODO: could just only grab this from the last key in a block
-            last_key = record.key.clone();
 
             buffer
                 .entry(record.key)
@@ -934,7 +944,15 @@ impl<R> RunFile<R> {
             max_ts = std::cmp::max(max_ts, record.ts);
         }
         if !buffer.is_empty() {
-            flush(w, &mut bytes_written, &mut index, &buffer, false).await?;
+            flush(
+                w,
+                &mut bytes_written,
+                &mut index,
+                &mut last_key,
+                &buffer,
+                false,
+            )
+            .await?;
         }
 
         index.insert(last_key.clone(), u32::MAX);
@@ -1000,6 +1018,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> RunFile<R> {
     }
 
     fn get(&self, ts: u64, k: &[u8]) -> Option<(u64, Value)> {
+        let block_header_start = self.index.search(k).ok()?;
         todo!();
     }
 
