@@ -814,7 +814,7 @@ struct RunFile<R> {
     max_key: Vec<u8>,
 }
 
-const INDEX_BLOCK_HEADER_SIZE: usize = 24;
+const INDEX_BLOCK_HEADER_SIZE: usize = 28;
 const BLOCK_SIZE_LIMIT: usize = 32768;
 
 impl<R> RunFile<R> {
@@ -891,8 +891,6 @@ impl<R> RunFile<R> {
             flush(w, &mut bytes_written, &mut index, &mut last_key, &buffer).await?;
         }
 
-        index.insert(last_key.clone(), u32::MAX);
-
         let index_compressed = PrefixCompressedKV::encode(&index);
 
         let index_block_offset = bytes_written;
@@ -900,8 +898,10 @@ impl<R> RunFile<R> {
         LittleEndian::write_u32(&mut header[0..4], keyspace_id);
         LittleEndian::write_u64(&mut header[4..12], min_ts);
         LittleEndian::write_u64(&mut header[12..20], max_ts);
-        LittleEndian::write_u32(&mut header[20..24], index_compressed.len() as u32);
+        LittleEndian::write_u32(&mut header[20..24], last_key.len() as u32);
+        LittleEndian::write_u32(&mut header[24..28], index_compressed.len() as u32);
         w.write_all(&header[..]).await?;
+        w.write_all(&last_key[..]).await?;
         w.write_all(&index_compressed).await?;
 
         let mut index_block_offset_buf = [0u8; 4];
@@ -927,20 +927,30 @@ impl<R: AsyncReadExactAt> RunFile<R> {
         let keyspace_id = LittleEndian::read_u32(&header[0..4]);
         let min_ts = LittleEndian::read_u64(&header[4..12]);
         let max_ts = LittleEndian::read_u64(&header[12..20]);
-        let index_len = LittleEndian::read_u32(&header[20..24]);
+        let max_key_len = LittleEndian::read_u32(&header[20..24]);
+        let index_len = LittleEndian::read_u32(&header[24..28]);
+
+        let max_key = {
+            let mut max_key = vec![0u8; max_key_len as usize];
+            r.read_exact_at(
+                &mut max_key[..],
+                (index_block_offset as u64) + (header.len() as u64),
+            )
+            .await?;
+            max_key
+        };
 
         let index = {
             let mut index_bytes = vec![0u8; index_len as usize];
             r.read_exact_at(
                 &mut index_bytes[..],
-                (index_block_offset as u64) + (header.len() as u64),
+                (index_block_offset as u64) + (header.len() as u64) + (max_key_len as u64),
             )
             .await?;
             PrefixCompressedKV::decode(index_bytes)
         };
 
         let min_key = index.get_key(0);
-        let max_key = index.get_key(index.len() - 1);
 
         Ok(Self {
             r,
@@ -1248,6 +1258,79 @@ mod test {
         assert_eq!(block.get(340, &ab[..]).await?, Some((302, ab_302.clone())));
         assert_eq!(block.get(300, &ab[..]).await?, None);
         assert_eq!(block.get(296, &ab[..]).await?, Some((290, ab_290.clone())));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_run_file() -> anyhow::Result<()> {
+        fn rand_bytes(n: usize) -> Vec<u8> {
+            let mut out = vec![0u8; n];
+            rand::thread_rng().fill_bytes(&mut out);
+            out
+        }
+        let records = vec![
+            Record {
+                key: b"prefixbar".to_vec(),
+                ts: 20101,
+                value: Value::Regular(rand_bytes(10_000)),
+            },
+            Record {
+                key: b"prefixbar".to_vec(),
+                ts: 19230,
+                value: Value::Tombstone,
+            },
+            Record {
+                key: b"prefixbar".to_vec(),
+                ts: 10230,
+                value: Value::Regular(rand_bytes(128)),
+            },
+            Record {
+                key: b"prefixfoo".to_vec(),
+                ts: 21925,
+                value: Value::Regular(rand_bytes(10_000)),
+            },
+            Record {
+                key: b"prefixfoo".to_vec(),
+                ts: 12031,
+                value: Value::Regular(rand_bytes(10_000)),
+            },
+        ];
+        let mut v = vec![];
+        RunFile::<()>::write(
+            &mut v,
+            1,
+            futures::stream::iter(records.iter().map(|record| Ok(record.clone()))),
+        )
+        .await
+        .unwrap();
+
+        let v_len = v.len();
+        let run = RunFile::open(v, v_len).await?;
+
+        assert_eq!(run.min_ts, 10230);
+        assert_eq!(run.max_ts, 21925);
+        assert_eq!(run.min_key, b"prefixbar".to_vec());
+        assert_eq!(run.max_key, b"prefixfoo".to_vec());
+
+        println!("runfile index");
+        for i in 0..run.index.len() {
+            println!(
+                "  {}->{}",
+                hexlify(&run.index.get_key(i)),
+                run.index.get_value(i)
+            );
+        }
+
+        for record in records {
+            assert_eq!(
+                run.get(record.ts, &record.key).await?,
+                match record.value {
+                    Value::Regular(v) => Some((record.ts, v)),
+                    Value::Tombstone => None,
+                }
+            );
+        }
 
         Ok(())
     }
