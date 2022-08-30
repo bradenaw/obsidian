@@ -603,6 +603,7 @@ impl<'a> BlockVersions<'a> {
     }
 }
 
+#[derive(Clone)]
 struct Record {
     key: Vec<u8>,
     ts: u64,
@@ -1061,13 +1062,18 @@ fn longest_shared_prefix(a: &[u8], b: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod test {
+    use std::cmp::Reverse;
     use std::collections::BTreeMap;
+
+    use proptest::prelude::*;
 
     use crate::binary_search_by_idx;
     use crate::hexlify;
     use crate::Block;
     use crate::Lsm;
+    use crate::Record;
     use crate::Run;
+    use crate::RunFile;
     use crate::Value;
     use crate::BLOCK_INDEX_HEADER_SIZE;
 
@@ -1280,6 +1286,44 @@ mod test {
         assert_eq!(block.get(296, &ab[..]).await?, Some((290, ab_290.clone())));
 
         Ok(())
+    }
+
+    proptest! {
+        #[test]
+        fn proptest_run_file(m in proptest::collection::btree_map(
+            (proptest::collection::vec(u8::arbitrary(), 0..2), u64::arbitrary()),
+            proptest::option::of(proptest::collection::vec(u8::arbitrary(), 0..128)),
+            1..4096,
+        )) {
+            let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+
+            rt.block_on(async {
+                let mut records = m.into_iter().map(|((key, ts), maybe_value)| Record{
+                    key, ts, value: match maybe_value {
+                        Some(v) => Value::Regular(v),
+                        None => Value::Tombstone,
+                    },
+                }).collect::<Vec<Record>>();
+                records.sort_by_key(|record| (record.key.clone(), Reverse(record.ts)));
+
+                let mut v = vec![];
+                RunFile::<()>::write(
+                    &mut v,
+                    1,
+                    futures::stream::iter(records.iter().map(|record| Ok(record.clone()))),
+                ).await.unwrap();
+
+                let v_len = v.len();
+                let run = RunFile::open(v, v_len).await.unwrap();
+
+                for record in records {
+                    assert_eq!(run.get(record.ts, &record.key[..]).await.unwrap(), match record.value {
+                        Value::Regular(value) => Some((record.ts, value)),
+                        Value::Tombstone => None,
+                    });
+                }
+            });
+        }
     }
 }
 
