@@ -395,8 +395,8 @@ impl<'a, R> Block<'a, R> {
             )
             .ok_or_else(|| anyhow!("malformed block"))?;
         // Shift here for room for the tombstone bit.
-        let bytes_per_ts_offset = byte_width((max_ts - min_ts) << 1);
-        let bytes_per_value_offset = byte_width(values_len as u64);
+        let bytes_per_ts_offset = std::cmp::max(byte_width((max_ts - min_ts) << 1), 1);
+        let bytes_per_value_offset = std::cmp::max(byte_width(values_len as u64), 1);
 
         let mut index: BTreeMap<Vec<u8>, u16> = BTreeMap::new();
         let mut block = vec![];
@@ -520,8 +520,6 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
             return Ok(None);
         }
         let record_ts = key_versions.ts(version_idx);
-        println!("n_versions for key {} = {}", hexlify(k), key_versions.len());
-        println!("version_idx = {}", version_idx);
         let (value_start, value_end) = match key_versions.value_offsets(version_idx) {
             Some(v) => v,
             None => return Ok(None), // tombstone
@@ -631,7 +629,7 @@ impl<V: FixedSizeSerializable> PrefixCompressedKV<V> {
         };
         let suffixes_len: usize = m.keys().map(|k| k.len() - prefix.len()).sum();
 
-        let offset_width = byte_width(suffixes_len as u64);
+        let offset_width = std::cmp::max(byte_width(suffixes_len as u64), 1);
 
         let offset_and_value_width = offset_width + V::size();
         let mut suffixes = Vec::with_capacity(suffixes_len);
@@ -871,7 +869,6 @@ impl<R> RunFile<R> {
                 && buffer_size + record_size > BLOCK_SIZE_LIMIT
                 && !buffer.contains_key(&record.key)
             {
-                println!("block {}, middle", index.len());
                 flush(w, &mut bytes_written, &mut index, &mut last_key, &buffer).await?;
                 buffer.clear();
                 buffer_size = 0;
@@ -887,7 +884,6 @@ impl<R> RunFile<R> {
             max_ts = std::cmp::max(max_ts, record.ts);
         }
         if !buffer.is_empty() {
-            println!("block {}, last block", index.len());
             flush(w, &mut bytes_written, &mut index, &mut last_key, &buffer).await?;
         }
 
@@ -970,11 +966,16 @@ impl<R: AsyncReadExactAt> RunFile<R> {
     }
 
     async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<(u64, Vec<u8>)>> {
-        let mut block_header_idx = self.index.search(k).unwrap_or_else(core::convert::identity);
-        // Might be equal to the max key.
-        if block_header_idx == self.index.len() {
-            block_header_idx -= 1;
-        }
+        let block_header_idx = match self.index.search(k) {
+            Ok(idx) => idx,
+            Err(idx) => {
+                if idx == 0 {
+                    return Ok(None);
+                }
+                idx - 1
+            }
+        };
+        println!("block # {}", block_header_idx);
         let block_header_offset = self.index.get_value(block_header_idx);
         let block = Block::open(&self.r, block_header_offset as u64).await?;
         block.get(ts, k).await
@@ -1043,6 +1044,7 @@ mod test {
 
     use crate::binary_search_by_idx;
     use crate::hexlify;
+    use crate::AsyncReadExactAt;
     use crate::Block;
     use crate::Lsm;
     use crate::Record;
@@ -1215,7 +1217,7 @@ mod test {
                 Some((value_start, value_end)) => format!("({}, {})", value_start, value_end),
                 None => "<TOMBSTONE>".into(),
             };
-            println!("  {} {} {}", i, versions.ts(i), value_str,);
+            println!("  {} {} {}", i, versions.ts(i), value_str);
         }
         //println!("n_keys = {}", block.index.len());
         //for i in 0..block.index.len() {
@@ -1313,15 +1315,6 @@ mod test {
         assert_eq!(run.min_key, b"prefixbar".to_vec());
         assert_eq!(run.max_key, b"prefixfoo".to_vec());
 
-        println!("runfile index");
-        for i in 0..run.index.len() {
-            println!(
-                "  {}->{}",
-                hexlify(&run.index.get_key(i)),
-                run.index.get_value(i)
-            );
-        }
-
         for record in records {
             assert_eq!(
                 run.get(record.ts, &record.key).await?,
@@ -1363,7 +1356,10 @@ mod test {
                 let v_len = v.len();
                 let run = RunFile::open(v, v_len).await.unwrap();
 
+                dump_run_file(&run).await.unwrap();
+
                 for record in records {
+                    println!("get({}, [{}])", record.ts, hexlify(&record.key[..]));
                     assert_eq!(run.get(record.ts, &record.key[..]).await.unwrap(), match record.value {
                         Value::Regular(value) => Some((record.ts, value)),
                         Value::Tombstone => None,
@@ -1371,6 +1367,52 @@ mod test {
                 }
             });
         }
+    }
+
+    async fn dump_run_file<R: AsyncReadExactAt>(run: &RunFile<R>) -> anyhow::Result<()> {
+        println!("min_ts: {}", run.min_ts);
+        println!("max_ts: {}", run.max_ts);
+        println!("index");
+        println!("prefix: [{}]", hexlify(run.index.prefix()));
+        for i in 0..run.index.len() {
+            println!(
+                "  {} header offset {}",
+                hexlify(&run.index.get_key(i)),
+                run.index.get_value(i)
+            );
+        }
+        println!("blocks");
+        for i in 0..run.index.len() {
+            println!("== block {} ======", i);
+            println!("first key: [{}]", hexlify(&run.index.get_key(i)),);
+            println!("header_offset: {}", run.index.get_value(i));
+            let header_offset = run.index.get_value(i);
+            let block = Block::open(&run.r, header_offset as u64).await?;
+            dump_block(&block).await?;
+        }
+        Ok(())
+    }
+    async fn dump_block<'a, R: AsyncReadExactAt>(block: &Block<'a, R>) -> anyhow::Result<()> {
+        println!("prefix: {}", hexlify(block.index.prefix()));
+        println!("n_keys: {}", block.index.len());
+        println!("n_versions: {}", block.n_versions);
+        println!("values_len: {}", block.values_len);
+        println!("  == keys ======");
+        for i in 0..block.index.len() {
+            let key = block.index.get_key(i);
+            let versions_offset = block.index.get_value(i);
+            println!("    [{}] {}", hexlify(&key), versions_offset);
+        }
+        let versions = block.versions();
+        println!("  == versions ======");
+        for i in 0..block.n_versions {
+            let value_str = match versions.value_offsets(i) {
+                Some((value_start, value_end)) => format!("({}, {})", value_start, value_end),
+                None => "<TOMBSTONE>".into(),
+            };
+            println!("    {} {} {}", i, versions.ts(i), value_str);
+        }
+        Ok(())
     }
 }
 
