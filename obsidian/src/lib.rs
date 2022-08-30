@@ -5,7 +5,6 @@ use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
-use std::convert::TryFrom;
 use std::marker::PhantomData;
 use std::time::SystemTime;
 
@@ -362,44 +361,42 @@ struct Block<'a, R> {
     n_versions: usize,
     min_ts: u64,
     ts_bytes: usize,
+    offset_bytes: usize,
     index: PrefixCompressedKV<u16>,
     versions_bytes: Vec<u8>,
     header_offset: u64,
     r: &'a R,
 }
 
-const BLOCK_INDEX_HEADER_SIZE: usize = 17;
+const BLOCK_INDEX_HEADER_SIZE: usize = 18;
 
 impl<'a, R> Block<'a, R> {
     // Assumes that kvs values are in reverse order by timestamp.
     //
     // Returns the encoded block and the offset of the header within the block.
     pub fn encode(kvs: &BTreeMap<Vec<u8>, Vec<(u64, Value)>>) -> anyhow::Result<(Vec<u8>, usize)> {
-        let (min_ts, bytes_per_ts_offset) = {
-            let mut min_ts = u64::MAX;
-            let mut max_ts = 0;
-            for (_, versions) in kvs {
-                min_ts = std::cmp::min(
-                    min_ts,
-                    versions
-                        .last()
-                        .ok_or_else(|| anyhow!("key has no versions"))?
-                        .0,
-                );
-                max_ts = std::cmp::max(
-                    max_ts,
-                    versions
-                        .first()
-                        .ok_or_else(|| anyhow!("key has no versions"))?
-                        .0,
-                );
-            }
-            (
-                min_ts,
-                // +8 instead of +7, since we pack an extra tombstone bit in there
-                (((64 - (max_ts - min_ts).leading_zeros()) + 8) / 8) as usize,
+        let (min_ts, max_ts, values_len) = kvs
+            .values()
+            .map(|versions| {
+                let min_ts = versions.last()?.0;
+                let max_ts = versions.first()?.0;
+                let values_len: usize = versions.iter().map(|(_, v)| v.len()).sum();
+                Some((min_ts, max_ts, values_len))
+            })
+            .flatten()
+            .reduce(
+                |(min_ts0, max_ts0, values_len0), (min_ts1, max_ts1, values_len1)| {
+                    (
+                        std::cmp::min(min_ts0, min_ts1),
+                        std::cmp::max(max_ts0, max_ts1),
+                        values_len0 + values_len1,
+                    )
+                },
             )
-        };
+            .ok_or_else(|| anyhow!("malformed block"))?;
+        // Shift here for room for the tombstone bit.
+        let bytes_per_ts_offset = byte_width((max_ts - min_ts) << 1);
+        let bytes_per_value_offset = byte_width(values_len as u64);
 
         let mut index: BTreeMap<Vec<u8>, u16> = BTreeMap::new();
         let mut block = vec![];
@@ -409,7 +406,6 @@ impl<'a, R> Block<'a, R> {
         for (key, key_versions) in kvs {
             index.insert(key.clone(), n_versions as u16);
             for (ts, value) in key_versions {
-                let mut buf = [0u8; 10];
                 let value_offset = block.len();
                 let tombstone_bit = match value {
                     Value::Regular(value) => {
@@ -419,13 +415,11 @@ impl<'a, R> Block<'a, R> {
                     Value::Tombstone => 1,
                 };
                 let ts_offset_and_tombstone = ((ts - min_ts) << 1) | tombstone_bit;
-                assert!(ts_offset_and_tombstone < 1 << (8 * bytes_per_ts_offset));
+
+                let mut buf = [0u8; 16];
                 LittleEndian::write_u64(&mut buf[..], ts_offset_and_tombstone);
-                LittleEndian::write_u16(
-                    &mut buf[bytes_per_ts_offset..],
-                    u16::try_from(value_offset)?,
-                );
-                versions.extend_from_slice(&buf[..bytes_per_ts_offset + 2]);
+                LittleEndian::write_u64(&mut buf[bytes_per_ts_offset..], value_offset as u64);
+                versions.extend_from_slice(&buf[..bytes_per_ts_offset + bytes_per_value_offset]);
             }
             n_versions += key_versions.len();
         }
@@ -438,6 +432,7 @@ impl<'a, R> Block<'a, R> {
         LittleEndian::write_u64(&mut header[6..14], min_ts);
         LittleEndian::write_u16(&mut header[14..16], encoded_index.len() as u16);
         header[16] = bytes_per_ts_offset as u8;
+        header[17] = bytes_per_value_offset as u8;
 
         let header_idx = block.len();
         block.extend_from_slice(&header[..]);
@@ -459,7 +454,8 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         let min_ts = LittleEndian::read_u64(&header[6..14]);
         let index_len = LittleEndian::read_u16(&header[14..16]) as usize;
         let bytes_per_ts_offset = header[16] as usize;
-        let versions_len = n_versions * (bytes_per_ts_offset + 2);
+        let bytes_per_value_offset = header[17] as usize;
+        let versions_len = n_versions * (bytes_per_ts_offset + bytes_per_value_offset);
 
         let mut index_bytes = vec![0u8; index_len];
         r.read_exact_at(
@@ -485,12 +481,14 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
             versions_bytes,
             header_offset,
             ts_bytes: bytes_per_ts_offset,
+            offset_bytes: bytes_per_value_offset,
         })
     }
 
     fn versions(&self) -> BlockVersions<'_> {
         BlockVersions {
             ts_bytes: self.ts_bytes,
+            offset_bytes: self.offset_bytes,
             min_ts: self.min_ts,
             end_offset: self.values_len,
             b: &self.versions_bytes[..],
@@ -544,6 +542,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
 
 struct BlockVersions<'a> {
     ts_bytes: usize,
+    offset_bytes: usize,
     min_ts: u64,
     end_offset: usize,
     b: &'a [u8],
@@ -551,26 +550,26 @@ struct BlockVersions<'a> {
 
 impl<'a> BlockVersions<'a> {
     fn len(&self) -> usize {
-        self.b.len() / (self.ts_bytes + 2)
+        self.b.len() / (self.ts_bytes + self.offset_bytes)
     }
 
     fn elem(&self, idx: usize) -> (u64, bool, usize) {
-        let width = self.ts_bytes + 2;
+        let width = self.ts_bytes + self.offset_bytes;
         let elem = &self.b[width * idx..width * (idx + 1)];
         let mut ts_offset_buf = [0u8; 8];
         ts_offset_buf[..self.ts_bytes].copy_from_slice(&elem[..self.ts_bytes]);
         let ts_offset_and_tombstone = LittleEndian::read_u64(&ts_offset_buf[..]);
         let tombstone = ts_offset_and_tombstone & 1 == 1;
         let ts = (ts_offset_and_tombstone >> 1) + self.min_ts;
-        (
-            ts,
-            tombstone,
-            LittleEndian::read_u16(&elem[elem.len() - 2..]) as usize,
-        )
+
+        let mut value_offset_buf = [0u8; 8];
+        value_offset_buf[..self.offset_bytes].copy_from_slice(&elem[self.ts_bytes..]);
+        let value_offset = LittleEndian::read_u64(&value_offset_buf[..]) as usize;
+        (ts, tombstone, value_offset)
     }
 
     fn slice(&self, start_idx: usize, end_idx: usize) -> BlockVersions<'a> {
-        let width = self.ts_bytes + 2;
+        let width = self.ts_bytes + self.offset_bytes;
         let b = &self.b[start_idx * width..end_idx * width];
         let end_offset = if end_idx == self.len() {
             self.end_offset
@@ -579,6 +578,7 @@ impl<'a> BlockVersions<'a> {
         };
         BlockVersions {
             ts_bytes: self.ts_bytes,
+            offset_bytes: self.offset_bytes,
             min_ts: self.min_ts,
             end_offset,
             b,
@@ -631,13 +631,7 @@ impl<V: FixedSizeSerializable> PrefixCompressedKV<V> {
         };
         let suffixes_len: usize = m.keys().map(|k| k.len() - prefix.len()).sum();
 
-        let offset_width = if suffixes_len < 1 << 8 {
-            1
-        } else if suffixes_len < 1 << 16 {
-            2
-        } else {
-            4
-        };
+        let offset_width = byte_width(suffixes_len as u64);
 
         let offset_and_value_width = offset_width + V::size();
         let mut suffixes = Vec::with_capacity(suffixes_len);
@@ -836,13 +830,8 @@ impl<R> RunFile<R> {
             index: &mut BTreeMap<Vec<u8>, u32>,
             last_key: &mut Vec<u8>,
             buffer: &BTreeMap<Vec<u8>, Vec<(u64, Value)>>,
-            continuation: bool,
         ) -> anyhow::Result<()> {
-            if continuation {
-                todo!();
-            }
-
-            let (first_key, last_key_) = match (index.first_key_value(), index.last_key_value()) {
+            let (first_key, last_key_) = match (buffer.first_key_value(), buffer.last_key_value()) {
                 (Some((first_key, _)), Some((last_key, _))) => (first_key, last_key),
                 _ => anyhow::bail!("empty block"),
             };
@@ -864,7 +853,6 @@ impl<R> RunFile<R> {
         let mut buffer: BTreeMap<Vec<u8>, Vec<(u64, Value)>> = BTreeMap::new();
         let mut bytes_written = 0;
         let mut buffer_size = BLOCK_INDEX_HEADER_SIZE;
-        let mut prev_continuation = false;
         let mut index: BTreeMap<Vec<u8>, u32> = BTreeMap::new();
         let mut min_ts = u64::MAX;
         let mut max_ts = 0;
@@ -880,36 +868,13 @@ impl<R> RunFile<R> {
             };
 
             if !buffer.is_empty()
-                && (buffer_size + record_size > BLOCK_SIZE_LIMIT
-                    || (prev_continuation && !buffer.contains_key(&record.key)))
+                && buffer_size + record_size > BLOCK_SIZE_LIMIT
+                && !buffer.contains_key(&record.key)
             {
-                let mut this_key_versions = None;
-                let mut continuation = false;
-                if buffer.contains_key(&record.key) {
-                    if buffer.len() == 1 {
-                        // flush with continuation bit set
-                        continuation = true;
-                    } else {
-                        // flush everything but last key
-                        this_key_versions = buffer.remove(&record.key);
-                    }
-                }
-                flush(
-                    w,
-                    &mut bytes_written,
-                    &mut index,
-                    &mut last_key,
-                    &buffer,
-                    continuation,
-                )
-                .await?;
+                println!("block {}, middle", index.len());
+                flush(w, &mut bytes_written, &mut index, &mut last_key, &buffer).await?;
                 buffer.clear();
                 buffer_size = 0;
-                prev_continuation = continuation;
-                if let Some(versions) = this_key_versions {
-                    buffer_size = versions.iter().map(|(_, value)| 10 + value.len()).sum();
-                    buffer.insert(record.key.clone(), versions);
-                }
             }
 
             buffer
@@ -922,15 +887,8 @@ impl<R> RunFile<R> {
             max_ts = std::cmp::max(max_ts, record.ts);
         }
         if !buffer.is_empty() {
-            flush(
-                w,
-                &mut bytes_written,
-                &mut index,
-                &mut last_key,
-                &buffer,
-                false,
-            )
-            .await?;
+            println!("block {}, last block", index.len());
+            flush(w, &mut bytes_written, &mut index, &mut last_key, &buffer).await?;
         }
 
         index.insert(last_key.clone(), u32::MAX);
@@ -1058,6 +1016,12 @@ fn longest_shared_prefix(a: &[u8], b: &[u8]) -> Vec<u8> {
         .take_while(|(a, b)| *a == *b)
         .map(|(a, _)| *a)
         .collect()
+}
+
+// Returns the number of bytes needed to represent x.
+fn byte_width(x: u64) -> usize {
+    let bits_needed = 64 - x.leading_zeros();
+    ((bits_needed + 7) / 8) as usize
 }
 
 #[cfg(test)]
@@ -1291,7 +1255,7 @@ mod test {
     proptest! {
         #[test]
         fn proptest_run_file(m in proptest::collection::btree_map(
-            (proptest::collection::vec(u8::arbitrary(), 0..2), u64::arbitrary()),
+            (proptest::collection::vec(u8::arbitrary(), 0..2), 0..(1u64 << 63)),
             proptest::option::of(proptest::collection::vec(u8::arbitrary(), 0..128)),
             1..4096,
         )) {
