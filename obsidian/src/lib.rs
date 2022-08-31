@@ -975,7 +975,6 @@ impl<R: AsyncReadExactAt> RunFile<R> {
                 idx - 1
             }
         };
-        println!("block # {}", block_header_idx);
         let block_header_offset = self.index.get_value(block_header_idx);
         let block = Block::open(&self.r, block_header_offset as u64).await?;
         block.get(ts, k).await
