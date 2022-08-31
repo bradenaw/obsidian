@@ -614,7 +614,7 @@ impl<'a> BlockVersions<'a> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Eq, PartialEq, Clone, Debug)]
 struct Record {
     key: Vec<u8>,
     ts: u64,
@@ -1065,6 +1065,7 @@ mod test {
     use std::cmp::Reverse;
     use std::collections::BTreeMap;
 
+    use futures::stream::StreamExt;
     use proptest::prelude::*;
 
     use crate::binary_search_by_idx;
@@ -1383,13 +1384,23 @@ mod test {
 
                 dump_run_file(&run).await.unwrap();
 
-                for record in records {
+                for record in &records {
                     println!("get({}, [{}])", record.ts, hexlify(&record.key[..]));
-                    assert_eq!(run.get(record.ts, &record.key[..]).await.unwrap(), match record.value {
-                        Value::Regular(value) => Some((record.ts, value)),
+                    assert_eq!(run.get(record.ts, &record.key[..]).await.unwrap(), match &record.value {
+                        Value::Regular(value) => Some((record.ts, value.clone())),
                         Value::Tombstone => None,
                     });
                 }
+
+                let streamed_out_records = run
+                    .stream()
+                    .collect::<Vec<anyhow::Result<Record>>>()
+                    .await
+                    .into_iter()
+                    .collect::<anyhow::Result<Vec<Record>>>()
+                    .unwrap();
+
+                assert_eq!(streamed_out_records, records);
             });
         }
     }
