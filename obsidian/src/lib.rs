@@ -9,6 +9,7 @@ use std::marker::PhantomData;
 use std::time::SystemTime;
 
 use anyhow::anyhow;
+use async_stream::try_stream;
 use async_trait::async_trait;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
@@ -505,6 +506,28 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         self.versions().slice(start_idx, end_idx)
     }
 
+    async fn value<'b>(
+        &'b self,
+        versions: &BlockVersions<'b>,
+        idx: usize,
+    ) -> anyhow::Result<Value> {
+        let (value_start, value_end) = match versions.value_offsets(idx) {
+            Some(v) => v,
+            None => return Ok(Value::Tombstone),
+        };
+        let value_len = value_end - value_start;
+
+        let mut value = vec![0u8; value_len];
+        self.r
+            .read_exact_at(
+                &mut value[..],
+                self.header_offset - (self.values_len as u64) + (value_start as u64),
+            )
+            .await?;
+
+        Ok(Value::Regular(value))
+    }
+
     pub async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<(u64, Vec<u8>)>> {
         let key_idx = match self.index.search(k) {
             Ok(idx) => idx,
@@ -520,21 +543,11 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
             return Ok(None);
         }
         let record_ts = key_versions.ts(version_idx);
-        let (value_start, value_end) = match key_versions.value_offsets(version_idx) {
-            Some(v) => v,
-            None => return Ok(None), // tombstone
-        };
-        let value_len = value_end - value_start;
 
-        let mut value = vec![0u8; value_len];
-        self.r
-            .read_exact_at(
-                &mut value[..],
-                self.header_offset - (self.values_len as u64) + (value_start as u64),
-            )
-            .await?;
-
-        Ok(Some((record_ts, value)))
+        Ok(match self.value(&key_versions, version_idx).await? {
+            Value::Regular(v) => Some((record_ts, v)),
+            Value::Tombstone => None,
+        })
     }
 }
 
@@ -984,9 +997,22 @@ impl<R: AsyncReadExactAt> RunFile<R> {
         Some((self.min_key.clone(), self.max_key.clone()))
     }
 
-    fn into_stream(self) -> impl Stream<Item = anyhow::Result<Record>> {
-        todo!();
-        futures::stream::empty()
+    fn stream(&self) -> impl Stream<Item = anyhow::Result<Record>> + '_ {
+        try_stream! {
+            for i in 0..self.index.len() {
+                let block_header_offset = self.index.get_value(i);
+                let block = Block::open(&self.r, block_header_offset as u64).await?;
+                for j in 0..block.index.len() {
+                    let key = block.index.get_key(j);
+                    let versions = block.versions_for_key(j);
+                    for k in 0..versions.len() {
+                        let ts = versions.ts(k);
+                        let value = block.value(&versions, k).await?;
+                        yield Record{key: key.clone(), ts, value};
+                    }
+                }
+            }
+        }
     }
 }
 

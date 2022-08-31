@@ -8,6 +8,7 @@ edition = "2018"
 [dependencies]
 anyhow = "1.0.58"
 async-trait = "0.1.57"
+async-stream = "0.3.3"
 byteorder = "1.4.3"
 futures = "0.3.23"
 rand = "0.8.5"
