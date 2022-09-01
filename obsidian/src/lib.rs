@@ -163,7 +163,7 @@ impl Lsm {
 
             let run_handle = tokio::spawn(async {
                 let mut run_out = vec![];
-                RunFile::<()>::write(&mut run_out, 0, rx).await?;
+                Run::<()>::write(&mut run_out, 0, rx).await?;
                 Ok::<_, anyhow::Error>(run_out)
             });
 
@@ -195,7 +195,7 @@ impl Lsm {
             drop(tx);
             let run_out = run_handle.await??;
             let run_size = run_out.len();
-            runs.push(RunFile::open(run_out, run_size).await?);
+            runs.push(Run::open(run_out, run_size).await?);
         }
 
         self.levels[into_level].add_all(runs);
@@ -276,7 +276,7 @@ impl Default for Memtable {
 
 struct Level {
     // In sorted order by range.
-    runs: Vec<RunFile<Vec<u8>>>,
+    runs: Vec<Run<Vec<u8>>>,
 }
 
 impl Level {
@@ -302,11 +302,7 @@ impl Level {
         self.runs.iter().map(|run| run.size()).sum()
     }
 
-    fn take_overlapping_runs(
-        &mut self,
-        min_key: Vec<u8>,
-        max_key: Vec<u8>,
-    ) -> Vec<RunFile<Vec<u8>>> {
+    fn take_overlapping_runs(&mut self, min_key: Vec<u8>, max_key: Vec<u8>) -> Vec<Run<Vec<u8>>> {
         let start_idx = match self
             .runs
             .binary_search_by_key(&min_key, |run| run.range().unwrap().1)
@@ -325,7 +321,7 @@ impl Level {
         self.runs.drain(start_idx..end_idx).collect()
     }
 
-    fn add_all(&mut self, runs: Vec<RunFile<Vec<u8>>>) {
+    fn add_all(&mut self, runs: Vec<Run<Vec<u8>>>) {
         let idx = match self
             .runs
             .binary_search_by_key(&runs[0].range().unwrap().0, |run| run.range().unwrap().0)
@@ -334,46 +330,6 @@ impl Level {
             Err(idx) => idx,
         };
         self.runs.splice(idx..idx, runs).for_each(|_| {});
-    }
-}
-
-struct Run {
-    // Sorted by (k, ts).
-    kvs: Vec<(Vec<u8>, u64, Value)>,
-    size: usize,
-}
-
-impl Run {
-    fn new(kvs: Vec<(Vec<u8>, u64, Value)>) -> Self {
-        let size = kvs.iter().map(|(k, _, v)| k.len() + 8 + v.len()).sum();
-        Self { kvs, size }
-    }
-
-    fn size(&self) -> usize {
-        self.size
-    }
-
-    fn get(&self, ts: u64, k: &[u8]) -> Option<(u64, Value)> {
-        let entry = match self
-            .kvs
-            .binary_search_by_key(&(k, ts), |entry| (&entry.0, entry.1))
-        {
-            Ok(idx) => &self.kvs[idx],
-            Err(next_idx) if next_idx > 0 => &self.kvs[next_idx - 1],
-            _ => return None,
-        };
-        if entry.0 != k {
-            return None;
-        }
-        Some((entry.1, entry.2.clone()))
-    }
-
-    fn range(&self) -> Option<(Vec<u8>, Vec<u8>)> {
-        Some((self.kvs.first()?.0.clone(), self.kvs.last()?.0.clone()))
-    }
-
-    fn into_iter(self) -> impl Iterator<Item = (Vec<u8>, u64, Value)> {
-        self.kvs.into_iter()
     }
 }
 
@@ -889,7 +845,7 @@ impl From<&[u8]> for LittleEndianU32 {
     }
 }
 
-struct RunFile<R> {
+struct Run<R> {
     r: R,
 
     size: usize,
@@ -906,7 +862,7 @@ struct RunFile<R> {
 const INDEX_BLOCK_HEADER_SIZE: usize = 28;
 const BLOCK_SIZE_LIMIT: usize = 32768;
 
-impl<R> RunFile<R> {
+impl<R> Run<R> {
     // Assumes S is in (key, rev(ts)) order, and assumes termination at a reasonable size limit.
     async fn write<W: AsyncWrite + Unpin, S: Stream<Item = anyhow::Result<Record>>>(
         w: &mut W,
@@ -999,7 +955,7 @@ impl<R> RunFile<R> {
     }
 }
 
-impl<R: AsyncReadExactAt> RunFile<R> {
+impl<R: AsyncReadExactAt> Run<R> {
     async fn open(r: R, size: usize) -> anyhow::Result<Self> {
         let file_len = r.len().await?;
         let mut index_block_offset_buf = [0u8; 4];
@@ -1190,7 +1146,6 @@ mod test {
     use crate::Lsm;
     use crate::Record;
     use crate::Run;
-    use crate::RunFile;
     use crate::Value;
     use crate::BLOCK_INDEX_HEADER_SIZE;
 
@@ -1209,35 +1164,6 @@ mod test {
         assert_eq!(lsm.get(write_ts + 1, not_k).await?, None);
 
         Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_run_get() {
-        let run = Run::new(vec![
-            (b"a".to_vec(), 10, Value::Regular(b"a10".to_vec())),
-            (b"a".to_vec(), 15, Value::Regular(b"a15".to_vec())),
-            (b"b".to_vec(), 10, Value::Regular(b"b10".to_vec())),
-            (b"b".to_vec(), 15, Value::Regular(b"b15".to_vec())),
-        ]);
-
-        assert_eq!(run.get(9, b"a"), None);
-        assert_eq!(
-            run.get(10, b"a"),
-            Some((10, Value::Regular(b"a10".to_vec())))
-        );
-        assert_eq!(
-            run.get(11, b"a"),
-            Some((10, Value::Regular(b"a10".to_vec())))
-        );
-        assert_eq!(
-            run.get(16, b"a"),
-            Some((15, Value::Regular(b"a15".to_vec())))
-        );
-        assert_eq!(run.get(9, b"b"), None);
-        assert_eq!(
-            run.get(17, b"b"),
-            Some((15, Value::Regular(b"b15".to_vec())))
-        );
     }
 
     #[tokio::test]
@@ -1449,7 +1375,7 @@ mod test {
             },
         ];
         let mut v = vec![];
-        RunFile::<()>::write(
+        Run::<()>::write(
             &mut v,
             1,
             futures::stream::iter(records.iter().map(|record| Ok(record.clone()))),
@@ -1458,7 +1384,7 @@ mod test {
         .unwrap();
 
         let v_len = v.len();
-        let run = RunFile::open(v, v_len).await?;
+        let run = Run::open(v, v_len).await?;
 
         assert_eq!(run.min_ts, 10230);
         assert_eq!(run.max_ts, 21925);
@@ -1494,14 +1420,14 @@ mod test {
                 records.sort_by_key(|record| (record.key.clone(), Reverse(record.ts)));
 
                 let mut v = vec![];
-                RunFile::<()>::write(
+                Run::<()>::write(
                     &mut v,
                     1,
                     futures::stream::iter(records.iter().map(|record| Ok(record.clone()))),
                 ).await.unwrap();
 
                 let v_len = v.len();
-                let run = RunFile::open(v, v_len).await.unwrap();
+                let run = Run::open(v, v_len).await.unwrap();
 
                 dump_run_file(&run).await.unwrap();
 
@@ -1526,7 +1452,7 @@ mod test {
         }
     }
 
-    async fn dump_run_file<R: AsyncReadExactAt>(run: &RunFile<R>) -> anyhow::Result<()> {
+    async fn dump_run_file<R: AsyncReadExactAt>(run: &Run<R>) -> anyhow::Result<()> {
         println!("min_ts: {}", run.min_ts);
         println!("max_ts: {}", run.max_ts);
         println!("index");
