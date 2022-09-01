@@ -5,7 +5,10 @@ use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
+use std::fs::File;
 use std::marker::PhantomData;
+use std::os::unix::fs::FileExt;
+use std::pin::Pin;
 use std::time::SystemTime;
 
 use anyhow::anyhow;
@@ -38,22 +41,22 @@ impl Lsm {
         }
     }
 
-    fn get(&self, ts: u64, k: &[u8]) -> Option<Vec<u8>> {
+    async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         if let Some((_, v)) = self.l0.get(ts, k) {
             return match v {
-                Value::Regular(v) => Some(v),
-                Value::Tombstone => None,
+                Value::Regular(v) => Ok(Some(v)),
+                Value::Tombstone => Ok(None),
             };
         }
         for level in &self.levels {
-            if let Some((_, v)) = level.get(ts, k) {
+            if let Some((_, v)) = level.get(ts, k).await? {
                 return match v {
-                    Value::Regular(v) => Some(v),
-                    Value::Tombstone => None,
+                    Value::Regular(v) => Ok(Some(v)),
+                    Value::Tombstone => Ok(None),
                 };
             }
         }
-        None
+        Ok(None)
     }
 
     fn put(&mut self, k: Vec<u8>, v: Vec<u8>) -> u64 {
@@ -88,7 +91,18 @@ impl Lsm {
 
         let l0 = std::mem::take(&mut self.l0);
 
-        self.compact_inner(1, min_key, max_key, l0.into_iter())
+        self.compact_inner(
+            1,
+            min_key,
+            max_key,
+            futures::stream::iter(l0.into_iter().map(|(k, ts, v)| {
+                Ok(Record {
+                    key: k,
+                    ts,
+                    value: v,
+                })
+            })),
+        );
     }
 
     fn compact_from(&mut self, level: usize) {
@@ -101,35 +115,43 @@ impl Lsm {
             Some((min_key, max_key)) => (min_key, max_key),
             None => return,
         };
-        self.compact_inner(level + 1, min_key, max_key, run.into_iter());
+        self.compact_inner(level + 1, min_key, max_key, run.stream());
     }
 
-    fn compact_inner(
+    async fn compact_inner(
         &mut self,
         into_level: usize,
         min_key: Vec<u8>,
         max_key: Vec<u8>,
-        entries: impl Iterator<Item = (Vec<u8>, u64, Value)>,
-    ) {
+        entries: impl Stream<Item = anyhow::Result<Record>>,
+    ) -> anyhow::Result<()> {
         let overlapping_runs = self.levels[into_level].take_overlapping_runs(min_key, max_key);
 
-        let existing_iter = overlapping_runs
-            .into_iter()
-            .map(|run| run.into_iter())
-            .flatten()
-            .map(|(k, ts, v)| OrdEqByFirst((k, ts), v));
+        let existing_iter =
+            futures::stream::iter(overlapping_runs.into_iter().map(|run| run.stream()))
+                .flatten()
+                .map(|result| {
+                    result.map(|record| OrdEqByFirst((record.key, record.ts), record.value))
+                });
 
-        let sorted = merge_sorted(vec![
-            Box::new(existing_iter)
-                as Box<dyn Iterator<Item = OrdEqByFirst<(Vec<u8>, u64), Value>>>,
-            Box::new(entries.map(|(k, ts, v)| OrdEqByFirst((k, ts), v)))
-                as Box<dyn Iterator<Item = _>>,
-        ]);
+        let sorted = Box::pin(merge_sorted_streams(vec![
+            Box::pin(existing_iter)
+                as Pin<
+                    Box<
+                        dyn Stream<
+                            Item = anyhow::Result<OrdEqByFirst<(Vec<u8>, Reverse<u64>), Value>>,
+                        >,
+                    >,
+                >,
+            Box::pin(entries.map(|result| {
+                result.map(|record| OrdEqByFirst((record.key, Reverse(record.ts)), record.value))
+            })) as Pin<Box<dyn Stream<Item = _>>>,
+        ]));
 
         let mut runs = Vec::new();
         let mut curr: Vec<(Vec<u8>, u64, Value)> = Vec::new();
         let mut curr_size = 0;
-        for OrdEqByFirst((k, ts), v) in sorted {
+        while let Some(OrdEqByFirst((k, Reverse(ts)), v)) = sorted.next().await.transpose()? {
             let elem_size = k.len() + 8 + v.len();
             if curr.len() > 0
                 && curr_size + elem_size > self.l0_max_size
@@ -147,6 +169,8 @@ impl Lsm {
         }
 
         self.levels[into_level].add_all(runs);
+
+        Ok(())
     }
 }
 
@@ -222,7 +246,7 @@ impl Default for Memtable {
 
 struct Level {
     // In sorted order by range.
-    runs: Vec<Run>,
+    runs: Vec<RunFile<Vec<u8>>>,
 }
 
 impl Level {
@@ -230,7 +254,7 @@ impl Level {
         Self { runs: vec![] }
     }
 
-    fn get(&self, ts: u64, k: &[u8]) -> Option<(u64, Value)> {
+    async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<(u64, Value)>> {
         let idx = match self
             .runs
             .binary_search_by_key(&k.to_vec(), |run| run.range().unwrap().1)
@@ -239,16 +263,20 @@ impl Level {
             Err(idx) => idx,
         };
         if idx >= self.runs.len() {
-            return None;
+            return Ok(None);
         }
-        self.runs[idx].get(ts, k)
+        self.runs[idx].get(ts, k).await
     }
 
     fn size(&self) -> usize {
         self.runs.iter().map(|run| run.size()).sum()
     }
 
-    fn take_overlapping_runs(&mut self, min_key: Vec<u8>, max_key: Vec<u8>) -> Vec<Run> {
+    fn take_overlapping_runs(
+        &mut self,
+        min_key: Vec<u8>,
+        max_key: Vec<u8>,
+    ) -> Vec<RunFile<Vec<u8>>> {
         let start_idx = match self
             .runs
             .binary_search_by_key(&min_key, |run| run.range().unwrap().1)
@@ -267,7 +295,7 @@ impl Level {
         self.runs.drain(start_idx..end_idx).collect()
     }
 
-    fn add_all(&mut self, runs: Vec<Run>) {
+    fn add_all(&mut self, runs: Vec<RunFile<Vec<u8>>>) {
         let idx = match self
             .runs
             .binary_search_by_key(&runs[0].range().unwrap().0, |run| run.range().unwrap().0)
@@ -336,6 +364,26 @@ pub fn merge_sorted<'a, T: Ord + 'a>(
         }
         Some(t.0)
     })
+}
+
+pub fn merge_sorted_streams<T: Ord>(
+    mut streams: Vec<impl Stream<Item = anyhow::Result<T>> + Unpin>,
+) -> impl Stream<Item = anyhow::Result<T>> {
+    try_stream! {
+        let mut h: BinaryHeap<(std::cmp::Reverse<T>, usize)> = BinaryHeap::new();
+        h.reserve_exact(streams.len());
+        for i in 0..streams.len() {
+            if let Some(t) = streams[i].next().await.transpose()? {
+                h.push((std::cmp::Reverse(t), i));
+            }
+        }
+        while let Some((t, i)) = h.pop() {
+            if let Some(t) = streams[i].next().await.transpose()? {
+                h.push((std::cmp::Reverse(t), i));
+            }
+            yield t.0;
+        }
+    }
 }
 
 pub struct OrdEqByFirst<A, B>(pub A, pub B);
@@ -528,7 +576,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         Ok(Value::Regular(value))
     }
 
-    pub async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<(u64, Vec<u8>)>> {
+    pub async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<(u64, Value)>> {
         let key_idx = match self.index.search(k) {
             Ok(idx) => idx,
             Err(_) => return Ok(None),
@@ -544,10 +592,10 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         }
         let record_ts = key_versions.ts(version_idx);
 
-        Ok(match self.value(&key_versions, version_idx).await? {
-            Value::Regular(v) => Some((record_ts, v)),
-            Value::Tombstone => None,
-        })
+        Ok(Some((
+            record_ts,
+            self.value(&key_versions, version_idx).await?,
+        )))
     }
 }
 
@@ -978,7 +1026,7 @@ impl<R: AsyncReadExactAt> RunFile<R> {
         self.size
     }
 
-    async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<(u64, Vec<u8>)>> {
+    async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<(u64, Value)>> {
         let block_header_idx = match self.index.search(k) {
             Ok(idx) => idx,
             Err(idx) => {
@@ -1029,6 +1077,34 @@ impl AsyncReadExactAt for Vec<u8> {
     }
     async fn len(&self) -> anyhow::Result<u64> {
         Ok(self.len() as u64)
+    }
+}
+
+#[async_trait]
+impl AsyncReadExactAt for File {
+    async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
+        // TODO: This requires an extra allocation because spawn_blocking can't hold onto a mut ref
+        // to buf because compiler isn't smart enough to know that we immediately await it and that
+        // awaiting it implies that the function is done running.
+        //
+        // Static-sized reads are not the common case here it seems, so it might be worth just
+        // changing this function to take a length and always do the allocation internally, or
+        // figure out how tokio implements AsyncRead::read_exact() when poll_read() requires a
+        // spawn_blocking.
+        let mut inner_buf = vec![0u8; buf.len()];
+        // We can safely clone this because the file descriptor's state is not affected by
+        // read_exact_at.
+        let other = self.try_clone()?;
+        let mut inner_buf = tokio::task::spawn_blocking(move || {
+            FileExt::read_exact_at(&other, &mut inner_buf, offset)?;
+            Ok::<Vec<u8>, anyhow::Error>(inner_buf)
+        })
+        .await??;
+        buf.copy_from_slice(&mut inner_buf);
+        Ok(())
+    }
+    async fn len(&self) -> anyhow::Result<u64> {
+        todo!()
     }
 }
 
