@@ -171,6 +171,8 @@ impl Lsm {
                 let record_size = record.key.len() + 8 + record.value.len();
                 curr_size += record_size;
                 let break_after = {
+                    // All of the records for a single key need to end up in the same run, so once
+                    // we've gone over the target size look for a break between keys.
                     if curr_size > RUN_SIZE_TARGET {
                         if let Some(Ok(next_record)) = Pin::new(&mut sorted).peek().await {
                             if record.key != next_record.key {
