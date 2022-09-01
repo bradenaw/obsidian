@@ -12,6 +12,7 @@ use std::pin::Pin;
 use std::time::SystemTime;
 
 use anyhow::anyhow;
+use async_stream::stream;
 use async_stream::try_stream;
 use async_trait::async_trait;
 use byteorder::ByteOrder;
@@ -19,6 +20,7 @@ use byteorder::LittleEndian;
 use futures::pin_mut;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
+use futures::SinkExt;
 use rand::Rng;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
@@ -59,7 +61,7 @@ impl Lsm {
         Ok(None)
     }
 
-    fn put(&mut self, k: Vec<u8>, v: Vec<u8>) -> u64 {
+    async fn put(&mut self, k: Vec<u8>, v: Vec<u8>) -> anyhow::Result<u64> {
         let ts = std::cmp::max(
             self.last_ts + 1,
             SystemTime::now()
@@ -70,23 +72,23 @@ impl Lsm {
         self.last_ts = ts;
         self.l0.put(k, ts, v);
         if self.l0.size() > self.l0_max_size {
-            self.compact_l0();
+            self.compact_l0().await?;
 
             for i in 1..self.levels.len() - 1 {
                 if self.levels[i].size() <= self.l0_max_size * 10_usize.pow(i as u32) {
                     break;
                 }
-                self.compact_from(i);
+                self.compact_from(i).await?;
             }
         }
-        ts
+        Ok(ts)
     }
 
-    fn compact_l0(&mut self) {
+    async fn compact_l0(&mut self) -> anyhow::Result<()> {
         let (min_key, max_key) = match self.l0.range() {
             Some(r) => r,
             // l0 is empty, nothing to do
-            None => return,
+            None => return Ok(()),
         };
 
         let l0 = std::mem::take(&mut self.l0);
@@ -102,20 +104,22 @@ impl Lsm {
                     value: v,
                 })
             })),
-        );
+        )
+        .await
     }
 
-    fn compact_from(&mut self, level: usize) {
+    async fn compact_from(&mut self, level: usize) -> anyhow::Result<()> {
         if self.levels[level].runs.is_empty() {
-            return;
+            return Ok(());
         }
         let idx = rand::thread_rng().gen_range(0..self.levels[level].runs.len());
         let run = self.levels[level].runs.remove(idx);
         let (min_key, max_key) = match run.range() {
             Some((min_key, max_key)) => (min_key, max_key),
-            None => return,
+            None => return Ok(()),
         };
-        self.compact_inner(level + 1, min_key, max_key, run.stream());
+        self.compact_inner(level + 1, min_key, max_key, run.stream())
+            .await
     }
 
     async fn compact_inner(
@@ -128,44 +132,68 @@ impl Lsm {
         let overlapping_runs = self.levels[into_level].take_overlapping_runs(min_key, max_key);
 
         let existing_iter =
-            futures::stream::iter(overlapping_runs.into_iter().map(|run| run.stream()))
+            futures::stream::iter(overlapping_runs.into_iter().map(|run| run.into_stream()))
                 .flatten()
                 .map(|result| {
-                    result.map(|record| OrdEqByFirst((record.key, record.ts), record.value))
+                    result
+                        .map(|record| OrdEqByFirst((record.key, Reverse(record.ts)), record.value))
                 });
 
-        let sorted = Box::pin(merge_sorted_streams(vec![
-            Box::pin(existing_iter)
-                as Pin<
-                    Box<
-                        dyn Stream<
-                            Item = anyhow::Result<OrdEqByFirst<(Vec<u8>, Reverse<u64>), Value>>,
-                        >,
-                    >,
-                >,
-            Box::pin(entries.map(|result| {
-                result.map(|record| OrdEqByFirst((record.key, Reverse(record.ts)), record.value))
-            })) as Pin<Box<dyn Stream<Item = _>>>,
-        ]));
+        let mut sorted = merge_sorted_streams(vec![
+            existing_iter.boxed_local(),
+            entries
+                .map(|result| {
+                    result
+                        .map(|record| OrdEqByFirst((record.key, Reverse(record.ts)), record.value))
+                })
+                .boxed_local(),
+        ])
+        .map(|result| {
+            result.map(|OrdEqByFirst((key, Reverse(ts)), value)| Record { key, ts, value })
+        })
+        .boxed_local()
+        .peekable();
+
+        const RUN_SIZE_TARGET: usize = 64 * 1024 * 1024;
 
         let mut runs = Vec::new();
-        let mut curr: Vec<(Vec<u8>, u64, Value)> = Vec::new();
-        let mut curr_size = 0;
-        while let Some(OrdEqByFirst((k, Reverse(ts)), v)) = sorted.next().await.transpose()? {
-            let elem_size = k.len() + 8 + v.len();
-            if curr.len() > 0
-                && curr_size + elem_size > self.l0_max_size
-                && curr.last().unwrap().0 != k
-            {
-                runs.push(Run::new(curr));
-                curr = Vec::new();
-                curr_size = 0;
+        while let Some(_) = Pin::new(&mut sorted).peek().await {
+            let mut curr_size = 0;
+            let (mut tx, rx) = futures::channel::mpsc::channel(1);
+
+            let run_handle = tokio::spawn(async {
+                let mut run_out = vec![];
+                RunFile::<()>::write(&mut run_out, 0, rx).await?;
+                Ok::<_, anyhow::Error>(run_out)
+            });
+
+            while let Some(record) = sorted.next().await.transpose()? {
+                let record_size = record.key.len() + 8 + record.value.len();
+                curr_size += record_size;
+                let break_after = {
+                    if curr_size > RUN_SIZE_TARGET {
+                        if let Some(Ok(next_record)) = Pin::new(&mut sorted).peek().await {
+                            if record.key != next_record.key {
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                };
+                tx.send(Ok(record)).await?;
+                if break_after {
+                    break;
+                }
             }
-            curr.push((k, ts, v));
-            curr_size += elem_size;
-        }
-        if curr.len() > 0 {
-            runs.push(Run::new(curr));
+            drop(tx);
+            let run_out = run_handle.await??;
+            let run_size = run_out.len();
+            runs.push(RunFile::open(run_out, run_size).await?);
         }
 
         self.levels[into_level].add_all(runs);
@@ -1062,6 +1090,15 @@ impl<R: AsyncReadExactAt> RunFile<R> {
             }
         }
     }
+
+    fn into_stream(self) -> impl Stream<Item = anyhow::Result<Record>> {
+        stream! {
+            let mut s = self.stream().boxed_local();
+            while let Some(x) = s.next().await {
+                yield x;
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -1155,23 +1192,25 @@ mod test {
     use crate::Value;
     use crate::BLOCK_INDEX_HEADER_SIZE;
 
-    #[test]
-    fn test_put_get() {
+    #[tokio::test]
+    async fn test_put_get() -> anyhow::Result<()> {
         let mut lsm = Lsm::new();
         let k = b"abc";
         let not_k = b"def";
         let v = b"foo";
-        let write_ts = lsm.put(k.to_vec(), v.to_vec());
-        assert_eq!(lsm.get(write_ts - 1, k), None);
-        assert_eq!(lsm.get(write_ts, k), Some(v.to_vec()));
-        assert_eq!(lsm.get(write_ts + 1, k), Some(v.to_vec()));
-        assert_eq!(lsm.get(write_ts - 1, not_k), None);
-        assert_eq!(lsm.get(write_ts, not_k), None);
-        assert_eq!(lsm.get(write_ts + 1, not_k), None);
+        let write_ts = lsm.put(k.to_vec(), v.to_vec()).await?;
+        assert_eq!(lsm.get(write_ts - 1, k).await?, None);
+        assert_eq!(lsm.get(write_ts, k).await?, Some(v.to_vec()));
+        assert_eq!(lsm.get(write_ts + 1, k).await?, Some(v.to_vec()));
+        assert_eq!(lsm.get(write_ts - 1, not_k).await?, None);
+        assert_eq!(lsm.get(write_ts, not_k).await?, None);
+        assert_eq!(lsm.get(write_ts + 1, not_k).await?, None);
+
+        Ok(())
     }
 
-    #[test]
-    fn test_run_get() {
+    #[tokio::test]
+    async fn test_run_get() {
         let run = Run::new(vec![
             (b"a".to_vec(), 10, Value::Regular(b"a10".to_vec())),
             (b"a".to_vec(), 15, Value::Regular(b"a15".to_vec())),
@@ -1199,8 +1238,8 @@ mod test {
         );
     }
 
-    #[test]
-    fn test_compact_l0() {
+    #[tokio::test]
+    async fn test_compact_l0() -> anyhow::Result<()> {
         let mut lsm = Lsm::new();
         let mut map = BTreeMap::new();
         let mut last_ts = 0;
@@ -1208,7 +1247,7 @@ mod test {
         for _ in 0..10 {
             for i in 0..usize::MAX {
                 let v = (i % 179) as u8;
-                let put_ts = lsm.put(vec![i as u8], vec![v]);
+                let put_ts = lsm.put(vec![i as u8], vec![v]).await?;
                 last_ts = std::cmp::max(put_ts, last_ts);
                 map.insert(i as u8, v);
 
@@ -1220,13 +1259,15 @@ mod test {
             }
 
             for (k, v) in &map {
-                assert_eq!(lsm.get(last_ts, &[*k]), Some(vec![*v]));
+                assert_eq!(lsm.get(last_ts, &[*k]).await?, Some(vec![*v]));
             }
         }
+
+        Ok(())
     }
 
-    #[test]
-    fn test_compact_l1() {
+    #[tokio::test]
+    async fn test_compact_l1() -> anyhow::Result<()> {
         let mut lsm = Lsm::new();
         let mut map = BTreeMap::new();
         let mut last_ts = 0;
@@ -1234,7 +1275,7 @@ mod test {
         for _ in 0..3 {
             for i in 0..usize::MAX {
                 let v = (i % 179) as u8;
-                let put_ts = lsm.put(vec![i as u8], vec![v]);
+                let put_ts = lsm.put(vec![i as u8], vec![v]).await?;
                 last_ts = std::cmp::max(put_ts, last_ts);
                 map.insert(i as u8, v);
 
@@ -1246,9 +1287,11 @@ mod test {
             }
 
             for (k, v) in &map {
-                assert_eq!(lsm.get(last_ts, &[*k]), Some(vec![*v]));
+                assert_eq!(lsm.get(last_ts, &[*k]).await?, Some(vec![*v]));
             }
         }
+
+        Ok(())
     }
 
     #[test]
@@ -1269,27 +1312,24 @@ mod test {
     async fn test_block() -> anyhow::Result<()> {
         let aa: Vec<u8> = "aa".into();
         let ab: Vec<u8> = "ab".into();
-        let aa_279: Vec<u8> = "foo".into();
-        let aa_265: Vec<u8> = "bar".into();
-        let ab_341: Vec<u8> = "baz".into();
-        let ab_302: Vec<u8> = "qux".into();
-        let ab_290: Vec<u8> = "garply".into();
+        let aa_279: Value = Value::Regular("foo".into());
+        let aa_265: Value = Value::Regular("bar".into());
+        let ab_341: Value = Value::Regular("baz".into());
+        let ab_302: Value = Value::Regular("qux".into());
+        let ab_290: Value = Value::Regular("garply".into());
         let kvs = {
             let mut kvs = BTreeMap::new();
             kvs.insert(
                 aa.clone(),
-                vec![
-                    (279, Value::Regular(aa_279.clone())),
-                    (265, Value::Regular(aa_265.clone())),
-                ],
+                vec![(279, aa_279.clone()), (265, aa_265.clone())],
             );
             kvs.insert(
                 ab.clone(),
                 vec![
-                    (341, Value::Regular(ab_341.clone())),
-                    (302, Value::Regular(ab_302.clone())),
+                    (341, ab_341.clone()),
+                    (302, ab_302.clone()),
                     (297, Value::Tombstone),
-                    (290, Value::Regular(ab_290.clone())),
+                    (290, ab_290.clone()),
                 ],
             );
             kvs
@@ -1354,13 +1394,19 @@ mod test {
 
         assert_eq!(block.get(341, &ab[..]).await?, Some((341, ab_341.clone())));
         assert_eq!(block.get(302, &ab[..]).await?, Some((302, ab_302.clone())));
-        assert_eq!(block.get(297, &ab[..]).await?, None);
+        assert_eq!(
+            block.get(297, &ab[..]).await?,
+            Some((297, Value::Tombstone))
+        );
         assert_eq!(block.get(290, &ab[..]).await?, Some((290, ab_290.clone())));
         assert_eq!(block.get(289, &ab[..]).await?, None);
 
         assert_eq!(block.get(500, &ab[..]).await?, Some((341, ab_341.clone())));
         assert_eq!(block.get(340, &ab[..]).await?, Some((302, ab_302.clone())));
-        assert_eq!(block.get(300, &ab[..]).await?, None);
+        assert_eq!(
+            block.get(300, &ab[..]).await?,
+            Some((297, Value::Tombstone))
+        );
         assert_eq!(block.get(296, &ab[..]).await?, Some((290, ab_290.clone())));
 
         Ok(())
@@ -1420,10 +1466,7 @@ mod test {
         for record in records {
             assert_eq!(
                 run.get(record.ts, &record.key).await?,
-                match record.value {
-                    Value::Regular(v) => Some((record.ts, v)),
-                    Value::Tombstone => None,
-                }
+                Some((record.ts, record.value)),
             );
         }
 
@@ -1462,10 +1505,10 @@ mod test {
 
                 for record in &records {
                     println!("get({}, [{}])", record.ts, hexlify(&record.key[..]));
-                    assert_eq!(run.get(record.ts, &record.key[..]).await.unwrap(), match &record.value {
-                        Value::Regular(value) => Some((record.ts, value.clone())),
-                        Value::Tombstone => None,
-                    });
+                    assert_eq!(
+                        run.get(record.ts, &record.key[..]).await.unwrap(),
+                        Some((record.ts, record.value.clone())),
+                    );
                 }
 
                 let streamed_out_records = run
