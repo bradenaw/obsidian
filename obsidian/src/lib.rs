@@ -25,6 +25,12 @@ use rand::Rng;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 
+mod range;
+
+use range::Bound;
+use range::KeyOrBound;
+use range::Range;
+
 struct Lsm {
     last_ts: u64,
     l0: Memtable,
@@ -59,6 +65,35 @@ impl Lsm {
             }
         }
         Ok(None)
+    }
+
+    async fn scan_page(
+        &self,
+        ts: u64,
+        range: Range<&[u8]>,
+        direction: Direction,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
+        if direction == Direction::Desc {
+            todo!();
+        }
+
+        let streams = Vec::with_capacity(self.levels.len());
+        for level in self.levels {
+            let start_idx = binary_search_by_idx(level.runs.len(), range.lower, |idx| {
+                Bound::Before(&level.runs[idx].range().unwrap().0)
+            })
+            .unwrap_or_else(core::convert::identity);
+            let end_idx = binary_search_by_idx(level.runs.len(), range.lower, |idx| {
+                Bound::After(&level.runs[idx].range().unwrap().1)
+            })
+            .unwrap_or_else(core::convert::identity);
+
+            level.runs[start_idx..=end_idx]
+                .iter()
+                .map(|run| run.scan(ts, range, direction));
+        }
+        todo!();
     }
 
     async fn put(&mut self, k: Vec<u8>, v: Vec<u8>) -> anyhow::Result<u64> {
@@ -655,6 +690,12 @@ struct Record {
     value: Value,
 }
 
+#[derive(Eq, PartialEq)]
+enum Direction {
+    Asc,
+    Desc,
+}
+
 struct PrefixCompressedKV<V> {
     v: PhantomData<V>,
     offset_width: usize,
@@ -1025,6 +1066,62 @@ impl<R: AsyncReadExactAt> Run<R> {
         let block_header_offset = self.index.get_value(block_header_idx);
         let block = Block::open(&self.r, block_header_offset as u64).await?;
         block.get(ts, k).await
+    }
+
+    async fn scan(
+        &self,
+        ts: u64,
+        range: Range<Vec<u8>>,
+        direction: Direction,
+    ) -> impl Stream<Item = anyhow::Result<Record>> + '_ {
+        try_stream! {
+            if direction == Direction::Desc {
+                todo!();
+            }
+
+            let lower_block_idx = binary_search_by_idx(
+                self.index.len(),
+                KeyOrBound::Bound(range.lower.clone()),
+                |idx| KeyOrBound::Key(self.index.get_key(idx)),
+            )
+            .unwrap_or_else(|idx| if idx != 0 { idx - 1 } else { idx });
+
+            for i in lower_block_idx..self.index.len() {
+                let block_header_offset = self.index.get_value(i);
+                let block = Block::open(&self.r, block_header_offset as u64).await?;
+                let lower_key_idx = if i == lower_block_idx {
+                    binary_search_by_idx(
+                        block.index.len(),
+                        KeyOrBound::Bound(range.lower.clone()),
+                        |idx| KeyOrBound::Key(block.index.get_key(idx)),
+                    )
+                    .unwrap_or_else(core::convert::identity)
+                } else {
+                    0
+                };
+
+                for j in lower_key_idx..block.index.len() {
+                    let key = block.index.get_key(j);
+
+                    let versions = block.versions_for_key(j);
+                    let version_idx = binary_search_by_idx(versions.len(), Reverse(ts), |idx| {
+                        Reverse(versions.ts(idx))
+                    })
+                    .unwrap_or_else(core::convert::identity);
+                    if version_idx == versions.len() {
+                        continue;
+                    }
+
+                    let ts = versions.ts(version_idx);
+                    let value = block.value(&versions, version_idx).await?;
+                    if let Value::Tombstone = value {
+                        continue;
+                    }
+
+                    yield Record { key, ts, value };
+                }
+            }
+        }
     }
 
     fn range(&self) -> Option<(Vec<u8>, Vec<u8>)> {
