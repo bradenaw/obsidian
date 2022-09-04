@@ -79,7 +79,11 @@ impl Lsm {
         }
 
         let mut streams = Vec::with_capacity(self.levels.len());
-        for level in &self.levels {
+        streams.push(
+            futures::stream::iter(self.l0.scan_asc(ts, range.clone()).map(|record| Ok(record)))
+                .boxed_local(),
+        );
+        for level in &self.levels[1..] {
             let start_idx = binary_search_by_idx(
                 level.runs.len(),
                 range.lower.clone().map(Vec::from),
@@ -288,6 +292,7 @@ impl Value {
 struct Memtable {
     size: usize,
     kvs: BTreeMap<Vec<u8>, BTreeMap<u64, Value>>,
+    max_key_len: usize,
 }
 
 impl Memtable {
@@ -295,6 +300,7 @@ impl Memtable {
         Self {
             size: 0,
             kvs: BTreeMap::new(),
+            max_key_len: 0,
         }
     }
 
@@ -309,6 +315,7 @@ impl Memtable {
 
     fn put(&mut self, k: Vec<u8>, ts: u64, v: Vec<u8>) {
         self.size += k.len() + v.len() + 8;
+        self.max_key_len = std::cmp::max(k.len(), self.max_key_len);
         self.kvs
             .entry(k)
             .or_insert(BTreeMap::default())
@@ -320,6 +327,56 @@ impl Memtable {
             self.kvs.iter().next()?.0.clone(),
             self.kvs.iter().next_back()?.0.clone(),
         ))
+    }
+
+    fn scan_asc(&self, ts: u64, range: Range<&[u8]>) -> impl Iterator<Item = Record> + '_ {
+        Box::new(
+            self.kvs
+                .range((
+                    match range.lower {
+                        Bound::BeforeAll => std::ops::Bound::Unbounded,
+                        Bound::Before(k) => std::ops::Bound::Included(k.to_vec()),
+                        Bound::After(k) => std::ops::Bound::Excluded(k.to_vec()),
+                        Bound::AfterPrefix(k) => std::ops::Bound::Excluded(
+                            k.iter()
+                                .cloned()
+                                .chain(
+                                    (0..std::cmp::max(0, self.max_key_len - k.len()))
+                                        .map(|_| 0xFFu8),
+                                )
+                                .collect(),
+                        ),
+                        Bound::AfterAll => {
+                            return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record>>
+                        }
+                    },
+                    match range.upper {
+                        Bound::BeforeAll => {
+                            return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record>>
+                        }
+                        Bound::Before(k) => std::ops::Bound::Excluded(k.to_vec()),
+                        Bound::After(k) => std::ops::Bound::Included(k.to_vec()),
+                        Bound::AfterPrefix(k) => std::ops::Bound::Excluded(
+                            k.iter()
+                                .cloned()
+                                .chain(
+                                    (0..std::cmp::max(0, self.max_key_len - k.len()))
+                                        .map(|_| 0xFFu8),
+                                )
+                                .collect(),
+                        ),
+                        Bound::AfterAll => std::ops::Bound::Unbounded,
+                    },
+                ))
+                .filter_map(move |(key, versions)| {
+                    let (record_ts, value) = versions.range(0..=ts).next_back()?;
+                    Some(Record {
+                        key: key.clone(),
+                        ts: *record_ts,
+                        value: value.clone(),
+                    })
+                }),
+        ) as Box<dyn Iterator<Item = Record>>
     }
 
     fn into_iter(self) -> impl Iterator<Item = (Vec<u8>, u64, Value)> {
