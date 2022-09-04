@@ -78,22 +78,53 @@ impl Lsm {
             todo!();
         }
 
-        let streams = Vec::with_capacity(self.levels.len());
-        for level in self.levels {
-            let start_idx = binary_search_by_idx(level.runs.len(), range.lower, |idx| {
-                Bound::Before(&level.runs[idx].range().unwrap().0)
-            })
+        let mut streams = Vec::with_capacity(self.levels.len());
+        for level in &self.levels {
+            let start_idx = binary_search_by_idx(
+                level.runs.len(),
+                range.lower.clone().map(Vec::from),
+                |idx| Bound::Before(level.runs[idx].range().unwrap().0),
+            )
             .unwrap_or_else(core::convert::identity);
-            let end_idx = binary_search_by_idx(level.runs.len(), range.lower, |idx| {
-                Bound::After(&level.runs[idx].range().unwrap().1)
-            })
+            let end_idx = binary_search_by_idx(
+                level.runs.len(),
+                range.upper.clone().map(Vec::from),
+                |idx| Bound::After(level.runs[idx].range().unwrap().1),
+            )
             .unwrap_or_else(core::convert::identity);
 
-            level.runs[start_idx..=end_idx]
-                .iter()
-                .map(|run| run.scan(ts, range, direction));
+            streams.push(
+                futures::stream::iter(level.runs[start_idx..=end_idx].iter())
+                    .map(|run| run.scan(ts, range.to_vec(), direction))
+                    .flatten()
+                    .boxed_local(),
+            );
         }
-        todo!();
+        let mut merged = merge_sorted_streams(streams).peekable().boxed_local();
+        let mut page = vec![];
+        while let Some(record) = merged.next().await.transpose()? {
+            if let Some(Record { key: last_key, .. }) = page.last() {
+                if last_key == &record.key {
+                    continue;
+                }
+            }
+            if let Value::Tombstone = record.value {
+                continue;
+            }
+            page.push(record);
+            if page.len() == limit {
+                break;
+            }
+        }
+
+        let continue_cursor = match page.last() {
+            Some(Record { key: last_key, .. }) => Some(Range {
+                lower: Bound::After(last_key.clone()),
+                upper: range.upper.clone().map(Vec::from),
+            }),
+            None => None,
+        };
+        Ok((page, continue_cursor))
     }
 
     async fn put(&mut self, k: Vec<u8>, v: Vec<u8>) -> anyhow::Result<u64> {
@@ -690,7 +721,23 @@ struct Record {
     value: Value,
 }
 
-#[derive(Eq, PartialEq)]
+impl PartialOrd for Record {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Record {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.key.cmp(&other.key) {
+            Ordering::Equal => {}
+            ord => return ord,
+        }
+        self.ts.cmp(&other.ts).reverse()
+    }
+}
+
+#[derive(Eq, PartialEq, Copy, Clone)]
 enum Direction {
     Asc,
     Desc,
@@ -1068,7 +1115,7 @@ impl<R: AsyncReadExactAt> Run<R> {
         block.get(ts, k).await
     }
 
-    async fn scan(
+    fn scan(
         &self,
         ts: u64,
         range: Range<Vec<u8>>,

@@ -167,8 +167,8 @@ impl<K: Ord + HasPrefix> PartialOrd for KeyOrBound<K> {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub struct Range<K: Ord + HasPrefix> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Range<K> {
     pub lower: Bound<K>,
     pub upper: Bound<K>,
 }
@@ -227,6 +227,15 @@ impl<K: Ord + HasPrefix + Clone> Range<K> {
 
     pub fn adjacent(&self, other: &Range<K>) -> bool {
         self.lower == other.upper || self.upper == other.lower
+    }
+}
+
+impl<K: Clone> Range<&[K]> {
+    pub fn to_vec(&self) -> Range<Vec<K>> {
+        Range {
+            lower: self.lower.clone().map(Vec::from),
+            upper: self.upper.clone().map(Vec::from),
+        }
     }
 }
 
