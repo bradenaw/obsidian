@@ -31,19 +31,58 @@ use range::Bound;
 use range::KeyOrBound;
 use range::Range;
 
+struct LsmBuilder {
+    l0_max_size: u64,
+    run_target_size: u64,
+    block_size: u64,
+}
+
+impl LsmBuilder {
+    fn new() -> Self {
+        LsmBuilder {
+            l0_max_size: 8_000_000,
+            run_target_size: 64_000_000,
+            block_size: 32768,
+        }
+    }
+
+    fn l0_max_size(mut self, x: u64) -> Self {
+        self.l0_max_size = x;
+        self
+    }
+
+    fn run_target_size(mut self, x: u64) -> Self {
+        self.run_target_size = x;
+        self
+    }
+
+    fn block_size(mut self, x: u64) -> Self {
+        self.block_size = x;
+        self
+    }
+
+    fn build(self) -> Lsm {
+        Lsm::new(self.l0_max_size, self.run_target_size, self.block_size)
+    }
+}
+
 struct Lsm {
     last_ts: u64,
     l0: Memtable,
-    l0_max_size: usize,
+    l0_max_size: u64,
+    run_target_size: u64,
+    block_size: u64,
     // levels[0] is empty and unused, to make the naming easier.
     levels: Vec<Level>,
 }
 
 impl Lsm {
-    fn new() -> Self {
+    fn new(l0_max_size: u64, run_target_size: u64, block_size: u64) -> Self {
         Self {
             last_ts: 0,
-            l0_max_size: 64,
+            l0_max_size,
+            run_target_size,
+            block_size,
             l0: Memtable::new(),
             levels: (0..7).map(|_| Level::new()).collect(),
         }
@@ -141,11 +180,11 @@ impl Lsm {
         );
         self.last_ts = ts;
         self.l0.put(k, ts, v);
-        if self.l0.size() > self.l0_max_size {
+        if self.l0.size() as u64 > self.l0_max_size {
             self.compact_l0().await?;
 
             for i in 1..self.levels.len() - 1 {
-                if self.levels[i].size() <= self.l0_max_size * 10_usize.pow(i as u32) {
+                if self.levels[i].size() as u64 <= self.l0_max_size * 10_u64.pow(i as u32) {
                     break;
                 }
                 self.compact_from(i).await?;
@@ -224,26 +263,25 @@ impl Lsm {
         .boxed_local()
         .peekable();
 
-        const RUN_SIZE_TARGET: usize = 64 * 1024 * 1024;
-
+        let block_size = self.block_size;
         let mut runs = Vec::new();
         while let Some(_) = Pin::new(&mut sorted).peek().await {
-            let mut curr_size = 0;
+            let mut curr_size = 0u64;
             let (mut tx, rx) = futures::channel::mpsc::channel(1);
 
-            let run_handle = tokio::spawn(async {
+            let run_handle = tokio::spawn(async move {
                 let mut run_out = vec![];
-                Run::<()>::write(&mut run_out, 0, rx).await?;
+                Run::<()>::write(&mut run_out, 0, block_size, rx).await?;
                 Ok::<_, anyhow::Error>(run_out)
             });
 
             while let Some(record) = sorted.next().await.transpose()? {
-                let record_size = record.key.len() + 8 + record.value.len();
+                let record_size = (record.key.len() as u64) + 8 + (record.value.len() as u64);
                 curr_size += record_size;
                 let break_after = {
                     // All of the records for a single key need to end up in the same run, so once
                     // we've gone over the target size look for a break between keys.
-                    if curr_size > RUN_SIZE_TARGET {
+                    if curr_size > self.run_target_size {
                         if let Some(Ok(next_record)) = Pin::new(&mut sorted).peek().await {
                             if record.key != next_record.key {
                                 true
@@ -1005,13 +1043,13 @@ struct Run<R> {
 }
 
 const INDEX_BLOCK_HEADER_SIZE: usize = 28;
-const BLOCK_SIZE_LIMIT: usize = 32768;
 
 impl<R> Run<R> {
     // Assumes S is in (key, rev(ts)) order, and assumes termination at a reasonable size limit.
     async fn write<W: AsyncWrite + Unpin, S: Stream<Item = anyhow::Result<Record>>>(
         w: &mut W,
         keyspace_id: u32,
+        block_size_limit: u64,
         s: S,
     ) -> anyhow::Result<()> {
         async fn flush<W: AsyncWrite + Unpin>(
@@ -1042,7 +1080,7 @@ impl<R> Run<R> {
 
         let mut buffer: BTreeMap<Vec<u8>, Vec<(u64, Value)>> = BTreeMap::new();
         let mut bytes_written = 0;
-        let mut buffer_size = BLOCK_INDEX_HEADER_SIZE;
+        let mut buffer_size = BLOCK_INDEX_HEADER_SIZE as u64;
         let mut index: BTreeMap<Vec<u8>, u32> = BTreeMap::new();
         let mut min_ts = u64::MAX;
         let mut max_ts = 0;
@@ -1052,13 +1090,13 @@ impl<R> Run<R> {
                 let key_len = if buffer.contains_key(&record.key) {
                     0
                 } else {
-                    record.key.len() + 4
+                    (record.key.len() as u64) + 4
                 };
-                key_len + 10 + record.value.len()
+                (key_len as u64) + 10 + (record.value.len() as u64)
             };
 
             if !buffer.is_empty()
-                && buffer_size + record_size > BLOCK_SIZE_LIMIT
+                && buffer_size + record_size > block_size_limit
                 && !buffer.contains_key(&record.key)
             {
                 flush(w, &mut bytes_written, &mut index, &mut last_key, &buffer).await?;
@@ -1344,7 +1382,7 @@ mod test {
     use crate::hexlify;
     use crate::AsyncReadExactAt;
     use crate::Block;
-    use crate::Lsm;
+    use crate::LsmBuilder;
     use crate::Record;
     use crate::Run;
     use crate::Value;
@@ -1352,7 +1390,7 @@ mod test {
 
     #[tokio::test]
     async fn test_put_get() -> anyhow::Result<()> {
-        let mut lsm = Lsm::new();
+        let mut lsm = LsmBuilder::new().build();
         let k = b"abc";
         let not_k = b"def";
         let v = b"foo";
@@ -1369,7 +1407,7 @@ mod test {
 
     #[tokio::test]
     async fn test_compact_l0() -> anyhow::Result<()> {
-        let mut lsm = Lsm::new();
+        let mut lsm = LsmBuilder::new().l0_max_size(64).build();
         let mut map = BTreeMap::new();
         let mut last_ts = 0;
         let mut runs_in_l1 = 0;
@@ -1397,7 +1435,11 @@ mod test {
 
     #[tokio::test]
     async fn test_compact_l1() -> anyhow::Result<()> {
-        let mut lsm = Lsm::new();
+        let mut lsm = LsmBuilder::new()
+            .l0_max_size(64)
+            .run_target_size(1024)
+            .block_size(256)
+            .build();
         let mut map = BTreeMap::new();
         let mut last_ts = 0;
         let mut runs_in_l2 = 0;
@@ -1579,6 +1621,7 @@ mod test {
         Run::<()>::write(
             &mut v,
             1,
+            32768,
             futures::stream::iter(records.iter().map(|record| Ok(record.clone()))),
         )
         .await
@@ -1624,6 +1667,7 @@ mod test {
                 Run::<()>::write(
                     &mut v,
                     1,
+                    1024,
                     futures::stream::iter(records.iter().map(|record| Ok(record.clone()))),
                 ).await.unwrap();
 
