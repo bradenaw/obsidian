@@ -127,13 +127,11 @@ impl Lsm {
             futures::stream::iter(self.l0.scan_asc(ts, range.clone()).map(|record| Ok(record)))
                 .boxed_local(),
         );
-        //println!("scan range: {}", range_string(&range.to_vec()));
         for i in 1..self.levels.len() {
             let level = &self.levels[i];
             if level.runs.is_empty() {
                 continue;
             }
-            // XXX: appears to be an off-by-one here
             let start_idx = binary_search_by_idx(
                 level.runs.len(),
                 range.lower.clone().map(Vec::from),
@@ -152,19 +150,6 @@ impl Lsm {
                     idx
                 }
             });
-
-            //for (j, run) in level.runs.iter().enumerate() {
-            //    let run_range = run.range().unwrap();
-            //    println!(
-            //        "  {} {}: {} {}",
-            //        i,
-            //        j,
-            //        hexlify(&run_range.0),
-            //        hexlify(&run_range.1)
-            //    );
-            //}
-            //println!("start_idx = {}", start_idx);
-            //println!("end_idx = {}", end_idx);
 
             if end_idx < start_idx {
                 continue;
@@ -239,7 +224,6 @@ impl Lsm {
             // l0 is empty, nothing to do
             None => return Ok(()),
         };
-        //println!("compact_l0()");
 
         let l0 = std::mem::take(&mut self.l0);
 
@@ -262,7 +246,6 @@ impl Lsm {
         if self.levels[level].runs.is_empty() {
             return Ok(());
         }
-        //println!("compact_from({})", level);
         let idx = rand::thread_rng().gen_range(0..self.levels[level].runs.len());
         let run = self.levels[level].runs.remove(idx);
         let (min_key, max_key) = match run.range() {
@@ -280,17 +263,7 @@ impl Lsm {
         max_key: Vec<u8>,
         entries: impl Stream<Item = anyhow::Result<Record>>,
     ) -> anyhow::Result<()> {
-        //self.dump();
-
-        //println!("min_key = [{}]", hexlify(&min_key));
-        //println!("max_key = [{}]", hexlify(&max_key));
         let overlapping_runs = self.levels[into_level].take_overlapping_runs(min_key, max_key);
-        //println!("n_overlapping_runs = {}", overlapping_runs.len());
-        //println!("overlapping_runs");
-        //for run in &overlapping_runs {
-        //    let (lower, upper) = run.range().unwrap();
-        //    println!("  [{}] [{}]", hexlify(&lower), hexlify(&upper));
-        //}
 
         let existing_iter =
             futures::stream::iter(overlapping_runs.into_iter().map(|run| run.into_stream()))
@@ -311,16 +284,6 @@ impl Lsm {
         ])
         .map(|result| {
             result.map(|OrdEqByFirst((key, Reverse(ts)), value)| Record { key, ts, value })
-        })
-        .inspect(|maybe_record| {
-            //if let Ok(record) = maybe_record {
-            //    println!(
-            //        "[{}] @ {}: {}",
-            //        hexlify(&record.key[..]),
-            //        record.ts,
-            //        value_string(&record.value),
-            //    );
-            //}
         })
         .boxed_local()
         .peekable();
@@ -369,9 +332,6 @@ impl Lsm {
         }
 
         self.levels[into_level].add_all(runs);
-
-        //println!("after compaction");
-        //self.dump();
 
         for run in &self.levels[into_level].runs {
             let (min_key, max_key) = run.range().unwrap();
@@ -510,11 +470,6 @@ impl Memtable {
             _ => {}
         }
 
-        //println!(
-        //    "Memtable::scan_asc {} -> {:?}",
-        //    range_string(&range.to_vec()),
-        //    range_bounds
-        //);
         Box::new(
             self.kvs
                 .range(range_bounds)
@@ -682,19 +637,6 @@ impl<'a, R> Block<'a, R> {
     //
     // Returns the encoded block and the offset of the header within the block.
     pub fn encode(kvs: &BTreeMap<Vec<u8>, Vec<(u64, Value)>>) -> anyhow::Result<(Vec<u8>, usize)> {
-        // println!("== Block::encode ====");
-        // for (key, versions) in kvs {
-        //     for (ts, value) in versions {
-        //         println!(
-        //             "Block::encode [{}]@{}: {}",
-        //             hexlify(&key[..]),
-        //             ts,
-        //             value_string(&value),
-        //         );
-        //     }
-        // }
-        // println!("======");
-
         let (min_ts, max_ts, values_len) = kvs
             .values()
             .map(|versions| {
@@ -1183,7 +1125,6 @@ impl<R> Run<R> {
             last_key: &mut Vec<u8>,
             buffer: &BTreeMap<Vec<u8>, Vec<(u64, Value)>>,
         ) -> anyhow::Result<()> {
-            //println!("flush()");
             let (first_key, last_key_) = match (buffer.first_key_value(), buffer.last_key_value()) {
                 (Some((first_key, _)), Some((last_key, _))) => (first_key, last_key),
                 _ => anyhow::bail!("empty block"),
@@ -1229,12 +1170,6 @@ impl<R> Run<R> {
                 buffer_size = 0;
             }
 
-            //println!(
-            //    "Run::write buffer [{}]@{}: {}",
-            //    hexlify(&record.key[..]),
-            //    record.ts,
-            //    value_string(&record.value),
-            //);
             if let Some(prev_record) = buffer
                 .get(&record.key)
                 .map(|versions| versions.last())
@@ -1657,53 +1592,6 @@ mod test {
 
         let block = Block::open(&encoded, header_offset as u64).await?;
 
-        //println!("encoded  = {}", hexlify(&encoded[..]));
-        //println!(
-        //    "header   = {}",
-        //    hexlify(&encoded[header_offset..header_offset + BLOCK_INDEX_HEADER_SIZE])
-        //);
-        // println!(
-        //     "index    = {}",
-        //     hexlify(
-        //         &encoded[header_offset + BLOCK_INDEX_HEADER_SIZE
-        //             ..header_offset + BLOCK_INDEX_HEADER_SIZE + block.index_len]
-        //     ),
-        // );
-        //println!("versions = {}", hexlify(&block.versions_bytes));
-        //println!("prefix = {}", hexlify(block.index.prefix()));
-        //println!("n_versions = {}", block.n_versions);
-        //let versions = block.versions();
-        //for i in 0..block.n_versions {
-        //    let value_str = match versions.value_offsets(i) {
-        //        Some((value_start, value_end)) => format!("({}, {})", value_start, value_end),
-        //        None => "<TOMBSTONE>".into(),
-        //    };
-        //    println!("  {} {} {}", i, versions.ts(i), value_str);
-        //}
-        //println!("n_keys = {}", block.index.len());
-        //for i in 0..block.index.len() {
-        //    println!(
-        //        "  {} {} {}",
-        //        i,
-        //        hexlify(&block.index.get_key(i)),
-        //        block.index.get_value(i)
-        //    );
-        //    //let key_versions = block.versions_for_key(i);
-        //    //println!(
-        //    //    "  {} {}  {} versions",
-        //    //    i,
-        //    //    hexlify(&block.index.get_key(i)),
-        //    //    key_versions.len()
-        //    //);
-        //    //for j in 0..key_versions.len() {
-        //    //    let value_str = match key_versions.value_offsets(j) {
-        //    //        Some((value_start, value_end)) => format!("({}, {})", value_start, value_end),
-        //    //        None => "<TOMBSTONE>".into(),
-        //    //    };
-        //    //    println!("    {} {} {}", j, key_versions.ts(j), value_str);
-        //    //}
-        //}
-
         assert_eq!(block.get(279, &aa[..]).await?, Some((279, aa_279.clone())));
         assert_eq!(block.get(265, &aa[..]).await?, Some((265, aa_265.clone())));
         assert_eq!(block.get(123, &aa[..]).await?, None);
@@ -1838,7 +1726,6 @@ mod test {
                 dump_run_file(&run).await.unwrap();
 
                 for record in &records {
-                    println!("get({}, [{}])", record.ts, hexlify(&record.key[..]));
                     assert_eq!(
                         run.get(record.ts, &record.key[..]).await.unwrap(),
                         Some((record.ts, record.value.clone())),
@@ -1883,8 +1770,6 @@ mod test {
                     BigEndian::write_u64(&mut value[8..], i as u64);
                     let ts = lsm.put(key.clone(), value.clone()).await.unwrap();
                     writes.push((key.clone(), ts, value.clone()));
-
-                    //println!("[{}] @ {}: [{}]", hexlify(&key), ts, hexlify(&value));
                 }
 
                 for (log_index_gen, range) in std::iter::zip(log_indexes, ranges) {
@@ -1912,36 +1797,7 @@ mod test {
                         Record{key: key.clone(), ts: *ts, value: Value::Regular(value.clone())}
                     }).collect();
 
-                    if results != expected_recs {
-                        println!("scan({}, {})", ts, range_string(&range));
-                        println!("results ====");
-                        for record in &results {
-                            println!("  {}", record_string(&record));
-                        }
-                        println!("");
-                        println!("expected ===");
-                        for record in &expected_recs {
-                            println!("  {}", record_string(&record));
-                        }
-
-                        println!("");
-                        println!("lsm ========");
-                        println!("l0");
-                        for (key, versions) in &lsm.l0.kvs {
-                            for (ts, value) in versions {
-                                println!("[{}] @ {}: [{}]", hexlify(&key), ts, value_string(&value));
-                            }
-                        }
-                        for i in 1..lsm.levels.len() {
-                            println!("l{}", i);
-                            for (j, run) in lsm.levels[i].runs.iter().enumerate() {
-                                println!("  run {}", j);
-                                dump_run_file(&run).await.unwrap();
-                            }
-                        }
-                        panic!();
-                    }
-                    //assert_eq!(results, expected_recs);
+                    assert_eq!(results, expected_recs);
                 }
             });
         }
