@@ -345,28 +345,6 @@ impl Lsm {
 
         Ok(())
     }
-
-    fn dump(&self) {
-        println!("== lsm =====");
-        match self.l0.range() {
-            Some((lower, upper)) => {
-                println!("l0 [{}] [{}]", hexlify(&lower), hexlify(&upper));
-            }
-            None => println!("l0 empty"),
-        }
-        for (i, level) in self.levels[1..]
-            .iter()
-            .enumerate()
-            .map(|(i, level)| (i + 1, level))
-        {
-            println!("l{}", i);
-            for run in &level.runs {
-                let (lower, upper) = run.range().unwrap();
-                println!("  run [{}] [{}]", hexlify(&lower), hexlify(&upper));
-            }
-        }
-        println!("============");
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1460,12 +1438,10 @@ mod test {
     use crate::hexlify;
     use crate::range::Bound;
     use crate::range::Range;
-    use crate::range_string;
-    use crate::record_string;
-    use crate::value_string;
     use crate::AsyncReadExactAt;
     use crate::Block;
     use crate::Direction;
+    use crate::Lsm;
     use crate::LsmBuilder;
     use crate::Record;
     use crate::Run;
@@ -1847,6 +1823,28 @@ mod test {
             println!("        {} {} {}", i, versions.ts(i), value_str);
         }
         Ok(())
+    }
+
+    fn dump_lsm_runs(lsm: &Lsm) {
+        println!("== lsm =====");
+        match lsm.l0.range() {
+            Some((lower, upper)) => {
+                println!("l0 [{}] [{}]", hexlify(&lower), hexlify(&upper));
+            }
+            None => println!("l0 empty"),
+        }
+        for (i, level) in lsm.levels[1..]
+            .iter()
+            .enumerate()
+            .map(|(i, level)| (i + 1, level))
+        {
+            println!("l{}", i);
+            for run in &level.runs {
+                let (lower, upper) = run.range().unwrap();
+                println!("  run [{}] [{}]", hexlify(&lower), hexlify(&upper));
+            }
+        }
+        println!("============");
     }
 }
 
