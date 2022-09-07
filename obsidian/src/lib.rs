@@ -114,6 +114,10 @@ impl Lsm {
         direction: Direction,
         limit: usize,
     ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
+        if range.is_empty() {
+            return Ok((vec![], None));
+        }
+
         if direction == Direction::Desc {
             todo!();
         }
@@ -159,6 +163,10 @@ impl Lsm {
             //println!("start_idx = {}", start_idx);
             //println!("end_idx = {}", end_idx);
 
+            if end_idx < start_idx {
+                continue;
+            }
+
             streams.push(
                 futures::stream::iter(level.runs[start_idx..=end_idx].iter())
                     .map(|run| run.scan(ts, range.to_vec(), direction))
@@ -169,8 +177,14 @@ impl Lsm {
         let mut merged = merge_sorted_streams(streams).peekable().boxed_local();
         let mut page = vec![];
         while let Some(record) = merged.next().await.transpose()? {
-            if let Some(Record { key: last_key, .. }) = page.last() {
+            if let Some(Record {
+                key: last_key,
+                ts: last_ts,
+                ..
+            }) = page.last()
+            {
                 if last_key == &record.key {
+                    assert!(*last_ts > record.ts);
                     continue;
                 }
             }
@@ -1332,7 +1346,7 @@ impl<R: AsyncReadExactAt> Run<R> {
             )
             .unwrap_or_else(|idx| if idx != 0 { idx - 1 } else { idx });
 
-            for i in lower_block_idx..self.index.len() {
+            'outer: for i in lower_block_idx..self.index.len() {
                 let block_header_offset = self.index.get_value(i);
                 let block = Block::open(&self.r, block_header_offset as u64).await?;
                 let lower_key_idx = if i == lower_block_idx {
@@ -1348,6 +1362,9 @@ impl<R: AsyncReadExactAt> Run<R> {
 
                 for j in lower_key_idx..block.index.len() {
                     let key = block.index.get_key(j);
+                    if !range.contains(&key) {
+                        break 'outer;
+                    }
 
                     let versions = block.versions_for_key(j);
                     let version_idx = binary_search_by_idx(versions.len(), Reverse(ts), |idx| {
@@ -1479,6 +1496,8 @@ mod test {
     use std::cmp::Reverse;
     use std::collections::BTreeMap;
 
+    use byteorder::BigEndian;
+    use byteorder::ByteOrder;
     use futures::stream::StreamExt;
     use proptest::prelude::*;
 
@@ -1487,6 +1506,7 @@ mod test {
     use crate::range::Bound;
     use crate::range::Range;
     use crate::range_string;
+    use crate::record_string;
     use crate::AsyncReadExactAt;
     use crate::Block;
     use crate::Direction;
@@ -1836,9 +1856,10 @@ mod test {
                     .block_size(128)
                     .run_target_size(512)
                     .build();
-                for index in &write_indexes {
+                for (i, index) in write_indexes.iter().enumerate() {
                     let key = keys_vec[index.index(keys_vec.len())];
-                    let value = vec![0; 16];
+                    let mut value = vec![0; 16];
+                    BigEndian::write_u64(&mut value[8..], i as u64);
                     let ts = lsm.put(key.clone(), value.clone()).await.unwrap();
                     writes.push((key.clone(), ts, value.clone()));
 
@@ -1857,7 +1878,7 @@ mod test {
                         expected.insert(key, (ts, value));
                     }
 
-                    println!("scan({})", range_string(&range));
+                    println!("scan({}, {})", ts, range_string(&range));
 
                     let mut maybe_cursor = Some(range);
                     let mut results = vec![];
@@ -1867,9 +1888,21 @@ mod test {
                         maybe_cursor = continue_cursor;
                     }
 
-                    assert_eq!(results, expected.into_iter().map(|(key, (ts, value))| {
+                    let expected_recs: Vec<Record> = expected.into_iter().map(|(key, (ts, value))| {
                         Record{key: key.clone(), ts: *ts, value: Value::Regular(value.clone())}
-                    }).collect::<Vec<Record>>());
+                    }).collect();
+
+                    println!("results ====");
+                    for record in &results {
+                        println!("  {}", record_string(&record));
+                    }
+                    println!("");
+                    println!("expected ===");
+                    for record in &expected_recs {
+                        println!("  {}", record_string(&record));
+                    }
+
+                    assert_eq!(results, expected_recs);
                 }
             });
         }
@@ -1922,6 +1955,14 @@ mod test {
     }
 }
 
+fn record_string(r: &Record) -> String {
+    format!(
+        "[{}] @ {}: {}",
+        hexlify(&r.key),
+        r.ts,
+        value_string(&r.value)
+    )
+}
 fn value_string(v: &Value) -> String {
     match v {
         Value::Regular(v) => format!("[{}]", hexlify(v)),
