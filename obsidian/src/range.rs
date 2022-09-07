@@ -40,6 +40,18 @@ impl<K> Bound<K> {
     }
 }
 
+impl<K> Bound<Vec<K>> {
+    pub fn borrow(&self) -> Bound<&[K]> {
+        match self {
+            Bound::BeforeAll => Bound::BeforeAll,
+            Bound::Before(v) => Bound::Before(&v[..]),
+            Bound::After(v) => Bound::After(&v[..]),
+            Bound::AfterPrefix(v) => Bound::AfterPrefix(&v[..]),
+            Bound::AfterAll => Bound::AfterAll,
+        }
+    }
+}
+
 impl<K: Ord + HasPrefix> Bound<K> {
     pub fn cmp_key(&self, other: &K) -> Ordering {
         match self {
@@ -235,6 +247,15 @@ impl<K: Clone> Range<&[K]> {
         Range {
             lower: self.lower.clone().map(Vec::from),
             upper: self.upper.clone().map(Vec::from),
+        }
+    }
+}
+
+impl<K> Range<Vec<K>> {
+    pub fn borrow(&self) -> Range<&[K]> {
+        Range {
+            lower: self.lower.borrow(),
+            upper: self.upper.borrow(),
         }
     }
 }
@@ -612,6 +633,16 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_range_contains() {
+        let empty: Vec<u8> = vec![];
+        assert!(!Range {
+            lower: Bound::BeforeAll,
+            upper: Bound::BeforeAll,
+        }
+        .contains(&empty));
     }
 
     fn range_set_intersection(

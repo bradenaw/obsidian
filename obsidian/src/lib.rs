@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 #![feature(map_first_last)]
+#![feature(is_sorted)]
 
 use std::cmp::Ordering;
 use std::cmp::Reverse;
@@ -123,6 +124,9 @@ impl Lsm {
                 .boxed_local(),
         );
         for level in &self.levels[1..] {
+            if level.runs.is_empty() {
+                continue;
+            }
             let start_idx = binary_search_by_idx(
                 level.runs.len(),
                 range.lower.clone().map(Vec::from),
@@ -134,7 +138,26 @@ impl Lsm {
                 range.upper.clone().map(Vec::from),
                 |idx| Bound::After(level.runs[idx].range().unwrap().1),
             )
-            .unwrap_or_else(core::convert::identity);
+            .unwrap_or_else(|idx| {
+                if idx == level.runs.len() {
+                    idx - 1
+                } else {
+                    idx
+                }
+            });
+
+            //println!("scan range: {}", range_string(&range.to_vec()));
+            //for (i, run) in level.runs.iter().enumerate() {
+            //    let run_range = run.range().unwrap();
+            //    println!(
+            //        "  {}: {} {}",
+            //        i,
+            //        hexlify(&run_range.0),
+            //        hexlify(&run_range.1)
+            //    );
+            //}
+            //println!("start_idx = {}", start_idx);
+            //println!("end_idx = {}", end_idx);
 
             streams.push(
                 futures::stream::iter(level.runs[start_idx..=end_idx].iter())
@@ -199,6 +222,7 @@ impl Lsm {
             // l0 is empty, nothing to do
             None => return Ok(()),
         };
+        //println!("compact_l0()");
 
         let l0 = std::mem::take(&mut self.l0);
 
@@ -221,6 +245,7 @@ impl Lsm {
         if self.levels[level].runs.is_empty() {
             return Ok(());
         }
+        //println!("compact_from({})", level);
         let idx = rand::thread_rng().gen_range(0..self.levels[level].runs.len());
         let run = self.levels[level].runs.remove(idx);
         let (min_key, max_key) = match run.range() {
@@ -238,7 +263,17 @@ impl Lsm {
         max_key: Vec<u8>,
         entries: impl Stream<Item = anyhow::Result<Record>>,
     ) -> anyhow::Result<()> {
+        //self.dump();
+
+        //println!("min_key = [{}]", hexlify(&min_key));
+        //println!("max_key = [{}]", hexlify(&max_key));
         let overlapping_runs = self.levels[into_level].take_overlapping_runs(min_key, max_key);
+        //println!("n_overlapping_runs = {}", overlapping_runs.len());
+        //println!("overlapping_runs");
+        //for run in &overlapping_runs {
+        //    let (lower, upper) = run.range().unwrap();
+        //    println!("  [{}] [{}]", hexlify(&lower), hexlify(&upper));
+        //}
 
         let existing_iter =
             futures::stream::iter(overlapping_runs.into_iter().map(|run| run.into_stream()))
@@ -259,6 +294,16 @@ impl Lsm {
         ])
         .map(|result| {
             result.map(|OrdEqByFirst((key, Reverse(ts)), value)| Record { key, ts, value })
+        })
+        .inspect(|maybe_record| {
+            //if let Ok(record) = maybe_record {
+            //    println!(
+            //        "[{}] @ {}: {}",
+            //        hexlify(&record.key[..]),
+            //        record.ts,
+            //        value_string(&record.value),
+            //    );
+            //}
         })
         .boxed_local()
         .peekable();
@@ -308,7 +353,42 @@ impl Lsm {
 
         self.levels[into_level].add_all(runs);
 
+        //println!("after compaction");
+        //self.dump();
+
+        for run in &self.levels[into_level].runs {
+            let (min_key, max_key) = run.range().unwrap();
+            assert!(min_key <= max_key);
+        }
+        for window in self.levels[into_level].runs.windows(2) {
+            let a = &window[0];
+            let b = &window[1];
+            assert!(a.range().unwrap().1 < b.range().unwrap().0);
+        }
+
         Ok(())
+    }
+
+    fn dump(&self) {
+        println!("== lsm =====");
+        match self.l0.range() {
+            Some((lower, upper)) => {
+                println!("l0 [{}] [{}]", hexlify(&lower), hexlify(&upper));
+            }
+            None => println!("l0 empty"),
+        }
+        for (i, level) in self.levels[1..]
+            .iter()
+            .enumerate()
+            .map(|(i, level)| (i + 1, level))
+        {
+            println!("l{}", i);
+            for run in &level.runs {
+                let (lower, upper) = run.range().unwrap();
+                println!("  run [{}] [{}]", hexlify(&lower), hexlify(&upper));
+            }
+        }
+        println!("============");
     }
 }
 
@@ -379,8 +459,7 @@ impl Memtable {
                             k.iter()
                                 .cloned()
                                 .chain(
-                                    (0..std::cmp::max(0, self.max_key_len - k.len()))
-                                        .map(|_| 0xFFu8),
+                                    (0..self.max_key_len.saturating_sub(k.len())).map(|_| 0xFFu8),
                                 )
                                 .collect(),
                         ),
@@ -398,8 +477,7 @@ impl Memtable {
                             k.iter()
                                 .cloned()
                                 .chain(
-                                    (0..std::cmp::max(0, self.max_key_len - k.len()))
-                                        .map(|_| 0xFFu8),
+                                    (0..self.max_key_len.saturating_sub(k.len())).map(|_| 0xFFu8),
                                 )
                                 .collect(),
                         ),
@@ -423,6 +501,7 @@ impl Memtable {
             .map(|(key, entries)| {
                 entries
                     .into_iter()
+                    .rev()
                     .map(move |(ts, value)| (key.clone(), ts, value))
             })
             .flatten()
@@ -464,21 +543,19 @@ impl Level {
     }
 
     fn take_overlapping_runs(&mut self, min_key: Vec<u8>, max_key: Vec<u8>) -> Vec<Run<Vec<u8>>> {
-        let start_idx = match self
+        let start_idx = self
             .runs
             .binary_search_by_key(&min_key, |run| run.range().unwrap().1)
-        {
-            Ok(idx) => idx,
-            Err(idx) => idx,
-        };
+            .unwrap_or_else(core::convert::identity);
 
         let end_idx = match self
             .runs
             .binary_search_by_key(&max_key, |run| run.range().unwrap().0)
         {
-            Ok(idx) => idx,
+            Ok(idx) => idx + 1,
             Err(idx) => idx,
         };
+
         self.runs.drain(start_idx..end_idx).collect()
     }
 
@@ -571,6 +648,19 @@ impl<'a, R> Block<'a, R> {
     //
     // Returns the encoded block and the offset of the header within the block.
     pub fn encode(kvs: &BTreeMap<Vec<u8>, Vec<(u64, Value)>>) -> anyhow::Result<(Vec<u8>, usize)> {
+        // println!("== Block::encode ====");
+        // for (key, versions) in kvs {
+        //     for (ts, value) in versions {
+        //         println!(
+        //             "Block::encode [{}]@{}: {}",
+        //             hexlify(&key[..]),
+        //             ts,
+        //             value_string(&value),
+        //         );
+        //     }
+        // }
+        // println!("======");
+
         let (min_ts, max_ts, values_len) = kvs
             .values()
             .map(|versions| {
@@ -1059,6 +1149,7 @@ impl<R> Run<R> {
             last_key: &mut Vec<u8>,
             buffer: &BTreeMap<Vec<u8>, Vec<(u64, Value)>>,
         ) -> anyhow::Result<()> {
+            //println!("flush()");
             let (first_key, last_key_) = match (buffer.first_key_value(), buffer.last_key_value()) {
                 (Some((first_key, _)), Some((last_key, _))) => (first_key, last_key),
                 _ => anyhow::bail!("empty block"),
@@ -1104,6 +1195,19 @@ impl<R> Run<R> {
                 buffer_size = 0;
             }
 
+            //println!(
+            //    "Run::write buffer [{}]@{}: {}",
+            //    hexlify(&record.key[..]),
+            //    record.ts,
+            //    value_string(&record.value),
+            //);
+            if let Some(prev_record) = buffer
+                .get(&record.key)
+                .map(|versions| versions.last())
+                .flatten()
+            {
+                assert!(prev_record.0 > record.ts);
+            }
             buffer
                 .entry(record.key)
                 .or_insert_with(Vec::new)
@@ -1380,13 +1484,16 @@ mod test {
 
     use crate::binary_search_by_idx;
     use crate::hexlify;
+    use crate::range::Bound;
+    use crate::range::Range;
+    use crate::range_string;
     use crate::AsyncReadExactAt;
     use crate::Block;
+    use crate::Direction;
     use crate::LsmBuilder;
     use crate::Record;
     use crate::Run;
     use crate::Value;
-    use crate::BLOCK_INDEX_HEADER_SIZE;
 
     #[tokio::test]
     async fn test_put_get() -> anyhow::Result<()> {
@@ -1509,11 +1616,11 @@ mod test {
 
         let block = Block::open(&encoded, header_offset as u64).await?;
 
-        println!("encoded  = {}", hexlify(&encoded[..]));
-        println!(
-            "header   = {}",
-            hexlify(&encoded[header_offset..header_offset + BLOCK_INDEX_HEADER_SIZE])
-        );
+        //println!("encoded  = {}", hexlify(&encoded[..]));
+        //println!(
+        //    "header   = {}",
+        //    hexlify(&encoded[header_offset..header_offset + BLOCK_INDEX_HEADER_SIZE])
+        //);
         // println!(
         //     "index    = {}",
         //     hexlify(
@@ -1521,17 +1628,17 @@ mod test {
         //             ..header_offset + BLOCK_INDEX_HEADER_SIZE + block.index_len]
         //     ),
         // );
-        println!("versions = {}", hexlify(&block.versions_bytes));
-        println!("prefix = {}", hexlify(block.index.prefix()));
-        println!("n_versions = {}", block.n_versions);
-        let versions = block.versions();
-        for i in 0..block.n_versions {
-            let value_str = match versions.value_offsets(i) {
-                Some((value_start, value_end)) => format!("({}, {})", value_start, value_end),
-                None => "<TOMBSTONE>".into(),
-            };
-            println!("  {} {} {}", i, versions.ts(i), value_str);
-        }
+        //println!("versions = {}", hexlify(&block.versions_bytes));
+        //println!("prefix = {}", hexlify(block.index.prefix()));
+        //println!("n_versions = {}", block.n_versions);
+        //let versions = block.versions();
+        //for i in 0..block.n_versions {
+        //    let value_str = match versions.value_offsets(i) {
+        //        Some((value_start, value_end)) => format!("({}, {})", value_start, value_end),
+        //        None => "<TOMBSTONE>".into(),
+        //    };
+        //    println!("  {} {} {}", i, versions.ts(i), value_str);
+        //}
         //println!("n_keys = {}", block.index.len());
         //for i in 0..block.index.len() {
         //    println!(
@@ -1645,6 +1752,19 @@ mod test {
         Ok(())
     }
 
+    fn bound_strategy() -> impl Strategy<Value = Bound<Vec<u8>>> {
+        prop_oneof![
+            Just(Bound::BeforeAll),
+            proptest::collection::vec(u8::arbitrary(), 0..16).prop_map(|v| Bound::Before(v)),
+            proptest::collection::vec(u8::arbitrary(), 0..16).prop_map(|v| Bound::After(v)),
+            proptest::collection::vec(u8::arbitrary(), 0..16).prop_map(|v| Bound::AfterPrefix(v)),
+            Just(Bound::AfterAll),
+        ]
+    }
+    fn range_strategy() -> impl Strategy<Value = Range<Vec<u8>>> {
+        (bound_strategy(), bound_strategy()).prop_map(|(lower, upper)| Range { lower, upper })
+    }
+
     proptest! {
         #[test]
         fn proptest_run_file(m in proptest::collection::btree_map(
@@ -1693,6 +1813,64 @@ mod test {
                     .unwrap();
 
                 assert_eq!(streamed_out_records, records);
+            });
+        }
+
+        #[test]
+        fn proptest_lsm_scan(
+            keys in proptest::collection::btree_set(
+                proptest::collection::vec(u8::arbitrary(), 0..16),
+                1..100,
+            ),
+            write_indexes in proptest::collection::vec(any::<prop::sample::Index>(), 1..4096),
+            log_indexes in proptest::collection::vec(any::<prop::sample::Index>(), 1000),
+            ranges in proptest::collection::vec(range_strategy(), 1000),
+        ) {
+            tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
+                let keys_vec: Vec<_> = keys.iter().collect();
+
+                let mut writes = vec![];
+
+                let mut lsm = LsmBuilder::new()
+                    .l0_max_size(128)
+                    .block_size(128)
+                    .run_target_size(512)
+                    .build();
+                for index in &write_indexes {
+                    let key = keys_vec[index.index(keys_vec.len())];
+                    let value = vec![0; 16];
+                    let ts = lsm.put(key.clone(), value.clone()).await.unwrap();
+                    writes.push((key.clone(), ts, value.clone()));
+
+                    println!("[{}] @ {}: [{}]", hexlify(&key), ts, hexlify(&value));
+                }
+
+                for (log_index_gen, range) in std::iter::zip(log_indexes, ranges) {
+                    let log_idx = log_index_gen.index(writes.len());
+                    let ts = writes[log_idx].1;
+
+                    let mut expected = BTreeMap::new();
+                    for (key, ts, value) in writes[..=log_idx].iter() {
+                        if !range.contains(key) {
+                            continue;
+                        }
+                        expected.insert(key, (ts, value));
+                    }
+
+                    println!("scan({})", range_string(&range));
+
+                    let mut maybe_cursor = Some(range);
+                    let mut results = vec![];
+                    while let Some(cursor) = maybe_cursor {
+                        let (mut page, continue_cursor) = lsm.scan_page(ts, cursor.borrow(), Direction::Asc, 100).await.unwrap();
+                        results.append(&mut page);
+                        maybe_cursor = continue_cursor;
+                    }
+
+                    assert_eq!(results, expected.into_iter().map(|(key, (ts, value))| {
+                        Record{key: key.clone(), ts: *ts, value: Value::Regular(value.clone())}
+                    }).collect::<Vec<Record>>());
+                }
             });
         }
     }
@@ -1744,6 +1922,24 @@ mod test {
     }
 }
 
+fn value_string(v: &Value) -> String {
+    match v {
+        Value::Regular(v) => format!("[{}]", hexlify(v)),
+        Value::Tombstone => "<TOMBSTONE>".into(),
+    }
+}
+fn bound_string(b: &Bound<Vec<u8>>) -> String {
+    match b {
+        Bound::BeforeAll => "before_all".into(),
+        Bound::Before(v) => format!("before({})", hexlify(v)),
+        Bound::After(v) => format!("after({})", hexlify(v)),
+        Bound::AfterPrefix(v) => format!("after_prefix({})", hexlify(v)),
+        Bound::AfterAll => "after_all".into(),
+    }
+}
+fn range_string(r: &Range<Vec<u8>>) -> String {
+    format!("({}, {})", bound_string(&r.lower), bound_string(&r.upper))
+}
 fn hexlify(b: &[u8]) -> String {
     b.iter().map(|b| format!("{:02x}", b)).collect()
 }
