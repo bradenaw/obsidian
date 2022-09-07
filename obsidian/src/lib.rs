@@ -127,20 +127,23 @@ impl Lsm {
             futures::stream::iter(self.l0.scan_asc(ts, range.clone()).map(|record| Ok(record)))
                 .boxed_local(),
         );
-        for level in &self.levels[1..] {
+        //println!("scan range: {}", range_string(&range.to_vec()));
+        for i in 1..self.levels.len() {
+            let level = &self.levels[i];
             if level.runs.is_empty() {
                 continue;
             }
+            // XXX: appears to be an off-by-one here
             let start_idx = binary_search_by_idx(
                 level.runs.len(),
                 range.lower.clone().map(Vec::from),
-                |idx| Bound::Before(level.runs[idx].range().unwrap().0),
+                |idx| Bound::After(level.runs[idx].range().unwrap().1),
             )
             .unwrap_or_else(core::convert::identity);
             let end_idx = binary_search_by_idx(
                 level.runs.len(),
                 range.upper.clone().map(Vec::from),
-                |idx| Bound::After(level.runs[idx].range().unwrap().1),
+                |idx| Bound::Before(level.runs[idx].range().unwrap().0),
             )
             .unwrap_or_else(|idx| {
                 if idx == level.runs.len() {
@@ -150,12 +153,12 @@ impl Lsm {
                 }
             });
 
-            //println!("scan range: {}", range_string(&range.to_vec()));
-            //for (i, run) in level.runs.iter().enumerate() {
+            //for (j, run) in level.runs.iter().enumerate() {
             //    let run_range = run.range().unwrap();
             //    println!(
-            //        "  {}: {} {}",
+            //        "  {} {}: {} {}",
             //        i,
+            //        j,
             //        hexlify(&run_range.0),
             //        hexlify(&run_range.1)
             //    );
@@ -462,42 +465,59 @@ impl Memtable {
     }
 
     fn scan_asc(&self, ts: u64, range: Range<&[u8]>) -> impl Iterator<Item = Record> + '_ {
+        let range_bounds = (
+            match range.lower {
+                Bound::BeforeAll => std::ops::Bound::Unbounded,
+                Bound::Before(k) => std::ops::Bound::Included(k.to_vec()),
+                Bound::After(k) => std::ops::Bound::Excluded(k.to_vec()),
+                Bound::AfterPrefix(k) => std::ops::Bound::Excluded(
+                    k.iter()
+                        .cloned()
+                        .chain((0..self.max_key_len.saturating_sub(k.len())).map(|_| 0xFFu8))
+                        .collect(),
+                ),
+                Bound::AfterAll => {
+                    return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record>>
+                }
+            },
+            match range.upper {
+                Bound::BeforeAll => {
+                    return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record>>
+                }
+                Bound::Before(k) => std::ops::Bound::Excluded(k.to_vec()),
+                Bound::After(k) => std::ops::Bound::Included(k.to_vec()),
+                Bound::AfterPrefix(k) => std::ops::Bound::Excluded(
+                    k.iter()
+                        .cloned()
+                        .chain((0..self.max_key_len.saturating_sub(k.len())).map(|_| 0xFFu8))
+                        .collect(),
+                ),
+                Bound::AfterAll => std::ops::Bound::Unbounded,
+            },
+        );
+
+        // BTreeMap panics in these situations.
+        match (&range_bounds.0, &range_bounds.1) {
+            (std::ops::Bound::Excluded(s), std::ops::Bound::Excluded(e)) if s == e => {
+                return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record>>;
+            }
+            (
+                std::ops::Bound::Included(s) | std::ops::Bound::Excluded(s),
+                std::ops::Bound::Included(e) | std::ops::Bound::Excluded(e),
+            ) if s > e => {
+                return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record>>;
+            }
+            _ => {}
+        }
+
+        //println!(
+        //    "Memtable::scan_asc {} -> {:?}",
+        //    range_string(&range.to_vec()),
+        //    range_bounds
+        //);
         Box::new(
             self.kvs
-                .range((
-                    match range.lower {
-                        Bound::BeforeAll => std::ops::Bound::Unbounded,
-                        Bound::Before(k) => std::ops::Bound::Included(k.to_vec()),
-                        Bound::After(k) => std::ops::Bound::Excluded(k.to_vec()),
-                        Bound::AfterPrefix(k) => std::ops::Bound::Excluded(
-                            k.iter()
-                                .cloned()
-                                .chain(
-                                    (0..self.max_key_len.saturating_sub(k.len())).map(|_| 0xFFu8),
-                                )
-                                .collect(),
-                        ),
-                        Bound::AfterAll => {
-                            return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record>>
-                        }
-                    },
-                    match range.upper {
-                        Bound::BeforeAll => {
-                            return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record>>
-                        }
-                        Bound::Before(k) => std::ops::Bound::Excluded(k.to_vec()),
-                        Bound::After(k) => std::ops::Bound::Included(k.to_vec()),
-                        Bound::AfterPrefix(k) => std::ops::Bound::Excluded(
-                            k.iter()
-                                .cloned()
-                                .chain(
-                                    (0..self.max_key_len.saturating_sub(k.len())).map(|_| 0xFFu8),
-                                )
-                                .collect(),
-                        ),
-                        Bound::AfterAll => std::ops::Bound::Unbounded,
-                    },
-                ))
+                .range(range_bounds)
                 .filter_map(move |(key, versions)| {
                     let (record_ts, value) = versions.range(0..=ts).next_back()?;
                     Some(Record {
@@ -1507,6 +1527,7 @@ mod test {
     use crate::range::Range;
     use crate::range_string;
     use crate::record_string;
+    use crate::value_string;
     use crate::AsyncReadExactAt;
     use crate::Block;
     use crate::Direction;
@@ -1863,7 +1884,7 @@ mod test {
                     let ts = lsm.put(key.clone(), value.clone()).await.unwrap();
                     writes.push((key.clone(), ts, value.clone()));
 
-                    println!("[{}] @ {}: [{}]", hexlify(&key), ts, hexlify(&value));
+                    //println!("[{}] @ {}: [{}]", hexlify(&key), ts, hexlify(&value));
                 }
 
                 for (log_index_gen, range) in std::iter::zip(log_indexes, ranges) {
@@ -1878,9 +1899,8 @@ mod test {
                         expected.insert(key, (ts, value));
                     }
 
-                    println!("scan({}, {})", ts, range_string(&range));
 
-                    let mut maybe_cursor = Some(range);
+                    let mut maybe_cursor = Some(range.clone());
                     let mut results = vec![];
                     while let Some(cursor) = maybe_cursor {
                         let (mut page, continue_cursor) = lsm.scan_page(ts, cursor.borrow(), Direction::Asc, 100).await.unwrap();
@@ -1892,39 +1912,58 @@ mod test {
                         Record{key: key.clone(), ts: *ts, value: Value::Regular(value.clone())}
                     }).collect();
 
-                    println!("results ====");
-                    for record in &results {
-                        println!("  {}", record_string(&record));
-                    }
-                    println!("");
-                    println!("expected ===");
-                    for record in &expected_recs {
-                        println!("  {}", record_string(&record));
-                    }
+                    if results != expected_recs {
+                        println!("scan({}, {})", ts, range_string(&range));
+                        println!("results ====");
+                        for record in &results {
+                            println!("  {}", record_string(&record));
+                        }
+                        println!("");
+                        println!("expected ===");
+                        for record in &expected_recs {
+                            println!("  {}", record_string(&record));
+                        }
 
-                    assert_eq!(results, expected_recs);
+                        println!("");
+                        println!("lsm ========");
+                        println!("l0");
+                        for (key, versions) in &lsm.l0.kvs {
+                            for (ts, value) in versions {
+                                println!("[{}] @ {}: [{}]", hexlify(&key), ts, value_string(&value));
+                            }
+                        }
+                        for i in 1..lsm.levels.len() {
+                            println!("l{}", i);
+                            for (j, run) in lsm.levels[i].runs.iter().enumerate() {
+                                println!("  run {}", j);
+                                dump_run_file(&run).await.unwrap();
+                            }
+                        }
+                        panic!();
+                    }
+                    //assert_eq!(results, expected_recs);
                 }
             });
         }
     }
 
     async fn dump_run_file<R: AsyncReadExactAt>(run: &Run<R>) -> anyhow::Result<()> {
-        println!("min_ts: {}", run.min_ts);
-        println!("max_ts: {}", run.max_ts);
-        println!("index");
-        println!("prefix: [{}]", hexlify(run.index.prefix()));
+        println!("    min_ts: {}", run.min_ts);
+        println!("    max_ts: {}", run.max_ts);
+        println!("    index");
+        println!("    prefix: [{}]", hexlify(run.index.prefix()));
         for i in 0..run.index.len() {
             println!(
-                "  {} header offset {}",
+                "      {} header offset {}",
                 hexlify(&run.index.get_key(i)),
                 run.index.get_value(i)
             );
         }
-        println!("blocks");
+        println!("    blocks");
         for i in 0..run.index.len() {
-            println!("== block {} ======", i);
-            println!("first key: [{}]", hexlify(&run.index.get_key(i)),);
-            println!("header_offset: {}", run.index.get_value(i));
+            println!("    == block {} ======", i);
+            println!("    first key: [{}]", hexlify(&run.index.get_key(i)),);
+            println!("    header_offset: {}", run.index.get_value(i));
             let header_offset = run.index.get_value(i);
             let block = Block::open(&run.r, header_offset as u64).await?;
             dump_block(&block).await?;
@@ -1932,24 +1971,24 @@ mod test {
         Ok(())
     }
     async fn dump_block<'a, R: AsyncReadExactAt>(block: &Block<'a, R>) -> anyhow::Result<()> {
-        println!("prefix: {}", hexlify(block.index.prefix()));
-        println!("n_keys: {}", block.index.len());
-        println!("n_versions: {}", block.n_versions);
-        println!("values_len: {}", block.values_len);
-        println!("  == keys ======");
+        println!("    prefix: {}", hexlify(block.index.prefix()));
+        println!("    n_keys: {}", block.index.len());
+        println!("    n_versions: {}", block.n_versions);
+        println!("    values_len: {}", block.values_len);
+        println!("      == keys ======");
         for i in 0..block.index.len() {
             let key = block.index.get_key(i);
             let versions_offset = block.index.get_value(i);
-            println!("    [{}] {}", hexlify(&key), versions_offset);
+            println!("        [{}] {}", hexlify(&key), versions_offset);
         }
         let versions = block.versions();
-        println!("  == versions ======");
+        println!("      == versions ======");
         for i in 0..block.n_versions {
             let value_str = match versions.value_offsets(i) {
                 Some((value_start, value_end)) => format!("({}, {})", value_start, value_end),
                 None => "<TOMBSTONE>".into(),
             };
-            println!("    {} {} {}", i, versions.ts(i), value_str);
+            println!("        {} {} {}", i, versions.ts(i), value_str);
         }
         Ok(())
     }
