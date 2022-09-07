@@ -1247,6 +1247,9 @@ impl<R: AsyncReadExactAt> Run<R> {
     }
 
     async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<(u64, Value)>> {
+        if ts < self.min_ts {
+            return Ok(None);
+        }
         let block_header_idx = match self.index.search(k) {
             Ok(idx) => idx,
             Err(idx) => {
@@ -1270,6 +1273,10 @@ impl<R: AsyncReadExactAt> Run<R> {
         try_stream! {
             if direction == Direction::Desc {
                 todo!();
+            }
+
+            if ts < self.min_ts {
+                return;
             }
 
             let lower_block_idx = binary_search_by_idx(
