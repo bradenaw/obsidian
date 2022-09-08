@@ -10,7 +10,6 @@ use std::fs::File;
 use std::marker::PhantomData;
 use std::os::unix::fs::FileExt;
 use std::pin::Pin;
-use std::time::SystemTime;
 
 use anyhow::anyhow;
 use async_stream::stream;
@@ -27,10 +26,12 @@ use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 
 mod range;
+mod sequencer;
 
 use range::Bound;
 use range::KeyOrBound;
 use range::Range;
+use sequencer::Sequencer;
 
 struct LsmBuilder {
     l0_max_size: u64,
@@ -68,7 +69,7 @@ impl LsmBuilder {
 }
 
 struct Lsm {
-    last_ts: u64,
+    sequencer: Sequencer,
     l0: Memtable,
     l0_max_size: u64,
     run_target_size: u64,
@@ -80,7 +81,7 @@ struct Lsm {
 impl Lsm {
     fn new(l0_max_size: u64, run_target_size: u64, block_size: u64) -> Self {
         Self {
-            last_ts: 0,
+            sequencer: Sequencer::new(),
             l0_max_size,
             run_target_size,
             block_size,
@@ -90,6 +91,7 @@ impl Lsm {
     }
 
     async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+        self.sequencer.wait_for_safe_read(ts).await?;
         if let Some((_, v)) = self.l0.get(ts, k) {
             return match v {
                 Value::Regular(v) => Ok(Some(v)),
@@ -114,6 +116,7 @@ impl Lsm {
         direction: Direction,
         limit: usize,
     ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
+        self.sequencer.wait_for_safe_read(ts).await?;
         if range.is_empty() {
             return Ok((vec![], None));
         }
@@ -196,15 +199,9 @@ impl Lsm {
     }
 
     async fn put(&mut self, k: Vec<u8>, v: Vec<u8>) -> anyhow::Result<u64> {
-        let ts = std::cmp::max(
-            self.last_ts + 1,
-            SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("now before UNIX_EPOCH?")
-                .as_nanos() as u64,
-        );
-        self.last_ts = ts;
+        let ts = self.sequencer.start_write();
         self.l0.put(k, ts, v);
+        self.sequencer.finish_write(ts);
         if self.l0.size() as u64 > self.l0_max_size {
             self.compact_l0().await?;
 
