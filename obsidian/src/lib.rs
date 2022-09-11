@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![feature(generators)]
 #![feature(map_first_last)]
 #![feature(is_sorted)]
 
@@ -25,6 +26,7 @@ use rand::Rng;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 
+mod memtable;
 mod range;
 mod sequencer;
 
@@ -342,6 +344,11 @@ impl Lsm {
 
         Ok(())
     }
+}
+
+struct Manifest {
+    l0: Vec<Memtable>,
+    lower_levels: Vec<Level>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
