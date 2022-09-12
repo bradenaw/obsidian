@@ -8,6 +8,10 @@ use crate::Range;
 use crate::Record;
 use crate::Value;
 
+pub(crate) enum PutError {
+    Sealed,
+}
+
 pub(crate) struct Memtable {
     // TODO: This should probably be something like crossbeam-skiplist, but this'll do for now.
     inner: RwLock<MemtableInner>,
@@ -29,6 +33,11 @@ impl Memtable {
         ts: u64,
         range: Range<&'a [u8]>,
     ) -> impl Iterator<Item = Record> + 'a {
+        // TODO: This is an absolutely whack implementation, but I can't wrap my head around any
+        // way to properly express mucking with an iterator that contains a borrow to inner through
+        // a RwLockReadGuard. The guard only gives you the whole thing, and to make an iterator
+        // that contains both the guard and the iterator over the thing inside it is a
+        // self-referential struct.
         gen_iter!(move {
             let mut cursor = range.to_vec();
             loop {
@@ -41,12 +50,45 @@ impl Memtable {
             }
         })
     }
+
+    pub fn range(&self) -> Option<(Vec<u8>, Vec<u8>)> {
+        self.inner.read().unwrap().range()
+    }
+
+    pub fn put(&self, k: Vec<u8>, ts: u64, v: Vec<u8>) -> Result<usize, PutError> {
+        let mut inner = self.inner.write().unwrap();
+        if inner.sealed {
+            return Err(PutError::Sealed);
+        }
+        inner.put(k, ts, v);
+        Ok(inner.size())
+    }
+
+    pub fn try_seal(&self) -> bool {
+        let mut inner = self.inner.write().unwrap();
+        if inner.sealed {
+            return false;
+        }
+        inner.sealed = true;
+        true
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (Vec<u8>, u64, Value)> + '_ {
+        self.inner.read().unwrap().iter()
+    }
+}
+
+impl Default for Memtable {
+    fn default() -> Self {
+        Memtable::new()
+    }
 }
 
 struct MemtableInner {
     size: usize,
     kvs: BTreeMap<Vec<u8>, BTreeMap<u64, Value>>,
     max_key_len: usize,
+    sealed: bool,
 }
 
 impl MemtableInner {
@@ -55,6 +97,7 @@ impl MemtableInner {
             size: 0,
             kvs: BTreeMap::new(),
             max_key_len: 0,
+            sealed: false,
         }
     }
 
