@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use uuid::Uuid;
+
 use crate::Bound;
 use crate::Range;
 use crate::Record;
@@ -16,6 +18,7 @@ impl Default for Memtable {
 }
 
 pub(crate) struct Memtable {
+    id: Uuid,
     size: u64,
     kvs: BTreeMap<Vec<u8>, BTreeMap<u64, Value>>,
     max_key_len: usize,
@@ -25,11 +28,16 @@ pub(crate) struct Memtable {
 impl Memtable {
     pub fn new() -> Self {
         Self {
+            id: Uuid::new_v4(),
             size: 0,
             kvs: BTreeMap::new(),
             max_key_len: 0,
             sealed: false,
         }
+    }
+
+    pub fn id(&self) -> Uuid {
+        self.id
     }
 
     pub fn get(&self, ts: u64, k: &[u8]) -> Option<(u64, Value)> {

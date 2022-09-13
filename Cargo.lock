@@ -190,12 +190,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gen-iter"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1668ac3c7b8cc5f1e31565ed509d8d70aa1a81bd7f508b620725b78c6e1d7049"
-
-[[package]]
 name = "getrandom"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -251,10 +245,10 @@ dependencies = [
  "async-trait",
  "byteorder",
  "futures",
- "gen-iter",
  "proptest",
  "rand",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -470,6 +464,15 @@ name = "unicode-ident"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5bd2fe26506023ed7b5e1e315add59d6f584c621d037f9368fea9cfb988f368c"
+
+[[package]]
+name = "uuid"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd6469f4314d5f1ffec476e05f17cc9a78bc7a27a6a857842170bdf8d6f98d2f"
+dependencies = [
+ "getrandom",
+]
 
 [[package]]
 name = "wait-timeout"

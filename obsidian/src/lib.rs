@@ -28,6 +28,7 @@ use memtable::PutError;
 use rand::Rng;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
+use uuid::Uuid;
 
 mod memtable;
 mod range;
@@ -75,6 +76,62 @@ impl LsmBuilder {
 }
 
 struct Lsm {
+    inner: Arc<LsmInner>,
+    compaction: tokio::task::JoinHandle<()>,
+}
+
+impl Lsm {
+    pub fn new(l0_max_size: u64, run_target_size: u64, block_size: u64) -> Self {
+        let (l0_compact_notify, l0_compact_ready) = tokio::sync::mpsc::channel::<()>(1);
+        let inner = Arc::new(LsmInner::new(l0_max_size, run_target_size, block_size));
+        let inner_ = inner.clone();
+        let compaction = tokio::spawn(async {
+            while let Some(_) = l0_compact_ready.recv().await {
+                Self::compact(inner_);
+            }
+        });
+        Self { inner, compaction }
+    }
+
+    pub async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+        self.inner.get(ts, k).await
+    }
+
+    pub async fn scan_page(
+        &self,
+        ts: u64,
+        range: Range<&[u8]>,
+        direction: Direction,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
+        self.inner.scan_page(ts, range, direction, limit).await
+    }
+
+    pub async fn put(&self, k: Vec<u8>, v: Vec<u8>) -> anyhow::Result<u64> {
+        self.inner.put(k, v).await
+    }
+
+    async fn compact(inner: Arc<LsmInner>) -> anyhow::Result<()> {
+        let manifest = inner.manifest.read().unwrap().clone();
+
+        self.compact_l0().await?;
+
+        for i in 1..self.levels.len() - 1 {
+            if self.levels[i].size() as u64 <= self.l0_max_size * 10_u64.pow(i as u32) {
+                break;
+            }
+            self.compact_from(i).await?;
+        }
+    }
+}
+
+impl Drop for Lsm {
+    fn drop(&mut self) {
+        self.compaction.abort();
+    }
+}
+
+struct LsmInner {
     l0_max_size: u64,
     run_target_size: u64,
     block_size: u64,
@@ -86,7 +143,7 @@ struct Lsm {
     manifest: RwLock<Arc<Manifest>>,
 }
 
-impl Lsm {
+impl LsmInner {
     fn new(l0_max_size: u64, run_target_size: u64, block_size: u64) -> Self {
         Self {
             sequencer: Sequencer::new(),
@@ -94,10 +151,7 @@ impl Lsm {
             run_target_size,
             block_size,
             l0_active: RwLock::new(Arc::new(RwLock::new(Memtable::new()))),
-            manifest: RwLock::new(Arc::new(Manifest {
-                l0: vec![],
-                levels: (0..7).map(|_| Level::new()).collect(),
-            })),
+            manifest: RwLock::new(Arc::new(Manifest::new(7))),
         }
     }
 
@@ -238,7 +292,7 @@ impl Lsm {
         Ok((page, continue_cursor))
     }
 
-    async fn put(&mut self, k: Vec<u8>, v: Vec<u8>) -> anyhow::Result<u64> {
+    async fn put(&self, k: Vec<u8>, v: Vec<u8>) -> anyhow::Result<u64> {
         let ts = self.sequencer.start_write();
         loop {
             let l0_active = { self.l0_active.read().unwrap().clone() };
@@ -259,16 +313,6 @@ impl Lsm {
                 // seal l0
                 l0_active.write().unwrap().try_seal();
             }
-            // if self.l0.size() as u64 > self.l0_max_size {
-            //     self.compact_l0().await?;
-
-            //     for i in 1..self.levels.len() - 1 {
-            //         if self.levels[i].size() as u64 <= self.l0_max_size * 10_u64.pow(i as u32) {
-            //             break;
-            //         }
-            //         self.compact_from(i).await?;
-            //     }
-            // }
             return Ok(ts);
         }
     }
@@ -405,6 +449,26 @@ impl Lsm {
 struct Manifest {
     l0: Vec<Arc<RwLock<Memtable>>>,
     levels: Vec<Level>,
+
+    locs: BTreeMap<Uuid, (usize, usize)>,
+}
+
+impl Manifest {
+    fn new(n_levels: usize) -> Self {
+        Self {
+            l0: vec![],
+            levels: (0..n_levels).map(|_| Level::new()).collect(),
+            locs: BTreeMap::new(),
+        }
+    }
+
+    fn with_ingest(
+        &self,
+        into_level: usize,
+        add: Vec<Run<Vec<u8>>>,
+        remove: impl Iterator<Item = Uuid>,
+    ) -> Self {
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
