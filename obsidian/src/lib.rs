@@ -11,6 +11,8 @@ use std::fs::File;
 use std::marker::PhantomData;
 use std::os::unix::fs::FileExt;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 use anyhow::anyhow;
 use async_stream::stream;
@@ -22,6 +24,7 @@ use futures::pin_mut;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
 use futures::SinkExt;
+use memtable::PutError;
 use rand::Rng;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
@@ -72,13 +75,15 @@ impl LsmBuilder {
 }
 
 struct Lsm {
-    sequencer: Sequencer,
-    l0: Memtable,
     l0_max_size: u64,
     run_target_size: u64,
     block_size: u64,
-    // levels[0] is empty and unused, to make the naming easier.
-    levels: Vec<Level>,
+
+    sequencer: Sequencer,
+    // Outer lock just protects the arc, hold in W to swap it.
+    // Inner lock protects memtable, use as normal.
+    l0_active: RwLock<Arc<RwLock<Memtable>>>,
+    manifest: RwLock<Arc<Manifest>>,
 }
 
 impl Lsm {
@@ -88,20 +93,36 @@ impl Lsm {
             l0_max_size,
             run_target_size,
             block_size,
-            l0: Memtable::new(),
-            levels: (0..7).map(|_| Level::new()).collect(),
+            l0_active: RwLock::new(Arc::new(RwLock::new(Memtable::new()))),
+            manifest: RwLock::new(Arc::new(Manifest {
+                l0: vec![],
+                levels: (0..7).map(|_| Level::new()).collect(),
+            })),
         }
     }
 
     async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         self.sequencer.wait_for_safe_read(ts).await?;
-        if let Some((_, v)) = self.l0.get(ts, k) {
+
+        let l0_active = { self.l0_active.read().unwrap().clone() };
+        let manifest = { self.manifest.read().unwrap().clone() };
+
+        let maybe_record = Iterator::chain(
+            l0_active.read().unwrap().get(ts, k).into_iter(),
+            manifest
+                .l0
+                .iter()
+                .map(|memtable| memtable.read().unwrap().get(ts, k))
+                .filter_map(core::convert::identity),
+        )
+        .max_by_key(|(ts, _)| *ts);
+        if let Some((_, v)) = maybe_record {
             return match v {
                 Value::Regular(v) => Ok(Some(v)),
                 Value::Tombstone => Ok(None),
             };
         }
-        for level in &self.levels {
+        for level in &manifest.levels {
             if let Some((_, v)) = level.get(ts, k).await? {
                 return match v {
                     Value::Regular(v) => Ok(Some(v)),
@@ -128,13 +149,29 @@ impl Lsm {
             todo!();
         }
 
-        let mut streams = Vec::with_capacity(self.levels.len());
+        let l0_active = { self.l0_active.read().unwrap().clone() };
+        let manifest = { self.manifest.read().unwrap().clone() };
+
+        let l0: Vec<_> = manifest.l0.iter().map(|l| l.read().unwrap()).collect();
+        let l0_active_2 = l0_active.read().unwrap();
+
+        let mut streams = Vec::with_capacity(manifest.l0.len() + manifest.levels.len() + 1);
         streams.push(
-            futures::stream::iter(self.l0.scan_asc(ts, range.clone()).map(|record| Ok(record)))
-                .boxed_local(),
+            futures::stream::iter(
+                l0_active_2
+                    .scan_asc(ts, range.clone())
+                    .map(|record| Ok(record)),
+            )
+            .boxed_local(),
         );
-        for i in 1..self.levels.len() {
-            let level = &self.levels[i];
+        for l0_run in &l0 {
+            streams.push(
+                futures::stream::iter(l0_run.scan_asc(ts, range.clone()).map(|record| Ok(record)))
+                    .boxed_local(),
+            );
+        }
+        for i in 1..manifest.levels.len() {
+            let level = &manifest.levels[i];
             if level.runs.is_empty() {
                 continue;
             }
@@ -203,19 +240,37 @@ impl Lsm {
 
     async fn put(&mut self, k: Vec<u8>, v: Vec<u8>) -> anyhow::Result<u64> {
         let ts = self.sequencer.start_write();
-        self.l0.put(k, ts, v);
-        self.sequencer.finish_write(ts);
-        if self.l0.size() as u64 > self.l0_max_size {
-            self.compact_l0().await?;
-
-            for i in 1..self.levels.len() - 1 {
-                if self.levels[i].size() as u64 <= self.l0_max_size * 10_u64.pow(i as u32) {
-                    break;
+        loop {
+            let l0_active = { self.l0_active.read().unwrap().clone() };
+            let new_size = match l0_active.write().unwrap().put(k.clone(), ts, v.clone()) {
+                Ok(new_size) => new_size,
+                Err(PutError::Sealed) => {
+                    continue;
                 }
-                self.compact_from(i).await?;
+                Err(e) => {
+                    self.sequencer.finish_write(ts);
+                    anyhow::bail!("other error putting");
+                }
+            };
+            self.sequencer.finish_write(ts);
+            if new_size > self.l0_max_size {
+                // copy l0 ref to manifest
+                // replace l0 with empty
+                // seal l0
+                l0_active.write().unwrap().try_seal();
             }
+            // if self.l0.size() as u64 > self.l0_max_size {
+            //     self.compact_l0().await?;
+
+            //     for i in 1..self.levels.len() - 1 {
+            //         if self.levels[i].size() as u64 <= self.l0_max_size * 10_u64.pow(i as u32) {
+            //             break;
+            //         }
+            //         self.compact_from(i).await?;
+            //     }
+            // }
+            return Ok(ts);
         }
-        Ok(ts)
     }
 
     async fn compact_l0(&mut self) -> anyhow::Result<()> {
@@ -231,7 +286,7 @@ impl Lsm {
             1,
             min_key,
             max_key,
-            futures::stream::iter(l0.into_iter().map(|(k, ts, v)| {
+            futures::stream::iter(l0.iter().map(|(k, ts, v)| {
                 Ok(Record {
                     key: k,
                     ts,
@@ -345,6 +400,11 @@ impl Lsm {
 
         Ok(())
     }
+}
+
+struct Manifest {
+    l0: Vec<Arc<RwLock<Memtable>>>,
+    levels: Vec<Level>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

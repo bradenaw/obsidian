@@ -1,7 +1,4 @@
 use std::collections::BTreeMap;
-use std::sync::RwLock;
-
-use gen_iter::gen_iter;
 
 use crate::Bound;
 use crate::Range;
@@ -12,87 +9,21 @@ pub(crate) enum PutError {
     Sealed,
 }
 
-pub(crate) struct Memtable {
-    // TODO: This should probably be something like crossbeam-skiplist, but this'll do for now.
-    inner: RwLock<MemtableInner>,
-}
-
-impl Memtable {
-    pub fn new() -> Self {
-        Self {
-            inner: RwLock::new(MemtableInner::new()),
-        }
-    }
-
-    pub fn get(&self, ts: u64, k: &[u8]) -> Option<(u64, Value)> {
-        self.inner.read().unwrap().get(ts, k)
-    }
-
-    pub fn scan_asc<'a>(
-        &'a self,
-        ts: u64,
-        range: Range<&'a [u8]>,
-    ) -> impl Iterator<Item = Record> + 'a {
-        // TODO: This is an absolutely whack implementation, but I can't wrap my head around any
-        // way to properly express mucking with an iterator that contains a borrow to inner through
-        // a RwLockReadGuard. The guard only gives you the whole thing, and to make an iterator
-        // that contains both the guard and the iterator over the thing inside it is a
-        // self-referential struct.
-        gen_iter!(move {
-            let mut cursor = range.to_vec();
-            loop {
-                let record = match self.inner.read().unwrap().scan_asc(ts, cursor.borrow()).next() {
-                    Some(record) => record,
-                    None => return,
-                };
-                cursor.lower = Bound::After(record.key.clone());
-                yield record;
-            }
-        })
-    }
-
-    pub fn range(&self) -> Option<(Vec<u8>, Vec<u8>)> {
-        self.inner.read().unwrap().range()
-    }
-
-    pub fn put(&self, k: Vec<u8>, ts: u64, v: Vec<u8>) -> Result<usize, PutError> {
-        let mut inner = self.inner.write().unwrap();
-        if inner.sealed {
-            return Err(PutError::Sealed);
-        }
-        inner.put(k, ts, v);
-        Ok(inner.size())
-    }
-
-    pub fn try_seal(&self) -> bool {
-        let mut inner = self.inner.write().unwrap();
-        if inner.sealed {
-            return false;
-        }
-        inner.sealed = true;
-        true
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (Vec<u8>, u64, Value)> + '_ {
-        self.inner.read().unwrap().iter()
-    }
-}
-
 impl Default for Memtable {
     fn default() -> Self {
         Memtable::new()
     }
 }
 
-struct MemtableInner {
-    size: usize,
+pub(crate) struct Memtable {
+    size: u64,
     kvs: BTreeMap<Vec<u8>, BTreeMap<u64, Value>>,
     max_key_len: usize,
     sealed: bool,
 }
 
-impl MemtableInner {
-    fn new() -> Self {
+impl Memtable {
+    pub fn new() -> Self {
         Self {
             size: 0,
             kvs: BTreeMap::new(),
@@ -101,32 +32,32 @@ impl MemtableInner {
         }
     }
 
-    fn size(&self) -> usize {
-        self.size
-    }
-
-    fn get(&self, ts: u64, k: &[u8]) -> Option<(u64, Value)> {
+    pub fn get(&self, ts: u64, k: &[u8]) -> Option<(u64, Value)> {
         let (record_ts, record_v) = self.kvs.get(k)?.range(0..=ts).next_back()?;
         Some((*record_ts, record_v.clone()))
     }
 
-    fn put(&mut self, k: Vec<u8>, ts: u64, v: Vec<u8>) {
-        self.size += k.len() + v.len() + 8;
+    pub fn put(&mut self, k: Vec<u8>, ts: u64, v: Vec<u8>) -> Result<u64, PutError> {
+        if self.sealed {
+            return Err(PutError::Sealed);
+        }
+        self.size += (k.len() + v.len() + 8) as u64;
         self.max_key_len = std::cmp::max(k.len(), self.max_key_len);
         self.kvs
             .entry(k)
             .or_insert(BTreeMap::default())
             .insert(ts, Value::Regular(v));
+        Ok(self.size)
     }
 
-    fn range(&self) -> Option<(Vec<u8>, Vec<u8>)> {
+    pub fn range(&self) -> Option<(Vec<u8>, Vec<u8>)> {
         Some((
             self.kvs.iter().next()?.0.clone(),
             self.kvs.iter().next_back()?.0.clone(),
         ))
     }
 
-    fn scan_asc(&self, ts: u64, range: Range<&[u8]>) -> impl Iterator<Item = Record> + '_ {
+    pub fn scan_asc(&self, ts: u64, range: Range<&[u8]>) -> impl Iterator<Item = Record> + '_ {
         let range_bounds = (
             match range.lower {
                 Bound::BeforeAll => std::ops::Bound::Unbounded,
@@ -187,7 +118,15 @@ impl MemtableInner {
         ) as Box<dyn Iterator<Item = Record>>
     }
 
-    fn iter(&self) -> impl Iterator<Item = (Vec<u8>, u64, Value)> + '_ {
+    pub fn try_seal(&mut self) -> bool {
+        if self.sealed {
+            return false;
+        }
+        self.sealed = true;
+        true
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (Vec<u8>, u64, Value)> + '_ {
         self.kvs
             .iter()
             .map(|(key, entries)| {
