@@ -24,6 +24,7 @@ use futures::SinkExt;
 use rand::Rng;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
+use uuid::Uuid;
 
 mod range;
 mod sequencer;
@@ -360,6 +361,7 @@ impl Value {
 }
 
 struct Memtable {
+    id: Uuid,
     size: usize,
     kvs: BTreeMap<Vec<u8>, BTreeMap<u64, Value>>,
     max_key_len: usize,
@@ -368,10 +370,15 @@ struct Memtable {
 impl Memtable {
     fn new() -> Self {
         Self {
+            id: Uuid::new_v4(),
             size: 0,
             kvs: BTreeMap::new(),
             max_key_len: 0,
         }
+    }
+
+    fn id(&self) -> Uuid {
+        self.id
     }
 
     fn size(&self) -> usize {
@@ -1072,6 +1079,7 @@ impl From<&[u8]> for LittleEndianU32 {
 struct Run<R> {
     r: R,
 
+    id: Uuid,
     size: usize,
     keyspace_id: u32,
     min_ts: u64,
@@ -1083,7 +1091,7 @@ struct Run<R> {
     max_key: Vec<u8>,
 }
 
-const INDEX_BLOCK_HEADER_SIZE: usize = 28;
+const INDEX_BLOCK_HEADER_SIZE: usize = 44;
 
 impl<R> Run<R> {
     // Assumes S is in (key, rev(ts)) order, and assumes termination at a reasonable size limit.
@@ -1169,11 +1177,13 @@ impl<R> Run<R> {
 
         let index_block_offset = bytes_written;
         let mut header = [0u8; INDEX_BLOCK_HEADER_SIZE];
-        LittleEndian::write_u32(&mut header[0..4], keyspace_id);
-        LittleEndian::write_u64(&mut header[4..12], min_ts);
-        LittleEndian::write_u64(&mut header[12..20], max_ts);
-        LittleEndian::write_u32(&mut header[20..24], last_key.len() as u32);
-        LittleEndian::write_u32(&mut header[24..28], index_compressed.len() as u32);
+        let id = Uuid::new_v4();
+        header[0..16].copy_from_slice(&id.as_bytes()[..]);
+        LittleEndian::write_u32(&mut header[16..20], keyspace_id);
+        LittleEndian::write_u64(&mut header[20..28], min_ts);
+        LittleEndian::write_u64(&mut header[28..36], max_ts);
+        LittleEndian::write_u32(&mut header[36..40], last_key.len() as u32);
+        LittleEndian::write_u32(&mut header[40..44], index_compressed.len() as u32);
         w.write_all(&header[..]).await?;
         w.write_all(&last_key[..]).await?;
         w.write_all(&index_compressed).await?;
@@ -1198,11 +1208,16 @@ impl<R: AsyncReadExactAt> Run<R> {
         r.read_exact_at(&mut header[..], index_block_offset as u64)
             .await?;
 
-        let keyspace_id = LittleEndian::read_u32(&header[0..4]);
-        let min_ts = LittleEndian::read_u64(&header[4..12]);
-        let max_ts = LittleEndian::read_u64(&header[12..20]);
-        let max_key_len = LittleEndian::read_u32(&header[20..24]);
-        let index_len = LittleEndian::read_u32(&header[24..28]);
+        let id = {
+            let mut uuid_bytes = [0u8; 16];
+            uuid_bytes.copy_from_slice(&header[0..16]);
+            Uuid::from_bytes(uuid_bytes)
+        };
+        let keyspace_id = LittleEndian::read_u32(&header[16..20]);
+        let min_ts = LittleEndian::read_u64(&header[20..28]);
+        let max_ts = LittleEndian::read_u64(&header[28..36]);
+        let max_key_len = LittleEndian::read_u32(&header[36..40]);
+        let index_len = LittleEndian::read_u32(&header[40..44]);
 
         let max_key = {
             let mut max_key = vec![0u8; max_key_len as usize];
@@ -1228,6 +1243,8 @@ impl<R: AsyncReadExactAt> Run<R> {
 
         Ok(Self {
             r,
+
+            id,
             size,
             keyspace_id,
             min_ts,
