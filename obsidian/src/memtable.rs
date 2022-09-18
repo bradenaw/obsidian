@@ -7,10 +7,6 @@ use crate::Range;
 use crate::Record;
 use crate::Value;
 
-pub(crate) enum PutError {
-    Sealed,
-}
-
 impl Default for Memtable {
     fn default() -> Self {
         Memtable::new()
@@ -22,7 +18,6 @@ pub(crate) struct Memtable {
     size: u64,
     kvs: BTreeMap<Vec<u8>, BTreeMap<u64, Value>>,
     max_key_len: usize,
-    sealed: bool,
 }
 
 impl Memtable {
@@ -32,7 +27,6 @@ impl Memtable {
             size: 0,
             kvs: BTreeMap::new(),
             max_key_len: 0,
-            sealed: false,
         }
     }
 
@@ -45,17 +39,14 @@ impl Memtable {
         Some((*record_ts, record_v.clone()))
     }
 
-    pub fn put(&mut self, k: Vec<u8>, ts: u64, v: Vec<u8>) -> Result<u64, PutError> {
-        if self.sealed {
-            return Err(PutError::Sealed);
-        }
+    pub fn put(&mut self, k: Vec<u8>, ts: u64, v: Vec<u8>) -> u64 {
         self.size += (k.len() + v.len() + 8) as u64;
         self.max_key_len = std::cmp::max(k.len(), self.max_key_len);
         self.kvs
             .entry(k)
             .or_insert(BTreeMap::default())
             .insert(ts, Value::Regular(v));
-        Ok(self.size)
+        self.size
     }
 
     pub fn range(&self) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -124,14 +115,6 @@ impl Memtable {
                     })
                 }),
         ) as Box<dyn Iterator<Item = Record>>
-    }
-
-    pub fn try_seal(&mut self) -> bool {
-        if self.sealed {
-            return false;
-        }
-        self.sealed = true;
-        true
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (Vec<u8>, u64, Value)> + '_ {

@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::File;
 use std::marker::PhantomData;
+use std::ops::Deref;
 use std::os::unix::fs::FileExt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -26,7 +27,6 @@ use futures::pin_mut;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
 use futures::SinkExt;
-use memtable::PutError;
 use rand::Rng;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
@@ -126,7 +126,7 @@ impl Lsm {
         block_size: u64,
         inner: Arc<LsmInner>,
     ) -> anyhow::Result<()> {
-        let manifest = inner.manifest.read().unwrap().clone();
+        let mut manifest = inner.manifest.load();
 
         if manifest.l0_sealed.is_empty() {
             // Wait for the next signal.
@@ -138,9 +138,14 @@ impl Lsm {
         if runs.is_empty() && remove_ids.is_empty() {
             return Ok(());
         }
-        {
-            let mut manifest_guard = inner.manifest.write().unwrap();
-            *manifest_guard = Arc::new(manifest.with_ingest(1, runs, remove_ids));
+        loop {
+            if inner.manifest.compare_and_swap(
+                &manifest,
+                Arc::new(manifest.with_ingest(1, runs.clone(), remove_ids.clone())),
+            ) {
+                break;
+            }
+            manifest = inner.manifest.load();
         }
 
         //for i in 1..self.levels.len() - 1 {
@@ -165,9 +170,7 @@ impl Lsm {
             .skip(rand::thread_rng().gen_range(0..manifest.l0_sealed.len()))
             .next()
             .unwrap()
-            .1
-            .read()
-            .unwrap();
+            .1;
         let (min_key, max_key) = match chosen_l0.range() {
             Some(r) => r,
             // l0 is empty, nothing to do
@@ -306,8 +309,8 @@ struct LsmInner {
     // Outer lock just protects the arc, hold in W to swap it.
     // Inner lock protects memtable, use as normal.
     // Also exists in manifest.l0_active, so reads can go there.
-    l0_active: RwLock<Arc<RwLock<Memtable>>>,
-    manifest: RwLock<Arc<Manifest>>,
+    l0_active: AtomicArc<RwLock<MaybeActiveMemtable>>,
+    manifest: AtomicArc<Manifest>,
 }
 
 impl LsmInner {
@@ -317,22 +320,22 @@ impl LsmInner {
         block_size: u64,
         l0_compact_notify: tokio::sync::mpsc::Sender<()>,
     ) -> Self {
-        let l0_active = Arc::new(RwLock::new(Memtable::new()));
+        let l0_active = Arc::new(RwLock::new(MaybeActiveMemtable::Active(Memtable::new())));
         Self {
             l0_max_size,
             run_target_size,
             block_size,
             l0_compact_notify,
             sequencer: Sequencer::new(),
-            l0_active: RwLock::new(l0_active.clone()),
-            manifest: RwLock::new(Arc::new(Manifest::new(7).with_ingest_l0(l0_active))),
+            l0_active: AtomicArc::new(l0_active.clone()),
+            manifest: AtomicArc::new(Arc::new(Manifest::new(7).with_ingest_l0(l0_active))),
         }
     }
 
     async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         self.sequencer.wait_for_safe_read(ts).await?;
 
-        let manifest = { self.manifest.read().unwrap().clone() };
+        let manifest = self.manifest.load();
 
         // Any memtable might have the latest for the key, so must check all of them.
         let maybe_record = Iterator::chain(manifest.l0_active.iter(), manifest.l0_sealed.iter())
@@ -372,7 +375,7 @@ impl LsmInner {
             todo!();
         }
 
-        let manifest = { self.manifest.read().unwrap().clone() };
+        let manifest = self.manifest.load();
 
         let l0_guards: Vec<_> =
             Iterator::chain(manifest.l0_active.iter(), manifest.l0_sealed.iter())
@@ -459,52 +462,97 @@ impl LsmInner {
     async fn put(&self, k: Vec<u8>, v: Vec<u8>) -> anyhow::Result<u64> {
         let ts = self.sequencer.start_write();
         loop {
-            let l0_active = { self.l0_active.read().unwrap().clone() };
-            let new_size = match l0_active.write().unwrap().put(k.clone(), ts, v.clone()) {
-                Ok(new_size) => new_size,
-                Err(PutError::Sealed) => {
+            let l0_active = self.l0_active.load();
+            let new_size = {
+                let mut guard = l0_active.write().unwrap();
+                if let MaybeActiveMemtable::Active(memtable) = &mut *guard {
+                    memtable.put(k.clone(), ts, v.clone())
+                } else {
+                    // Only happens if there's already a new one inserted into self.l0_active, so
+                    // just try again.
                     continue;
-                }
-                Err(e) => {
-                    self.sequencer.finish_write(ts);
-                    anyhow::bail!("other error putting");
                 }
             };
             self.sequencer.finish_write(ts);
             if new_size > self.l0_max_size {
-                let mut l0_active_w = self.l0_active.write().unwrap();
-                let id = l0_active.read().unwrap().id();
-                // Check again with self.l0_active locked to make sure nobody already did it.
-                if l0_active_w.read().unwrap().id() == id {
-                    let old_memtable = l0_active_w.clone();
-                    // Make a new memtable.
-                    let new_memtable = Arc::new(RwLock::new(Memtable::new()));
-                    // Swap the new memtable in for self.l0_active, so that's where all of the new
-                    // writes go. Also add it to the manifest so that reads can find it.
-                    {
-                        let mut manifest = self.manifest.write().unwrap();
-                        *l0_active_w = new_memtable.clone();
-                        *manifest = Arc::new(manifest.with_ingest_l0(new_memtable));
-                    }
-                    // Seal the old memtable, and then mark it as such in the manifest so it's
-                    // eligible for compaction.
-                    if old_memtable.write().unwrap().try_seal() {
-                        let mut manifest = self.manifest.write().unwrap();
-                        *manifest = Arc::new(manifest.with_mark_sealed(id));
-                        let _ = self.l0_compact_notify.try_send(());
+                // TODO: Choose which thread is going to do this.
+                let old_memtable_id = { l0_active.read().unwrap().id() };
+                // Make a new memtable.
+                let new_memtable =
+                    Arc::new(RwLock::new(MaybeActiveMemtable::Active(Memtable::new())));
+                // Add it to the manifest, so that by the time it receives any writes, it's
+                // also visible to readers.
+                loop {
+                    let manifest = self.manifest.load();
+                    if self.manifest.compare_and_swap(
+                        &manifest,
+                        Arc::new(manifest.with_ingest_l0(new_memtable.clone())),
+                    ) {
+                        break;
                     }
                 }
+                // Swap the new memtable in for self.l0_active, so that's where all of the new
+                // writes go.
+                self.l0_active.compare_and_swap(&l0_active, new_memtable);
+
+                // Seal the old memtable and mark it as such in the manifest so it's eligible for
+                // compaction.
+                loop {
+                    let manifest = self.manifest.load();
+                    if self.manifest.compare_and_swap(
+                        &manifest,
+                        Arc::new(manifest.with_mark_sealed(old_memtable_id)),
+                    ) {
+                        break;
+                    }
+                }
+
+                let _ = self.l0_compact_notify.try_send(());
             }
             return Ok(ts);
         }
     }
 }
 
+enum MaybeActiveMemtable {
+    Active(Memtable),
+    Sealed(Arc<Memtable>),
+}
+
+impl Deref for MaybeActiveMemtable {
+    type Target = Memtable;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            MaybeActiveMemtable::Active(memtable) => &memtable,
+            MaybeActiveMemtable::Sealed(arc_memtable) => &arc_memtable,
+        }
+    }
+}
+
+impl MaybeActiveMemtable {
+    fn seal(self) -> (Self, Arc<Memtable>) {
+        match self {
+            MaybeActiveMemtable::Active(memtable) => {
+                let arc = Arc::new(memtable);
+                (MaybeActiveMemtable::Sealed(arc), arc)
+            }
+            MaybeActiveMemtable::Sealed(arc_memtable) => {
+                let arc = arc_memtable.clone();
+                (self, arc)
+            }
+        }
+    }
+}
+
+// Mostly immutable, except that:
+// (a) memtables in l0_active may still be receiving writes.
+// (b) l0_active memtables may swap from active to sealed.
 struct Manifest {
     // May still be receiving writes.
-    l0_active: HashMap<Uuid, Arc<RwLock<Memtable>>>,
+    l0_active: HashMap<Uuid, Arc<RwLock<MaybeActiveMemtable>>>,
     // Guaranteed to be read-only.
-    l0_sealed: HashMap<Uuid, Arc<RwLock<Memtable>>>,
+    l0_sealed: HashMap<Uuid, Arc<Memtable>>,
     levels: Vec<Level>,
 }
 
@@ -522,7 +570,10 @@ impl Manifest {
         let mut l0_sealed = self.l0_sealed.clone();
 
         if let Some(memtable) = l0_active.remove(&id) {
-            l0_sealed.insert(id, memtable);
+            let guard = memtable.write().unwrap();
+            let (memtable, arc_memtable) = guard.seal();
+            *guard = memtable;
+            l0_sealed.insert(id, arc_memtable);
         }
 
         Self {
@@ -532,7 +583,7 @@ impl Manifest {
         }
     }
 
-    fn with_ingest_l0(&self, memtable: Arc<RwLock<Memtable>>) -> Self {
+    fn with_ingest_l0(&self, memtable: Arc<RwLock<MaybeActiveMemtable>>) -> Self {
         Self {
             l0_active: self
                 .l0_active
@@ -1561,6 +1612,37 @@ fn longest_shared_prefix(a: &[u8], b: &[u8]) -> Vec<u8> {
 fn byte_width(x: u64) -> usize {
     let bits_needed = 64 - x.leading_zeros();
     ((bits_needed + 7) / 8) as usize
+}
+
+struct AtomicArc<T> {
+    // TODO: figure out how to do this with actual atomic instructions
+    lock: RwLock<Arc<T>>,
+}
+
+impl<T> AtomicArc<T> {
+    fn new(t: Arc<T>) -> Self {
+        Self {
+            lock: RwLock::new(t),
+        }
+    }
+
+    fn load(&self) -> Arc<T> {
+        self.lock.read().unwrap().clone()
+    }
+
+    fn store(&self, t: Arc<T>) {
+        let guard = self.lock.write().unwrap();
+        *guard = t;
+    }
+
+    fn compare_and_swap(&self, prev: &Arc<T>, next: Arc<T>) -> bool {
+        let guard = self.lock.write().unwrap();
+        if Arc::ptr_eq(prev, &*guard) {
+            *guard = next;
+            return true;
+        }
+        false
+    }
 }
 
 #[cfg(test)]
