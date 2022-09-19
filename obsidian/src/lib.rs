@@ -338,10 +338,18 @@ impl LsmInner {
         let manifest = self.manifest.load();
 
         // Any memtable might have the latest for the key, so must check all of them.
-        let maybe_record = Iterator::chain(manifest.l0_active.iter(), manifest.l0_sealed.iter())
-            .map(|(_, memtable)| memtable.read().unwrap().get(ts, k))
-            .filter_map(core::convert::identity)
-            .max_by_key(|(ts, _)| *ts);
+        let maybe_record = Iterator::chain(
+            manifest
+                .l0_active
+                .iter()
+                .map(|(_, memtable)| memtable.read().unwrap().get(ts, k)),
+            manifest
+                .l0_sealed
+                .values()
+                .map(|memtable| memtable.get(ts, k)),
+        )
+        .filter_map(core::convert::identity)
+        .max_by_key(|(ts, _)| *ts);
         if let Some((_, v)) = maybe_record {
             return match v {
                 Value::Regular(v) => Ok(Some(v)),
@@ -377,15 +385,22 @@ impl LsmInner {
 
         let manifest = self.manifest.load();
 
-        let l0_guards: Vec<_> =
-            Iterator::chain(manifest.l0_active.iter(), manifest.l0_sealed.iter())
-                .map(|(_, memtable)| memtable.read().unwrap())
-                .collect();
+        let l0_active_guards: Vec<_> = manifest
+            .l0_active
+            .iter()
+            .map(|(_, memtable)| memtable.read().unwrap())
+            .collect();
 
         let mut streams = Vec::with_capacity(
             manifest.l0_active.len() + manifest.l0_sealed.len() + manifest.levels.len(),
         );
-        for l0_run in &l0_guards {
+        for l0_run in &l0_active_guards {
+            streams.push(
+                futures::stream::iter(l0_run.scan_asc(ts, range.clone()).map(|record| Ok(record)))
+                    .boxed_local(),
+            );
+        }
+        for l0_run in manifest.l0_sealed.values() {
             streams.push(
                 futures::stream::iter(l0_run.scan_asc(ts, range.clone()).map(|record| Ok(record)))
                     .boxed_local(),
