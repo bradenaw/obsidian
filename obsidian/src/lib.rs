@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::marker::PhantomData;
 use std::ops::Deref;
+use std::ops::DerefMut;
 use std::os::unix::fs::FileExt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -94,7 +95,7 @@ impl Lsm {
         let inner_ = inner.clone();
         let compaction = tokio::spawn(async move {
             while let Some(_) = l0_compact_ready.recv().await {
-                Self::compact(l0_max_size, run_target_size, block_size, inner_.clone())
+                Self::compact(run_target_size, block_size, inner_.clone())
                     .await
                     .unwrap();
             }
@@ -121,7 +122,6 @@ impl Lsm {
     }
 
     async fn compact(
-        l0_max_size: u64,
         run_target_size: u64,
         block_size: u64,
         inner: Arc<LsmInner>,
@@ -133,8 +133,7 @@ impl Lsm {
             return Ok(());
         }
 
-        let (runs, remove_ids) =
-            Self::compact_l0(l0_max_size, run_target_size, block_size, &manifest).await?;
+        let (runs, remove_ids) = Self::compact_l0(run_target_size, block_size, &manifest).await?;
         if runs.is_empty() && remove_ids.is_empty() {
             return Ok(());
         }
@@ -159,7 +158,6 @@ impl Lsm {
     }
 
     async fn compact_l0(
-        l0_max_size: u64,
         run_target_size: u64,
         block_size: u64,
         manifest: &Manifest,
@@ -178,7 +176,6 @@ impl Lsm {
         };
 
         Self::compact_inner(
-            l0_max_size,
             run_target_size,
             block_size,
             manifest,
@@ -211,14 +208,13 @@ impl Lsm {
     //}
 
     async fn compact_inner(
-        l0_max_size: u64,
         run_target_size: u64,
         block_size: u64,
         manifest: &Manifest,
         into_level: usize,
         min_key: Vec<u8>,
         max_key: Vec<u8>,
-        entries: impl Stream<Item = anyhow::Result<Record>>,
+        entries: impl Stream<Item = anyhow::Result<Record>> + Send,
     ) -> anyhow::Result<(Vec<Run<Vec<u8>>>, HashSet<Uuid>)> {
         let overlapping_runs = manifest.levels[into_level].overlapping_runs(min_key, max_key);
 
@@ -233,18 +229,18 @@ impl Lsm {
                 });
 
         let mut sorted = merge_sorted_streams(vec![
-            existing_iter.boxed_local(),
+            existing_iter.boxed(),
             entries
                 .map(|result| {
                     result
                         .map(|record| OrdEqByFirst((record.key, Reverse(record.ts)), record.value))
                 })
-                .boxed_local(),
+                .boxed(),
         ])
         .map(|result| {
             result.map(|OrdEqByFirst((key, Reverse(ts)), value)| Record { key, ts, value })
         })
-        .boxed_local()
+        .boxed()
         .peekable();
 
         let mut runs = Vec::new();
@@ -397,13 +393,13 @@ impl LsmInner {
         for l0_run in &l0_active_guards {
             streams.push(
                 futures::stream::iter(l0_run.scan_asc(ts, range.clone()).map(|record| Ok(record)))
-                    .boxed_local(),
+                    .boxed(),
             );
         }
         for l0_run in manifest.l0_sealed.values() {
             streams.push(
                 futures::stream::iter(l0_run.scan_asc(ts, range.clone()).map(|record| Ok(record)))
-                    .boxed_local(),
+                    .boxed(),
             );
         }
         for i in 1..manifest.levels.len() {
@@ -438,7 +434,7 @@ impl LsmInner {
                 futures::stream::iter(level.runs[start_idx..=end_idx].iter())
                     .map(|run| run.scan(ts, range.to_vec(), direction))
                     .flatten()
-                    .boxed_local(),
+                    .boxed(),
             );
         }
         let mut merged = merge_sorted_streams(streams).peekable().boxed_local();
@@ -550,9 +546,9 @@ impl MaybeActiveMemtable {
         match self {
             MaybeActiveMemtable::Active(memtable) => {
                 let arc = Arc::new(memtable);
-                (MaybeActiveMemtable::Sealed(arc), arc)
+                (MaybeActiveMemtable::Sealed(arc.clone()), arc)
             }
-            MaybeActiveMemtable::Sealed(arc_memtable) => {
+            MaybeActiveMemtable::Sealed(ref arc_memtable) => {
                 let arc = arc_memtable.clone();
                 (self, arc)
             }
@@ -584,11 +580,15 @@ impl Manifest {
         let mut l0_active = self.l0_active.clone();
         let mut l0_sealed = self.l0_sealed.clone();
 
-        if let Some(memtable) = l0_active.remove(&id) {
-            let guard = memtable.write().unwrap();
-            let (memtable, arc_memtable) = guard.seal();
-            *guard = memtable;
-            l0_sealed.insert(id, arc_memtable);
+        if let Some(maybe_active_memtable) = l0_active.remove(&id) {
+            let mut guard = maybe_active_memtable.write().unwrap();
+            let mut temp = MaybeActiveMemtable::Sealed(Arc::new(Memtable::new()));
+            // Awkward, but we need ownership, so we'd have to wrap with an Option and deal with it
+            // being missing or we have to make a temporary one that we'll destroy in a second.
+            std::mem::swap(guard.deref_mut(), &mut temp);
+            let (new_maybe_active_memtable, memtable) = temp.seal();
+            *guard = new_maybe_active_memtable;
+            l0_sealed.insert(id, memtable);
         }
 
         Self {
@@ -739,13 +739,14 @@ pub fn merge_sorted<'a, T: Ord + 'a>(
     })
 }
 
-pub fn merge_sorted_streams<T: Ord>(
-    mut streams: Vec<impl Stream<Item = anyhow::Result<T>> + Unpin>,
-) -> impl Stream<Item = anyhow::Result<T>> {
+pub fn merge_sorted_streams<T: Ord + Send>(
+    mut streams: Vec<impl Stream<Item = anyhow::Result<T>> + Unpin + Send>,
+) -> impl Stream<Item = anyhow::Result<T>> + Send {
     try_stream! {
         let mut h: BinaryHeap<(std::cmp::Reverse<T>, usize)> = BinaryHeap::new();
         h.reserve_exact(streams.len());
-        for i in 0..streams.len() {
+        let n = streams.len();
+        for i in 0..n {
             if let Some(t) = streams[i].next().await.transpose()? {
                 h.push((std::cmp::Reverse(t), i));
             }
@@ -1646,12 +1647,12 @@ impl<T> AtomicArc<T> {
     }
 
     fn store(&self, t: Arc<T>) {
-        let guard = self.lock.write().unwrap();
+        let mut guard = self.lock.write().unwrap();
         *guard = t;
     }
 
     fn compare_and_swap(&self, prev: &Arc<T>, next: Arc<T>) -> bool {
-        let guard = self.lock.write().unwrap();
+        let mut guard = self.lock.write().unwrap();
         if Arc::ptr_eq(prev, &*guard) {
             *guard = next;
             return true;

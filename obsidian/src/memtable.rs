@@ -56,7 +56,11 @@ impl Memtable {
         ))
     }
 
-    pub fn scan_asc(&self, ts: u64, range: Range<&[u8]>) -> impl Iterator<Item = Record> + '_ {
+    pub fn scan_asc(
+        &self,
+        ts: u64,
+        range: Range<&[u8]>,
+    ) -> impl Iterator<Item = Record> + Send + '_ {
         let range_bounds = (
             match range.lower {
                 Bound::BeforeAll => std::ops::Bound::Unbounded,
@@ -69,12 +73,12 @@ impl Memtable {
                         .collect(),
                 ),
                 Bound::AfterAll => {
-                    return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record>>
+                    return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record> + Send>
                 }
             },
             match range.upper {
                 Bound::BeforeAll => {
-                    return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record>>
+                    return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record> + Send>
                 }
                 Bound::Before(k) => std::ops::Bound::Excluded(k.to_vec()),
                 Bound::After(k) => std::ops::Bound::Included(k.to_vec()),
@@ -92,13 +96,13 @@ impl Memtable {
         // when the range is in fact empty.
         match (&range_bounds.0, &range_bounds.1) {
             (std::ops::Bound::Excluded(s), std::ops::Bound::Excluded(e)) if s == e => {
-                return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record>>;
+                return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record> + Send>;
             }
             (
                 std::ops::Bound::Included(s) | std::ops::Bound::Excluded(s),
                 std::ops::Bound::Included(e) | std::ops::Bound::Excluded(e),
             ) if s > e => {
-                return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record>>;
+                return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record> + Send>;
             }
             _ => {}
         }
@@ -114,7 +118,7 @@ impl Memtable {
                         value: value.clone(),
                     })
                 }),
-        ) as Box<dyn Iterator<Item = Record>>
+        ) as Box<dyn Iterator<Item = Record> + Send>
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (Vec<u8>, u64, Value)> + '_ {
