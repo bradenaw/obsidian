@@ -220,13 +220,11 @@ impl Lsm {
 
         let removes = overlapping_runs.iter().map(|run| run.id()).collect();
 
-        let existing_iter =
-            futures::stream::iter(overlapping_runs.into_iter().map(|run| run.stream()))
-                .flatten()
-                .map(|result| {
-                    result
-                        .map(|record| OrdEqByFirst((record.key, Reverse(record.ts)), record.value))
-                });
+        let existing_iter = futures::stream::iter(overlapping_runs.iter().map(|run| run.stream()))
+            .flatten()
+            .map(|result| {
+                result.map(|record| OrdEqByFirst((record.key, Reverse(record.ts)), record.value))
+            });
 
         let mut sorted = merge_sorted_streams(vec![
             existing_iter.boxed(),
@@ -611,6 +609,7 @@ impl Manifest {
         }
     }
 
+    // TODO: Return an error if not all `remove`s appear in the manifest.
     fn with_ingest(
         &self,
         into_level: usize,
