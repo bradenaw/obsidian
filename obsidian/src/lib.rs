@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 #![feature(generators)]
-#![feature(map_first_last)]
 #![feature(is_sorted)]
+#![feature(map_first_last)]
 
 use std::cmp::Ordering;
 use std::cmp::Reverse;
@@ -85,7 +85,7 @@ struct Lsm {
 
 impl Lsm {
     pub fn new(l0_max_size: u64, run_target_size: u64, block_size: u64) -> Self {
-        let (l0_compact_notify, mut l0_compact_ready) = tokio::sync::mpsc::channel::<()>(1);
+        let (l0_compact_notify, l0_compact_ready) = tokio::sync::mpsc::channel::<()>(1);
         let inner = Arc::new(LsmInner::new(
             l0_max_size,
             run_target_size,
@@ -93,13 +93,12 @@ impl Lsm {
             l0_compact_notify,
         ));
         let inner_ = inner.clone();
-        let compaction = tokio::spawn(async move {
-            while let Some(_) = l0_compact_ready.recv().await {
-                Self::compact(run_target_size, block_size, inner_.clone())
-                    .await
-                    .unwrap();
-            }
-        });
+        let compaction = tokio::spawn(Self::compaction_loop(
+            run_target_size,
+            block_size,
+            inner_.clone(),
+            l0_compact_ready,
+        ));
         Self { inner, compaction }
     }
 
@@ -119,6 +118,19 @@ impl Lsm {
 
     pub async fn put(&self, k: Vec<u8>, v: Vec<u8>) -> anyhow::Result<u64> {
         self.inner.put(k, v).await
+    }
+
+    async fn compaction_loop(
+        run_target_size: u64,
+        block_size: u64,
+        inner: Arc<LsmInner>,
+        mut l0_compact_ready: tokio::sync::mpsc::Receiver<()>,
+    ) {
+        while let Some(_) = l0_compact_ready.recv().await {
+            Self::compact(run_target_size, block_size, inner.clone())
+                .await
+                .unwrap();
+        }
     }
 
     async fn compact(
@@ -220,7 +232,7 @@ impl Lsm {
 
         let removes = overlapping_runs.iter().map(|run| run.id()).collect();
 
-        let existing_iter = futures::stream::iter(overlapping_runs.iter().map(|run| run.stream()))
+        let existing_iter = futures::stream::iter(overlapping_runs.iter().map(Run::stream))
             .flatten()
             .map(|result| {
                 result.map(|record| OrdEqByFirst((record.key, Reverse(record.ts)), record.value))
