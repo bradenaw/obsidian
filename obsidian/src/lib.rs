@@ -194,20 +194,19 @@ impl Lsm {
         block_size: u64,
         manifest: &Manifest,
     ) -> anyhow::Result<(Vec<Run<Vec<u8>>>, HashSet<Uuid>)> {
-        let chosen_l0 = manifest
+        let (chosen_l0_id, chosen_l0) = manifest
             .l0_sealed
             .iter()
             .skip(rand::thread_rng().gen_range(0..manifest.l0_sealed.len()))
             .next()
-            .unwrap()
-            .1;
+            .unwrap();
         let (min_key, max_key) = match chosen_l0.range() {
             Some(r) => r,
             // l0 is empty, nothing to do
             None => return Ok((vec![], HashSet::new())),
         };
 
-        Self::compact_inner(
+        let (new_runs, mut removes) = Self::compact_inner(
             run_target_size,
             block_size,
             manifest,
@@ -222,7 +221,10 @@ impl Lsm {
                 })
             })),
         )
-        .await
+        .await?;
+        removes.insert(*chosen_l0_id);
+
+        Ok((new_runs, removes))
     }
 
     //async fn compact_from(&mut self, level: usize) -> anyhow::Result<()> {
@@ -1738,23 +1740,20 @@ mod test {
     #[tokio::test]
     async fn test_compact_l0() -> anyhow::Result<()> {
         let lsm = LsmBuilder::new()
-            .l0_max_size(64)
-            .run_target_size(128)
+            .l0_max_size(128)
+            .block_size(128)
+            .run_target_size(512)
             .build();
         let mut map = BTreeMap::new();
         let mut last_ts = 0;
         //let mut runs_in_l1 = 0;
         for _ in 0..10 {
-            let mut compaction = lsm.next_compaction().boxed_local();
-            for i in 0..usize::MAX {
+            let compaction = lsm.next_compaction().boxed_local();
+            for i in 0..13 {
                 let v = (i % 179) as u8;
                 let put_ts = lsm.put(vec![i as u8], vec![v]).await?;
                 last_ts = std::cmp::max(put_ts, last_ts);
                 map.insert(i as u8, v);
-
-                if let Poll::Ready(_) = poll!(&mut compaction) {
-                    break;
-                }
 
                 // Insert until we trigger a compaction.
                 //if lsm.levels[1].runs.len() != runs_in_l1 {
@@ -1762,13 +1761,15 @@ mod test {
                 //    break;
                 //}
             }
+            compaction.await;
 
             for (k, v) in &map {
                 assert_eq!(lsm.get(last_ts, &[*k]).await?, Some(vec![*v]));
             }
         }
 
-        assert!(lsm.inner.manifest.load().levels[1].runs.len() >= 10);
+        // Make sure we actually did ever do a compaction.
+        assert!(lsm.inner.manifest.load().levels[1].runs.len() >= 1);
 
         Ok(())
     }
@@ -2105,30 +2106,41 @@ mod test {
         }
         Ok(())
     }
-
-    // fn dump_lsm_runs(lsm: &Lsm) {
-    //     println!("== lsm =====");
-    //     match lsm.l0.range() {
-    //         Some((lower, upper)) => {
-    //             println!("l0 [{}] [{}]", hexlify(&lower), hexlify(&upper));
-    //         }
-    //         None => println!("l0 empty"),
-    //     }
-    //     for (i, level) in lsm.levels[1..]
-    //         .iter()
-    //         .enumerate()
-    //         .map(|(i, level)| (i + 1, level))
-    //     {
-    //         println!("l{}", i);
-    //         for run in &level.runs {
-    //             let (lower, upper) = run.range().unwrap();
-    //             println!("  run [{}] [{}]", hexlify(&lower), hexlify(&upper));
-    //         }
-    //     }
-    //     println!("============");
-    // }
 }
 
+fn dump_manifest(manifest: &Manifest) {
+    println!("== manifest =====");
+    println!("l0_active");
+    for memtable_lock in manifest.l0_active.values() {
+        match memtable_lock.read().unwrap().range() {
+            Some((lower, upper)) => {
+                println!("  [{}] [{}]", hexlify(&lower), hexlify(&upper));
+            }
+            None => println!("  (empty)"),
+        }
+    }
+    println!("l0_sealed");
+    for memtable in manifest.l0_sealed.values() {
+        match memtable.range() {
+            Some((lower, upper)) => {
+                println!("  [{}] [{}]", hexlify(&lower), hexlify(&upper));
+            }
+            None => println!("  (empty)"),
+        }
+    }
+    for (i, level) in manifest.levels[1..]
+        .iter()
+        .enumerate()
+        .map(|(i, level)| (i + 1, level))
+    {
+        println!("l{}", i);
+        for run in &level.runs {
+            let (lower, upper) = run.range().unwrap();
+            println!("  run [{}] [{}]", hexlify(&lower), hexlify(&upper));
+        }
+    }
+    println!("============");
+}
 fn record_string(r: &Record) -> String {
     format!(
         "[{}] @ {}: {}",
