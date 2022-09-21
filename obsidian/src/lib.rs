@@ -133,7 +133,7 @@ impl Lsm {
         let _ = compacted.recv().await;
     }
 
-    pub async fn all_compactions(&self) {
+    pub async fn pending_compactions(&self) {
         loop {
             let compacted = self.next_compaction();
             if self.inner.manifest.load().l0_sealed.len() == 0 {
@@ -1835,7 +1835,7 @@ mod test {
                     map.insert(k, v);
                 }
 
-                lsm.all_compactions().await;
+                lsm.pending_compactions().await;
                 if lsm.inner.manifest.load().levels[2].runs.len() >= j + 1 {
                     break;
                 }
