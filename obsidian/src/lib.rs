@@ -7,7 +7,6 @@ use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::File;
 use std::marker::PhantomData;
@@ -224,17 +223,15 @@ impl Lsm {
         block_size: u64,
         manifest: &Manifest,
     ) -> anyhow::Result<(Vec<Run<Vec<u8>>>, HashSet<Uuid>)> {
-        let (chosen_l0_id, chosen_l0) = manifest
-            .l0_sealed
-            .iter()
-            .skip(rand::thread_rng().gen_range(0..manifest.l0_sealed.len()))
-            .next()
-            .unwrap();
+        // We must always compact the oldest l0, because get, etc. assume that everything in
+        // memtables is newer than anything in any lower levels.
+        let chosen_l0 = &manifest.l0_sealed[0];
+        let chosen_l0_id = chosen_l0.id();
         let (min_key, max_key) = match chosen_l0.range() {
             Some(r) => r,
             None => {
                 let mut removes = HashSet::new();
-                removes.insert(*chosen_l0_id);
+                removes.insert(chosen_l0_id);
                 return Ok((vec![], removes));
             }
         };
@@ -255,7 +252,7 @@ impl Lsm {
             })),
         )
         .await?;
-        removes.insert(*chosen_l0_id);
+        removes.insert(chosen_l0_id);
 
         Ok((new_runs, removes))
     }
@@ -425,7 +422,7 @@ impl LsmInner {
                 .map(|(_, memtable)| memtable.read().unwrap().get(ts, k)),
             manifest
                 .l0_sealed
-                .values()
+                .iter()
                 .map(|memtable| memtable.get(ts, k)),
         )
         .filter_map(core::convert::identity)
@@ -480,7 +477,7 @@ impl LsmInner {
                     .boxed(),
             );
         }
-        for l0_run in manifest.l0_sealed.values() {
+        for l0_run in &manifest.l0_sealed {
             streams.push(
                 futures::stream::iter(l0_run.scan_asc(ts, range.clone()).map(|record| Ok(record)))
                     .boxed(),
@@ -646,34 +643,38 @@ impl MaybeActiveMemtable {
 // (b) l0_active memtables may swap from active to sealed.
 struct Manifest {
     // May still be receiving writes.
-    l0_active: HashMap<Uuid, Arc<RwLock<MaybeActiveMemtable>>>,
-    // Guaranteed to be read-only.
-    l0_sealed: HashMap<Uuid, Arc<Memtable>>,
+    l0_active: Vec<(Uuid, Arc<RwLock<MaybeActiveMemtable>>)>,
+    // Guaranteed to be read-only. In insertion order.
+    l0_sealed: Vec<Arc<Memtable>>,
     levels: Vec<Level>,
 }
 
 impl Manifest {
     fn new(n_levels: usize) -> Self {
         Self {
-            l0_active: HashMap::new(),
-            l0_sealed: HashMap::new(),
+            l0_active: vec![],
+            l0_sealed: vec![],
             levels: (0..n_levels).map(|_| Level::new()).collect(),
         }
     }
 
     fn with_mark_sealed(&self, id: Uuid) -> Self {
-        let mut l0_active = self.l0_active.clone();
+        let mut l0_active = Vec::with_capacity(self.l0_active.len() - 1);
         let mut l0_sealed = self.l0_sealed.clone();
 
-        if let Some(maybe_active_memtable) = l0_active.remove(&id) {
-            let mut guard = maybe_active_memtable.write().unwrap();
-            let mut temp = MaybeActiveMemtable::Sealed(Arc::new(Memtable::new()));
-            // Awkward, but we need ownership, so we'd have to wrap with an Option and deal with it
-            // being missing or we have to make a temporary one that we'll destroy in a second.
-            std::mem::swap(guard.deref_mut(), &mut temp);
-            let (new_maybe_active_memtable, memtable) = temp.seal();
-            *guard = new_maybe_active_memtable;
-            l0_sealed.insert(id, memtable);
+        for (memtable_id, arc_rwlock_memtable) in &self.l0_active {
+            if *memtable_id == id {
+                let mut guard = arc_rwlock_memtable.write().unwrap();
+                let mut temp = MaybeActiveMemtable::Sealed(Arc::new(Memtable::new()));
+                // Awkward, but we need ownership, so we'd have to wrap with an Option and deal with it
+                // being missing or we have to make a temporary one that we'll destroy in a second.
+                std::mem::swap(guard.deref_mut(), &mut temp);
+                let (new_maybe_active_memtable, memtable) = temp.seal();
+                *guard = new_maybe_active_memtable;
+                l0_sealed.push(memtable);
+            } else {
+                l0_active.push((*memtable_id, arc_rwlock_memtable.clone()));
+            }
         }
 
         Self {
@@ -684,11 +685,12 @@ impl Manifest {
     }
 
     fn with_ingest_l0(&self, memtable: Arc<RwLock<MaybeActiveMemtable>>) -> Self {
+        let id = memtable.read().unwrap().id();
         Self {
             l0_active: self
                 .l0_active
                 .iter()
-                .chain(std::iter::once((&memtable.read().unwrap().id(), &memtable)))
+                .chain(std::iter::once(&(id, memtable)))
                 .map(|(id, table)| (id.clone(), table.clone()))
                 .collect(),
             l0_sealed: self.l0_sealed.clone(),
@@ -736,8 +738,8 @@ impl Manifest {
             l0_sealed: self
                 .l0_sealed
                 .iter()
-                .filter(|(id, _)| !remove.contains(&id))
-                .map(|(id, memtable)| (id.clone(), memtable.clone()))
+                .filter(|memtable| !remove.contains(&memtable.id()))
+                .cloned()
                 .collect(),
             levels,
         }
@@ -2158,7 +2160,7 @@ mod test {
 fn dump_manifest(manifest: &Manifest) {
     println!("== manifest =====");
     println!("l0_active");
-    for memtable_lock in manifest.l0_active.values() {
+    for (_, memtable_lock) in &manifest.l0_active {
         let memtable = memtable_lock.read().unwrap();
         match memtable.range() {
             Some((lower, upper)) => {
@@ -2174,7 +2176,7 @@ fn dump_manifest(manifest: &Manifest) {
         }
     }
     println!("l0_sealed");
-    for memtable in manifest.l0_sealed.values() {
+    for memtable in &manifest.l0_sealed {
         match memtable.range() {
             Some((lower, upper)) => {
                 println!(
