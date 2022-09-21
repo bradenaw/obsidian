@@ -2,6 +2,7 @@
 #![feature(generators)]
 #![feature(is_sorted)]
 #![feature(map_first_last)]
+#![feature(build_hasher_simple_hash_one)]
 
 use std::cmp::Ordering;
 use std::cmp::Reverse;
@@ -27,11 +28,14 @@ use futures::pin_mut;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
 use futures::SinkExt;
+use lock_mgr::LockMgr;
 use rand::Rng;
+use thiserror::Error;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
+mod lock_mgr;
 mod memtable;
 mod range;
 mod sequencer;
@@ -41,6 +45,40 @@ use crate::range::Bound;
 use crate::range::KeyOrBound;
 use crate::range::Range;
 use crate::sequencer::Sequencer;
+
+enum Precondition {
+    NotChangedSince(Vec<u8>, u64),
+}
+
+impl Precondition {
+    fn key(&self) -> &[u8] {
+        match self {
+            Precondition::NotChangedSince(key, _) => &key,
+        }
+    }
+}
+
+enum Mutation {
+    Put(Vec<u8>, Vec<u8>),
+    Delete(Vec<u8>),
+}
+
+impl Mutation {
+    fn key(&self) -> &[u8] {
+        match self {
+            Mutation::Put(key, _) => &key,
+            Mutation::Delete(key) => &key,
+        }
+    }
+}
+
+#[derive(Error, Debug)]
+enum WriteError {
+    #[error("precondition failed")]
+    PreconditionFailed,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
 
 struct LsmBuilder {
     l0_max_size: u64,
@@ -124,7 +162,15 @@ impl Lsm {
     }
 
     pub async fn put(&self, k: Vec<u8>, v: Vec<u8>) -> anyhow::Result<u64> {
-        self.inner.put(k, v).await
+        Ok(self.write(vec![], vec![Mutation::Put(k, v)]).await?)
+    }
+
+    pub async fn write(
+        &self,
+        preconds: Vec<Precondition>,
+        muts: Vec<Mutation>,
+    ) -> Result<u64, WriteError> {
+        self.inner.write(preconds, muts).await
     }
 
     pub async fn next_compaction(&self) {
@@ -383,6 +429,7 @@ struct LsmInner {
 
     l0_compact_notify: tokio::sync::mpsc::Sender<()>,
     sequencer: Sequencer,
+    lock_mgr: LockMgr,
     // Outer lock just protects the arc, hold in W to swap it.
     // Inner lock protects memtable, use as normal.
     // Also exists in manifest.l0_active, so reads can go there.
@@ -404,6 +451,7 @@ impl LsmInner {
             block_size,
             l0_compact_notify,
             sequencer: Sequencer::new(),
+            lock_mgr: LockMgr::new(16384),
             l0_active: AtomicArc::new(l0_active.clone()),
             manifest: AtomicArc::new(Arc::new(Manifest::new(7).with_ingest_l0(l0_active))),
         }
@@ -412,6 +460,16 @@ impl LsmInner {
     async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         self.sequencer.wait_for_safe_read(ts).await?;
 
+        Ok(match self.unsafe_get(ts, k).await? {
+            Some((_, value)) => match value {
+                Value::Regular(v) => Some(v),
+                Value::Tombstone => None,
+            },
+            None => None,
+        })
+    }
+
+    async fn unsafe_get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<(u64, Value)>> {
         let manifest = self.manifest.load();
 
         // Any memtable might have the latest for the key, so must check all of them.
@@ -427,18 +485,12 @@ impl LsmInner {
         )
         .filter_map(core::convert::identity)
         .max_by_key(|(ts, _)| *ts);
-        if let Some((_, v)) = maybe_record {
-            return match v {
-                Value::Regular(v) => Ok(Some(v)),
-                Value::Tombstone => Ok(None),
-            };
+        if let Some((record_ts, v)) = maybe_record {
+            return Ok(Some((record_ts, v)));
         }
         for level in &manifest.levels {
-            if let Some((_, v)) = level.get(ts, k).await? {
-                return match v {
-                    Value::Regular(v) => Ok(Some(v)),
-                    Value::Tombstone => Ok(None),
-                };
+            if let Some((record_ts, v)) = level.get(ts, k).await? {
+                return Ok(Some((record_ts, v)));
             }
         }
         Ok(None)
@@ -551,15 +603,53 @@ impl LsmInner {
         Ok((page, continue_cursor))
     }
 
-    async fn put(&self, k: Vec<u8>, v: Vec<u8>) -> anyhow::Result<u64> {
+    async fn write(
+        &self,
+        preconds: Vec<Precondition>,
+        muts: Vec<Mutation>,
+    ) -> Result<u64, WriteError> {
+        let _ = self
+            .lock_mgr
+            .lock(
+                preconds.iter().map(|precond| precond.key()),
+                muts.iter().map(|m| m.key()),
+            )
+            .await;
+
         let ts = self.sequencer.start_write();
+
+        for precond in preconds {
+            let res = self.unsafe_get(*ts, precond.key()).await?;
+            match precond {
+                Precondition::NotChangedSince(_, ts) => {
+                    if let Some((last_write_ts, _)) = res {
+                        if last_write_ts > ts {
+                            return Err(WriteError::PreconditionFailed);
+                        }
+                    }
+                }
+            }
+        }
+
+        for m in muts {
+            let (key, value) = match m {
+                Mutation::Put(key, raw_value) => (key, Value::Regular(raw_value)),
+                Mutation::Delete(key) => (key, Value::Tombstone),
+            };
+            self.insert(key, *ts, value);
+        }
+
+        Ok(*ts)
+    }
+
+    fn insert(&self, k: Vec<u8>, ts: u64, v: Value) -> u64 {
         loop {
             let l0_active = self.l0_active.load();
             let overfilled = {
                 let mut guard = l0_active.write().unwrap();
                 if let MaybeActiveMemtable::Active(memtable) = &mut *guard {
                     let pre_size = memtable.size();
-                    let post_size = memtable.put(k.clone(), ts, v.clone());
+                    let post_size = memtable.insert(k.clone(), ts, v.clone());
                     pre_size < self.l0_max_size && post_size >= self.l0_max_size
                 } else {
                     // Only happens if there's already a new one inserted into self.l0_active, so
@@ -567,7 +657,6 @@ impl LsmInner {
                     continue;
                 }
             };
-            self.sequencer.finish_write(ts);
             if overfilled {
                 let old_memtable_id = { l0_active.read().unwrap().id() };
                 // Make a new memtable.
@@ -602,7 +691,7 @@ impl LsmInner {
 
                 let _ = self.l0_compact_notify.try_send(());
             }
-            return Ok(ts);
+            return ts;
         }
     }
 }
@@ -1767,9 +1856,12 @@ mod test {
     use crate::Block;
     use crate::Direction;
     use crate::LsmBuilder;
+    use crate::Mutation;
+    use crate::Precondition;
     use crate::Record;
     use crate::Run;
     use crate::Value;
+    use crate::WriteError;
 
     #[tokio::test]
     async fn test_put_get() -> anyhow::Result<()> {
@@ -1784,6 +1876,50 @@ mod test {
         assert_eq!(lsm.get(write_ts - 1, not_k).await?, None);
         assert_eq!(lsm.get(write_ts, not_k).await?, None);
         assert_eq!(lsm.get(write_ts + 1, not_k).await?, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_write_tx() -> anyhow::Result<()> {
+        let lsm = LsmBuilder::new().build();
+
+        let ka = b"a";
+        let kb = b"b";
+
+        let write_0_ts = lsm
+            .write(
+                vec![],
+                vec![
+                    Mutation::Put(ka.to_vec(), b"a0".to_vec()),
+                    Mutation::Put(kb.to_vec(), b"b0".to_vec()),
+                ],
+            )
+            .await?;
+
+        assert!(matches!(
+            lsm.write(
+                vec![Precondition::NotChangedSince(ka.to_vec(), write_0_ts - 1)],
+                vec![Mutation::Put(ka.to_vec(), b"a1".to_vec()),],
+            )
+            .await,
+            Err(WriteError::PreconditionFailed),
+        ));
+
+        let write_1_ts = lsm
+            .write(
+                vec![Precondition::NotChangedSince(ka.to_vec(), write_0_ts)],
+                vec![
+                    Mutation::Put(ka.to_vec(), b"a1".to_vec()),
+                    Mutation::Delete(kb.to_vec()),
+                ],
+            )
+            .await?;
+
+        assert_eq!(lsm.get(write_1_ts - 1, ka).await?, Some(b"a0".to_vec()));
+        assert_eq!(lsm.get(write_1_ts - 1, kb).await?, Some(b"b0".to_vec()));
+        assert_eq!(lsm.get(write_1_ts, ka).await?, Some(b"a1".to_vec()));
+        assert_eq!(lsm.get(write_1_ts, kb).await?, None);
 
         Ok(())
     }
@@ -2052,6 +2188,7 @@ mod test {
         }
 
         #[test]
+        #[ignore]
         fn proptest_lsm_scan(
             keys in proptest::collection::btree_set(
                 proptest::collection::vec(u8::arbitrary(), 0..16),

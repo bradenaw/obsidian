@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::collections::BinaryHeap;
+use std::ops::Deref;
 use std::sync::RwLock;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -29,7 +30,7 @@ impl Sequencer {
         }
     }
 
-    pub fn start_write(&self) -> u64 {
+    pub fn start_write(&self) -> WriteTsGuard<'_> {
         let now = now_nanos();
 
         let mut inner = self.inner.write().unwrap();
@@ -40,10 +41,10 @@ impl Sequencer {
             inner.wake_waiters();
         }
         inner.pending.insert(ts);
-        ts
+        WriteTsGuard { parent: self, ts }
     }
 
-    pub fn finish_write(&self, ts: u64) {
+    fn finish_write(&self, ts: u64) {
         let mut inner = self.inner.write().unwrap();
         assert!(inner.pending.remove(&ts));
         if let Some(lowest_pending_ts) = inner.pending.first() {
@@ -94,6 +95,24 @@ impl Sequencer {
             drop(inner);
             tokio::time::sleep(Duration::from_nanos(now_nanos() - ts)).await;
         }
+    }
+}
+
+pub struct WriteTsGuard<'a> {
+    parent: &'a Sequencer,
+    ts: u64,
+}
+
+impl<'a> Deref for WriteTsGuard<'a> {
+    type Target = u64;
+    fn deref(&self) -> &u64 {
+        &self.ts
+    }
+}
+
+impl<'a> Drop for WriteTsGuard<'a> {
+    fn drop(&mut self) {
+        self.parent.finish_write(self.ts);
     }
 }
 

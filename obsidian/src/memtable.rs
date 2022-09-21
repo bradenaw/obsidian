@@ -43,13 +43,13 @@ impl Memtable {
         Some((*record_ts, record_v.clone()))
     }
 
-    pub fn put(&mut self, k: Vec<u8>, ts: u64, v: Vec<u8>) -> u64 {
+    pub fn insert(&mut self, k: Vec<u8>, ts: u64, v: Value) -> u64 {
         self.size += (k.len() + v.len() + 8) as u64;
         self.max_key_len = std::cmp::max(k.len(), self.max_key_len);
         self.kvs
             .entry(k)
             .or_insert(BTreeMap::default())
-            .insert(ts, Value::Regular(v));
+            .insert(ts, v);
         self.size
     }
 
