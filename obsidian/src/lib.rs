@@ -59,17 +59,8 @@ impl Precondition {
 }
 
 enum Mutation {
-    Put(Vec<u8>, Vec<u8>),
-    Delete(Vec<u8>),
-}
-
-impl Mutation {
-    fn key(&self) -> &[u8] {
-        match self {
-            Mutation::Put(key, _) => &key,
-            Mutation::Delete(key) => &key,
-        }
-    }
+    Put(Vec<u8>),
+    Delete,
 }
 
 #[derive(Error, Debug)]
@@ -162,13 +153,15 @@ impl Lsm {
     }
 
     pub async fn put(&self, k: Vec<u8>, v: Vec<u8>) -> anyhow::Result<u64> {
-        Ok(self.write(vec![], vec![Mutation::Put(k, v)]).await?)
+        Ok(self
+            .write(vec![], BTreeMap::from([(k, Mutation::Put(v))]))
+            .await?)
     }
 
     pub async fn write(
         &self,
         preconds: Vec<Precondition>,
-        muts: Vec<Mutation>,
+        muts: BTreeMap<Vec<u8>, Mutation>,
     ) -> Result<u64, WriteError> {
         self.inner.write(preconds, muts).await
     }
@@ -606,13 +599,13 @@ impl LsmInner {
     async fn write(
         &self,
         preconds: Vec<Precondition>,
-        muts: Vec<Mutation>,
+        muts: BTreeMap<Vec<u8>, Mutation>,
     ) -> Result<u64, WriteError> {
         let _ = self
             .lock_mgr
             .lock(
                 preconds.iter().map(|precond| precond.key()),
-                muts.iter().map(|m| m.key()),
+                muts.keys().map(|k| &k[..]),
             )
             .await;
 
@@ -631,10 +624,10 @@ impl LsmInner {
             }
         }
 
-        for m in muts {
-            let (key, value) = match m {
-                Mutation::Put(key, raw_value) => (key, Value::Regular(raw_value)),
-                Mutation::Delete(key) => (key, Value::Tombstone),
+        for (key, m) in muts {
+            let value = match m {
+                Mutation::Put(raw_value) => Value::Regular(raw_value),
+                Mutation::Delete => Value::Tombstone,
             };
             self.insert(key, *ts, value);
         }
@@ -1890,17 +1883,17 @@ mod test {
         let write_0_ts = lsm
             .write(
                 vec![],
-                vec![
-                    Mutation::Put(ka.to_vec(), b"a0".to_vec()),
-                    Mutation::Put(kb.to_vec(), b"b0".to_vec()),
-                ],
+                BTreeMap::from([
+                    (ka.to_vec(), Mutation::Put(b"a0".to_vec())),
+                    (kb.to_vec(), Mutation::Put(b"b0".to_vec())),
+                ]),
             )
             .await?;
 
         assert!(matches!(
             lsm.write(
                 vec![Precondition::NotChangedSince(ka.to_vec(), write_0_ts - 1)],
-                vec![Mutation::Put(ka.to_vec(), b"a1".to_vec()),],
+                BTreeMap::from([(ka.to_vec(), Mutation::Put(b"a1".to_vec()))]),
             )
             .await,
             Err(WriteError::PreconditionFailed),
@@ -1909,10 +1902,10 @@ mod test {
         let write_1_ts = lsm
             .write(
                 vec![Precondition::NotChangedSince(ka.to_vec(), write_0_ts)],
-                vec![
-                    Mutation::Put(ka.to_vec(), b"a1".to_vec()),
-                    Mutation::Delete(kb.to_vec()),
-                ],
+                BTreeMap::from([
+                    (ka.to_vec(), Mutation::Put(b"a1".to_vec())),
+                    (kb.to_vec(), Mutation::Delete),
+                ]),
             )
             .await?;
 
