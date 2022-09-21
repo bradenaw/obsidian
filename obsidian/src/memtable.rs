@@ -34,6 +34,10 @@ impl Memtable {
         self.id
     }
 
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
     pub fn get(&self, ts: u64, k: &[u8]) -> Option<(u64, Value)> {
         let (record_ts, record_v) = self.kvs.get(k)?.range(0..=ts).next_back()?;
         Some((*record_ts, record_v.clone()))

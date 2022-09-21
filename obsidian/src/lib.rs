@@ -96,6 +96,7 @@ impl Lsm {
         ));
         let inner_ = inner.clone();
         let compaction = tokio::spawn(Self::compaction_loop(
+            l0_max_size,
             run_target_size,
             block_size,
             inner_.clone(),
@@ -132,7 +133,18 @@ impl Lsm {
         let _ = compacted.recv().await;
     }
 
+    pub async fn all_compactions(&self) {
+        loop {
+            let compacted = self.next_compaction();
+            if self.inner.manifest.load().l0_sealed.len() == 0 {
+                break;
+            }
+            compacted.await;
+        }
+    }
+
     async fn compaction_loop(
+        l0_max_size: u64,
         run_target_size: u64,
         block_size: u64,
         inner: Arc<LsmInner>,
@@ -141,6 +153,7 @@ impl Lsm {
     ) {
         while let Some(_) = l0_compact_ready.recv().await {
             Self::compact(
+                l0_max_size,
                 run_target_size,
                 block_size,
                 inner.clone(),
@@ -152,6 +165,7 @@ impl Lsm {
     }
 
     async fn compact(
+        l0_max_size: u64,
         run_target_size: u64,
         block_size: u64,
         inner: Arc<LsmInner>,
@@ -159,32 +173,48 @@ impl Lsm {
     ) -> anyhow::Result<()> {
         let mut manifest = inner.manifest.load();
 
-        if manifest.l0_sealed.is_empty() {
-            // Wait for the next signal.
-            return Ok(());
-        }
-
-        let (runs, remove_ids) = Self::compact_l0(run_target_size, block_size, &manifest).await?;
-        if runs.is_empty() && remove_ids.is_empty() {
-            return Ok(());
-        }
-        loop {
-            if inner.manifest.compare_and_swap(
-                &manifest,
-                Arc::new(manifest.with_ingest(1, runs.clone(), remove_ids.clone())),
-            ) {
-                break;
+        while !manifest.l0_sealed.is_empty() {
+            let (runs, remove_ids) =
+                Self::compact_l0(run_target_size, block_size, &manifest).await?;
+            if runs.is_empty() && remove_ids.is_empty() {
+                return Ok(());
             }
-            manifest = inner.manifest.load();
-        }
-        let _ = compacted_notify.send(());
+            loop {
+                let new_manifest =
+                    Arc::new(manifest.with_ingest(1, runs.clone(), remove_ids.clone()));
+                if inner
+                    .manifest
+                    .compare_and_swap(&manifest, new_manifest.clone())
+                {
+                    manifest = new_manifest;
+                    break;
+                }
+                manifest = inner.manifest.load();
+            }
 
-        //for i in 1..self.levels.len() - 1 {
-        //    if self.levels[i].size() as u64 <= self.l0_max_size * 10_u64.pow(i as u32) {
-        //        break;
-        //    }
-        //    self.compact_from(i).await?;
-        //}
+            'levels: for i in 1..manifest.levels.len() - 1 {
+                while manifest.levels[i].size() as u64 > l0_max_size * 10_u64.pow(i as u32) {
+                    let (runs, remove_ids) =
+                        Self::compact_from(run_target_size, block_size, &manifest, i).await?;
+                    if runs.is_empty() && remove_ids.is_empty() {
+                        break 'levels;
+                    }
+                    loop {
+                        let new_manifest =
+                            Arc::new(manifest.with_ingest(i + 1, runs.clone(), remove_ids.clone()));
+                        if inner
+                            .manifest
+                            .compare_and_swap(&manifest, new_manifest.clone())
+                        {
+                            manifest = new_manifest;
+                            break;
+                        }
+                        manifest = inner.manifest.load();
+                    }
+                }
+            }
+            let _ = compacted_notify.send(());
+        }
 
         Ok(())
     }
@@ -227,19 +257,38 @@ impl Lsm {
         Ok((new_runs, removes))
     }
 
-    //async fn compact_from(&mut self, level: usize) -> anyhow::Result<()> {
-    //    if self.levels[level].runs.is_empty() {
-    //        return Ok(());
-    //    }
-    //    let idx = rand::thread_rng().gen_range(0..self.levels[level].runs.len());
-    //    let run = self.levels[level].runs.remove(idx);
-    //    let (min_key, max_key) = match run.range() {
-    //        Some((min_key, max_key)) => (min_key, max_key),
-    //        None => return Ok(()),
-    //    };
-    //    self.compact_inner(level + 1, min_key, max_key, run.stream())
-    //        .await
-    //}
+    async fn compact_from(
+        run_target_size: u64,
+        block_size: u64,
+        manifest: &Manifest,
+        level: usize,
+    ) -> anyhow::Result<(Vec<Run<Vec<u8>>>, HashSet<Uuid>)> {
+        if manifest.levels[level].runs.is_empty() {
+            return Ok((vec![], HashSet::new()));
+        }
+        let idx = rand::thread_rng().gen_range(0..manifest.levels[level].runs.len());
+        let run = &manifest.levels[level].runs[idx];
+        let (min_key, max_key) = match run.range() {
+            Some((min_key, max_key)) => (min_key, max_key),
+            None => return Ok((vec![], HashSet::new())),
+        };
+
+        let run_id = run.id();
+
+        let (new_runs, mut removes) = Self::compact_inner(
+            run_target_size,
+            block_size,
+            manifest,
+            level + 1,
+            min_key,
+            max_key,
+            run.stream(),
+        )
+        .await?;
+        removes.insert(run_id);
+
+        Ok((new_runs, removes))
+    }
 
     async fn compact_inner(
         run_target_size: u64,
@@ -1698,13 +1747,10 @@ impl<T> AtomicArc<T> {
 mod test {
     use std::cmp::Reverse;
     use std::collections::BTreeMap;
-    use std::task::Poll;
 
     use byteorder::BigEndian;
     use byteorder::ByteOrder;
-    use futures::poll;
     use futures::stream::StreamExt;
-    use futures::FutureExt;
     use proptest::prelude::*;
 
     use crate::binary_search_by_idx;
@@ -1714,7 +1760,6 @@ mod test {
     use crate::AsyncReadExactAt;
     use crate::Block;
     use crate::Direction;
-    use crate::Lsm;
     use crate::LsmBuilder;
     use crate::Record;
     use crate::Run;
@@ -1746,22 +1791,17 @@ mod test {
             .build();
         let mut map = BTreeMap::new();
         let mut last_ts = 0;
-        //let mut runs_in_l1 = 0;
         for _ in 0..10 {
-            let compaction = lsm.next_compaction().boxed_local();
-            for i in 0..13 {
+            let compacted = lsm.next_compaction();
+            // We consider these writes to be 10 bytes (1 key + 8 ts + 1 value), so this is
+            // enough to overfill a memtable.
+            for i in 0..20 {
                 let v = (i % 179) as u8;
                 let put_ts = lsm.put(vec![i as u8], vec![v]).await?;
                 last_ts = std::cmp::max(put_ts, last_ts);
                 map.insert(i as u8, v);
-
-                // Insert until we trigger a compaction.
-                //if lsm.levels[1].runs.len() != runs_in_l1 {
-                //    runs_in_l1 = lsm.levels[1].runs.len();
-                //    break;
-                //}
             }
-            compaction.await;
+            compacted.await;
 
             for (k, v) in &map {
                 assert_eq!(lsm.get(last_ts, &[*k]).await?, Some(vec![*v]));
@@ -1774,37 +1814,40 @@ mod test {
         Ok(())
     }
 
-    // #[tokio::test]
-    // async fn test_compact_l1() -> anyhow::Result<()> {
-    //     let mut lsm = LsmBuilder::new()
-    //         .l0_max_size(64)
-    //         .run_target_size(1024)
-    //         .block_size(256)
-    //         .build();
-    //     let mut map = BTreeMap::new();
-    //     let mut last_ts = 0;
-    //     let mut runs_in_l2 = 0;
-    //     for _ in 0..3 {
-    //         for i in 0..usize::MAX {
-    //             let v = (i % 179) as u8;
-    //             let put_ts = lsm.put(vec![i as u8], vec![v]).await?;
-    //             last_ts = std::cmp::max(put_ts, last_ts);
-    //             map.insert(i as u8, v);
+    #[tokio::test]
+    async fn test_compact_l1() -> anyhow::Result<()> {
+        let lsm = LsmBuilder::new()
+            .l0_max_size(128)
+            .block_size(128)
+            .run_target_size(512)
+            .build();
+        let mut map = BTreeMap::new();
+        let mut last_ts = 0;
+        for j in 0..10 {
+            loop {
+                // We consider these writes to be 10 bytes (1 key + 8 ts + 1 value), so this is
+                // enough to overfill a memtable.
+                for i in 0..24 {
+                    let k = (j * 5 + i) as u8;
+                    let v = (i % 179) as u8;
+                    let put_ts = lsm.put(vec![k], vec![v]).await?;
+                    last_ts = std::cmp::max(put_ts, last_ts);
+                    map.insert(k, v);
+                }
 
-    //             // Insert until we trigger a compaction.
-    //             if lsm.levels[2].runs.len() != runs_in_l2 {
-    //                 runs_in_l2 = lsm.levels[2].runs.len();
-    //                 break;
-    //             }
-    //         }
+                lsm.all_compactions().await;
+                if lsm.inner.manifest.load().levels[2].runs.len() >= j + 1 {
+                    break;
+                }
+            }
 
-    //         for (k, v) in &map {
-    //             assert_eq!(lsm.get(last_ts, &[*k]).await?, Some(vec![*v]));
-    //         }
-    //     }
+            for (k, v) in &map {
+                assert_eq!(lsm.get(last_ts, &[*k]).await?, Some(vec![*v]));
+            }
+        }
 
-    //     Ok(())
-    // }
+        Ok(())
+    }
 
     #[test]
     fn test_binary_search_by_key() {
@@ -2017,7 +2060,7 @@ mod test {
 
                 let mut writes = vec![];
 
-                let mut lsm = LsmBuilder::new()
+                let lsm = LsmBuilder::new()
                     .l0_max_size(128)
                     .block_size(128)
                     .run_target_size(512)
@@ -2112,9 +2155,16 @@ fn dump_manifest(manifest: &Manifest) {
     println!("== manifest =====");
     println!("l0_active");
     for memtable_lock in manifest.l0_active.values() {
-        match memtable_lock.read().unwrap().range() {
+        let memtable = memtable_lock.read().unwrap();
+        match memtable.range() {
             Some((lower, upper)) => {
-                println!("  [{}] [{}]", hexlify(&lower), hexlify(&upper));
+                println!(
+                    "  {} ({} bytes) [{}] [{}]",
+                    memtable.id(),
+                    memtable.size(),
+                    hexlify(&lower),
+                    hexlify(&upper)
+                );
             }
             None => println!("  (empty)"),
         }
@@ -2123,7 +2173,13 @@ fn dump_manifest(manifest: &Manifest) {
     for memtable in manifest.l0_sealed.values() {
         match memtable.range() {
             Some((lower, upper)) => {
-                println!("  [{}] [{}]", hexlify(&lower), hexlify(&upper));
+                println!(
+                    "  {} ({} bytes) [{}] [{}]",
+                    memtable.id(),
+                    memtable.size(),
+                    hexlify(&lower),
+                    hexlify(&upper)
+                );
             }
             None => println!("  (empty)"),
         }
@@ -2133,10 +2189,16 @@ fn dump_manifest(manifest: &Manifest) {
         .enumerate()
         .map(|(i, level)| (i + 1, level))
     {
-        println!("l{}", i);
+        println!("l{} ({} bytes)", i, level.size());
         for run in &level.runs {
             let (lower, upper) = run.range().unwrap();
-            println!("  run [{}] [{}]", hexlify(&lower), hexlify(&upper));
+            println!(
+                "  {} ({} bytes) [{}] [{}]",
+                run.id(),
+                run.size(),
+                hexlify(&lower),
+                hexlify(&upper)
+            );
         }
     }
     println!("============");
