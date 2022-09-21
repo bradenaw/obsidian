@@ -232,8 +232,11 @@ impl Lsm {
             .unwrap();
         let (min_key, max_key) = match chosen_l0.range() {
             Some(r) => r,
-            // l0 is empty, nothing to do
-            None => return Ok((vec![], HashSet::new())),
+            None => {
+                let mut removes = HashSet::new();
+                removes.insert(*chosen_l0_id);
+                return Ok((vec![], removes));
+            }
         };
 
         let (new_runs, mut removes) = Self::compact_inner(
@@ -555,10 +558,12 @@ impl LsmInner {
         let ts = self.sequencer.start_write();
         loop {
             let l0_active = self.l0_active.load();
-            let new_size = {
+            let overfilled = {
                 let mut guard = l0_active.write().unwrap();
                 if let MaybeActiveMemtable::Active(memtable) = &mut *guard {
-                    memtable.put(k.clone(), ts, v.clone())
+                    let pre_size = memtable.size();
+                    let post_size = memtable.put(k.clone(), ts, v.clone());
+                    pre_size < self.l0_max_size && post_size >= self.l0_max_size
                 } else {
                     // Only happens if there's already a new one inserted into self.l0_active, so
                     // just try again.
@@ -566,8 +571,7 @@ impl LsmInner {
                 }
             };
             self.sequencer.finish_write(ts);
-            if new_size > self.l0_max_size {
-                // TODO: Choose which thread is going to do this.
+            if overfilled {
                 let old_memtable_id = { l0_active.read().unwrap().id() };
                 // Make a new memtable.
                 let new_memtable =
