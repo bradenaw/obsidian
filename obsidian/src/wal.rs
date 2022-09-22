@@ -1,0 +1,168 @@
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::RwLock;
+use std::time::Duration;
+
+use async_stream::try_stream;
+use futures::future;
+use futures::Stream;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+
+struct Wal<E> {
+    inner: Arc<RwLock<WalInner<E>>>,
+
+    reqs: mpsc::Sender<(E, oneshot::Sender<u64>)>,
+    highest_seqno: watch::Receiver<u64>,
+    process_handle: JoinHandle<()>,
+}
+
+impl<E: Entry + Clone + Send + Sync + 'static> Wal<E> {
+    fn new() -> Self {
+        let (reqs_send, reqs_recv) = mpsc::channel(1);
+        let (highest_seqno_send, highest_seqno_recv) = watch::channel(0);
+        let inner = Arc::new(RwLock::new(WalInner::new()));
+
+        let process_handle = tokio::spawn(Self::process(
+            inner.clone(),
+            65536,
+            Duration::from_millis(5),
+            reqs_recv,
+            highest_seqno_send,
+        ));
+
+        Self {
+            inner,
+            reqs: reqs_send,
+            highest_seqno: highest_seqno_recv,
+            process_handle,
+        }
+    }
+
+    async fn append(&self, e: E) -> anyhow::Result<u64> {
+        let (done_send, done_recv) = oneshot::channel();
+        self.reqs
+            .send((e, done_send))
+            .await
+            .map_err(|_| anyhow::anyhow!("Wal processor gone missing"))?;
+        let seqno = done_recv.await?;
+        Ok(seqno)
+    }
+
+    async fn trim(&self, last: u64) -> anyhow::Result<()> {
+        let mut inner = self.inner.write().unwrap();
+        while (inner.offset as u64) < last {
+            inner.entries.pop_front();
+            inner.offset += 1;
+        }
+        Ok(())
+    }
+
+    fn stream(&self, first: u64) -> impl Stream<Item = anyhow::Result<(u64, Vec<E>)>> + '_ {
+        try_stream! {
+            let mut highest_seqno = self.highest_seqno.clone();
+            let mut i = first;
+            loop {
+                loop {
+                    let inner = self.inner.read().unwrap();
+                    if i < inner.offset as u64 {
+                        Err(anyhow::anyhow!("oops"))?;
+                    }
+                    let j = i - inner.offset as u64;
+                    if j > inner.entries.len() as u64 {
+                        break;
+                    }
+                    yield (i, inner.entries[j as usize].clone());
+                    i += 1;
+                }
+                highest_seqno
+                    .changed()
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Wal processor gone missing"))?;
+            }
+        }
+    }
+
+    async fn process(
+        inner: Arc<RwLock<WalInner<E>>>,
+        max_buffer_size: u64,
+        max_buffer_duration: Duration,
+        mut reqs: mpsc::Receiver<(E, oneshot::Sender<u64>)>,
+        mut highest_seqno: watch::Sender<u64>,
+    ) {
+        let mut timer = future::Either::Left(future::pending::<()>());
+        let mut buffer = vec![];
+        let mut buffer_size = 0u64;
+
+        fn flush<E>(
+            inner_lock: &RwLock<WalInner<E>>,
+            buffer: &mut Vec<(E, oneshot::Sender<u64>)>,
+            buffer_size: &mut u64,
+            highest_seqno: &mut watch::Sender<u64>,
+        ) {
+            let (senders, seqno) = {
+                let mut inner = inner_lock.write().unwrap();
+                let (entries, senders): (Vec<_>, Vec<_>) = buffer.drain(..).unzip();
+                let seqno = (inner.offset + inner.entries.len()) as u64;
+                inner.entries.push_back(entries);
+                (senders, seqno)
+            };
+            for sender in senders {
+                _ = sender.send(seqno);
+            }
+            _ = highest_seqno.send(seqno);
+            *buffer_size = 0;
+        }
+
+        loop {
+            tokio::select! {
+                Some((entry, sender)) = reqs.recv() => {
+                    let entry_size = entry.size();
+                    if !buffer.is_empty() && buffer_size + entry_size > max_buffer_size {
+                        flush(&inner, &mut buffer, &mut buffer_size, &mut highest_seqno);
+                    }
+                    buffer_size += entry_size;
+                    buffer.push((entry, sender));
+                    if buffer_size > max_buffer_size {
+                        flush(&inner, &mut buffer, &mut buffer_size, &mut highest_seqno);
+                    }
+                    if buffer.len() == 1 {
+                        timer = future::Either::Right(Box::pin(
+                            tokio::time::sleep(max_buffer_duration),
+                        ));
+                    }
+                }
+                _ = &mut timer => {
+                    flush(&inner, &mut buffer, &mut buffer_size, &mut highest_seqno);
+                    timer = future::Either::Left(future::pending::<()>());
+                }
+            }
+        }
+    }
+}
+
+impl<E> Drop for Wal<E> {
+    fn drop(&mut self) {
+        self.process_handle.abort();
+    }
+}
+
+trait Entry {
+    fn size(&self) -> u64;
+}
+
+struct WalInner<E> {
+    entries: VecDeque<Vec<E>>,
+    offset: usize,
+}
+
+impl<E> WalInner<E> {
+    fn new() -> Self {
+        Self {
+            entries: VecDeque::new(),
+            offset: 0,
+        }
+    }
+}

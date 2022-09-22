@@ -39,6 +39,7 @@ mod lock_mgr;
 mod memtable;
 mod range;
 mod sequencer;
+mod wal;
 
 use crate::memtable::Memtable;
 use crate::range::Bound;
