@@ -67,14 +67,14 @@ impl<E: Entry + Clone + Send + Sync + 'static> Wal<E> {
             loop {
                 loop {
                     let inner = self.inner.read().unwrap();
-                    if i < inner.offset as u64 {
-                        Err(anyhow::anyhow!("oops"))?;
+                    let (min_seqno, max_seqno) = inner.seqno_range();
+                    if i < min_seqno {
+                        Err(anyhow::anyhow!("fell behind"))?;
                     }
-                    let j = i - inner.offset as u64;
-                    if j > inner.entries.len() as u64 {
+                    if i > max_seqno {
                         break;
                     }
-                    yield (i, inner.entries[j as usize].clone());
+                    yield (i, inner.entry(i).unwrap().clone());
                     i += 1;
                 }
                 highest_seqno
@@ -164,5 +164,23 @@ impl<E> WalInner<E> {
             entries: VecDeque::new(),
             offset: 0,
         }
+    }
+
+    fn entry(&self, seqno: u64) -> Option<&Vec<E>> {
+        if seqno < self.offset as u64 {
+            return None;
+        }
+        let idx = (seqno - (self.offset as u64)) as usize;
+        if idx >= self.entries.len() {
+            return None;
+        }
+        Some(&self.entries[idx])
+    }
+
+    fn seqno_range(&self) -> (u64, u64) {
+        (
+            self.offset as u64,
+            (self.offset + self.entries.len()) as u64,
+        )
     }
 }
