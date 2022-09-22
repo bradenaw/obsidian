@@ -14,15 +14,18 @@ use tokio::task::JoinHandle;
 struct Wal<E> {
     inner: Arc<RwLock<WalInner<E>>>,
 
-    reqs: mpsc::Sender<(E, oneshot::Sender<u64>)>,
-    highest_seqno: watch::Receiver<u64>,
+    reqs: mpsc::Sender<(E, oneshot::Sender<SeqNo>)>,
+    highest_seqno: watch::Receiver<SeqNo>,
     process_handle: JoinHandle<()>,
 }
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct SeqNo(u64);
 
 impl<E: Entry + Clone + Send + Sync + 'static> Wal<E> {
     fn new(buffer_size: u64, buffer_duration: Duration) -> Self {
         let (reqs_send, reqs_recv) = mpsc::channel(1);
-        let (highest_seqno_send, highest_seqno_recv) = watch::channel(0);
+        let (highest_seqno_send, highest_seqno_recv) = watch::channel(SeqNo(0));
         let inner = Arc::new(RwLock::new(WalInner::new()));
 
         let process_handle = tokio::spawn(Self::process(
@@ -41,7 +44,7 @@ impl<E: Entry + Clone + Send + Sync + 'static> Wal<E> {
         }
     }
 
-    async fn append(&self, e: E) -> anyhow::Result<u64> {
+    async fn append(&self, e: E) -> anyhow::Result<SeqNo> {
         let (done_send, done_recv) = oneshot::channel();
         self.reqs
             .send((e, done_send))
@@ -53,16 +56,16 @@ impl<E: Entry + Clone + Send + Sync + 'static> Wal<E> {
         Ok(seqno)
     }
 
-    async fn trim(&self, last: u64) -> anyhow::Result<()> {
+    async fn trim(&self, last: SeqNo) -> anyhow::Result<()> {
         let mut inner = self.inner.write().unwrap();
-        while (inner.offset as u64) < last {
+        while inner.offset <= last {
             inner.entries.pop_front();
-            inner.offset += 1;
+            inner.offset = SeqNo(inner.offset.0 + 1);
         }
         Ok(())
     }
 
-    fn stream(&self, first: u64) -> impl Stream<Item = anyhow::Result<(u64, Vec<E>)>> + '_ {
+    fn stream(&self, first: SeqNo) -> impl Stream<Item = anyhow::Result<(SeqNo, E)>> + '_ {
         try_stream! {
             let mut highest_seqno = self.highest_seqno.clone();
             let mut i = first;
@@ -78,7 +81,7 @@ impl<E: Entry + Clone + Send + Sync + 'static> Wal<E> {
                         break;
                     }
                     yield (i, inner.entry(i).unwrap().clone());
-                    i += 1;
+                    i = SeqNo(i.0 + 1);
                 }
                 highest_seqno
                     .changed()
@@ -92,8 +95,8 @@ impl<E: Entry + Clone + Send + Sync + 'static> Wal<E> {
         inner: Arc<RwLock<WalInner<E>>>,
         max_buffer_size: u64,
         max_buffer_duration: Duration,
-        mut reqs: mpsc::Receiver<(E, oneshot::Sender<u64>)>,
-        mut highest_seqno: watch::Sender<u64>,
+        mut reqs: mpsc::Receiver<(E, oneshot::Sender<SeqNo>)>,
+        mut highest_seqno: watch::Sender<SeqNo>,
     ) {
         let mut timer = future::Either::Left(future::pending::<()>());
         let mut buffer = vec![];
@@ -101,20 +104,23 @@ impl<E: Entry + Clone + Send + Sync + 'static> Wal<E> {
 
         fn flush<E>(
             inner_lock: &RwLock<WalInner<E>>,
-            buffer: &mut Vec<(E, oneshot::Sender<u64>)>,
+            buffer: &mut Vec<(E, oneshot::Sender<SeqNo>)>,
             buffer_size: &mut u64,
-            highest_seqno: &mut watch::Sender<u64>,
+            highest_seqno: &mut watch::Sender<SeqNo>,
         ) {
-            let (senders, seqno) = {
+            let last_seqno = {
                 let mut inner = inner_lock.write().unwrap();
-                let (entries, senders): (Vec<_>, Vec<_>) = buffer.drain(..).unzip();
-                let seqno = (inner.offset + inner.entries.len()) as u64;
-                inner.entries.push_back(entries);
-                (senders, seqno)
+                let mut last_seqno: Option<SeqNo> = None;
+                for (entry, sender) in buffer.drain(..) {
+                    let seqno = SeqNo(inner.offset.0 + (inner.entries.len() as u64));
+                    inner.entries.push_back(entry);
+                    _ = sender.send(seqno);
+                    last_seqno = Some(seqno);
+                }
+                last_seqno
             };
-            _ = highest_seqno.send(seqno);
-            for sender in senders {
-                _ = sender.send(seqno);
+            if let Some(seqno) = last_seqno {
+                _ = highest_seqno.send(seqno);
             }
             *buffer_size = 0;
         }
@@ -157,33 +163,33 @@ trait Entry {
 }
 
 struct WalInner<E> {
-    entries: VecDeque<Vec<E>>,
-    offset: usize,
+    entries: VecDeque<E>,
+    offset: SeqNo,
 }
 
 impl<E> WalInner<E> {
     fn new() -> Self {
         Self {
             entries: VecDeque::new(),
-            offset: 0,
+            offset: SeqNo(0),
         }
     }
 
-    fn entry(&self, seqno: u64) -> Option<&Vec<E>> {
-        if seqno < self.offset as u64 {
+    fn entry(&self, seqno: SeqNo) -> Option<&E> {
+        if seqno < self.offset {
             return None;
         }
-        let idx = (seqno - (self.offset as u64)) as usize;
+        let idx = (seqno.0 - self.offset.0) as usize;
         if idx >= self.entries.len() {
             return None;
         }
         Some(&self.entries[idx])
     }
 
-    fn seqno_range(&self) -> (u64, u64) {
+    fn seqno_range(&self) -> (SeqNo, SeqNo) {
         (
-            self.offset as u64,
-            (self.offset + self.entries.len()) as u64,
+            self.offset,
+            SeqNo(self.offset.0 + (self.entries.len() as u64)),
         )
     }
 }
@@ -198,6 +204,7 @@ mod test {
     use futures::stream::TryStreamExt;
 
     use super::Entry;
+    use super::SeqNo;
     use super::Wal;
 
     impl Entry for u64 {
@@ -210,13 +217,15 @@ mod test {
     async fn test_basic() -> anyhow::Result<()> {
         let wal = Wal::<u64>::new(3, Duration::from_millis(10000000));
 
-        let mut s = wal.stream(0).boxed_local();
+        let mut s = wal.stream(SeqNo(0)).boxed_local();
 
         assert!(matches!(futures::poll!(s.next()), Poll::Pending));
 
-        future::try_join3(wal.append(0), wal.append(1), wal.append(2)).await?;
+        future::try_join3(wal.append(5), wal.append(6), wal.append(7)).await?;
 
-        assert_eq!(s.try_next().await?, Some((0u64, vec![0u64, 1u64, 2u64])));
+        assert_eq!(s.try_next().await?, Some((SeqNo(0), 5)));
+        assert_eq!(s.try_next().await?, Some((SeqNo(1), 6)));
+        assert_eq!(s.try_next().await?, Some((SeqNo(2), 7)));
 
         Ok(())
     }
@@ -225,13 +234,15 @@ mod test {
     async fn test_flush_timeout() -> anyhow::Result<()> {
         let wal = Wal::<u64>::new(1000, Duration::from_millis(10));
 
-        let mut s = wal.stream(0).boxed_local();
+        let mut s = wal.stream(SeqNo(0)).boxed_local();
 
         assert!(matches!(futures::poll!(s.next()), Poll::Pending));
 
-        future::try_join3(wal.append(0), wal.append(1), wal.append(2)).await?;
+        future::try_join3(wal.append(5), wal.append(6), wal.append(7)).await?;
 
-        assert_eq!(s.try_next().await?, Some((0u64, vec![0u64, 1u64, 2u64])));
+        assert_eq!(s.try_next().await?, Some((SeqNo(0), 5)));
+        assert_eq!(s.try_next().await?, Some((SeqNo(1), 6)));
+        assert_eq!(s.try_next().await?, Some((SeqNo(2), 7)));
 
         Ok(())
     }
