@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
 use std::collections::HashSet;
 use std::fs::File;
+use std::future::Future;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ops::DerefMut;
@@ -17,6 +18,7 @@ use std::os::unix::fs::FileExt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use async_stream::stream;
@@ -28,6 +30,7 @@ use futures::pin_mut;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
 use futures::SinkExt;
+use futures::TryStreamExt;
 use lock_mgr::LockMgr;
 use rand::Rng;
 use thiserror::Error;
@@ -109,8 +112,12 @@ impl LsmBuilder {
 
 struct Lsm {
     inner: Arc<LsmInner>,
+    wal: Arc<wal::Wal<WalEntry>>,
+
     compaction: tokio::task::JoinHandle<()>,
     compacted: tokio::sync::broadcast::Receiver<()>,
+    wal_process: tokio::task::JoinHandle<anyhow::Result<()>>,
+    wal_processed: tokio::sync::watch::Receiver<wal::SeqNo>,
 }
 
 impl Lsm {
@@ -123,19 +130,30 @@ impl Lsm {
             block_size,
             l0_compact_notify,
         ));
-        let inner_ = inner.clone();
         let compaction = tokio::spawn(Self::compaction_loop(
             l0_max_size,
             run_target_size,
             block_size,
-            inner_.clone(),
+            inner.clone(),
             l0_compact_ready,
             compacted_notify,
         ));
+        let wal = Arc::new(wal::Wal::new(16384, Duration::from_millis(5)));
+
+        let (wal_processed_send, wal_processed_recv) = tokio::sync::watch::channel(wal::SeqNo(0));
+        let wal_process = tokio::spawn(Self::process_wal(
+            inner.clone(),
+            wal.clone(),
+            wal_processed_send,
+        ));
+
         Self {
             inner,
             compaction,
             compacted,
+            wal,
+            wal_process,
+            wal_processed: wal_processed_recv,
         }
     }
 
@@ -164,12 +182,63 @@ impl Lsm {
         preconds: Vec<Precondition>,
         muts: BTreeMap<Vec<u8>, Mutation>,
     ) -> Result<u64, WriteError> {
-        self.inner.write(preconds, muts).await
+        let _ = self
+            .inner
+            .lock_mgr
+            .lock(
+                preconds.iter().map(|precond| precond.key()),
+                muts.keys().map(|k| &k[..]),
+            )
+            .await;
+
+        let ts = self.inner.sequencer.start_write();
+
+        for precond in preconds {
+            let res = self.inner.unsafe_get(*ts, precond.key()).await?;
+            match precond {
+                Precondition::NotChangedSince(_, ts) => {
+                    if let Some((last_write_ts, _)) = res {
+                        if last_write_ts > ts {
+                            return Err(WriteError::PreconditionFailed);
+                        }
+                    }
+                }
+            }
+        }
+
+        let seqno = self
+            .wal
+            .append(WalEntry::Write(
+                *ts,
+                muts.into_iter()
+                    .map(|(key, m)| {
+                        let value = match m {
+                            Mutation::Put(raw_value) => Value::Regular(raw_value),
+                            Mutation::Delete => Value::Tombstone,
+                        };
+                        (key, value)
+                    })
+                    .collect(),
+            ))
+            .await?;
+
+        let mut wal_processed = self.wal_processed.clone();
+        while *wal_processed.borrow_and_update() < seqno {
+            wal_processed
+                .changed()
+                .await
+                .map_err(|_| WriteError::Other(anyhow::anyhow!("wal processor missing")))?;
+        }
+
+        Ok(*ts)
     }
 
-    pub async fn next_compaction(&self) {
+    pub fn next_compaction(&self) -> impl Future<Output = ()> {
         let mut compacted = self.compacted.resubscribe();
-        let _ = compacted.recv().await;
+        async move {
+            _ = compacted.recv().await;
+            ()
+        }
     }
 
     pub async fn pending_compactions(&self) {
@@ -180,6 +249,26 @@ impl Lsm {
             }
             compacted.await;
         }
+    }
+
+    async fn process_wal(
+        inner: Arc<LsmInner>,
+        wal: Arc<wal::Wal<WalEntry>>,
+        wal_processed: tokio::sync::watch::Sender<wal::SeqNo>,
+    ) -> anyhow::Result<()> {
+        let mut log = wal.stream(wal::SeqNo(0)).boxed();
+        while let Some((seqno, entry)) = log.try_next().await? {
+            match entry {
+                WalEntry::Write(ts, kvs) => {
+                    for (key, value) in kvs {
+                        inner.insert(key, ts, value);
+                    }
+                }
+            }
+            wal.trim(seqno).await?;
+            _ = wal_processed.send(seqno);
+        }
+        Ok(())
     }
 
     async fn compaction_loop(
@@ -413,6 +502,7 @@ impl Lsm {
 impl Drop for Lsm {
     fn drop(&mut self) {
         self.compaction.abort();
+        self.wal_process.abort();
     }
 }
 
@@ -1236,6 +1326,21 @@ enum Direction {
     Desc,
 }
 
+#[derive(Clone, Debug)]
+enum WalEntry {
+    Write(u64, Vec<(Vec<u8>, Value)>),
+}
+
+impl wal::Entry for WalEntry {
+    fn size(&self) -> u64 {
+        match self {
+            WalEntry::Write(_, kvs) => {
+                8 + kvs.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>() as u64
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 struct PrefixCompressedKV<V> {
     v: PhantomData<V>,
@@ -1931,7 +2036,7 @@ mod test {
             let compacted = lsm.next_compaction();
             // We consider these writes to be 10 bytes (1 key + 8 ts + 1 value), so this is
             // enough to overfill a memtable.
-            for i in 0..20 {
+            for i in 0..24 {
                 let v = (i % 179) as u8;
                 let put_ts = lsm.put(vec![i as u8], vec![v]).await?;
                 last_ts = std::cmp::max(put_ts, last_ts);

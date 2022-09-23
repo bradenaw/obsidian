@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
 
-use async_stream::try_stream;
+use async_stream::stream;
 use futures::future;
 use futures::Stream;
 use tokio::sync::mpsc;
@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-struct Wal<E> {
+pub(crate) struct Wal<E> {
     inner: Arc<RwLock<WalInner<E>>>,
 
     reqs: mpsc::Sender<(E, oneshot::Sender<SeqNo>)>,
@@ -20,10 +20,10 @@ struct Wal<E> {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct SeqNo(u64);
+pub(crate) struct SeqNo(pub u64);
 
 impl<E: Entry + Clone + Send + Sync + 'static> Wal<E> {
-    fn new(buffer_size: u64, buffer_duration: Duration) -> Self {
+    pub fn new(buffer_size: u64, buffer_duration: Duration) -> Self {
         let (reqs_send, reqs_recv) = mpsc::channel(1);
         let (highest_seqno_send, highest_seqno_recv) = watch::channel(SeqNo(0));
         let inner = Arc::new(RwLock::new(WalInner::new()));
@@ -44,7 +44,7 @@ impl<E: Entry + Clone + Send + Sync + 'static> Wal<E> {
         }
     }
 
-    async fn append(&self, e: E) -> anyhow::Result<SeqNo> {
+    pub async fn append(&self, e: E) -> anyhow::Result<SeqNo> {
         let (done_send, done_recv) = oneshot::channel();
         self.reqs
             .send((e, done_send))
@@ -56,7 +56,7 @@ impl<E: Entry + Clone + Send + Sync + 'static> Wal<E> {
         Ok(seqno)
     }
 
-    async fn trim(&self, last: SeqNo) -> anyhow::Result<()> {
+    pub async fn trim(&self, last: SeqNo) -> anyhow::Result<()> {
         let mut inner = self.inner.write().unwrap();
         while inner.offset <= last {
             inner.entries.pop_front();
@@ -65,22 +65,33 @@ impl<E: Entry + Clone + Send + Sync + 'static> Wal<E> {
         Ok(())
     }
 
-    fn stream(&self, first: SeqNo) -> impl Stream<Item = anyhow::Result<(SeqNo, E)>> + '_ {
-        try_stream! {
+    pub fn stream(
+        &self,
+        first: SeqNo,
+    ) -> impl Stream<Item = anyhow::Result<(SeqNo, E)>> + Send + '_ {
+        stream! {
             let mut highest_seqno = self.highest_seqno.clone();
             let mut i = first;
             loop {
                 loop {
-                    let inner = self.inner.read().unwrap();
-                    let (min_seqno, max_seqno_plus_one) = inner.seqno_range();
-                    if i < min_seqno {
-                        Err(anyhow::anyhow!("fell behind"))?;
+                    let maybe_entry = {
+                        let inner = self.inner.read().unwrap();
+                        let (min_seqno, max_seqno_plus_one) = inner.seqno_range();
+                        if i < min_seqno {
+                            Err(anyhow::anyhow!("fell behind"))
+                        } else {
+                            if i >= max_seqno_plus_one {
+                                // Run off the edge, so must wait for new ones to be written.
+                                break;
+                            }
+                            Ok((i, inner.entry(i).unwrap().clone()))
+                        }
+                    };
+                    let is_err = maybe_entry.is_err();
+                    yield maybe_entry;
+                    if is_err {
+                        return;
                     }
-                    if i >= max_seqno_plus_one {
-                        // Run off the edge, so must wait for new ones to be written.
-                        break;
-                    }
-                    yield (i, inner.entry(i).unwrap().clone());
                     i = SeqNo(i.0 + 1);
                 }
                 highest_seqno
@@ -158,7 +169,7 @@ impl<E> Drop for Wal<E> {
     }
 }
 
-trait Entry {
+pub(crate) trait Entry {
     fn size(&self) -> u64;
 }
 
