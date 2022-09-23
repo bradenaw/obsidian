@@ -26,6 +26,7 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
+use futures::future;
 use futures::pin_mut;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
@@ -42,6 +43,7 @@ mod lock_mgr;
 mod memtable;
 mod range;
 mod sequencer;
+mod storage;
 mod wal;
 
 use crate::memtable::Memtable;
@@ -49,6 +51,8 @@ use crate::range::Bound;
 use crate::range::KeyOrBound;
 use crate::range::Range;
 use crate::sequencer::Sequencer;
+use crate::storage::MemStorage;
+use crate::storage::Storage;
 
 enum Precondition {
     NotChangedSince(Vec<u8>, u64),
@@ -303,7 +307,7 @@ impl Lsm {
 
         while !manifest.l0_sealed.is_empty() {
             let (runs, remove_ids) =
-                Self::compact_l0(run_target_size, block_size, &manifest).await?;
+                Self::compact_l0(run_target_size, block_size, &manifest, &inner.storage).await?;
             if runs.is_empty() && remove_ids.is_empty() {
                 return Ok(());
             }
@@ -322,8 +326,14 @@ impl Lsm {
 
             'levels: for i in 1..manifest.levels.len() - 1 {
                 while manifest.levels[i].size() as u64 > l0_max_size * 10_u64.pow(i as u32) {
-                    let (runs, remove_ids) =
-                        Self::compact_from(run_target_size, block_size, &manifest, i).await?;
+                    let (runs, remove_ids) = Self::compact_from(
+                        run_target_size,
+                        block_size,
+                        &manifest,
+                        &inner.storage,
+                        i,
+                    )
+                    .await?;
                     if runs.is_empty() && remove_ids.is_empty() {
                         break 'levels;
                     }
@@ -351,7 +361,8 @@ impl Lsm {
         run_target_size: u64,
         block_size: u64,
         manifest: &Manifest,
-    ) -> anyhow::Result<(Vec<Run<Vec<u8>>>, HashSet<Uuid>)> {
+        storage: &MemStorage,
+    ) -> anyhow::Result<(Vec<Run<Arc<Vec<u8>>>>, HashSet<Uuid>)> {
         // We must always compact the oldest l0, because get, etc. assume that everything in
         // memtables is newer than anything in any lower levels.
         let chosen_l0 = &manifest.l0_sealed[0];
@@ -369,6 +380,7 @@ impl Lsm {
             run_target_size,
             block_size,
             manifest,
+            storage,
             1,
             min_key,
             max_key,
@@ -390,8 +402,9 @@ impl Lsm {
         run_target_size: u64,
         block_size: u64,
         manifest: &Manifest,
+        storage: &MemStorage,
         level: usize,
-    ) -> anyhow::Result<(Vec<Run<Vec<u8>>>, HashSet<Uuid>)> {
+    ) -> anyhow::Result<(Vec<Run<Arc<Vec<u8>>>>, HashSet<Uuid>)> {
         if manifest.levels[level].runs.is_empty() {
             return Ok((vec![], HashSet::new()));
         }
@@ -408,6 +421,7 @@ impl Lsm {
             run_target_size,
             block_size,
             manifest,
+            storage,
             level + 1,
             min_key,
             max_key,
@@ -423,11 +437,12 @@ impl Lsm {
         run_target_size: u64,
         block_size: u64,
         manifest: &Manifest,
+        storage: &MemStorage,
         into_level: usize,
         min_key: Vec<u8>,
         max_key: Vec<u8>,
         entries: impl Stream<Item = anyhow::Result<Record>> + Send,
-    ) -> anyhow::Result<(Vec<Run<Vec<u8>>>, HashSet<Uuid>)> {
+    ) -> anyhow::Result<(Vec<Run<Arc<Vec<u8>>>>, HashSet<Uuid>)> {
         let overlapping_runs = manifest.levels[into_level].overlapping_runs(min_key, max_key);
 
         let removes = overlapping_runs.iter().map(|run| run.id()).collect();
@@ -458,41 +473,60 @@ impl Lsm {
             let mut curr_size = 0u64;
             let (mut tx, rx) = futures::channel::mpsc::channel(1);
 
-            let run_handle = tokio::spawn(async move {
-                let mut run_out = vec![];
-                Run::<()>::write(&mut run_out, 0, block_size, rx).await?;
-                Ok::<_, anyhow::Error>(run_out)
-            });
-
-            while let Some(record) = sorted.next().await.transpose()? {
-                let record_size = (record.key.len() as u64) + 8 + (record.value.len() as u64);
-                curr_size += record_size;
-                let break_after = {
-                    // All of the records for a single key need to end up in the same run, so once
-                    // we've gone over the target size look for a break between keys.
-                    if curr_size > run_target_size {
-                        if let Some(Ok(next_record)) = Pin::new(&mut sorted).peek().await {
-                            if record.key != next_record.key {
-                                true
+            let id = Uuid::new_v4();
+            let (mut writer, reader) = tokio::io::duplex(16384);
+            future::try_join3(
+                storage.put(&id.to_string(), reader),
+                async {
+                    Run::<()>::write(&mut writer, 0, block_size, rx).await?;
+                    drop(writer);
+                    Ok(())
+                },
+                async {
+                    while let Some(record) = sorted.next().await.transpose()? {
+                        let record_size =
+                            (record.key.len() as u64) + 8 + (record.value.len() as u64);
+                        curr_size += record_size;
+                        let break_after = {
+                            // All of the records for a single key need to end up in the same run, so once
+                            // we've gone over the target size look for a break between keys.
+                            if curr_size > run_target_size {
+                                if let Some(Ok(next_record)) = Pin::new(&mut sorted).peek().await {
+                                    if record.key != next_record.key {
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
                             } else {
                                 false
                             }
-                        } else {
-                            false
+                        };
+                        tx.send(Ok(record)).await?;
+                        if break_after {
+                            break;
                         }
-                    } else {
-                        false
                     }
-                };
-                tx.send(Ok(record)).await?;
-                if break_after {
-                    break;
-                }
-            }
-            drop(tx);
-            let run_out = run_handle.await??;
-            let run_size = run_out.len();
-            runs.push(Run::open(run_out, run_size).await?);
+                    drop(tx);
+
+                    Ok(())
+                },
+            )
+            .await?;
+
+            let run = Run::open(storage.get(&id.to_string()).await?).await?;
+            runs.push(run);
+
+            //let run_handle = tokio::spawn(async move {
+            //    let mut run_out = vec![];
+            //    Run::<()>::write(&mut run_out, 0, block_size, rx).await?;
+            //    Ok::<_, anyhow::Error>(run_out)
+            //});
+
+            //let run_size = run_out.len();
+            //runs.push(Run::open(run_out, run_size).await?);
         }
 
         Ok((runs, removes))
@@ -514,6 +548,7 @@ struct LsmInner {
     l0_compact_notify: tokio::sync::mpsc::Sender<()>,
     sequencer: Sequencer,
     lock_mgr: LockMgr,
+    storage: MemStorage,
     // Outer lock just protects the arc, hold in W to swap it.
     // Inner lock protects memtable, use as normal.
     // Also exists in manifest.l0_active, so reads can go there.
@@ -536,6 +571,7 @@ impl LsmInner {
             l0_compact_notify,
             sequencer: Sequencer::new(),
             lock_mgr: LockMgr::new(16384),
+            storage: MemStorage::new(),
             l0_active: AtomicArc::new(l0_active.clone()),
             manifest: AtomicArc::new(Arc::new(Manifest::new(7).with_ingest_l0(l0_active))),
         }
@@ -875,7 +911,7 @@ impl Manifest {
     fn with_ingest(
         &self,
         into_level: usize,
-        mut add: Vec<Run<Vec<u8>>>,
+        mut add: Vec<Run<Arc<Vec<u8>>>>,
         remove: HashSet<Uuid>,
     ) -> Self {
         let mut levels = Vec::with_capacity(self.levels.len());
@@ -937,7 +973,7 @@ impl Value {
 #[derive(Clone)]
 struct Level {
     // In sorted order by range.
-    runs: Vec<Run<Vec<u8>>>,
+    runs: Vec<Run<Arc<Vec<u8>>>>,
 }
 
 impl Level {
@@ -963,7 +999,7 @@ impl Level {
         self.runs.iter().map(|run| run.size()).sum()
     }
 
-    fn overlapping_runs(&self, min_key: Vec<u8>, max_key: Vec<u8>) -> &[Run<Vec<u8>>] {
+    fn overlapping_runs(&self, min_key: Vec<u8>, max_key: Vec<u8>) -> &[Run<Arc<Vec<u8>>>] {
         let start_idx = self
             .runs
             .binary_search_by_key(&min_key, |run| run.range().unwrap().1)
@@ -1654,7 +1690,7 @@ impl<R> Run<R> {
 }
 
 impl<R: AsyncReadExactAt> Run<R> {
-    async fn open(r: R, size: usize) -> anyhow::Result<Self> {
+    async fn open(r: R) -> anyhow::Result<Self> {
         let file_len = r.len().await?;
         let mut index_block_offset_buf = [0u8; 4];
         r.read_exact_at(&mut index_block_offset_buf[..], file_len - 4)
@@ -1698,6 +1734,7 @@ impl<R: AsyncReadExactAt> Run<R> {
 
         let min_key = index.get_key(0);
 
+        let size = r.len().await? as usize;
         Ok(Self {
             r,
 
@@ -1847,6 +1884,16 @@ impl AsyncReadExactAt for Vec<u8> {
     }
     async fn len(&self) -> anyhow::Result<u64> {
         Ok(self.len() as u64)
+    }
+}
+
+#[async_trait]
+impl AsyncReadExactAt for Arc<Vec<u8>> {
+    async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
+        Ok(buf.copy_from_slice(&self[(offset as usize)..(offset as usize) + buf.len()]))
+    }
+    async fn len(&self) -> anyhow::Result<u64> {
+        Ok(Vec::len(self) as u64)
     }
 }
 
@@ -2205,8 +2252,7 @@ mod test {
         .await
         .unwrap();
 
-        let v_len = v.len();
-        let run = Run::open(v, v_len).await?;
+        let run = Run::open(v).await?;
 
         assert_eq!(run.min_ts, 10230);
         assert_eq!(run.max_ts, 21925);
@@ -2262,8 +2308,7 @@ mod test {
                     futures::stream::iter(records.iter().map(|record| Ok(record.clone()))),
                 ).await.unwrap();
 
-                let v_len = v.len();
-                let run = Run::open(v, v_len).await.unwrap();
+                let run = Run::open(v).await.unwrap();
 
                 dump_run_file(&run).await.unwrap();
 
