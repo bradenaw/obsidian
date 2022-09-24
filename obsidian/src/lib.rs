@@ -9,6 +9,7 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
 use std::collections::HashSet;
+use std::fmt::Display;
 use std::fs::File;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -19,6 +20,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
+use std::time::SystemTime;
 
 use anyhow::anyhow;
 use async_stream::stream;
@@ -55,7 +57,7 @@ use crate::storage::MemStorage;
 use crate::storage::Storage;
 
 enum Precondition {
-    NotChangedSince(Vec<u8>, u64),
+    NotChangedSince(Vec<u8>, Timestamp),
 }
 
 impl Precondition {
@@ -77,6 +79,57 @@ enum WriteError {
     PreconditionFailed,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
+pub struct Timestamp(u64);
+
+impl Timestamp {
+    const ZERO: Self = Timestamp(0);
+    const MAX: Self = Timestamp(u64::MAX);
+
+    fn now() -> Self {
+        Timestamp::from_nanos(
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("now before UNIX_EPOCH?")
+                .as_nanos() as u64,
+        )
+    }
+
+    fn now_after(other: Timestamp) -> Self {
+        std::cmp::max(Timestamp(other.0 + 1), Self::now())
+    }
+
+    fn from_nanos(x: u64) -> Self {
+        Timestamp(x)
+    }
+
+    fn as_nanos(&self) -> u64 {
+        self.0
+    }
+
+    fn plus_one(&self) -> Timestamp {
+        Timestamp(self.0 + 1)
+    }
+
+    fn minus_one(&self) -> Timestamp {
+        Timestamp(self.0 - 1)
+    }
+
+    fn checked_duration_since(&self, earlier: Timestamp) -> Option<Duration> {
+        self.0.checked_sub(earlier.0).map(Duration::from_nanos)
+    }
+
+    fn saturating_duration_since(&self, earlier: Timestamp) -> Duration {
+        Duration::from_nanos(self.0.saturating_sub(earlier.0))
+    }
+}
+
+impl Display for Timestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
 }
 
 struct LsmBuilder {
@@ -161,13 +214,13 @@ impl Lsm {
         }
     }
 
-    pub async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+    pub async fn get(&self, ts: Timestamp, k: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         self.inner.get(ts, k).await
     }
 
     pub async fn scan_page(
         &self,
-        ts: u64,
+        ts: Timestamp,
         range: Range<&[u8]>,
         direction: Direction,
         limit: usize,
@@ -175,7 +228,7 @@ impl Lsm {
         self.inner.scan_page(ts, range, direction, limit).await
     }
 
-    pub async fn put(&self, k: Vec<u8>, v: Vec<u8>) -> anyhow::Result<u64> {
+    pub async fn put(&self, k: Vec<u8>, v: Vec<u8>) -> anyhow::Result<Timestamp> {
         Ok(self
             .write(vec![], BTreeMap::from([(k, Mutation::Put(v))]))
             .await?)
@@ -185,7 +238,7 @@ impl Lsm {
         &self,
         preconds: Vec<Precondition>,
         muts: BTreeMap<Vec<u8>, Mutation>,
-    ) -> Result<u64, WriteError> {
+    ) -> Result<Timestamp, WriteError> {
         let _ = self
             .inner
             .lock_mgr
@@ -577,7 +630,7 @@ impl LsmInner {
         }
     }
 
-    async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+    async fn get(&self, ts: Timestamp, k: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         self.sequencer.wait_for_safe_read(ts).await?;
 
         Ok(match self.unsafe_get(ts, k).await? {
@@ -589,7 +642,11 @@ impl LsmInner {
         })
     }
 
-    async fn unsafe_get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<(u64, Value)>> {
+    async fn unsafe_get(
+        &self,
+        ts: Timestamp,
+        k: &[u8],
+    ) -> anyhow::Result<Option<(Timestamp, Value)>> {
         let manifest = self.manifest.load();
 
         // Any memtable might have the latest for the key, so must check all of them.
@@ -618,7 +675,7 @@ impl LsmInner {
 
     async fn scan_page(
         &self,
-        ts: u64,
+        ts: Timestamp,
         range: Range<&[u8]>,
         direction: Direction,
         limit: usize,
@@ -727,7 +784,7 @@ impl LsmInner {
         &self,
         preconds: Vec<Precondition>,
         muts: BTreeMap<Vec<u8>, Mutation>,
-    ) -> Result<u64, WriteError> {
+    ) -> Result<Timestamp, WriteError> {
         let _ = self
             .lock_mgr
             .lock(
@@ -762,7 +819,7 @@ impl LsmInner {
         Ok(*ts)
     }
 
-    fn insert(&self, k: Vec<u8>, ts: u64, v: Value) -> u64 {
+    fn insert(&self, k: Vec<u8>, ts: Timestamp, v: Value) {
         loop {
             let l0_active = self.l0_active.load();
             let overfilled = {
@@ -811,7 +868,7 @@ impl LsmInner {
 
                 let _ = self.l0_compact_notify.try_send(());
             }
-            return ts;
+            return;
         }
     }
 }
@@ -981,7 +1038,7 @@ impl Level {
         Self { runs: vec![] }
     }
 
-    async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<(u64, Value)>> {
+    async fn get(&self, ts: Timestamp, k: &[u8]) -> anyhow::Result<Option<(Timestamp, Value)>> {
         let idx = match self
             .runs
             .binary_search_by_key(&k.to_vec(), |run| run.range().unwrap().1)
@@ -1079,7 +1136,7 @@ impl<A: Ord, B> PartialOrd for OrdEqByFirst<A, B> {
 struct Block<'a, R> {
     values_len: usize,
     n_versions: usize,
-    min_ts: u64,
+    min_ts: Timestamp,
     ts_bytes: usize,
     offset_bytes: usize,
     index: PrefixCompressedKV<u16>,
@@ -1094,7 +1151,9 @@ impl<'a, R> Block<'a, R> {
     // Assumes that kvs values are in reverse order by timestamp.
     //
     // Returns the encoded block and the offset of the header within the block.
-    pub fn encode(kvs: &BTreeMap<Vec<u8>, Vec<(u64, Value)>>) -> anyhow::Result<(Vec<u8>, usize)> {
+    pub fn encode(
+        kvs: &BTreeMap<Vec<u8>, Vec<(Timestamp, Value)>>,
+    ) -> anyhow::Result<(Vec<u8>, usize)> {
         let (min_ts, max_ts, values_len) = kvs
             .values()
             .map(|versions| {
@@ -1115,7 +1174,8 @@ impl<'a, R> Block<'a, R> {
             )
             .ok_or_else(|| anyhow!("malformed block"))?;
         // Shift here for room for the tombstone bit.
-        let bytes_per_ts_offset = std::cmp::max(byte_width((max_ts - min_ts) << 1), 1);
+        let bytes_per_ts_offset =
+            std::cmp::max(byte_width((max_ts.as_nanos() - min_ts.as_nanos()) << 1), 1);
         let bytes_per_value_offset = std::cmp::max(byte_width(values_len as u64), 1);
 
         let mut index: BTreeMap<Vec<u8>, u16> = BTreeMap::new();
@@ -1134,7 +1194,8 @@ impl<'a, R> Block<'a, R> {
                     }
                     Value::Tombstone => 1,
                 };
-                let ts_offset_and_tombstone = ((ts - min_ts) << 1) | tombstone_bit;
+                let ts_offset_and_tombstone =
+                    ((ts.as_nanos() - min_ts.as_nanos()) << 1) | tombstone_bit;
 
                 let mut buf = [0u8; 16];
                 LittleEndian::write_u64(&mut buf[..], ts_offset_and_tombstone);
@@ -1149,7 +1210,7 @@ impl<'a, R> Block<'a, R> {
         let mut header = [0u8; BLOCK_INDEX_HEADER_SIZE];
         LittleEndian::write_u32(&mut header[0..4], values_len as u32);
         LittleEndian::write_u16(&mut header[4..6], n_versions as u16);
-        LittleEndian::write_u64(&mut header[6..14], min_ts);
+        LittleEndian::write_u64(&mut header[6..14], min_ts.as_nanos());
         LittleEndian::write_u16(&mut header[14..16], encoded_index.len() as u16);
         header[16] = bytes_per_ts_offset as u8;
         header[17] = bytes_per_value_offset as u8;
@@ -1171,7 +1232,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
 
         let values_len = LittleEndian::read_u32(&header[0..4]) as usize;
         let n_versions = LittleEndian::read_u16(&header[4..6]) as usize;
-        let min_ts = LittleEndian::read_u64(&header[6..14]);
+        let min_ts = Timestamp::from_nanos(LittleEndian::read_u64(&header[6..14]));
         let index_len = LittleEndian::read_u16(&header[14..16]) as usize;
         let bytes_per_ts_offset = header[16] as usize;
         let bytes_per_value_offset = header[17] as usize;
@@ -1247,7 +1308,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         Ok(Value::Regular(value))
     }
 
-    pub async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<(u64, Value)>> {
+    pub async fn get(&self, ts: Timestamp, k: &[u8]) -> anyhow::Result<Option<(Timestamp, Value)>> {
         let key_idx = match self.index.search(k) {
             Ok(idx) => idx,
             Err(_) => return Ok(None),
@@ -1273,7 +1334,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
 struct BlockVersions<'a> {
     ts_bytes: usize,
     offset_bytes: usize,
-    min_ts: u64,
+    min_ts: Timestamp,
     end_offset: usize,
     b: &'a [u8],
 }
@@ -1283,14 +1344,14 @@ impl<'a> BlockVersions<'a> {
         self.b.len() / (self.ts_bytes + self.offset_bytes)
     }
 
-    fn elem(&self, idx: usize) -> (u64, bool, usize) {
+    fn elem(&self, idx: usize) -> (Timestamp, bool, usize) {
         let width = self.ts_bytes + self.offset_bytes;
         let elem = &self.b[width * idx..width * (idx + 1)];
         let mut ts_offset_buf = [0u8; 8];
         ts_offset_buf[..self.ts_bytes].copy_from_slice(&elem[..self.ts_bytes]);
         let ts_offset_and_tombstone = LittleEndian::read_u64(&ts_offset_buf[..]);
         let tombstone = ts_offset_and_tombstone & 1 == 1;
-        let ts = (ts_offset_and_tombstone >> 1) + self.min_ts;
+        let ts = Timestamp::from_nanos((ts_offset_and_tombstone >> 1) + self.min_ts.as_nanos());
 
         let mut value_offset_buf = [0u8; 8];
         value_offset_buf[..self.offset_bytes].copy_from_slice(&elem[self.ts_bytes..]);
@@ -1315,7 +1376,7 @@ impl<'a> BlockVersions<'a> {
         }
     }
 
-    fn ts(&self, idx: usize) -> u64 {
+    fn ts(&self, idx: usize) -> Timestamp {
         self.elem(idx).0
     }
 
@@ -1336,7 +1397,7 @@ impl<'a> BlockVersions<'a> {
 #[derive(Eq, PartialEq, Clone, Debug)]
 struct Record {
     key: Vec<u8>,
-    ts: u64,
+    ts: Timestamp,
     value: Value,
 }
 
@@ -1364,7 +1425,7 @@ enum Direction {
 
 #[derive(Clone, Debug)]
 enum WalEntry {
-    Write(u64, Vec<(Vec<u8>, Value)>),
+    Write(Timestamp, Vec<(Vec<u8>, Value)>),
 }
 
 impl wal::Entry for WalEntry {
@@ -1575,8 +1636,8 @@ struct Run<R> {
     id: Uuid,
     size: usize,
     keyspace_id: u32,
-    min_ts: u64,
-    max_ts: u64,
+    min_ts: Timestamp,
+    max_ts: Timestamp,
 
     index: PrefixCompressedKV<u32>,
 
@@ -1599,7 +1660,7 @@ impl<R> Run<R> {
             bytes_written: &mut usize,
             index: &mut BTreeMap<Vec<u8>, u32>,
             last_key: &mut Vec<u8>,
-            buffer: &BTreeMap<Vec<u8>, Vec<(u64, Value)>>,
+            buffer: &BTreeMap<Vec<u8>, Vec<(Timestamp, Value)>>,
         ) -> anyhow::Result<()> {
             let (first_key, last_key_) = match (buffer.first_key_value(), buffer.last_key_value()) {
                 (Some((first_key, _)), Some((last_key, _))) => (first_key, last_key),
@@ -1620,12 +1681,12 @@ impl<R> Run<R> {
 
         pin_mut!(s);
 
-        let mut buffer: BTreeMap<Vec<u8>, Vec<(u64, Value)>> = BTreeMap::new();
+        let mut buffer: BTreeMap<Vec<u8>, Vec<(Timestamp, Value)>> = BTreeMap::new();
         let mut bytes_written = 0;
         let mut buffer_size = BLOCK_INDEX_HEADER_SIZE as u64;
         let mut index: BTreeMap<Vec<u8>, u32> = BTreeMap::new();
-        let mut min_ts = u64::MAX;
-        let mut max_ts = 0;
+        let mut min_ts = Timestamp::MAX;
+        let mut max_ts = Timestamp::ZERO;
         let mut last_key = vec![];
         while let Some(record) = s.next().await.transpose()? {
             let record_size = {
@@ -1673,8 +1734,8 @@ impl<R> Run<R> {
         let id = Uuid::new_v4();
         header[0..16].copy_from_slice(&id.as_bytes()[..]);
         LittleEndian::write_u32(&mut header[16..20], keyspace_id);
-        LittleEndian::write_u64(&mut header[20..28], min_ts);
-        LittleEndian::write_u64(&mut header[28..36], max_ts);
+        LittleEndian::write_u64(&mut header[20..28], min_ts.as_nanos());
+        LittleEndian::write_u64(&mut header[28..36], max_ts.as_nanos());
         LittleEndian::write_u32(&mut header[36..40], last_key.len() as u32);
         LittleEndian::write_u32(&mut header[40..44], index_compressed.len() as u32);
         w.write_all(&header[..]).await?;
@@ -1707,8 +1768,8 @@ impl<R: AsyncReadExactAt> Run<R> {
             Uuid::from_bytes(uuid_bytes)
         };
         let keyspace_id = LittleEndian::read_u32(&header[16..20]);
-        let min_ts = LittleEndian::read_u64(&header[20..28]);
-        let max_ts = LittleEndian::read_u64(&header[28..36]);
+        let min_ts = Timestamp::from_nanos(LittleEndian::read_u64(&header[20..28]));
+        let max_ts = Timestamp::from_nanos(LittleEndian::read_u64(&header[28..36]));
         let max_key_len = LittleEndian::read_u32(&header[36..40]);
         let index_len = LittleEndian::read_u32(&header[40..44]);
 
@@ -1758,7 +1819,7 @@ impl<R: AsyncReadExactAt> Run<R> {
         self.size
     }
 
-    async fn get(&self, ts: u64, k: &[u8]) -> anyhow::Result<Option<(u64, Value)>> {
+    async fn get(&self, ts: Timestamp, k: &[u8]) -> anyhow::Result<Option<(Timestamp, Value)>> {
         if ts < self.min_ts {
             return Ok(None);
         }
@@ -1778,7 +1839,7 @@ impl<R: AsyncReadExactAt> Run<R> {
 
     fn scan(
         &self,
-        ts: u64,
+        ts: Timestamp,
         range: Range<Vec<u8>>,
         direction: Direction,
     ) -> impl Stream<Item = anyhow::Result<Record>> + '_ {
@@ -2006,6 +2067,7 @@ mod test {
     use crate::Precondition;
     use crate::Record;
     use crate::Run;
+    use crate::Timestamp;
     use crate::Value;
     use crate::WriteError;
 
@@ -2016,12 +2078,12 @@ mod test {
         let not_k = b"def";
         let v = b"foo";
         let write_ts = lsm.put(k.to_vec(), v.to_vec()).await?;
-        assert_eq!(lsm.get(write_ts - 1, k).await?, None);
+        assert_eq!(lsm.get(write_ts.minus_one(), k).await?, None);
         assert_eq!(lsm.get(write_ts, k).await?, Some(v.to_vec()));
-        assert_eq!(lsm.get(write_ts + 1, k).await?, Some(v.to_vec()));
-        assert_eq!(lsm.get(write_ts - 1, not_k).await?, None);
+        assert_eq!(lsm.get(write_ts.plus_one(), k).await?, Some(v.to_vec()));
+        assert_eq!(lsm.get(write_ts.minus_one(), not_k).await?, None);
         assert_eq!(lsm.get(write_ts, not_k).await?, None);
-        assert_eq!(lsm.get(write_ts + 1, not_k).await?, None);
+        assert_eq!(lsm.get(write_ts.plus_one(), not_k).await?, None);
 
         Ok(())
     }
@@ -2045,7 +2107,10 @@ mod test {
 
         assert!(matches!(
             lsm.write(
-                vec![Precondition::NotChangedSince(ka.to_vec(), write_0_ts - 1)],
+                vec![Precondition::NotChangedSince(
+                    ka.to_vec(),
+                    write_0_ts.minus_one()
+                )],
                 BTreeMap::from([(ka.to_vec(), Mutation::Put(b"a1".to_vec()))]),
             )
             .await,
@@ -2062,8 +2127,14 @@ mod test {
             )
             .await?;
 
-        assert_eq!(lsm.get(write_1_ts - 1, ka).await?, Some(b"a0".to_vec()));
-        assert_eq!(lsm.get(write_1_ts - 1, kb).await?, Some(b"b0".to_vec()));
+        assert_eq!(
+            lsm.get(write_1_ts.minus_one(), ka).await?,
+            Some(b"a0".to_vec())
+        );
+        assert_eq!(
+            lsm.get(write_1_ts.minus_one(), kb).await?,
+            Some(b"b0".to_vec())
+        );
         assert_eq!(lsm.get(write_1_ts, ka).await?, Some(b"a1".to_vec()));
         assert_eq!(lsm.get(write_1_ts, kb).await?, None);
 
@@ -2078,7 +2149,7 @@ mod test {
             .run_target_size(512)
             .build();
         let mut map = BTreeMap::new();
-        let mut last_ts = 0;
+        let mut last_ts = Timestamp::ZERO;
         for _ in 0..10 {
             let compacted = lsm.next_compaction();
             // We consider these writes to be 10 bytes (1 key + 8 ts + 1 value), so this is
@@ -2110,7 +2181,7 @@ mod test {
             .run_target_size(512)
             .build();
         let mut map = BTreeMap::new();
-        let mut last_ts = 0;
+        let mut last_ts = Timestamp::ZERO;
         for j in 0..10 {
             loop {
                 // We consider these writes to be 10 bytes (1 key + 8 ts + 1 value), so this is
@@ -2164,15 +2235,18 @@ mod test {
             let mut kvs = BTreeMap::new();
             kvs.insert(
                 aa.clone(),
-                vec![(279, aa_279.clone()), (265, aa_265.clone())],
+                vec![
+                    (Timestamp(279), aa_279.clone()),
+                    (Timestamp(265), aa_265.clone()),
+                ],
             );
             kvs.insert(
                 ab.clone(),
                 vec![
-                    (341, ab_341.clone()),
-                    (302, ab_302.clone()),
-                    (297, Value::Tombstone),
-                    (290, ab_290.clone()),
+                    (Timestamp(341), ab_341.clone()),
+                    (Timestamp(302), ab_302.clone()),
+                    (Timestamp(297), Value::Tombstone),
+                    (Timestamp(290), ab_290.clone()),
                 ],
             );
             kvs
@@ -2181,29 +2255,59 @@ mod test {
 
         let block = Block::open(&encoded, header_offset as u64).await?;
 
-        assert_eq!(block.get(279, &aa[..]).await?, Some((279, aa_279.clone())));
-        assert_eq!(block.get(265, &aa[..]).await?, Some((265, aa_265.clone())));
-        assert_eq!(block.get(123, &aa[..]).await?, None);
-
-        assert_eq!(block.get(295, &aa[..]).await?, Some((279, aa_279.clone())));
-        assert_eq!(block.get(269, &aa[..]).await?, Some((265, aa_265.clone())));
-
-        assert_eq!(block.get(341, &ab[..]).await?, Some((341, ab_341.clone())));
-        assert_eq!(block.get(302, &ab[..]).await?, Some((302, ab_302.clone())));
         assert_eq!(
-            block.get(297, &ab[..]).await?,
-            Some((297, Value::Tombstone))
+            block.get(Timestamp(279), &aa[..]).await?,
+            Some((Timestamp(279), aa_279.clone()))
         );
-        assert_eq!(block.get(290, &ab[..]).await?, Some((290, ab_290.clone())));
-        assert_eq!(block.get(289, &ab[..]).await?, None);
-
-        assert_eq!(block.get(500, &ab[..]).await?, Some((341, ab_341.clone())));
-        assert_eq!(block.get(340, &ab[..]).await?, Some((302, ab_302.clone())));
         assert_eq!(
-            block.get(300, &ab[..]).await?,
-            Some((297, Value::Tombstone))
+            block.get(Timestamp(265), &aa[..]).await?,
+            Some((Timestamp(265), aa_265.clone()))
         );
-        assert_eq!(block.get(296, &ab[..]).await?, Some((290, ab_290.clone())));
+        assert_eq!(block.get(Timestamp(123), &aa[..]).await?, None);
+
+        assert_eq!(
+            block.get(Timestamp(295), &aa[..]).await?,
+            Some((Timestamp(279), aa_279.clone()))
+        );
+        assert_eq!(
+            block.get(Timestamp(269), &aa[..]).await?,
+            Some((Timestamp(265), aa_265.clone()))
+        );
+
+        assert_eq!(
+            block.get(Timestamp(341), &ab[..]).await?,
+            Some((Timestamp(341), ab_341.clone()))
+        );
+        assert_eq!(
+            block.get(Timestamp(302), &ab[..]).await?,
+            Some((Timestamp(302), ab_302.clone()))
+        );
+        assert_eq!(
+            block.get(Timestamp(297), &ab[..]).await?,
+            Some((Timestamp(297), Value::Tombstone))
+        );
+        assert_eq!(
+            block.get(Timestamp(290), &ab[..]).await?,
+            Some((Timestamp(290), ab_290.clone()))
+        );
+        assert_eq!(block.get(Timestamp(289), &ab[..]).await?, None);
+
+        assert_eq!(
+            block.get(Timestamp(500), &ab[..]).await?,
+            Some((Timestamp(341), ab_341.clone()))
+        );
+        assert_eq!(
+            block.get(Timestamp(340), &ab[..]).await?,
+            Some((Timestamp(302), ab_302.clone()))
+        );
+        assert_eq!(
+            block.get(Timestamp(300), &ab[..]).await?,
+            Some((Timestamp(297), Value::Tombstone))
+        );
+        assert_eq!(
+            block.get(Timestamp(296), &ab[..]).await?,
+            Some((Timestamp(290), ab_290.clone()))
+        );
 
         Ok(())
     }
@@ -2218,27 +2322,27 @@ mod test {
         let records = vec![
             Record {
                 key: b"prefixbar".to_vec(),
-                ts: 20101,
+                ts: Timestamp(20101),
                 value: Value::Regular(rand_bytes(10_000)),
             },
             Record {
                 key: b"prefixbar".to_vec(),
-                ts: 19230,
+                ts: Timestamp(19230),
                 value: Value::Tombstone,
             },
             Record {
                 key: b"prefixbar".to_vec(),
-                ts: 10230,
+                ts: Timestamp(10230),
                 value: Value::Regular(rand_bytes(128)),
             },
             Record {
                 key: b"prefixfoo".to_vec(),
-                ts: 21925,
+                ts: Timestamp(21925),
                 value: Value::Regular(rand_bytes(10_000)),
             },
             Record {
                 key: b"prefixfoo".to_vec(),
-                ts: 12031,
+                ts: Timestamp(12031),
                 value: Value::Regular(rand_bytes(10_000)),
             },
         ];
@@ -2254,8 +2358,8 @@ mod test {
 
         let run = Run::open(v).await?;
 
-        assert_eq!(run.min_ts, 10230);
-        assert_eq!(run.max_ts, 21925);
+        assert_eq!(run.min_ts, Timestamp(10230));
+        assert_eq!(run.max_ts, Timestamp(21925));
         assert_eq!(run.min_key, b"prefixbar".to_vec());
         assert_eq!(run.max_key, b"prefixfoo".to_vec());
 
@@ -2293,7 +2397,7 @@ mod test {
 
             rt.block_on(async {
                 let mut records = m.into_iter().map(|((key, ts), maybe_value)| Record{
-                    key, ts, value: match maybe_value {
+                    key, ts: Timestamp(ts), value: match maybe_value {
                         Some(v) => Value::Regular(v),
                         None => Value::Tombstone,
                     },

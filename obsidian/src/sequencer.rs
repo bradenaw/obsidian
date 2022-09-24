@@ -3,27 +3,20 @@ use std::collections::BinaryHeap;
 use std::ops::Deref;
 use std::sync::RwLock;
 use std::time::Duration;
-use std::time::SystemTime;
 
 use crate::OrdEqByFirst;
+use crate::Timestamp;
 
 pub struct Sequencer {
     inner: RwLock<SequencerInner>,
-}
-
-fn now_nanos() -> u64 {
-    SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("now before UNIX_EPOCH?")
-        .as_nanos() as u64
 }
 
 impl Sequencer {
     pub fn new() -> Self {
         Self {
             inner: RwLock::new(SequencerInner {
-                last_ts: 0,
-                safe_read_ts: 0,
+                last_ts: Timestamp::ZERO,
+                safe_read_ts: Timestamp::ZERO,
                 pending: BTreeSet::new(),
                 waiters: BinaryHeap::new(),
             }),
@@ -31,38 +24,36 @@ impl Sequencer {
     }
 
     pub fn start_write(&self) -> WriteTsGuard<'_> {
-        let now = now_nanos();
-
         let mut inner = self.inner.write().unwrap();
-        let ts = std::cmp::max(now, inner.last_ts + 1);
+        let ts = Timestamp::now_after(inner.last_ts);
         inner.last_ts = ts;
         if inner.pending.is_empty() {
-            inner.safe_read_ts = ts - 1;
+            inner.safe_read_ts = ts.minus_one();
             inner.wake_waiters();
         }
         inner.pending.insert(ts);
         WriteTsGuard { parent: self, ts }
     }
 
-    fn finish_write(&self, ts: u64) {
+    fn finish_write(&self, ts: Timestamp) {
         let mut inner = self.inner.write().unwrap();
         assert!(inner.pending.remove(&ts));
         if let Some(lowest_pending_ts) = inner.pending.first() {
-            inner.safe_read_ts = lowest_pending_ts - 1;
+            inner.safe_read_ts = lowest_pending_ts.minus_one();
         } else {
             inner.safe_read_ts = inner.last_ts;
         }
         inner.wake_waiters();
     }
 
-    pub fn safe_read_ts(&self) -> u64 {
+    pub fn safe_read_ts(&self) -> Timestamp {
         self.inner.read().unwrap().safe_read_ts
     }
 
-    pub async fn wait_for_safe_read(&self, ts: u64) -> anyhow::Result<()> {
+    pub async fn wait_for_safe_read(&self, ts: Timestamp) -> anyhow::Result<()> {
         // Straight reject - it's going to be a while before this timestamp is safe to read and we
         // may as well let the client wait instead of us.
-        if ts.saturating_sub(now_nanos()) > 100_000_000 {
+        if ts.saturating_duration_since(Timestamp::now()) > Duration::from_millis(100) {
             anyhow::bail!("timestamp in the future");
         }
         loop {
@@ -85,27 +76,26 @@ impl Sequencer {
                     return Ok(());
                 }
                 // pending.is_empty() which implies last_ts=safe_read_ts already.
-                let now = now_nanos();
-                if ts.saturating_sub(now) < 10_000_000 {
+                if ts.saturating_duration_since(Timestamp::now()) < Duration::from_millis(10) {
                     inner.safe_read_ts = ts;
                     inner.last_ts = ts;
                     return Ok(());
                 }
             }
             drop(inner);
-            tokio::time::sleep(Duration::from_nanos(now_nanos() - ts)).await;
+            tokio::time::sleep(ts.saturating_duration_since(Timestamp::now())).await;
         }
     }
 }
 
 pub struct WriteTsGuard<'a> {
     parent: &'a Sequencer,
-    ts: u64,
+    ts: Timestamp,
 }
 
 impl<'a> Deref for WriteTsGuard<'a> {
-    type Target = u64;
-    fn deref(&self) -> &u64 {
+    type Target = Timestamp;
+    fn deref(&self) -> &Timestamp {
         &self.ts
     }
 }
@@ -118,14 +108,14 @@ impl<'a> Drop for WriteTsGuard<'a> {
 
 struct SequencerInner {
     // Last assigned timestamp. All new timestamps must be higher than this.
-    last_ts: u64,
+    last_ts: Timestamp,
     // All writes that could have this timestamp or lower assigned are already completed and
     // visible.
     //
     // Invariant: !pending.is_empty() || safe_read_ts==last_ts.
-    safe_read_ts: u64,
-    pending: BTreeSet<u64>,
-    waiters: BinaryHeap<OrdEqByFirst<u64, tokio::sync::oneshot::Sender<()>>>,
+    safe_read_ts: Timestamp,
+    pending: BTreeSet<Timestamp>,
+    waiters: BinaryHeap<OrdEqByFirst<Timestamp, tokio::sync::oneshot::Sender<()>>>,
 }
 
 impl SequencerInner {

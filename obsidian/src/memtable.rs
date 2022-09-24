@@ -5,6 +5,7 @@ use uuid::Uuid;
 use crate::Bound;
 use crate::Range;
 use crate::Record;
+use crate::Timestamp;
 use crate::Value;
 
 impl Default for Memtable {
@@ -16,7 +17,7 @@ impl Default for Memtable {
 pub(crate) struct Memtable {
     id: Uuid,
     size: u64,
-    kvs: BTreeMap<Vec<u8>, BTreeMap<u64, Value>>,
+    kvs: BTreeMap<Vec<u8>, BTreeMap<Timestamp, Value>>,
     max_key_len: usize,
 }
 
@@ -38,12 +39,12 @@ impl Memtable {
         self.size
     }
 
-    pub fn get(&self, ts: u64, k: &[u8]) -> Option<(u64, Value)> {
-        let (record_ts, record_v) = self.kvs.get(k)?.range(0..=ts).next_back()?;
+    pub fn get(&self, ts: Timestamp, k: &[u8]) -> Option<(Timestamp, Value)> {
+        let (record_ts, record_v) = self.kvs.get(k)?.range(Timestamp::ZERO..=ts).next_back()?;
         Some((*record_ts, record_v.clone()))
     }
 
-    pub fn insert(&mut self, k: Vec<u8>, ts: u64, v: Value) -> u64 {
+    pub fn insert(&mut self, k: Vec<u8>, ts: Timestamp, v: Value) -> u64 {
         self.size += (k.len() + v.len() + 8) as u64;
         self.max_key_len = std::cmp::max(k.len(), self.max_key_len);
         self.kvs
@@ -62,7 +63,7 @@ impl Memtable {
 
     pub fn scan_asc(
         &self,
-        ts: u64,
+        ts: Timestamp,
         range: Range<&[u8]>,
     ) -> impl Iterator<Item = Record> + Send + '_ {
         let range_bounds = (
@@ -115,7 +116,7 @@ impl Memtable {
             self.kvs
                 .range(range_bounds)
                 .filter_map(move |(key, versions)| {
-                    let (record_ts, value) = versions.range(0..=ts).next_back()?;
+                    let (record_ts, value) = versions.range(Timestamp::ZERO..=ts).next_back()?;
                     Some(Record {
                         key: key.clone(),
                         ts: *record_ts,
@@ -125,7 +126,7 @@ impl Memtable {
         ) as Box<dyn Iterator<Item = Record> + Send>
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (Vec<u8>, u64, Value)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = (Vec<u8>, Timestamp, Value)> + '_ {
         self.kvs
             .iter()
             .map(|(key, entries)| {
