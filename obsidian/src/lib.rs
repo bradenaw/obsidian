@@ -323,6 +323,7 @@ impl Lsm {
                         inner.insert(seqno, key, ts, value);
                     }
                 }
+                WalEntry::Manifest(_, _) => {}
             }
             _ = wal_processed.send(seqno);
         }
@@ -382,7 +383,17 @@ impl Lsm {
             }
             // This seqno might be split across multiple memtables, so we can't trim the max seen
             // yet.
-            wal.trim(wal::SeqNo(seqno.0.saturating_sub(1))).await?;
+            let seqno_ingested = wal::SeqNo(seqno.0.saturating_sub(1));
+            wal.append(WalEntry::Manifest(
+                seqno_ingested,
+                manifest
+                    .levels
+                    .iter()
+                    .map(|level| level.runs.iter().map(|run| run.id()).collect::<Vec<_>>())
+                    .collect::<Vec<_>>(),
+            ))
+            .await?;
+            wal.trim(seqno_ingested).await?;
 
             'levels: for i in 1..manifest.levels.len() - 1 {
                 while manifest.levels[i].size() as u64 > l0_max_size * 10_u64.pow(i as u32) {
@@ -1396,6 +1407,7 @@ enum Direction {
 #[derive(Clone, Debug)]
 enum WalEntry {
     Write(Timestamp, Vec<(Vec<u8>, Value)>),
+    Manifest(wal::SeqNo, Vec<Vec<Uuid>>),
 }
 
 impl wal::Entry for WalEntry {
@@ -1403,6 +1415,9 @@ impl wal::Entry for WalEntry {
         match self {
             WalEntry::Write(_, kvs) => {
                 8 + kvs.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>() as u64
+            }
+            WalEntry::Manifest(_, levels) => {
+                8u64 + (levels.iter().map(|level| level.len() as u64).sum::<u64>() * 16u64)
             }
         }
     }
