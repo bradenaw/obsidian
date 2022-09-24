@@ -1,7 +1,9 @@
+use std::cmp;
 use std::collections::BTreeMap;
 
 use uuid::Uuid;
 
+use crate::wal;
 use crate::Bound;
 use crate::Range;
 use crate::Record;
@@ -17,6 +19,7 @@ impl Default for Memtable {
 pub(crate) struct Memtable {
     id: Uuid,
     size: u64,
+    max_seqno: wal::SeqNo,
     kvs: BTreeMap<Vec<u8>, BTreeMap<Timestamp, Value>>,
     max_key_len: usize,
 }
@@ -28,11 +31,16 @@ impl Memtable {
             size: 0,
             kvs: BTreeMap::new(),
             max_key_len: 0,
+            max_seqno: wal::SeqNo(0),
         }
     }
 
     pub fn id(&self) -> Uuid {
         self.id
+    }
+
+    pub fn max_seqno(&self) -> wal::SeqNo {
+        self.max_seqno
     }
 
     pub fn size(&self) -> u64 {
@@ -44,13 +52,14 @@ impl Memtable {
         Some((*record_ts, record_v.clone()))
     }
 
-    pub fn insert(&mut self, k: Vec<u8>, ts: Timestamp, v: Value) -> u64 {
+    pub fn insert(&mut self, seqno: wal::SeqNo, k: Vec<u8>, ts: Timestamp, v: Value) -> u64 {
         self.size += (k.len() + v.len() + 8) as u64;
         self.max_key_len = std::cmp::max(k.len(), self.max_key_len);
         self.kvs
             .entry(k)
             .or_insert(BTreeMap::default())
             .insert(ts, v);
+        self.max_seqno = cmp::max(self.max_seqno, seqno);
         self.size
     }
 

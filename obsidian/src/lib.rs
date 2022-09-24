@@ -187,15 +187,17 @@ impl Lsm {
             block_size,
             l0_compact_notify,
         ));
+        let wal = Arc::new(wal::Wal::new(16384, Duration::from_millis(5)));
+
         let compaction = tokio::spawn(Self::compaction_loop(
             l0_max_size,
             run_target_size,
             block_size,
             inner.clone(),
+            wal.clone(),
             l0_compact_ready,
             compacted_notify,
         ));
-        let wal = Arc::new(wal::Wal::new(16384, Duration::from_millis(5)));
 
         let (wal_processed_send, wal_processed_recv) = tokio::sync::watch::channel(wal::SeqNo(0));
         let wal_process = tokio::spawn(Self::process_wal(
@@ -318,11 +320,10 @@ impl Lsm {
             match entry {
                 WalEntry::Write(ts, kvs) => {
                     for (key, value) in kvs {
-                        inner.insert(key, ts, value);
+                        inner.insert(seqno, key, ts, value);
                     }
                 }
             }
-            wal.trim(seqno).await?;
             _ = wal_processed.send(seqno);
         }
         Ok(())
@@ -333,6 +334,7 @@ impl Lsm {
         run_target_size: u64,
         block_size: u64,
         inner: Arc<LsmInner>,
+        wal: Arc<wal::Wal<WalEntry>>,
         mut l0_compact_ready: tokio::sync::mpsc::Receiver<()>,
         compacted_notify: tokio::sync::broadcast::Sender<()>,
     ) {
@@ -342,6 +344,7 @@ impl Lsm {
                 run_target_size,
                 block_size,
                 inner.clone(),
+                &wal,
                 compacted_notify.clone(),
             )
             .await
@@ -354,12 +357,13 @@ impl Lsm {
         run_target_size: u64,
         block_size: u64,
         inner: Arc<LsmInner>,
+        wal: &wal::Wal<WalEntry>,
         compacted_notify: tokio::sync::broadcast::Sender<()>,
     ) -> anyhow::Result<()> {
         let mut manifest = inner.manifest.load();
 
         while !manifest.l0_sealed.is_empty() {
-            let (runs, remove_ids) =
+            let (runs, remove_ids, seqno) =
                 Self::compact_l0(run_target_size, block_size, &manifest, &inner.storage).await?;
             if runs.is_empty() && remove_ids.is_empty() {
                 return Ok(());
@@ -376,6 +380,9 @@ impl Lsm {
                 }
                 manifest = inner.manifest.load();
             }
+            // This seqno might be split across multiple memtables, so we can't trim the max seen
+            // yet.
+            wal.trim(wal::SeqNo(seqno.0.saturating_sub(1))).await?;
 
             'levels: for i in 1..manifest.levels.len() - 1 {
                 while manifest.levels[i].size() as u64 > l0_max_size * 10_u64.pow(i as u32) {
@@ -415,7 +422,7 @@ impl Lsm {
         block_size: u64,
         manifest: &Manifest,
         storage: &MemStorage,
-    ) -> anyhow::Result<(Vec<Run<Arc<Vec<u8>>>>, HashSet<Uuid>)> {
+    ) -> anyhow::Result<(Vec<Run<Arc<Vec<u8>>>>, HashSet<Uuid>, wal::SeqNo)> {
         // We must always compact the oldest l0, because get, etc. assume that everything in
         // memtables is newer than anything in any lower levels.
         let chosen_l0 = &manifest.l0_sealed[0];
@@ -425,9 +432,11 @@ impl Lsm {
             None => {
                 let mut removes = HashSet::new();
                 removes.insert(chosen_l0_id);
-                return Ok((vec![], removes));
+                return Ok((vec![], removes, wal::SeqNo(0)));
             }
         };
+
+        let seqno = chosen_l0.max_seqno();
 
         let (new_runs, mut removes) = Self::compact_inner(
             run_target_size,
@@ -448,7 +457,7 @@ impl Lsm {
         .await?;
         removes.insert(chosen_l0_id);
 
-        Ok((new_runs, removes))
+        Ok((new_runs, removes, seqno))
     }
 
     async fn compact_from(
@@ -780,53 +789,14 @@ impl LsmInner {
         Ok((page, continue_cursor))
     }
 
-    async fn write(
-        &self,
-        preconds: Vec<Precondition>,
-        muts: BTreeMap<Vec<u8>, Mutation>,
-    ) -> Result<Timestamp, WriteError> {
-        let _ = self
-            .lock_mgr
-            .lock(
-                preconds.iter().map(|precond| precond.key()),
-                muts.keys().map(|k| &k[..]),
-            )
-            .await;
-
-        let ts = self.sequencer.start_write();
-
-        for precond in preconds {
-            let res = self.unsafe_get(*ts, precond.key()).await?;
-            match precond {
-                Precondition::NotChangedSince(_, ts) => {
-                    if let Some((last_write_ts, _)) = res {
-                        if last_write_ts > ts {
-                            return Err(WriteError::PreconditionFailed);
-                        }
-                    }
-                }
-            }
-        }
-
-        for (key, m) in muts {
-            let value = match m {
-                Mutation::Put(raw_value) => Value::Regular(raw_value),
-                Mutation::Delete => Value::Tombstone,
-            };
-            self.insert(key, *ts, value);
-        }
-
-        Ok(*ts)
-    }
-
-    fn insert(&self, k: Vec<u8>, ts: Timestamp, v: Value) {
+    fn insert(&self, seqno: wal::SeqNo, k: Vec<u8>, ts: Timestamp, v: Value) {
         loop {
             let l0_active = self.l0_active.load();
             let overfilled = {
                 let mut guard = l0_active.write().unwrap();
                 if let MaybeActiveMemtable::Active(memtable) = &mut *guard {
                     let pre_size = memtable.size();
-                    let post_size = memtable.insert(k.clone(), ts, v.clone());
+                    let post_size = memtable.insert(seqno, k.clone(), ts, v.clone());
                     pre_size < self.l0_max_size && post_size >= self.l0_max_size
                 } else {
                     // Only happens if there's already a new one inserted into self.l0_active, so
