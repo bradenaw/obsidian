@@ -136,6 +136,8 @@ struct LsmBuilder {
     l0_max_size: u64,
     run_target_size: u64,
     block_size: u64,
+    wal: Option<wal::Wal<WalEntry>>,
+    storage: Option<MemStorage>,
 }
 
 impl LsmBuilder {
@@ -144,6 +146,8 @@ impl LsmBuilder {
             l0_max_size: 8_000_000,
             run_target_size: 64_000_000,
             block_size: 32768,
+            wal: None,
+            storage: None,
         }
     }
 
@@ -162,8 +166,25 @@ impl LsmBuilder {
         self
     }
 
+    fn wal(mut self, wal: wal::Wal<WalEntry>) -> Self {
+        self.wal = Some(wal);
+        self
+    }
+
+    fn storage(mut self, storage: MemStorage) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
     fn build(self) -> Lsm {
-        Lsm::new(self.l0_max_size, self.run_target_size, self.block_size)
+        Lsm::new(
+            self.l0_max_size,
+            self.run_target_size,
+            self.block_size,
+            self.wal
+                .unwrap_or_else(|| wal::Wal::new(16384, Duration::from_millis(5))),
+            self.storage.unwrap_or_else(|| MemStorage::new()),
+        )
     }
 }
 
@@ -178,16 +199,23 @@ struct Lsm {
 }
 
 impl Lsm {
-    pub fn new(l0_max_size: u64, run_target_size: u64, block_size: u64) -> Self {
+    pub fn new(
+        l0_max_size: u64,
+        run_target_size: u64,
+        block_size: u64,
+        wal: wal::Wal<WalEntry>,
+        storage: MemStorage,
+    ) -> Self {
         let (l0_compact_notify, l0_compact_ready) = tokio::sync::mpsc::channel::<()>(1);
         let (compacted_notify, compacted) = tokio::sync::broadcast::channel(1);
         let inner = Arc::new(LsmInner::new(
             l0_max_size,
             run_target_size,
             block_size,
+            storage,
             l0_compact_notify,
         ));
-        let wal = Arc::new(wal::Wal::new(16384, Duration::from_millis(5)));
+        let wal = Arc::new(wal);
 
         let compaction = tokio::spawn(Self::compaction_loop(
             l0_max_size,
@@ -634,6 +662,7 @@ impl LsmInner {
         l0_max_size: u64,
         run_target_size: u64,
         block_size: u64,
+        storage: MemStorage,
         l0_compact_notify: tokio::sync::mpsc::Sender<()>,
     ) -> Self {
         let l0_active = Arc::new(RwLock::new(MaybeActiveMemtable::Active(Memtable::new())));
@@ -644,7 +673,7 @@ impl LsmInner {
             l0_compact_notify,
             sequencer: Sequencer::new(),
             lock_mgr: LockMgr::new(16384),
-            storage: MemStorage::new(),
+            storage: storage,
             l0_active: AtomicArc::new(l0_active.clone()),
             manifest: AtomicArc::new(Arc::new(Manifest::new(7).with_ingest_l0(l0_active))),
         }
