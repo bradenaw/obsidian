@@ -9,6 +9,7 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::fmt::Display;
 use std::fs::File;
 use std::future::Future;
@@ -136,8 +137,8 @@ struct LsmBuilder {
     l0_max_size: u64,
     run_target_size: u64,
     block_size: u64,
-    wal: Option<wal::Wal<WalEntry>>,
-    storage: Option<MemStorage>,
+    wal: Option<Arc<wal::Wal<WalEntry>>>,
+    storage: Option<Arc<MemStorage>>,
 }
 
 impl LsmBuilder {
@@ -166,25 +167,26 @@ impl LsmBuilder {
         self
     }
 
-    fn wal(mut self, wal: wal::Wal<WalEntry>) -> Self {
+    fn wal(mut self, wal: Arc<wal::Wal<WalEntry>>) -> Self {
         self.wal = Some(wal);
         self
     }
 
-    fn storage(mut self, storage: MemStorage) -> Self {
+    fn storage(mut self, storage: Arc<MemStorage>) -> Self {
         self.storage = Some(storage);
         self
     }
 
-    fn build(self) -> Lsm {
+    async fn build(self) -> anyhow::Result<Lsm> {
         Lsm::new(
             self.l0_max_size,
             self.run_target_size,
             self.block_size,
             self.wal
-                .unwrap_or_else(|| wal::Wal::new(16384, Duration::from_millis(5))),
-            self.storage.unwrap_or_else(|| MemStorage::new()),
+                .unwrap_or_else(|| Arc::new(wal::Wal::new(16384, Duration::from_millis(5)))),
+            self.storage.unwrap_or_else(|| Arc::new(MemStorage::new())),
         )
+        .await
     }
 }
 
@@ -199,23 +201,24 @@ struct Lsm {
 }
 
 impl Lsm {
-    pub fn new(
+    pub async fn new(
         l0_max_size: u64,
         run_target_size: u64,
         block_size: u64,
-        wal: wal::Wal<WalEntry>,
-        storage: MemStorage,
-    ) -> Self {
+        wal: Arc<wal::Wal<WalEntry>>,
+        storage: Arc<MemStorage>,
+    ) -> anyhow::Result<Self> {
+        let (manifest, newest_seqno) = Self::recovery(&wal, &storage).await?;
         let (l0_compact_notify, l0_compact_ready) = tokio::sync::mpsc::channel::<()>(1);
         let (compacted_notify, compacted) = tokio::sync::broadcast::channel(1);
         let inner = Arc::new(LsmInner::new(
             l0_max_size,
             run_target_size,
             block_size,
+            manifest,
             storage,
             l0_compact_notify,
         ));
-        let wal = Arc::new(wal);
 
         let compaction = tokio::spawn(Self::compaction_loop(
             l0_max_size,
@@ -231,17 +234,18 @@ impl Lsm {
         let wal_process = tokio::spawn(Self::process_wal(
             inner.clone(),
             wal.clone(),
+            newest_seqno.unwrap_or(wal::SeqNo(0)),
             wal_processed_send,
         ));
 
-        Self {
+        Ok(Self {
             inner,
             compaction,
             compacted,
             wal,
             wal_process,
             wal_processed: wal_processed_recv,
-        }
+        })
     }
 
     pub async fn get(&self, ts: Timestamp, k: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
@@ -338,12 +342,64 @@ impl Lsm {
         }
     }
 
+    async fn recovery(
+        wal: &wal::Wal<WalEntry>,
+        storage: &MemStorage,
+    ) -> anyhow::Result<(Manifest, Option<wal::SeqNo>)> {
+        let oldest_seqno = wal.oldest_available();
+        let mut newest_seqno = None;
+        let mut wal_stream = wal.stream(oldest_seqno, false).boxed();
+        let mut buf = VecDeque::new();
+
+        let mut manifest_uuids = Vec::new();
+
+        while let Some((seqno, entry)) = wal_stream.try_next().await? {
+            match entry {
+                WalEntry::Write(ts, kvs) => {
+                    buf.push_back((seqno, ts, kvs));
+                }
+                WalEntry::Manifest(included_seqno, levels) => {
+                    let trim_to_idx = buf
+                        .binary_search_by_key(&included_seqno, |(seqno, _, _)| *seqno)
+                        .unwrap_or_else(core::convert::identity);
+                    // XXX: probably not right
+                    buf.drain(0..=trim_to_idx);
+                    manifest_uuids = levels;
+                }
+            }
+            newest_seqno = Some(seqno);
+        }
+
+        let mut memtable = Memtable::new();
+        for (seqno, ts, kvs) in buf {
+            for (key, value) in kvs {
+                memtable.insert(seqno, key, ts, value);
+            }
+        }
+
+        let mut manifest = Manifest::new(7);
+        manifest.l0_sealed.push(Arc::new(memtable));
+
+        for i in 1..manifest_uuids.len() {
+            let mut runs = Vec::with_capacity(manifest_uuids[i].len());
+            for run_uuid in &manifest_uuids[i] {
+                let run = Run::open(storage.get(&run_uuid.to_string()).await?).await?;
+                runs.push(run);
+            }
+            runs.sort_by_key(|run| run.range().unwrap().0);
+            manifest.levels[i] = Level { runs };
+        }
+
+        Ok((manifest, newest_seqno))
+    }
+
     async fn process_wal(
         inner: Arc<LsmInner>,
         wal: Arc<wal::Wal<WalEntry>>,
+        start: wal::SeqNo,
         wal_processed: tokio::sync::watch::Sender<wal::SeqNo>,
     ) -> anyhow::Result<()> {
-        let mut log = wal.stream(wal::SeqNo(0)).boxed();
+        let mut log = wal.stream(start, true).boxed();
         while let Some((seqno, entry)) = log.try_next().await? {
             match entry {
                 WalEntry::Write(ts, kvs) => {
@@ -579,7 +635,7 @@ impl Lsm {
             future::try_join3(
                 storage.put(&id.to_string(), reader),
                 async {
-                    Run::<()>::write(&mut writer, 0, block_size, rx).await?;
+                    Run::<()>::write(&mut writer, id, 0, block_size, rx).await?;
                     drop(writer);
                     Ok(())
                 },
@@ -649,7 +705,7 @@ struct LsmInner {
     l0_compact_notify: tokio::sync::mpsc::Sender<()>,
     sequencer: Sequencer,
     lock_mgr: LockMgr,
-    storage: MemStorage,
+    storage: Arc<MemStorage>,
     // Outer lock just protects the arc, hold in W to swap it.
     // Inner lock protects memtable, use as normal.
     // Also exists in manifest.l0_active, so reads can go there.
@@ -662,7 +718,8 @@ impl LsmInner {
         l0_max_size: u64,
         run_target_size: u64,
         block_size: u64,
-        storage: MemStorage,
+        initial_manifest: Manifest,
+        storage: Arc<MemStorage>,
         l0_compact_notify: tokio::sync::mpsc::Sender<()>,
     ) -> Self {
         let l0_active = Arc::new(RwLock::new(MaybeActiveMemtable::Active(Memtable::new())));
@@ -673,9 +730,9 @@ impl LsmInner {
             l0_compact_notify,
             sequencer: Sequencer::new(),
             lock_mgr: LockMgr::new(16384),
-            storage: storage,
+            storage,
             l0_active: AtomicArc::new(l0_active.clone()),
-            manifest: AtomicArc::new(Arc::new(Manifest::new(7).with_ingest_l0(l0_active))),
+            manifest: AtomicArc::new(Arc::new(initial_manifest.with_ingest_l0(l0_active))),
         }
     }
 
@@ -1665,6 +1722,7 @@ impl<R> Run<R> {
     // Assumes S is in (key, rev(ts)) order, and assumes termination at a reasonable size limit.
     async fn write<W: AsyncWrite + Unpin, S: Stream<Item = anyhow::Result<Record>>>(
         w: &mut W,
+        id: Uuid,
         keyspace_id: u32,
         block_size_limit: u64,
         s: S,
@@ -1745,7 +1803,6 @@ impl<R> Run<R> {
 
         let index_block_offset = bytes_written;
         let mut header = [0u8; INDEX_BLOCK_HEADER_SIZE];
-        let id = Uuid::new_v4();
         header[0..16].copy_from_slice(&id.as_bytes()[..]);
         LittleEndian::write_u32(&mut header[16..20], keyspace_id);
         LittleEndian::write_u64(&mut header[20..28], min_ts.as_nanos());
@@ -2063,16 +2120,21 @@ impl<T> AtomicArc<T> {
 mod test {
     use std::cmp::Reverse;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use byteorder::BigEndian;
     use byteorder::ByteOrder;
     use futures::stream::StreamExt;
     use proptest::prelude::*;
+    use uuid::Uuid;
 
     use crate::binary_search_by_idx;
     use crate::hexlify;
     use crate::range::Bound;
     use crate::range::Range;
+    use crate::storage::MemStorage;
+    use crate::wal;
     use crate::AsyncReadExactAt;
     use crate::Block;
     use crate::Direction;
@@ -2087,7 +2149,7 @@ mod test {
 
     #[tokio::test]
     async fn test_put_get() -> anyhow::Result<()> {
-        let lsm = LsmBuilder::new().build();
+        let lsm = LsmBuilder::new().build().await?;
         let k = b"abc";
         let not_k = b"def";
         let v = b"foo";
@@ -2104,7 +2166,7 @@ mod test {
 
     #[tokio::test]
     async fn test_write_tx() -> anyhow::Result<()> {
-        let lsm = LsmBuilder::new().build();
+        let lsm = LsmBuilder::new().build().await?;
 
         let ka = b"a";
         let kb = b"b";
@@ -2161,7 +2223,8 @@ mod test {
             .l0_max_size(128)
             .block_size(128)
             .run_target_size(512)
-            .build();
+            .build()
+            .await?;
         let mut map = BTreeMap::new();
         let mut last_ts = Timestamp::ZERO;
         for _ in 0..10 {
@@ -2193,7 +2256,8 @@ mod test {
             .l0_max_size(128)
             .block_size(128)
             .run_target_size(512)
-            .build();
+            .build()
+            .await?;
         let mut map = BTreeMap::new();
         let mut last_ts = Timestamp::ZERO;
         for j in 0..10 {
@@ -2217,6 +2281,54 @@ mod test {
             for (k, v) in &map {
                 assert_eq!(lsm.get(last_ts, &[*k]).await?, Some(vec![*v]));
             }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_recovery() -> anyhow::Result<()> {
+        let wal = Arc::new(wal::Wal::new(16, Duration::from_millis(2)));
+        let storage = Arc::new(MemStorage::new());
+
+        let lsm = LsmBuilder::new()
+            .l0_max_size(128)
+            .block_size(128)
+            .run_target_size(512)
+            .wal(wal.clone())
+            .storage(storage.clone())
+            .build()
+            .await?;
+
+        let mut map = BTreeMap::new();
+        let mut last_ts = Timestamp::ZERO;
+        for _ in 0..10 {
+            let compacted = lsm.next_compaction();
+            // We consider these writes to be 10 bytes (1 key + 8 ts + 1 value), so this is
+            // enough to overfill a memtable.
+            for i in 0..24 {
+                let v = (i % 179) as u8;
+                let put_ts = lsm.put(vec![i as u8], vec![v]).await?;
+                last_ts = std::cmp::max(put_ts, last_ts);
+                map.insert(i as u8, v);
+            }
+            compacted.await;
+
+            for (k, v) in &map {
+                assert_eq!(lsm.get(last_ts, &[*k]).await?, Some(vec![*v]));
+            }
+        }
+
+        // Make sure we actually did ever do a compaction.
+        assert!(lsm.inner.manifest.load().levels[1].runs.len() >= 1);
+
+        drop(lsm);
+
+        // Rebuild the LSM from the same WAL and storage, this should recover everything.
+        let lsm = LsmBuilder::new().wal(wal).storage(storage).build().await?;
+
+        for (k, v) in &map {
+            assert_eq!(lsm.get(last_ts, &[*k]).await?, Some(vec![*v]));
         }
 
         Ok(())
@@ -2363,6 +2475,7 @@ mod test {
         let mut v = vec![];
         Run::<()>::write(
             &mut v,
+            Uuid::new_v4(),
             1,
             32768,
             futures::stream::iter(records.iter().map(|record| Ok(record.clone()))),
@@ -2421,6 +2534,7 @@ mod test {
                 let mut v = vec![];
                 Run::<()>::write(
                     &mut v,
+                    Uuid::new_v4(),
                     1,
                     1024,
                     futures::stream::iter(records.iter().map(|record| Ok(record.clone()))),
@@ -2469,7 +2583,9 @@ mod test {
                     .l0_max_size(128)
                     .block_size(128)
                     .run_target_size(512)
-                    .build();
+                    .build()
+                    .await
+                    .unwrap();
                 for (i, index) in write_indexes.iter().enumerate() {
                     let key = keys_vec[index.index(keys_vec.len())];
                     let mut value = vec![0; 16];

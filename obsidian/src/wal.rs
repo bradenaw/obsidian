@@ -65,9 +65,15 @@ impl<E: Entry + Clone + Send + Sync + 'static> Wal<E> {
         Ok(())
     }
 
+    pub fn oldest_available(&self) -> SeqNo {
+        let inner = self.inner.read().unwrap();
+        inner.offset
+    }
+
     pub fn stream(
         &self,
         first: SeqNo,
+        tail: bool,
     ) -> impl Stream<Item = anyhow::Result<(SeqNo, E)>> + Send + '_ {
         stream! {
             let mut highest_seqno = self.highest_seqno.clone();
@@ -93,6 +99,9 @@ impl<E: Entry + Clone + Send + Sync + 'static> Wal<E> {
                         return;
                     }
                     i = SeqNo(i.0 + 1);
+                }
+                if !tail {
+                    break;
                 }
                 highest_seqno
                     .changed()
@@ -228,7 +237,7 @@ mod test {
     async fn test_basic() -> anyhow::Result<()> {
         let wal = Wal::<u64>::new(3, Duration::from_millis(10000000));
 
-        let mut s = wal.stream(SeqNo(0)).boxed_local();
+        let mut s = wal.stream(SeqNo(0), true).boxed_local();
 
         assert!(matches!(futures::poll!(s.next()), Poll::Pending));
 
@@ -237,6 +246,8 @@ mod test {
         assert_eq!(s.try_next().await?, Some((SeqNo(0), 5)));
         assert_eq!(s.try_next().await?, Some((SeqNo(1), 6)));
         assert_eq!(s.try_next().await?, Some((SeqNo(2), 7)));
+
+        assert!(matches!(futures::poll!(s.next()), Poll::Pending));
 
         Ok(())
     }
@@ -245,7 +256,7 @@ mod test {
     async fn test_flush_timeout() -> anyhow::Result<()> {
         let wal = Wal::<u64>::new(1000, Duration::from_millis(10));
 
-        let mut s = wal.stream(SeqNo(0)).boxed_local();
+        let mut s = wal.stream(SeqNo(0), true).boxed_local();
 
         assert!(matches!(futures::poll!(s.next()), Poll::Pending));
 
@@ -254,6 +265,8 @@ mod test {
         assert_eq!(s.try_next().await?, Some((SeqNo(0), 5)));
         assert_eq!(s.try_next().await?, Some((SeqNo(1), 6)));
         assert_eq!(s.try_next().await?, Some((SeqNo(2), 7)));
+
+        assert!(matches!(futures::poll!(s.next()), Poll::Pending));
 
         Ok(())
     }

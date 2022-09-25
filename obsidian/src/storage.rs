@@ -47,6 +47,7 @@ impl Storage for MemStorage {
             .unwrap()
             .files
             .insert(name.to_string(), Arc::new(buf));
+
         Ok(())
     }
 
@@ -57,7 +58,7 @@ impl Storage for MemStorage {
             .unwrap()
             .files
             .get(name)
-            .ok_or_else(|| anyhow::anyhow!("not found"))?
+            .ok_or_else(|| anyhow::anyhow!("{} not found", name))?
             .clone())
     }
 }
