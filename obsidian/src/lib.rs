@@ -362,7 +362,6 @@ impl Lsm {
                     let trim_to_idx = buf
                         .binary_search_by_key(&included_seqno, |(seqno, _, _)| *seqno)
                         .unwrap_or_else(core::convert::identity);
-                    // XXX: probably not right
                     buf.drain(0..=trim_to_idx);
                     manifest_uuids = levels;
                 }
