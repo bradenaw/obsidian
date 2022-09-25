@@ -477,6 +477,7 @@ impl Lsm {
                     .collect::<Vec<_>>(),
             ))
             .await?;
+            // TODO: We can delete any files that don't appear in the above manifest here.
             wal.trim(seqno_ingested).await?;
 
             'levels: for i in 1..manifest.levels.len() - 1 {

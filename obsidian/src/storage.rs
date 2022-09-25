@@ -14,6 +14,8 @@ pub(crate) trait Storage {
 
     async fn put<W: AsyncRead + Send>(&self, name: &str, w: W) -> anyhow::Result<()>;
 
+    async fn delete(&self, name: &str) -> anyhow::Result<()>;
+
     async fn get(&self, name: &str) -> anyhow::Result<Self::R>;
 }
 
@@ -60,5 +62,10 @@ impl Storage for MemStorage {
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("{} not found", name))?
             .clone())
+    }
+
+    async fn delete(&self, name: &str) -> anyhow::Result<()> {
+        self.inner.lock().unwrap().files.remove(name);
+        Ok(())
     }
 }
