@@ -1,0 +1,150 @@
+use std::cmp::Ordering;
+use std::fmt::Debug;
+use std::fmt::Display;
+use std::time::Duration;
+use std::time::SystemTime;
+
+use thiserror::Error;
+
+use crate::util::hexlify;
+
+#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
+pub struct Timestamp(pub(crate) u64);
+
+impl Timestamp {
+    pub const ZERO: Self = Timestamp(0);
+    pub const MAX: Self = Timestamp(u64::MAX);
+
+    pub fn now() -> Self {
+        Timestamp::from_nanos(
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("now before UNIX_EPOCH?")
+                .as_nanos() as u64,
+        )
+    }
+
+    pub fn now_after(other: Timestamp) -> Self {
+        std::cmp::max(Timestamp(other.0 + 1), Self::now())
+    }
+
+    pub fn from_nanos(x: u64) -> Self {
+        Timestamp(x)
+    }
+
+    pub fn as_nanos(&self) -> u64 {
+        self.0
+    }
+
+    pub fn plus_one(&self) -> Timestamp {
+        Timestamp(self.0 + 1)
+    }
+
+    pub fn minus_one(&self) -> Timestamp {
+        Timestamp(self.0 - 1)
+    }
+
+    pub fn checked_duration_since(&self, earlier: Timestamp) -> Option<Duration> {
+        self.0.checked_sub(earlier.0).map(Duration::from_nanos)
+    }
+
+    pub fn saturating_duration_since(&self, earlier: Timestamp) -> Duration {
+        Duration::from_nanos(self.0.saturating_sub(earlier.0))
+    }
+}
+
+impl Display for Timestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Eq, PartialEq, Clone)]
+pub struct Record {
+    pub key: Vec<u8>,
+    pub ts: Timestamp,
+    pub value: Value,
+}
+
+impl PartialOrd for Record {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Record {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.key.cmp(&other.key) {
+            Ordering::Equal => {}
+            ord => return ord,
+        }
+        self.ts.cmp(&other.ts).reverse()
+    }
+}
+
+impl Debug for Record {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[{}] @ {}: {:?}",
+            hexlify(&self.key),
+            self.ts,
+            self.value
+        )
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum Value {
+    Regular(Vec<u8>),
+    Tombstone,
+}
+
+impl Value {
+    pub fn len(&self) -> usize {
+        match self {
+            Value::Regular(v) => v.len(),
+            Value::Tombstone => 0,
+        }
+    }
+}
+
+impl Debug for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Regular(v) => write!(f, "[{}]", hexlify(v)),
+            Value::Tombstone => write!(f, "<TOMBSTONE>"),
+        }
+    }
+}
+
+#[derive(Eq, PartialEq, Copy, Clone)]
+pub enum Direction {
+    Asc,
+    Desc,
+}
+
+pub enum Precondition {
+    NotChangedSince(Vec<u8>, Timestamp),
+}
+
+impl Precondition {
+    pub fn key(&self) -> &[u8] {
+        match self {
+            Precondition::NotChangedSince(key, _) => &key,
+        }
+    }
+}
+
+pub enum Mutation {
+    Put(Vec<u8>),
+    Delete,
+}
+
+#[derive(Error, Debug)]
+pub enum WriteError {
+    #[error("precondition failed")]
+    PreconditionFailed,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}

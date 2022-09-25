@@ -1,9 +1,11 @@
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
-use std::iter::{FromIterator, IntoIterator};
+use std::fmt::Debug;
+use std::iter::FromIterator;
+use std::iter::IntoIterator;
 
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone)]
 pub enum Bound<K> {
     BeforeAll,
     Before(K),
@@ -146,6 +148,18 @@ impl<K: Clone> Bound<&K> {
     }
 }
 
+impl<K: Debug> Debug for Bound<K> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Bound::BeforeAll => write!(f, "before_all"),
+            Bound::Before(v) => write!(f, "before({:?})", v),
+            Bound::After(v) => write!(f, "after({:?})", v),
+            Bound::AfterPrefix(v) => write!(f, "after_prefix({:?})", v),
+            Bound::AfterAll => write!(f, "after_all"),
+        }
+    }
+}
+
 #[derive(Eq, PartialEq, Clone, Debug)]
 pub enum KeyOrBound<K> {
     Key(K),
@@ -179,7 +193,7 @@ impl<K: Ord + HasPrefix> PartialOrd for KeyOrBound<K> {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Range<K> {
     pub lower: Bound<K>,
     pub upper: Bound<K>,
@@ -257,6 +271,12 @@ impl<K> Range<Vec<K>> {
             lower: self.lower.borrow(),
             upper: self.upper.borrow(),
         }
+    }
+}
+
+impl<K: Debug> Debug for Range<K> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({:?}, {:?})", self.lower, self.upper)
     }
 }
 

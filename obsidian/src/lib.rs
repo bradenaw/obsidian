@@ -9,7 +9,6 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::fmt::Display;
 use std::fs::File;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -20,7 +19,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
-use std::time::SystemTime;
 
 use anyhow::anyhow;
 use async_stream::stream;
@@ -36,7 +34,6 @@ use futures::SinkExt;
 use futures::TryStreamExt;
 use lock_mgr::LockMgr;
 use rand::Rng;
-use thiserror::Error;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
@@ -46,6 +43,7 @@ mod memtable;
 mod range;
 mod sequencer;
 mod storage;
+mod types;
 mod util;
 mod wal;
 
@@ -56,90 +54,20 @@ use crate::range::Range;
 use crate::sequencer::Sequencer;
 use crate::storage::MemStorage;
 use crate::storage::Storage;
+use crate::types::Direction;
+use crate::types::Mutation;
+use crate::types::Precondition;
+use crate::types::Record;
+use crate::types::Timestamp;
+use crate::types::Value;
+use crate::types::WriteError;
 use crate::util::binary_search_by_idx;
 use crate::util::byte_width;
-use crate::util::hexlify;
 use crate::util::longest_shared_prefix;
 use crate::util::merge_sorted;
 use crate::util::merge_sorted_streams;
 use crate::util::AtomicArc;
 use crate::util::OrdEqByFirst;
-
-enum Precondition {
-    NotChangedSince(Vec<u8>, Timestamp),
-}
-
-impl Precondition {
-    fn key(&self) -> &[u8] {
-        match self {
-            Precondition::NotChangedSince(key, _) => &key,
-        }
-    }
-}
-
-enum Mutation {
-    Put(Vec<u8>),
-    Delete,
-}
-
-#[derive(Error, Debug)]
-enum WriteError {
-    #[error("precondition failed")]
-    PreconditionFailed,
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
-}
-
-#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
-pub struct Timestamp(u64);
-
-impl Timestamp {
-    const ZERO: Self = Timestamp(0);
-    const MAX: Self = Timestamp(u64::MAX);
-
-    fn now() -> Self {
-        Timestamp::from_nanos(
-            SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("now before UNIX_EPOCH?")
-                .as_nanos() as u64,
-        )
-    }
-
-    fn now_after(other: Timestamp) -> Self {
-        std::cmp::max(Timestamp(other.0 + 1), Self::now())
-    }
-
-    fn from_nanos(x: u64) -> Self {
-        Timestamp(x)
-    }
-
-    fn as_nanos(&self) -> u64 {
-        self.0
-    }
-
-    fn plus_one(&self) -> Timestamp {
-        Timestamp(self.0 + 1)
-    }
-
-    fn minus_one(&self) -> Timestamp {
-        Timestamp(self.0 - 1)
-    }
-
-    fn checked_duration_since(&self, earlier: Timestamp) -> Option<Duration> {
-        self.0.checked_sub(earlier.0).map(Duration::from_nanos)
-    }
-
-    fn saturating_duration_since(&self, earlier: Timestamp) -> Duration {
-        Duration::from_nanos(self.0.saturating_sub(earlier.0))
-    }
-}
-
-impl Display for Timestamp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
 
 struct LsmBuilder {
     l0_max_size: u64,
@@ -1087,21 +1015,6 @@ impl Manifest {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Value {
-    Regular(Vec<u8>),
-    Tombstone,
-}
-
-impl Value {
-    fn len(&self) -> usize {
-        match self {
-            Value::Regular(v) => v.len(),
-            Value::Tombstone => 0,
-        }
-    }
-}
-
 #[derive(Clone)]
 struct Level {
     // In sorted order by range.
@@ -1409,36 +1322,6 @@ impl<'a> BlockVersions<'a> {
         Some((start, end))
     }
 }
-
-#[derive(Eq, PartialEq, Clone, Debug)]
-struct Record {
-    key: Vec<u8>,
-    ts: Timestamp,
-    value: Value,
-}
-
-impl PartialOrd for Record {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Record {
-    fn cmp(&self, other: &Self) -> Ordering {
-        match self.key.cmp(&other.key) {
-            Ordering::Equal => {}
-            ord => return ord,
-        }
-        self.ts.cmp(&other.ts).reverse()
-    }
-}
-
-#[derive(Eq, PartialEq, Copy, Clone)]
-enum Direction {
-    Asc,
-    Desc,
-}
-
 #[derive(Clone, Debug)]
 enum WalEntry {
     Write(Timestamp, Vec<(Vec<u8>, Value)>),
@@ -2022,20 +1905,22 @@ mod test {
     use crate::range::Bound;
     use crate::range::Range;
     use crate::storage::MemStorage;
+    use crate::types::Direction;
+    use crate::types::Mutation;
+    use crate::types::Precondition;
+    use crate::types::Record;
+    use crate::types::Timestamp;
+    use crate::types::Value;
+    use crate::types::WriteError;
     use crate::util::binary_search_by_idx;
     use crate::util::hexlify;
     use crate::wal;
-    use crate::AsyncReadExactAt;
-    use crate::Block;
-    use crate::Direction;
-    use crate::LsmBuilder;
-    use crate::Mutation;
-    use crate::Precondition;
-    use crate::Record;
-    use crate::Run;
-    use crate::Timestamp;
-    use crate::Value;
-    use crate::WriteError;
+
+    use super::AsyncReadExactAt;
+    use super::Block;
+    use super::LsmBuilder;
+    use super::Manifest;
+    use super::Run;
 
     #[tokio::test]
     async fn test_put_get() -> anyhow::Result<()> {
@@ -2538,6 +2423,7 @@ mod test {
         }
         Ok(())
     }
+
     async fn dump_block<'a, R: AsyncReadExactAt>(block: &Block<'a, R>) -> anyhow::Result<()> {
         println!("    prefix: {}", hexlify(block.index.prefix()));
         println!("    n_keys: {}", block.index.len());
@@ -2560,83 +2446,57 @@ mod test {
         }
         Ok(())
     }
-}
 
-fn dump_manifest(manifest: &Manifest) {
-    println!("== manifest =====");
-    println!("l0_active");
-    for (_, memtable_lock) in &manifest.l0_active {
-        let memtable = memtable_lock.read().unwrap();
-        match memtable.range() {
-            Some((lower, upper)) => {
+    fn dump_manifest(manifest: &Manifest) {
+        println!("== manifest =====");
+        println!("l0_active");
+        for (_, memtable_lock) in &manifest.l0_active {
+            let memtable = memtable_lock.read().unwrap();
+            match memtable.range() {
+                Some((lower, upper)) => {
+                    println!(
+                        "  {} ({} bytes) [{}] [{}]",
+                        memtable.id(),
+                        memtable.size(),
+                        hexlify(&lower),
+                        hexlify(&upper)
+                    );
+                }
+                None => println!("  (empty)"),
+            }
+        }
+        println!("l0_sealed");
+        for memtable in &manifest.l0_sealed {
+            match memtable.range() {
+                Some((lower, upper)) => {
+                    println!(
+                        "  {} ({} bytes) [{}] [{}]",
+                        memtable.id(),
+                        memtable.size(),
+                        hexlify(&lower),
+                        hexlify(&upper)
+                    );
+                }
+                None => println!("  (empty)"),
+            }
+        }
+        for (i, level) in manifest.levels[1..]
+            .iter()
+            .enumerate()
+            .map(|(i, level)| (i + 1, level))
+        {
+            println!("l{} ({} bytes)", i, level.size());
+            for run in &level.runs {
+                let (lower, upper) = run.range().unwrap();
                 println!(
                     "  {} ({} bytes) [{}] [{}]",
-                    memtable.id(),
-                    memtable.size(),
+                    run.id(),
+                    run.size(),
                     hexlify(&lower),
                     hexlify(&upper)
                 );
             }
-            None => println!("  (empty)"),
         }
+        println!("============");
     }
-    println!("l0_sealed");
-    for memtable in &manifest.l0_sealed {
-        match memtable.range() {
-            Some((lower, upper)) => {
-                println!(
-                    "  {} ({} bytes) [{}] [{}]",
-                    memtable.id(),
-                    memtable.size(),
-                    hexlify(&lower),
-                    hexlify(&upper)
-                );
-            }
-            None => println!("  (empty)"),
-        }
-    }
-    for (i, level) in manifest.levels[1..]
-        .iter()
-        .enumerate()
-        .map(|(i, level)| (i + 1, level))
-    {
-        println!("l{} ({} bytes)", i, level.size());
-        for run in &level.runs {
-            let (lower, upper) = run.range().unwrap();
-            println!(
-                "  {} ({} bytes) [{}] [{}]",
-                run.id(),
-                run.size(),
-                hexlify(&lower),
-                hexlify(&upper)
-            );
-        }
-    }
-    println!("============");
-}
-fn record_string(r: &Record) -> String {
-    format!(
-        "[{}] @ {}: {}",
-        hexlify(&r.key),
-        r.ts,
-        value_string(&r.value)
-    )
-}
-fn value_string(v: &Value) -> String {
-    match v {
-        Value::Regular(v) => format!("[{}]", hexlify(v)),
-        Value::Tombstone => "<TOMBSTONE>".into(),
-    }
-}
-fn bound_string(b: &Bound<Vec<u8>>) -> String {
-    match b {
-        Bound::BeforeAll => "before_all".into(),
-        Bound::Before(v) => format!("before({})", hexlify(v)),
-        Bound::After(v) => format!("after({})", hexlify(v)),
-        Bound::AfterPrefix(v) => format!("after_prefix({})", hexlify(v)),
-        Bound::AfterAll => "after_all".into(),
-    }
-}
-fn range_string(r: &Range<Vec<u8>>) -> String {
-    format!("({}, {})", bound_string(&r.lower), bound_string(&r.upper))
 }
