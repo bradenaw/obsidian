@@ -40,6 +40,7 @@ use uuid::Uuid;
 
 mod lock_mgr;
 mod memtable;
+mod obsidian;
 mod range;
 mod sequencer;
 mod storage;

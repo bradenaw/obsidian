@@ -124,6 +124,7 @@ pub enum Direction {
     Desc,
 }
 
+#[derive(Clone, Debug)]
 pub enum Precondition {
     NotChangedSince(Vec<u8>, Timestamp),
 }
@@ -136,6 +137,7 @@ impl Precondition {
     }
 }
 
+#[derive(Clone, Debug)]
 pub enum Mutation {
     Put(Vec<u8>),
     Delete,
