@@ -3,12 +3,12 @@ use std::collections::BTreeMap;
 
 use uuid::Uuid;
 
+use crate::range::Bound;
+use crate::range::Range;
+use crate::types::Record;
+use crate::types::Timestamp;
+use crate::types::Value;
 use crate::wal;
-use crate::Bound;
-use crate::Range;
-use crate::Record;
-use crate::Timestamp;
-use crate::Value;
 
 impl Default for Memtable {
     fn default() -> Self {

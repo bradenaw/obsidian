@@ -4,8 +4,8 @@ use std::ops::Deref;
 use std::sync::RwLock;
 use std::time::Duration;
 
-use crate::OrdEqByFirst;
-use crate::Timestamp;
+use crate::types::Timestamp;
+use crate::util::OrdEqByFirst;
 
 pub struct Sequencer {
     inner: RwLock<SequencerInner>,
