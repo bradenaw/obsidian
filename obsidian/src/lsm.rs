@@ -542,7 +542,7 @@ impl Lsm {
         let mut runs = Vec::new();
         while let Some(_) = Pin::new(&mut sorted).peek().await {
             let mut curr_size = 0u64;
-            let (mut tx, rx) = futures::channel::mpsc::channel(1);
+            let (mut tx, rx) = futures::channel::mpsc::channel(256);
 
             let id = Uuid::new_v4();
             let (mut writer, reader) = tokio::io::duplex(16384);
