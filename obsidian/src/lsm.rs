@@ -307,7 +307,7 @@ impl Lsm {
                 let run = Run::open(storage.get(&run_uuid.to_string()).await?).await?;
                 runs.push(run);
             }
-            runs.sort_by_key(|run| run.range().unwrap().0);
+            runs.sort_by_key(|run| run.range().lower);
             manifest.levels[i] = Level { runs };
         }
 
@@ -444,14 +444,12 @@ impl Lsm {
         // memtables is newer than anything in any lower levels.
         let chosen_l0 = &manifest.l0_sealed[0];
         let chosen_l0_id = chosen_l0.id();
-        let (min_key, max_key) = match chosen_l0.range() {
-            Some(r) => r,
-            None => {
-                let mut removes = HashSet::new();
-                removes.insert(chosen_l0_id);
-                return Ok((vec![], removes, wal::SeqNo(0)));
-            }
-        };
+        let chosen_l0_range = chosen_l0.range();
+        if chosen_l0_range.is_empty() {
+            let mut removes = HashSet::new();
+            removes.insert(chosen_l0_id);
+            return Ok((vec![], removes, wal::SeqNo(0)));
+        }
 
         let seqno = chosen_l0.max_seqno();
 
@@ -461,8 +459,7 @@ impl Lsm {
             manifest,
             storage,
             1,
-            min_key,
-            max_key,
+            chosen_l0_range,
             futures::stream::iter(chosen_l0.iter().map(|(k, ts, v)| {
                 Ok(Record {
                     key: k,
@@ -489,10 +486,7 @@ impl Lsm {
         }
         let idx = rand::thread_rng().gen_range(0..manifest.levels[level].runs.len());
         let run = &manifest.levels[level].runs[idx];
-        let (min_key, max_key) = match run.range() {
-            Some((min_key, max_key)) => (min_key, max_key),
-            None => return Ok((vec![], HashSet::new())),
-        };
+        let run_range = run.range();
 
         let run_id = run.id();
 
@@ -502,8 +496,7 @@ impl Lsm {
             manifest,
             storage,
             level + 1,
-            min_key,
-            max_key,
+            run_range,
             run.stream(),
         )
         .await?;
@@ -518,11 +511,10 @@ impl Lsm {
         manifest: &Manifest,
         storage: &MemStorage,
         into_level: usize,
-        min_key: Vec<u8>,
-        max_key: Vec<u8>,
+        entries_range: Range<Vec<u8>>,
         entries: impl Stream<Item = anyhow::Result<Record>> + Send,
     ) -> anyhow::Result<(Vec<Run<Arc<Vec<u8>>>>, HashSet<Uuid>)> {
-        let overlapping_runs = manifest.levels[into_level].overlapping_runs(min_key, max_key);
+        let overlapping_runs = manifest.levels[into_level].overlapping_runs(entries_range);
 
         let removes = overlapping_runs.iter().map(|run| run.id()).collect();
 
@@ -748,13 +740,13 @@ impl LsmInner {
             let start_idx = binary_search_by_idx(
                 level.runs.len(),
                 range.lower.clone().map(Vec::from),
-                |idx| Bound::After(level.runs[idx].range().unwrap().1),
+                |idx| level.runs[idx].range().upper,
             )
             .unwrap_or_else(core::convert::identity);
             let end_idx = binary_search_by_idx(
                 level.runs.len(),
                 range.upper.clone().map(Vec::from),
-                |idx| Bound::Before(level.runs[idx].range().unwrap().0),
+                |idx| level.runs[idx].range().lower,
             )
             .unwrap_or_else(|idx| {
                 if idx == level.runs.len() {
@@ -770,6 +762,7 @@ impl LsmInner {
 
             streams.push(
                 futures::stream::iter(level.runs[start_idx..=end_idx].iter())
+                    .inspect(|run| assert!(!run.range().intersection(&range.to_vec()).is_empty()))
                     .map(|run| run.scan(ts, range.to_vec(), direction))
                     .flatten()
                     .boxed(),
@@ -970,13 +963,12 @@ impl Manifest {
             if i == into_level {
                 levels.push(Level {
                     runs: merge_sorted(vec![
-                        Box::new(
-                            filtered_old_level.map(|run| OrdEqByFirst(run.range().unwrap().0, run)),
-                        ) as Box<dyn Iterator<Item = _>>,
+                        Box::new(filtered_old_level.map(|run| OrdEqByFirst(run.range().lower, run)))
+                            as Box<dyn Iterator<Item = _>>,
                         Box::new(
                             std::mem::take(&mut add)
                                 .into_iter()
-                                .map(|run| OrdEqByFirst(run.range().unwrap().0, run)),
+                                .map(|run| OrdEqByFirst(run.range().lower, run)),
                         ),
                     ])
                     .map(|OrdEqByFirst(_, run)| run)
@@ -1013,13 +1005,12 @@ impl Level {
     }
 
     async fn get(&self, ts: Timestamp, k: &[u8]) -> anyhow::Result<Option<(Timestamp, Value)>> {
-        let idx = match self
+        let idx = self
             .runs
-            .binary_search_by_key(&k.to_vec(), |run| run.range().unwrap().1)
-        {
-            Ok(idx) => idx,
-            Err(idx) => idx,
-        };
+            .binary_search_by_key(&KeyOrBound::Key(k.to_vec()), |run| {
+                KeyOrBound::Bound(run.range().upper)
+            })
+            .unwrap_or_else(core::convert::identity);
         if idx >= self.runs.len() {
             return Ok(None);
         }
@@ -1030,21 +1021,27 @@ impl Level {
         self.runs.iter().map(|run| run.size()).sum()
     }
 
-    fn overlapping_runs(&self, min_key: Vec<u8>, max_key: Vec<u8>) -> &[Run<Arc<Vec<u8>>>] {
+    fn overlapping_runs(&self, range: Range<Vec<u8>>) -> &[Run<Arc<Vec<u8>>>] {
         let start_idx = self
             .runs
-            .binary_search_by_key(&min_key, |run| run.range().unwrap().1)
+            .binary_search_by_key(&range.lower, |run| run.range().upper)
             .unwrap_or_else(core::convert::identity);
 
         let end_idx = match self
             .runs
-            .binary_search_by_key(&max_key, |run| run.range().unwrap().0)
+            .binary_search_by_key(&range.upper, |run| run.range().lower)
         {
             Ok(idx) => idx + 1,
             Err(idx) => idx,
         };
 
-        &self.runs[start_idx..end_idx]
+        let runs = &self.runs[start_idx..end_idx];
+
+        assert!(runs
+            .iter()
+            .all(|run| !run.range().intersection(&range).is_empty()));
+
+        runs
     }
 }
 
@@ -1789,8 +1786,11 @@ impl<R: AsyncReadExactAt> Run<R> {
         }
     }
 
-    fn range(&self) -> Option<(Vec<u8>, Vec<u8>)> {
-        Some((self.min_key.clone(), self.max_key.clone()))
+    fn range(&self) -> Range<Vec<u8>> {
+        Range {
+            lower: Bound::Before(self.min_key.clone()),
+            upper: Bound::After(self.max_key.clone()),
+        }
     }
 
     fn stream(&self) -> impl Stream<Item = anyhow::Result<Record>> + '_ {
@@ -2438,33 +2438,21 @@ mod test {
         println!("l0_active");
         for (_, memtable_lock) in &manifest.l0_active {
             let memtable = memtable_lock.read().unwrap();
-            match memtable.range() {
-                Some((lower, upper)) => {
-                    println!(
-                        "  {} ({} bytes) [{}] [{}]",
-                        memtable.id(),
-                        memtable.size(),
-                        hexlify(&lower),
-                        hexlify(&upper)
-                    );
-                }
-                None => println!("  (empty)"),
-            }
+            println!(
+                "  {} ({} bytes) {:?}",
+                memtable.id(),
+                memtable.size(),
+                memtable.range(),
+            );
         }
         println!("l0_sealed");
         for memtable in &manifest.l0_sealed {
-            match memtable.range() {
-                Some((lower, upper)) => {
-                    println!(
-                        "  {} ({} bytes) [{}] [{}]",
-                        memtable.id(),
-                        memtable.size(),
-                        hexlify(&lower),
-                        hexlify(&upper)
-                    );
-                }
-                None => println!("  (empty)"),
-            }
+            println!(
+                "  {} ({} bytes) {:?}",
+                memtable.id(),
+                memtable.size(),
+                memtable.range(),
+            );
         }
         for (i, level) in manifest.levels[1..]
             .iter()
@@ -2473,14 +2461,7 @@ mod test {
         {
             println!("l{} ({} bytes)", i, level.size());
             for run in &level.runs {
-                let (lower, upper) = run.range().unwrap();
-                println!(
-                    "  {} ({} bytes) [{}] [{}]",
-                    run.id(),
-                    run.size(),
-                    hexlify(&lower),
-                    hexlify(&upper)
-                );
+                println!("  {} ({} bytes) {:?}", run.id(), run.size(), run.range());
             }
         }
         println!("============");

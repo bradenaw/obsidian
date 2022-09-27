@@ -63,11 +63,14 @@ impl Memtable {
         self.size
     }
 
-    pub fn range(&self) -> Option<(Vec<u8>, Vec<u8>)> {
-        Some((
-            self.kvs.iter().next()?.0.clone(),
-            self.kvs.iter().next_back()?.0.clone(),
-        ))
+    pub fn range(&self) -> Range<Vec<u8>> {
+        match (self.kvs.first_key_value(), self.kvs.last_key_value()) {
+            (Some((min_key, _)), Some((max_key, _))) => Range {
+                lower: Bound::Before(min_key.clone()),
+                upper: Bound::After(max_key.clone()),
+            },
+            _ => Range::empty(),
+        }
     }
 
     pub fn scan_asc(
