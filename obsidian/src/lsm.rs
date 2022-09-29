@@ -2247,18 +2247,20 @@ mod test {
                 // enough to overfill a memtable.
                 for i in 0..24 {
                     let k = (j * 5 + i) as u8;
-                    let v = (i % 179) as u8;
+                    let mut v = [0u8; 4];
+                    BigEndian::write_u32(&mut v, j * 24 + i);
+                    println!("put {} {:?}", k, v);
                     let put_ts = lsm
                         .write(
                             vec![],
                             BTreeMap::from([(
                                 (keyspace_id, vec![i as u8]),
-                                Mutation::Put(vec![v]),
+                                Mutation::Put(v.to_vec()),
                             )]),
                         )
                         .await?;
                     last_ts = std::cmp::max(put_ts, last_ts);
-                    map.insert(k, v);
+                    map.insert(k, v.to_vec());
                 }
 
                 lsm.pending_compactions().await;
@@ -2273,14 +2275,15 @@ mod test {
                     .levels[2]
                     .runs
                     .len()
-                    >= j + 1
+                    >= (j + 1) as usize
                 {
                     break;
                 }
             }
 
             for (k, v) in &map {
-                assert_eq!(lsm.get(last_ts, keyspace_id, &[*k]).await?, Some(vec![*v]));
+                println!("key: {}, expected: {:?}", k, v);
+                assert_eq!(lsm.get(last_ts, keyspace_id, &[*k]).await?, Some(v.clone()));
             }
         }
 
