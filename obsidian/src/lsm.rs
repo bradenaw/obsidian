@@ -307,6 +307,16 @@ impl LsmOuter {
         Ok(())
     }
 
+    pub async fn pending_compactions(&self) {
+        let inner = self.inner.load();
+        future::join_all(
+            inner
+                .values()
+                .map(|keyspace_lsm| keyspace_lsm.pending_compactions()),
+        )
+        .await;
+    }
+
     async fn recovery(
         wal: &wal::Wal<WalEntry>,
         storage: &MemStorage,
@@ -2053,6 +2063,7 @@ mod test {
     use crate::range::Range;
     use crate::storage::MemStorage;
     use crate::types::Direction;
+    use crate::types::KeyspaceId;
     use crate::types::Mutation;
     use crate::types::Precondition;
     use crate::types::Record;
@@ -2072,16 +2083,33 @@ mod test {
     #[tokio::test]
     async fn test_put_get() -> anyhow::Result<()> {
         let lsm = LsmBuilder::new().build().await?;
+        let keyspace_id = KeyspaceId(1);
         let k = b"abc";
         let not_k = b"def";
         let v = b"foo";
-        let write_ts = lsm.put(k.to_vec(), v.to_vec()).await?;
-        assert_eq!(lsm.get(write_ts.minus_one(), k).await?, None);
-        assert_eq!(lsm.get(write_ts, k).await?, Some(v.to_vec()));
-        assert_eq!(lsm.get(write_ts.plus_one(), k).await?, Some(v.to_vec()));
-        assert_eq!(lsm.get(write_ts.minus_one(), not_k).await?, None);
-        assert_eq!(lsm.get(write_ts, not_k).await?, None);
-        assert_eq!(lsm.get(write_ts.plus_one(), not_k).await?, None);
+
+        lsm.create_keyspace(keyspace_id).await?;
+        let write_ts = lsm
+            .write(
+                vec![],
+                BTreeMap::from([((keyspace_id, k.to_vec()), Mutation::Put(v.to_vec()))]),
+            )
+            .await?;
+        assert_eq!(lsm.get(write_ts.minus_one(), keyspace_id, k).await?, None);
+        assert_eq!(lsm.get(write_ts, keyspace_id, k).await?, Some(v.to_vec()));
+        assert_eq!(
+            lsm.get(write_ts.plus_one(), keyspace_id, k).await?,
+            Some(v.to_vec())
+        );
+        assert_eq!(
+            lsm.get(write_ts.minus_one(), keyspace_id, not_k).await?,
+            None
+        );
+        assert_eq!(lsm.get(write_ts, keyspace_id, not_k).await?, None);
+        assert_eq!(
+            lsm.get(write_ts.plus_one(), keyspace_id, not_k).await?,
+            None
+        );
 
         Ok(())
     }
@@ -2090,15 +2118,17 @@ mod test {
     async fn test_write_tx() -> anyhow::Result<()> {
         let lsm = LsmBuilder::new().build().await?;
 
+        let keyspace_id = KeyspaceId(1);
         let ka = b"a";
         let kb = b"b";
 
+        lsm.create_keyspace(keyspace_id).await?;
         let write_0_ts = lsm
             .write(
                 vec![],
                 BTreeMap::from([
-                    (ka.to_vec(), Mutation::Put(b"a0".to_vec())),
-                    (kb.to_vec(), Mutation::Put(b"b0".to_vec())),
+                    ((keyspace_id, ka.to_vec()), Mutation::Put(b"a0".to_vec())),
+                    ((keyspace_id, kb.to_vec()), Mutation::Put(b"b0".to_vec())),
                 ]),
             )
             .await?;
@@ -2106,10 +2136,11 @@ mod test {
         assert!(matches!(
             lsm.write(
                 vec![Precondition::NotChangedSince(
+                    keyspace_id,
                     ka.to_vec(),
                     write_0_ts.minus_one()
                 )],
-                BTreeMap::from([(ka.to_vec(), Mutation::Put(b"a1".to_vec()))]),
+                BTreeMap::from([((keyspace_id, ka.to_vec()), Mutation::Put(b"a1".to_vec()))]),
             )
             .await,
             Err(WriteError::PreconditionFailed),
@@ -2117,24 +2148,31 @@ mod test {
 
         let write_1_ts = lsm
             .write(
-                vec![Precondition::NotChangedSince(ka.to_vec(), write_0_ts)],
+                vec![Precondition::NotChangedSince(
+                    keyspace_id,
+                    ka.to_vec(),
+                    write_0_ts,
+                )],
                 BTreeMap::from([
-                    (ka.to_vec(), Mutation::Put(b"a1".to_vec())),
-                    (kb.to_vec(), Mutation::Delete),
+                    ((keyspace_id, ka.to_vec()), Mutation::Put(b"a1".to_vec())),
+                    ((keyspace_id, kb.to_vec()), Mutation::Delete),
                 ]),
             )
             .await?;
 
         assert_eq!(
-            lsm.get(write_1_ts.minus_one(), ka).await?,
+            lsm.get(write_1_ts.minus_one(), keyspace_id, ka).await?,
             Some(b"a0".to_vec())
         );
         assert_eq!(
-            lsm.get(write_1_ts.minus_one(), kb).await?,
+            lsm.get(write_1_ts.minus_one(), keyspace_id, kb).await?,
             Some(b"b0".to_vec())
         );
-        assert_eq!(lsm.get(write_1_ts, ka).await?, Some(b"a1".to_vec()));
-        assert_eq!(lsm.get(write_1_ts, kb).await?, None);
+        assert_eq!(
+            lsm.get(write_1_ts, keyspace_id, ka).await?,
+            Some(b"a1".to_vec())
+        );
+        assert_eq!(lsm.get(write_1_ts, keyspace_id, kb).await?, None);
 
         Ok(())
     }
@@ -2147,27 +2185,46 @@ mod test {
             .run_target_size(512)
             .build()
             .await?;
+        let keyspace_id = KeyspaceId(1);
+        lsm.create_keyspace(keyspace_id).await?;
         let mut map = BTreeMap::new();
         let mut last_ts = Timestamp::ZERO;
         for _ in 0..10 {
-            let compacted = lsm.next_compaction();
+            let compacted = lsm.pending_compactions();
             // We consider these writes to be 10 bytes (1 key + 8 ts + 1 value), so this is
             // enough to overfill a memtable.
             for i in 0..24 {
                 let v = (i % 179) as u8;
-                let put_ts = lsm.put(vec![i as u8], vec![v]).await?;
+                let put_ts = lsm
+                    .write(
+                        vec![],
+                        BTreeMap::from([((keyspace_id, vec![i as u8]), Mutation::Put(vec![v]))]),
+                    )
+                    .await?;
                 last_ts = std::cmp::max(put_ts, last_ts);
                 map.insert(i as u8, v);
             }
             compacted.await;
 
             for (k, v) in &map {
-                assert_eq!(lsm.get(last_ts, &[*k]).await?, Some(vec![*v]));
+                assert_eq!(lsm.get(last_ts, keyspace_id, &[*k]).await?, Some(vec![*v]));
             }
         }
 
         // Make sure we actually did ever do a compaction.
-        assert!(lsm.inner.manifest.load().levels[1].runs.len() >= 1);
+        assert!(
+            lsm.inner
+                .load()
+                .get(&keyspace_id)
+                .unwrap()
+                .inner
+                .manifest
+                .load()
+                .levels[1]
+                .runs
+                .len()
+                >= 1
+        );
 
         Ok(())
     }
@@ -2180,6 +2237,8 @@ mod test {
             .run_target_size(512)
             .build()
             .await?;
+        let keyspace_id = KeyspaceId(1);
+        lsm.create_keyspace(keyspace_id).await?;
         let mut map = BTreeMap::new();
         let mut last_ts = Timestamp::ZERO;
         for j in 0..10 {
@@ -2189,19 +2248,39 @@ mod test {
                 for i in 0..24 {
                     let k = (j * 5 + i) as u8;
                     let v = (i % 179) as u8;
-                    let put_ts = lsm.put(vec![k], vec![v]).await?;
+                    let put_ts = lsm
+                        .write(
+                            vec![],
+                            BTreeMap::from([(
+                                (keyspace_id, vec![i as u8]),
+                                Mutation::Put(vec![v]),
+                            )]),
+                        )
+                        .await?;
                     last_ts = std::cmp::max(put_ts, last_ts);
                     map.insert(k, v);
                 }
 
                 lsm.pending_compactions().await;
-                if lsm.inner.manifest.load().levels[2].runs.len() >= j + 1 {
+                if lsm
+                    .inner
+                    .load()
+                    .get(&keyspace_id)
+                    .unwrap()
+                    .inner
+                    .manifest
+                    .load()
+                    .levels[2]
+                    .runs
+                    .len()
+                    >= j + 1
+                {
                     break;
                 }
             }
 
             for (k, v) in &map {
-                assert_eq!(lsm.get(last_ts, &[*k]).await?, Some(vec![*v]));
+                assert_eq!(lsm.get(last_ts, keyspace_id, &[*k]).await?, Some(vec![*v]));
             }
         }
 
@@ -2222,27 +2301,46 @@ mod test {
             .build()
             .await?;
 
+        let keyspace_id = KeyspaceId(1);
+        lsm.create_keyspace(keyspace_id).await?;
+
         let mut map = BTreeMap::new();
         let mut last_ts = Timestamp::ZERO;
         for _ in 0..10 {
-            let compacted = lsm.next_compaction();
             // We consider these writes to be 10 bytes (1 key + 8 ts + 1 value), so this is
             // enough to overfill a memtable.
             for i in 0..24 {
                 let v = (i % 179) as u8;
-                let put_ts = lsm.put(vec![i as u8], vec![v]).await?;
+                let put_ts = lsm
+                    .write(
+                        vec![],
+                        BTreeMap::from([((keyspace_id, vec![i as u8]), Mutation::Put(vec![v]))]),
+                    )
+                    .await?;
                 last_ts = std::cmp::max(put_ts, last_ts);
                 map.insert(i as u8, v);
             }
-            compacted.await;
+            lsm.pending_compactions().await;
 
             for (k, v) in &map {
-                assert_eq!(lsm.get(last_ts, &[*k]).await?, Some(vec![*v]));
+                assert_eq!(lsm.get(last_ts, keyspace_id, &[*k]).await?, Some(vec![*v]));
             }
         }
 
         // Make sure we actually did ever do a compaction.
-        assert!(lsm.inner.manifest.load().levels[1].runs.len() >= 1);
+        assert!(
+            lsm.inner
+                .load()
+                .get(&keyspace_id)
+                .unwrap()
+                .inner
+                .manifest
+                .load()
+                .levels[1]
+                .runs
+                .len()
+                >= 1
+        );
 
         drop(lsm);
 
@@ -2250,7 +2348,7 @@ mod test {
         let lsm = LsmBuilder::new().wal(wal).storage(storage).build().await?;
 
         for (k, v) in &map {
-            assert_eq!(lsm.get(last_ts, &[*k]).await?, Some(vec![*v]));
+            assert_eq!(lsm.get(last_ts, keyspace_id, &[*k]).await?, Some(vec![*v]));
         }
 
         Ok(())
@@ -2398,7 +2496,7 @@ mod test {
         Run::<()>::write(
             &mut v,
             Uuid::new_v4(),
-            1,
+            KeyspaceId(1),
             32768,
             futures::stream::iter(records.iter().map(|record| Ok(record.clone()))),
         )
@@ -2457,7 +2555,7 @@ mod test {
                 Run::<()>::write(
                     &mut v,
                     Uuid::new_v4(),
-                    1,
+                    KeyspaceId(1),
                     1024,
                     futures::stream::iter(records.iter().map(|record| Ok(record.clone()))),
                 ).await.unwrap();
@@ -2508,11 +2606,20 @@ mod test {
                     .build()
                     .await
                     .unwrap();
+                let keyspace_id = KeyspaceId(1);
+                lsm.create_keyspace(keyspace_id).await.unwrap();
+
                 for (i, index) in write_indexes.iter().enumerate() {
                     let key = keys_vec[index.index(keys_vec.len())];
                     let mut value = vec![0; 16];
                     BigEndian::write_u64(&mut value[8..], i as u64);
-                    let ts = lsm.put(key.clone(), value.clone()).await.unwrap();
+                    let ts = lsm
+                        .write(
+                            vec![],
+                            BTreeMap::from([((keyspace_id, key.clone()), Mutation::Put(value.clone()))]),
+                        )
+                        .await
+                        .unwrap();
                     writes.push((key.clone(), ts, value.clone()));
                 }
 
@@ -2532,7 +2639,13 @@ mod test {
                     let mut maybe_cursor = Some(range.clone());
                     let mut results = vec![];
                     while let Some(cursor) = maybe_cursor {
-                        let (mut page, continue_cursor) = lsm.scan_page(ts, cursor.borrow(), Direction::Asc, 100).await.unwrap();
+                        let (mut page, continue_cursor) = lsm.scan_page(
+                            ts,
+                            keyspace_id,
+                            cursor.borrow(),
+                            Direction::Asc,
+                            100,
+                        ).await.unwrap();
                         results.append(&mut page);
                         maybe_cursor = continue_cursor;
                     }
