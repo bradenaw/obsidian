@@ -115,10 +115,15 @@ impl LsmBuilder {
 }
 
 struct LsmOuter {
-    inner: Arc<AtomicArc<HashMap<KeyspaceId, Lsm>>>,
+    l0_max_size: u64,
+    run_target_size: u64,
+    block_size: u64,
+
+    inner: Arc<AtomicArc<HashMap<KeyspaceId, Arc<Lsm>>>>,
     wal: Arc<wal::Wal<WalEntry>>,
     sequencer: Sequencer,
     lock_mgr: LockMgr,
+    storage: Arc<MemStorage>,
 
     wal_process: tokio::task::JoinHandle<anyhow::Result<()>>,
     wal_processed: tokio::sync::watch::Receiver<wal::SeqNo>,
@@ -140,16 +145,18 @@ impl LsmOuter {
             for (keyspace_id, manifest) in manifests {
                 lsms.insert(
                     keyspace_id,
-                    Lsm::new(
-                        l0_max_size,
-                        run_target_size,
-                        block_size,
-                        keyspace_id,
-                        manifest,
-                        wal.clone(),
-                        storage.clone(),
-                    )
-                    .await?,
+                    Arc::new(
+                        Lsm::new(
+                            l0_max_size,
+                            run_target_size,
+                            block_size,
+                            keyspace_id,
+                            manifest,
+                            wal.clone(),
+                            storage.clone(),
+                        )
+                        .await?,
+                    ),
                 );
             }
 
@@ -167,14 +174,33 @@ impl LsmOuter {
         ));
 
         Ok(Self {
+            l0_max_size,
+            run_target_size,
+            block_size,
+
             inner,
             wal,
             // TODO: recover from WAL, otherwise timestamps can go backwards
             sequencer: Sequencer::new(),
             lock_mgr: LockMgr::new(16384),
+            storage,
             wal_process,
             wal_processed: wal_processed_recv,
         })
+    }
+
+    pub async fn get(
+        &self,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        key: &[u8],
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        self.inner
+            .load()
+            .get(&keyspace_id)
+            .ok_or_else(|| anyhow::anyhow!("keyspace not found"))?
+            .get(ts, key)
+            .await
     }
 
     pub async fn scan_page(
@@ -256,6 +282,31 @@ impl LsmOuter {
         Ok(*ts)
     }
 
+    pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        loop {
+            let inner = self.inner.load();
+            let mut inner_new = (*inner).clone();
+            inner_new.entry(keyspace_id).or_insert(Arc::new(
+                Lsm::new(
+                    self.l0_max_size,
+                    self.run_target_size,
+                    self.block_size,
+                    keyspace_id,
+                    Manifest::new(7),
+                    self.wal.clone(),
+                    self.storage.clone(),
+                )
+                .await?,
+            ));
+
+            if self.inner.compare_and_swap(&inner, Arc::new(inner_new)) {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
     async fn recovery(
         wal: &wal::Wal<WalEntry>,
         storage: &MemStorage,
@@ -326,7 +377,7 @@ impl LsmOuter {
     }
 
     async fn process_wal(
-        inner: Arc<AtomicArc<HashMap<KeyspaceId, Lsm>>>,
+        inner: Arc<AtomicArc<HashMap<KeyspaceId, Arc<Lsm>>>>,
         wal: Arc<wal::Wal<WalEntry>>,
         start: wal::SeqNo,
         wal_processed: tokio::sync::watch::Sender<wal::SeqNo>,
@@ -709,15 +760,6 @@ impl Lsm {
 
             let run = Run::open(storage.get(&id.to_string()).await?).await?;
             runs.push(run);
-
-            //let run_handle = tokio::spawn(async move {
-            //    let mut run_out = vec![];
-            //    Run::<()>::write(&mut run_out, 0, block_size, rx).await?;
-            //    Ok::<_, anyhow::Error>(run_out)
-            //});
-
-            //let run_size = run_out.len();
-            //runs.push(Run::open(run_out, run_size).await?);
         }
 
         Ok((runs, removes))
