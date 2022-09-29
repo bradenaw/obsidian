@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fs::File;
@@ -40,6 +41,7 @@ use crate::sequencer::Sequencer;
 use crate::storage::MemStorage;
 use crate::storage::Storage;
 use crate::types::Direction;
+use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
 use crate::types::Record;
@@ -99,8 +101,8 @@ impl LsmBuilder {
         self
     }
 
-    async fn build(self) -> anyhow::Result<Lsm> {
-        Lsm::new(
+    async fn build(self) -> anyhow::Result<LsmOuter> {
+        LsmOuter::new(
             self.l0_max_size,
             self.run_target_size,
             self.block_size,
@@ -112,17 +114,17 @@ impl LsmBuilder {
     }
 }
 
-struct Lsm {
-    inner: Arc<LsmInner>,
+struct LsmOuter {
+    inner: Arc<AtomicArc<HashMap<KeyspaceId, Lsm>>>,
     wal: Arc<wal::Wal<WalEntry>>,
+    sequencer: Sequencer,
+    lock_mgr: LockMgr,
 
-    compaction: tokio::task::JoinHandle<()>,
-    compacted: tokio::sync::broadcast::Receiver<()>,
     wal_process: tokio::task::JoinHandle<anyhow::Result<()>>,
     wal_processed: tokio::sync::watch::Receiver<wal::SeqNo>,
 }
 
-impl Lsm {
+impl LsmOuter {
     pub async fn new(
         l0_max_size: u64,
         run_target_size: u64,
@@ -130,7 +132,234 @@ impl Lsm {
         wal: Arc<wal::Wal<WalEntry>>,
         storage: Arc<MemStorage>,
     ) -> anyhow::Result<Self> {
-        let (manifest, newest_seqno) = Self::recovery(&wal, &storage).await?;
+        let (manifests, newest_seqno) = Self::recovery(&wal, &storage).await?;
+
+        let lsms = {
+            let mut lsms = HashMap::new();
+
+            for (keyspace_id, manifest) in manifests {
+                lsms.insert(
+                    keyspace_id,
+                    Lsm::new(
+                        l0_max_size,
+                        run_target_size,
+                        block_size,
+                        manifest,
+                        wal.clone(),
+                        storage.clone(),
+                    )
+                    .await?,
+                );
+            }
+
+            lsms
+        };
+
+        let inner = Arc::new(AtomicArc::new(Arc::new(lsms)));
+
+        let (wal_processed_send, wal_processed_recv) = tokio::sync::watch::channel(wal::SeqNo(0));
+        let wal_process = tokio::spawn(Self::process_wal(
+            inner.clone(),
+            wal.clone(),
+            newest_seqno.unwrap_or(wal::SeqNo(0)),
+            wal_processed_send,
+        ));
+
+        todo!();
+    }
+
+    pub async fn scan_page(
+        &self,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        range: Range<&[u8]>,
+        direction: Direction,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
+        self.inner
+            .load()
+            .get(&keyspace_id)
+            .ok_or_else(|| anyhow::anyhow!("keyspace not found"))?
+            .scan_page(ts, range, direction, limit)
+            .await
+    }
+
+    pub async fn write(
+        &self,
+        preconds: Vec<Precondition>,
+        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+    ) -> Result<Timestamp, WriteError> {
+        let _ = self
+            .lock_mgr
+            .lock(
+                // TODO: Include keyspace in the hash.
+                preconds.iter().map(|precond| precond.key()),
+                muts.keys().map(|(_, k)| &k[..]),
+            )
+            .await;
+
+        let ts = self.sequencer.start_write();
+
+        let keyspaces = self.inner.load();
+
+        for precond in preconds {
+            let res = keyspaces
+                .get(&precond.keyspace_id())
+                .ok_or_else(|| anyhow::anyhow!("keyspace not found"))?
+                .inner
+                .unsafe_get(*ts, precond.key())
+                .await?;
+            match precond {
+                Precondition::NotChangedSince(_, _, ts) => {
+                    if let Some((last_write_ts, _)) = res {
+                        if last_write_ts > ts {
+                            return Err(WriteError::PreconditionFailed);
+                        }
+                    }
+                }
+            }
+        }
+
+        let seqno = self
+            .wal
+            .append(WalEntry::Write(
+                *ts,
+                muts.into_iter()
+                    .map(|((keyspace_id, key), m)| {
+                        let value = match m {
+                            Mutation::Put(raw_value) => Value::Regular(raw_value),
+                            Mutation::Delete => Value::Tombstone,
+                        };
+                        (keyspace_id, key, value)
+                    })
+                    .collect(),
+            ))
+            .await?;
+
+        let mut wal_processed = self.wal_processed.clone();
+        while *wal_processed.borrow_and_update() < seqno {
+            wal_processed
+                .changed()
+                .await
+                .map_err(|_| WriteError::Other(anyhow::anyhow!("wal processor missing")))?;
+        }
+
+        Ok(*ts)
+    }
+
+    async fn recovery(
+        wal: &wal::Wal<WalEntry>,
+        storage: &MemStorage,
+    ) -> anyhow::Result<(HashMap<KeyspaceId, Manifest>, Option<wal::SeqNo>)> {
+        let oldest_seqno = wal.oldest_available();
+        let mut newest_seqno = None;
+        let mut wal_stream = wal.stream(oldest_seqno, false).boxed();
+
+        let mut bufs = HashMap::new();
+        let mut manifest_uuids = HashMap::new();
+
+        while let Some((seqno, entry)) = wal_stream.try_next().await? {
+            match entry {
+                WalEntry::Write(ts, kvs) => {
+                    let mut kvs_by_keyspace = HashMap::new();
+                    for (keyspace_id, key, value) in kvs {
+                        kvs_by_keyspace
+                            .entry(keyspace_id)
+                            .or_insert_with(Vec::new)
+                            .push((key, value));
+                    }
+                    for (keyspace_id, keyspace_kvs) in kvs_by_keyspace {
+                        bufs.entry(keyspace_id)
+                            .or_insert_with(VecDeque::new)
+                            .push_back((seqno, ts, keyspace_kvs));
+                    }
+                }
+                WalEntry::Manifest(keyspace_id, included_seqno, levels) => {
+                    let buf = bufs.entry(keyspace_id).or_insert_with(VecDeque::new);
+                    let trim_to_idx = buf
+                        .binary_search_by_key(&included_seqno, |(seqno, _, _)| *seqno)
+                        .unwrap_or_else(core::convert::identity);
+                    buf.drain(0..=trim_to_idx);
+                    manifest_uuids.insert(keyspace_id, levels);
+                }
+            }
+            newest_seqno = Some(seqno);
+        }
+
+        let mut manifests = HashMap::new();
+        for (keyspace_id, buf) in bufs {
+            let mut memtable = Memtable::new();
+            for (seqno, ts, kvs) in buf {
+                for (key, value) in kvs {
+                    memtable.insert(seqno, key, ts, value);
+                }
+            }
+
+            // TODO: no unwrap by putting both in the same map
+            let keyspace_manifest_uuids = manifest_uuids.get(&keyspace_id).unwrap();
+            let mut manifest = Manifest::new(7);
+            manifest.l0_sealed.push(Arc::new(memtable));
+
+            for i in 1..keyspace_manifest_uuids.len() {
+                let mut runs = Vec::with_capacity(keyspace_manifest_uuids[i].len());
+                for run_uuid in &keyspace_manifest_uuids[i] {
+                    let run = Run::open(storage.get(&run_uuid.to_string()).await?).await?;
+                    runs.push(run);
+                }
+                runs.sort_by_key(|run| run.range().lower);
+                manifest.levels[i] = Level { runs };
+            }
+
+            manifests.insert(keyspace_id, manifest);
+        }
+
+        Ok((manifests, newest_seqno))
+    }
+
+    async fn process_wal(
+        inner: Arc<AtomicArc<HashMap<KeyspaceId, Lsm>>>,
+        wal: Arc<wal::Wal<WalEntry>>,
+        start: wal::SeqNo,
+        wal_processed: tokio::sync::watch::Sender<wal::SeqNo>,
+    ) -> anyhow::Result<()> {
+        let mut log = wal.stream(start, true).boxed();
+        while let Some((seqno, entry)) = log.try_next().await? {
+            match entry {
+                WalEntry::Write(ts, kvs) => {
+                    for (keyspace_id, key, value) in kvs {
+                        inner
+                            .load()
+                            .get(&keyspace_id)
+                            .unwrap()
+                            // TODO, just pull up a level so we don't have to reach down to inner here
+                            .inner
+                            .insert(seqno, key, ts, value);
+                    }
+                }
+                WalEntry::Manifest(_, _, _) => {}
+            }
+            _ = wal_processed.send(seqno);
+        }
+        Ok(())
+    }
+}
+
+struct Lsm {
+    inner: Arc<LsmInner>,
+
+    compaction: tokio::task::JoinHandle<()>,
+    compacted: tokio::sync::broadcast::Receiver<()>,
+}
+
+impl Lsm {
+    pub async fn new(
+        l0_max_size: u64,
+        run_target_size: u64,
+        block_size: u64,
+        manifest: Manifest,
+        wal: Arc<wal::Wal<WalEntry>>,
+        storage: Arc<MemStorage>,
+    ) -> anyhow::Result<Self> {
         let (l0_compact_notify, l0_compact_ready) = tokio::sync::mpsc::channel::<()>(1);
         let (compacted_notify, compacted) = tokio::sync::broadcast::channel(1);
         let inner = Arc::new(LsmInner::new(
@@ -152,26 +381,15 @@ impl Lsm {
             compacted_notify,
         ));
 
-        let (wal_processed_send, wal_processed_recv) = tokio::sync::watch::channel(wal::SeqNo(0));
-        let wal_process = tokio::spawn(Self::process_wal(
-            inner.clone(),
-            wal.clone(),
-            newest_seqno.unwrap_or(wal::SeqNo(0)),
-            wal_processed_send,
-        ));
-
         Ok(Self {
             inner,
             compaction,
             compacted,
-            wal,
-            wal_process,
-            wal_processed: wal_processed_recv,
         })
     }
 
-    pub async fn get(&self, ts: Timestamp, k: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
-        self.inner.get(ts, k).await
+    pub async fn get(&self, ts: Timestamp, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+        self.inner.get(ts, key).await
     }
 
     pub async fn scan_page(
@@ -183,69 +401,6 @@ impl Lsm {
     ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
         self.inner.scan_page(ts, range, direction, limit).await
     }
-
-    pub async fn put(&self, k: Vec<u8>, v: Vec<u8>) -> anyhow::Result<Timestamp> {
-        Ok(self
-            .write(vec![], BTreeMap::from([(k, Mutation::Put(v))]))
-            .await?)
-    }
-
-    pub async fn write(
-        &self,
-        preconds: Vec<Precondition>,
-        muts: BTreeMap<Vec<u8>, Mutation>,
-    ) -> Result<Timestamp, WriteError> {
-        let _ = self
-            .inner
-            .lock_mgr
-            .lock(
-                preconds.iter().map(|precond| precond.key()),
-                muts.keys().map(|k| &k[..]),
-            )
-            .await;
-
-        let ts = self.inner.sequencer.start_write();
-
-        for precond in preconds {
-            let res = self.inner.unsafe_get(*ts, precond.key()).await?;
-            match precond {
-                Precondition::NotChangedSince(_, ts) => {
-                    if let Some((last_write_ts, _)) = res {
-                        if last_write_ts > ts {
-                            return Err(WriteError::PreconditionFailed);
-                        }
-                    }
-                }
-            }
-        }
-
-        let seqno = self
-            .wal
-            .append(WalEntry::Write(
-                *ts,
-                muts.into_iter()
-                    .map(|(key, m)| {
-                        let value = match m {
-                            Mutation::Put(raw_value) => Value::Regular(raw_value),
-                            Mutation::Delete => Value::Tombstone,
-                        };
-                        (key, value)
-                    })
-                    .collect(),
-            ))
-            .await?;
-
-        let mut wal_processed = self.wal_processed.clone();
-        while *wal_processed.borrow_and_update() < seqno {
-            wal_processed
-                .changed()
-                .await
-                .map_err(|_| WriteError::Other(anyhow::anyhow!("wal processor missing")))?;
-        }
-
-        Ok(*ts)
-    }
-
     pub fn next_compaction(&self) -> impl Future<Output = ()> {
         let mut compacted = self.compacted.resubscribe();
         async move {
@@ -262,77 +417,6 @@ impl Lsm {
             }
             compacted.await;
         }
-    }
-
-    async fn recovery(
-        wal: &wal::Wal<WalEntry>,
-        storage: &MemStorage,
-    ) -> anyhow::Result<(Manifest, Option<wal::SeqNo>)> {
-        let oldest_seqno = wal.oldest_available();
-        let mut newest_seqno = None;
-        let mut wal_stream = wal.stream(oldest_seqno, false).boxed();
-        let mut buf = VecDeque::new();
-
-        let mut manifest_uuids = Vec::new();
-
-        while let Some((seqno, entry)) = wal_stream.try_next().await? {
-            match entry {
-                WalEntry::Write(ts, kvs) => {
-                    buf.push_back((seqno, ts, kvs));
-                }
-                WalEntry::Manifest(included_seqno, levels) => {
-                    let trim_to_idx = buf
-                        .binary_search_by_key(&included_seqno, |(seqno, _, _)| *seqno)
-                        .unwrap_or_else(core::convert::identity);
-                    buf.drain(0..=trim_to_idx);
-                    manifest_uuids = levels;
-                }
-            }
-            newest_seqno = Some(seqno);
-        }
-
-        let mut memtable = Memtable::new();
-        for (seqno, ts, kvs) in buf {
-            for (key, value) in kvs {
-                memtable.insert(seqno, key, ts, value);
-            }
-        }
-
-        let mut manifest = Manifest::new(7);
-        manifest.l0_sealed.push(Arc::new(memtable));
-
-        for i in 1..manifest_uuids.len() {
-            let mut runs = Vec::with_capacity(manifest_uuids[i].len());
-            for run_uuid in &manifest_uuids[i] {
-                let run = Run::open(storage.get(&run_uuid.to_string()).await?).await?;
-                runs.push(run);
-            }
-            runs.sort_by_key(|run| run.range().lower);
-            manifest.levels[i] = Level { runs };
-        }
-
-        Ok((manifest, newest_seqno))
-    }
-
-    async fn process_wal(
-        inner: Arc<LsmInner>,
-        wal: Arc<wal::Wal<WalEntry>>,
-        start: wal::SeqNo,
-        wal_processed: tokio::sync::watch::Sender<wal::SeqNo>,
-    ) -> anyhow::Result<()> {
-        let mut log = wal.stream(start, true).boxed();
-        while let Some((seqno, entry)) = log.try_next().await? {
-            match entry {
-                WalEntry::Write(ts, kvs) => {
-                    for (key, value) in kvs {
-                        inner.insert(seqno, key, ts, value);
-                    }
-                }
-                WalEntry::Manifest(_, _) => {}
-            }
-            _ = wal_processed.send(seqno);
-        }
-        Ok(())
     }
 
     async fn compaction_loop(
@@ -1307,18 +1391,18 @@ impl<'a> BlockVersions<'a> {
 }
 #[derive(Clone, Debug)]
 enum WalEntry {
-    Write(Timestamp, Vec<(Vec<u8>, Value)>),
-    Manifest(wal::SeqNo, Vec<Vec<Uuid>>),
+    Write(Timestamp, Vec<(KeyspaceId, Vec<u8>, Value)>),
+    Manifest(KeyspaceId, wal::SeqNo, Vec<Vec<Uuid>>),
 }
 
 impl wal::Entry for WalEntry {
     fn size(&self) -> u64 {
         match self {
             WalEntry::Write(_, kvs) => {
-                8 + kvs.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>() as u64
+                8 + kvs.iter().map(|(_, k, v)| k.len() + v.len()).sum::<usize>() as u64
             }
-            WalEntry::Manifest(_, levels) => {
-                8u64 + (levels.iter().map(|level| level.len() as u64).sum::<u64>() * 16u64)
+            WalEntry::Manifest(_, _, levels) => {
+                16u64 + (levels.iter().map(|level| level.len() as u64).sum::<u64>() * 16u64)
             }
         }
     }
