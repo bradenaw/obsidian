@@ -144,6 +144,7 @@ impl LsmOuter {
                         l0_max_size,
                         run_target_size,
                         block_size,
+                        keyspace_id,
                         manifest,
                         wal.clone(),
                         storage.clone(),
@@ -165,7 +166,15 @@ impl LsmOuter {
             wal_processed_send,
         ));
 
-        todo!();
+        Ok(Self {
+            inner,
+            wal,
+            // TODO: recover from WAL, otherwise timestamps can go backwards
+            sequencer: Sequencer::new(),
+            lock_mgr: LockMgr::new(16384),
+            wal_process,
+            wal_processed: wal_processed_recv,
+        })
     }
 
     pub async fn scan_page(
@@ -344,6 +353,12 @@ impl LsmOuter {
     }
 }
 
+impl Drop for LsmOuter {
+    fn drop(&mut self) {
+        self.wal_process.abort();
+    }
+}
+
 struct Lsm {
     inner: Arc<LsmInner>,
 
@@ -356,6 +371,7 @@ impl Lsm {
         l0_max_size: u64,
         run_target_size: u64,
         block_size: u64,
+        keyspace_id: KeyspaceId,
         manifest: Manifest,
         wal: Arc<wal::Wal<WalEntry>>,
         storage: Arc<MemStorage>,
@@ -375,6 +391,7 @@ impl Lsm {
             l0_max_size,
             run_target_size,
             block_size,
+            keyspace_id,
             inner.clone(),
             wal.clone(),
             l0_compact_ready,
@@ -423,6 +440,7 @@ impl Lsm {
         l0_max_size: u64,
         run_target_size: u64,
         block_size: u64,
+        keyspace_id: KeyspaceId,
         inner: Arc<LsmInner>,
         wal: Arc<wal::Wal<WalEntry>>,
         mut l0_compact_ready: tokio::sync::mpsc::Receiver<()>,
@@ -433,6 +451,7 @@ impl Lsm {
                 l0_max_size,
                 run_target_size,
                 block_size,
+                keyspace_id,
                 inner.clone(),
                 &wal,
                 compacted_notify.clone(),
@@ -446,6 +465,7 @@ impl Lsm {
         l0_max_size: u64,
         run_target_size: u64,
         block_size: u64,
+        keyspace_id: KeyspaceId,
         inner: Arc<LsmInner>,
         wal: &wal::Wal<WalEntry>,
         compacted_notify: tokio::sync::broadcast::Sender<()>,
@@ -453,8 +473,14 @@ impl Lsm {
         let mut manifest = inner.manifest.load();
 
         while !manifest.l0_sealed.is_empty() {
-            let (runs, remove_ids, seqno) =
-                Self::compact_l0(run_target_size, block_size, &manifest, &inner.storage).await?;
+            let (runs, remove_ids, seqno) = Self::compact_l0(
+                run_target_size,
+                block_size,
+                keyspace_id,
+                &manifest,
+                &inner.storage,
+            )
+            .await?;
             if runs.is_empty() && remove_ids.is_empty() {
                 return Ok(());
             }
@@ -474,6 +500,7 @@ impl Lsm {
             // yet.
             let seqno_ingested = wal::SeqNo(seqno.0.saturating_sub(1));
             wal.append(WalEntry::Manifest(
+                keyspace_id,
                 seqno_ingested,
                 manifest
                     .levels
@@ -490,6 +517,7 @@ impl Lsm {
                     let (runs, remove_ids) = Self::compact_from(
                         run_target_size,
                         block_size,
+                        keyspace_id,
                         &manifest,
                         &inner.storage,
                         i,
@@ -510,6 +538,9 @@ impl Lsm {
                         }
                         manifest = inner.manifest.load();
                     }
+                    // TODO: should probably write the manifest to WAL even though only l0
+                    // compactions can move seqno_ingested because otherwise we're throwing away a
+                    // bunch of our hard-earned compaction work
                 }
             }
             let _ = compacted_notify.send(());
@@ -521,6 +552,7 @@ impl Lsm {
     async fn compact_l0(
         run_target_size: u64,
         block_size: u64,
+        keyspace_id: KeyspaceId,
         manifest: &Manifest,
         storage: &MemStorage,
     ) -> anyhow::Result<(Vec<Run<Arc<Vec<u8>>>>, HashSet<Uuid>, wal::SeqNo)> {
@@ -540,6 +572,7 @@ impl Lsm {
         let (new_runs, mut removes) = Self::compact_inner(
             run_target_size,
             block_size,
+            keyspace_id,
             manifest,
             storage,
             1,
@@ -561,6 +594,7 @@ impl Lsm {
     async fn compact_from(
         run_target_size: u64,
         block_size: u64,
+        keyspace_id: KeyspaceId,
         manifest: &Manifest,
         storage: &MemStorage,
         level: usize,
@@ -577,6 +611,7 @@ impl Lsm {
         let (new_runs, mut removes) = Self::compact_inner(
             run_target_size,
             block_size,
+            keyspace_id,
             manifest,
             storage,
             level + 1,
@@ -592,6 +627,7 @@ impl Lsm {
     async fn compact_inner(
         run_target_size: u64,
         block_size: u64,
+        keyspace_id: KeyspaceId,
         manifest: &Manifest,
         storage: &MemStorage,
         into_level: usize,
@@ -633,7 +669,7 @@ impl Lsm {
             future::try_join3(
                 storage.put(&id.to_string(), reader),
                 async {
-                    Run::<()>::write(&mut writer, id, 0, block_size, rx).await?;
+                    Run::<()>::write(&mut writer, id, keyspace_id, block_size, rx).await?;
                     drop(writer);
                     Ok(())
                 },
@@ -691,7 +727,6 @@ impl Lsm {
 impl Drop for Lsm {
     fn drop(&mut self) {
         self.compaction.abort();
-        self.wal_process.abort();
     }
 }
 
@@ -1605,7 +1640,7 @@ struct Run<R> {
 
     id: Uuid,
     size: usize,
-    keyspace_id: u32,
+    keyspace_id: KeyspaceId,
     min_ts: Timestamp,
     max_ts: Timestamp,
 
@@ -1622,7 +1657,7 @@ impl<R> Run<R> {
     async fn write<W: AsyncWrite + Unpin, S: Stream<Item = anyhow::Result<Record>>>(
         w: &mut W,
         id: Uuid,
-        keyspace_id: u32,
+        keyspace_id: KeyspaceId,
         block_size_limit: u64,
         s: S,
     ) -> anyhow::Result<()> {
@@ -1703,7 +1738,7 @@ impl<R> Run<R> {
         let index_block_offset = bytes_written;
         let mut header = [0u8; INDEX_BLOCK_HEADER_SIZE];
         header[0..16].copy_from_slice(&id.as_bytes()[..]);
-        LittleEndian::write_u32(&mut header[16..20], keyspace_id);
+        LittleEndian::write_u32(&mut header[16..20], keyspace_id.0);
         LittleEndian::write_u64(&mut header[20..28], min_ts.as_nanos());
         LittleEndian::write_u64(&mut header[28..36], max_ts.as_nanos());
         LittleEndian::write_u32(&mut header[36..40], last_key.len() as u32);
@@ -1737,7 +1772,7 @@ impl<R: AsyncReadExactAt> Run<R> {
             uuid_bytes.copy_from_slice(&header[0..16]);
             Uuid::from_bytes(uuid_bytes)
         };
-        let keyspace_id = LittleEndian::read_u32(&header[16..20]);
+        let keyspace_id = KeyspaceId(LittleEndian::read_u32(&header[16..20]));
         let min_ts = Timestamp::from_nanos(LittleEndian::read_u64(&header[20..28]));
         let max_ts = Timestamp::from_nanos(LittleEndian::read_u64(&header[28..36]));
         let max_key_len = LittleEndian::read_u32(&header[36..40]);
