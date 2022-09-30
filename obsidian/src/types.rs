@@ -59,6 +59,9 @@ impl Display for Timestamp {
     }
 }
 
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
+pub struct KeyspaceId(pub u32);
+
 #[derive(Eq, PartialEq, Clone)]
 pub struct Record {
     pub key: Vec<u8>,
@@ -126,13 +129,18 @@ pub enum Direction {
 
 #[derive(Clone, Debug)]
 pub enum Precondition {
-    NotChangedSince(Vec<u8>, Timestamp),
+    NotChangedSince(KeyspaceId, Vec<u8>, Timestamp),
 }
 
 impl Precondition {
+    pub fn keyspace_id(&self) -> KeyspaceId {
+        match self {
+            Precondition::NotChangedSince(keyspace_id, _, _) => *keyspace_id,
+        }
+    }
     pub fn key(&self) -> &[u8] {
         match self {
-            Precondition::NotChangedSince(key, _) => &key,
+            Precondition::NotChangedSince(_, key, _) => &key,
         }
     }
 }
