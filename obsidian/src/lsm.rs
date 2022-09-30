@@ -101,8 +101,8 @@ impl LsmBuilder {
         self
     }
 
-    async fn build(self) -> anyhow::Result<LsmOuter> {
-        LsmOuter::new(
+    async fn build(self) -> anyhow::Result<Lsm> {
+        Lsm::new(
             self.l0_max_size,
             self.run_target_size,
             self.block_size,
@@ -114,12 +114,12 @@ impl LsmBuilder {
     }
 }
 
-struct LsmOuter {
+struct Lsm {
     l0_max_size: u64,
     run_target_size: u64,
     block_size: u64,
 
-    inner: Arc<AtomicArc<HashMap<KeyspaceId, Arc<Lsm>>>>,
+    inner: Arc<AtomicArc<HashMap<KeyspaceId, Arc<LsmInner>>>>,
     wal: Arc<wal::Wal<WalEntry>>,
     sequencer: Sequencer,
     lock_mgr: LockMgr,
@@ -129,7 +129,7 @@ struct LsmOuter {
     wal_processed: tokio::sync::watch::Receiver<wal::SeqNo>,
 }
 
-impl LsmOuter {
+impl Lsm {
     pub async fn new(
         l0_max_size: u64,
         run_target_size: u64,
@@ -146,7 +146,7 @@ impl LsmOuter {
                 lsms.insert(
                     keyspace_id,
                     Arc::new(
-                        Lsm::new(
+                        LsmInner::new(
                             l0_max_size,
                             run_target_size,
                             block_size,
@@ -287,7 +287,7 @@ impl LsmOuter {
             let inner = self.inner.load();
             let mut inner_new = (*inner).clone();
             inner_new.entry(keyspace_id).or_insert(Arc::new(
-                Lsm::new(
+                LsmInner::new(
                     self.l0_max_size,
                     self.run_target_size,
                     self.block_size,
@@ -387,7 +387,7 @@ impl LsmOuter {
     }
 
     async fn process_wal(
-        inner: Arc<AtomicArc<HashMap<KeyspaceId, Arc<Lsm>>>>,
+        inner: Arc<AtomicArc<HashMap<KeyspaceId, Arc<LsmInner>>>>,
         wal: Arc<wal::Wal<WalEntry>>,
         start: wal::SeqNo,
         wal_processed: tokio::sync::watch::Sender<wal::SeqNo>,
@@ -414,20 +414,20 @@ impl LsmOuter {
     }
 }
 
-impl Drop for LsmOuter {
+impl Drop for Lsm {
     fn drop(&mut self) {
         self.wal_process.abort();
     }
 }
 
-struct Lsm {
-    inner: Arc<LsmInner>,
+struct LsmInner {
+    inner: Arc<LsmInnerInner>,
 
     compaction: tokio::task::JoinHandle<()>,
     compacted: tokio::sync::broadcast::Receiver<()>,
 }
 
-impl Lsm {
+impl LsmInner {
     pub async fn new(
         l0_max_size: u64,
         run_target_size: u64,
@@ -439,7 +439,7 @@ impl Lsm {
     ) -> anyhow::Result<Self> {
         let (l0_compact_notify, l0_compact_ready) = tokio::sync::mpsc::channel::<()>(1);
         let (compacted_notify, compacted) = tokio::sync::broadcast::channel(1);
-        let inner = Arc::new(LsmInner::new(
+        let inner = Arc::new(LsmInnerInner::new(
             l0_max_size,
             run_target_size,
             block_size,
@@ -502,7 +502,7 @@ impl Lsm {
         run_target_size: u64,
         block_size: u64,
         keyspace_id: KeyspaceId,
-        inner: Arc<LsmInner>,
+        inner: Arc<LsmInnerInner>,
         wal: Arc<wal::Wal<WalEntry>>,
         mut l0_compact_ready: tokio::sync::mpsc::Receiver<()>,
         compacted_notify: tokio::sync::broadcast::Sender<()>,
@@ -527,7 +527,7 @@ impl Lsm {
         run_target_size: u64,
         block_size: u64,
         keyspace_id: KeyspaceId,
-        inner: Arc<LsmInner>,
+        inner: Arc<LsmInnerInner>,
         wal: &wal::Wal<WalEntry>,
         compacted_notify: tokio::sync::broadcast::Sender<()>,
     ) -> anyhow::Result<()> {
@@ -776,13 +776,13 @@ impl Lsm {
     }
 }
 
-impl Drop for Lsm {
+impl Drop for LsmInner {
     fn drop(&mut self) {
         self.compaction.abort();
     }
 }
 
-struct LsmInner {
+struct LsmInnerInner {
     l0_max_size: u64,
     run_target_size: u64,
     block_size: u64,
@@ -798,7 +798,7 @@ struct LsmInner {
     manifest: AtomicArc<Manifest>,
 }
 
-impl LsmInner {
+impl LsmInnerInner {
     fn new(
         l0_max_size: u64,
         run_target_size: u64,
@@ -2076,8 +2076,8 @@ mod test {
 
     use super::AsyncReadExactAt;
     use super::Block;
+    use super::Lsm;
     use super::LsmBuilder;
-    use super::LsmOuter;
     use super::Manifest;
     use super::Run;
 
@@ -2664,7 +2664,7 @@ mod test {
         }
     }
 
-    async fn dump_lsm(lsm: &LsmOuter) -> anyhow::Result<()> {
+    async fn dump_lsm(lsm: &Lsm) -> anyhow::Result<()> {
         let inner = lsm.inner.load();
         for (keyspace_id, lsm) in &*inner {
             println!("keyspace_id {:?}", keyspace_id);
