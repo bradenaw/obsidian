@@ -2077,6 +2077,7 @@ mod test {
     use super::AsyncReadExactAt;
     use super::Block;
     use super::LsmBuilder;
+    use super::LsmOuter;
     use super::Manifest;
     use super::Run;
 
@@ -2241,6 +2242,7 @@ mod test {
         lsm.create_keyspace(keyspace_id).await?;
         let mut map = BTreeMap::new();
         let mut last_ts = Timestamp::ZERO;
+        let mut ctr = 1u32;
         for j in 0..10 {
             loop {
                 // We consider these writes to be 10 bytes (1 key + 8 ts + 1 value), so this is
@@ -2248,15 +2250,12 @@ mod test {
                 for i in 0..24 {
                     let k = (j * 5 + i) as u8;
                     let mut v = [0u8; 4];
-                    BigEndian::write_u32(&mut v, j * 24 + i);
-                    println!("put {} {:?}", k, v);
+                    BigEndian::write_u32(&mut v, ctr);
+                    ctr += 1;
                     let put_ts = lsm
                         .write(
                             vec![],
-                            BTreeMap::from([(
-                                (keyspace_id, vec![i as u8]),
-                                Mutation::Put(v.to_vec()),
-                            )]),
+                            BTreeMap::from([((keyspace_id, vec![k]), Mutation::Put(v.to_vec()))]),
                         )
                         .await?;
                     last_ts = std::cmp::max(put_ts, last_ts);
@@ -2281,9 +2280,11 @@ mod test {
                 }
             }
 
+            dump_lsm(&lsm).await?;
+
             for (k, v) in &map {
-                println!("key: {}, expected: {:?}", k, v);
-                assert_eq!(lsm.get(last_ts, keyspace_id, &[*k]).await?, Some(v.clone()));
+                let actual = lsm.get(last_ts, keyspace_id, &[*k]).await?.unwrap();
+                assert_eq!(Some(actual), Some(v.clone()));
             }
         }
 
@@ -2663,6 +2664,52 @@ mod test {
         }
     }
 
+    async fn dump_lsm(lsm: &LsmOuter) -> anyhow::Result<()> {
+        let inner = lsm.inner.load();
+        for (keyspace_id, lsm) in &*inner {
+            println!("keyspace_id {:?}", keyspace_id);
+            let manifest = lsm.inner.manifest.load();
+            dump_manifest(&manifest);
+
+            println!("== kvs =====");
+            println!("l0_active");
+            for (_, memtable_lock) in &manifest.l0_active {
+                let memtable = memtable_lock.read().unwrap();
+                println!(
+                    "  {} ({} bytes) {:?}",
+                    memtable.id(),
+                    memtable.size(),
+                    memtable.range(),
+                );
+                memtable.dump();
+            }
+            println!("l0_sealed");
+            for memtable in &manifest.l0_sealed {
+                println!(
+                    "  {} ({} bytes) {:?}",
+                    memtable.id(),
+                    memtable.size(),
+                    memtable.range(),
+                );
+                memtable.dump();
+            }
+            for (i, level) in manifest.levels[1..]
+                .iter()
+                .enumerate()
+                .map(|(i, level)| (i + 1, level))
+            {
+                println!("l{} ({} bytes)", i, level.size());
+                for run in &level.runs {
+                    println!("  {} ({} bytes) {:?}", run.id(), run.size(), run.range());
+                    dump_run_file(&run).await?;
+                }
+            }
+            println!("============");
+        }
+
+        Ok(())
+    }
+
     async fn dump_run_file<R: AsyncReadExactAt>(run: &Run<R>) -> anyhow::Result<()> {
         println!("    min_ts: {}", run.min_ts);
         println!("    max_ts: {}", run.max_ts);
@@ -2705,7 +2752,14 @@ mod test {
                 Some((value_start, value_end)) => format!("({}, {})", value_start, value_end),
                 None => "<TOMBSTONE>".into(),
             };
-            println!("        {} {} {}", i, versions.ts(i), value_str);
+
+            println!(
+                "        {} {} {} {:?}",
+                i,
+                versions.ts(i),
+                value_str,
+                block.value(&versions, i).await?,
+            );
         }
         Ok(())
     }

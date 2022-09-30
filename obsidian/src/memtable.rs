@@ -149,4 +149,21 @@ impl Memtable {
             })
             .flatten()
     }
+
+    pub(crate) fn dump(&self) {
+        println!("=== memtable ===");
+        for (key, versions) in &self.kvs {
+            for (ts, value) in versions {
+                println!(
+                    "  {:?}",
+                    Record {
+                        key: key.clone(),
+                        ts: *ts,
+                        value: value.clone()
+                    }
+                );
+            }
+        }
+        println!("================");
+    }
 }
