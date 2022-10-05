@@ -54,35 +54,41 @@ impl Sequencer {
         // Straight reject - it's going to be a while before this timestamp is safe to read and we
         // may as well let the client wait instead of us.
         if ts.saturating_duration_since(Timestamp::now()) > Duration::from_millis(100) {
-            anyhow::bail!("timestamp in the future");
+            anyhow::bail!("timestamp too far in the future");
         }
         loop {
             if ts <= self.safe_read_ts() {
                 return Ok(());
             }
-            let mut inner = self.inner.write().unwrap();
-            if let Some(highest_pending_ts) = inner.pending.last() {
-                if *highest_pending_ts >= ts {
-                    let (sender, receiver) = tokio::sync::oneshot::channel();
-                    inner.waiters.push(OrdEqByFirst(ts, sender));
-                    // Important: don't hold the lock while waiting, otherwise nobody will be able
-                    // to wake us up.
-                    drop(inner);
-                    receiver.await.unwrap();
-                    return Ok(());
+            let maybe_receiver = {
+                let mut inner = self.inner.write().unwrap();
+                if let Some(highest_pending_ts) = inner.pending.last() {
+                    if *highest_pending_ts >= ts {
+                        let (sender, receiver) = tokio::sync::oneshot::channel();
+                        inner.waiters.push(OrdEqByFirst(ts, sender));
+                        // Important: don't hold the lock while waiting, otherwise nobody will be able
+                        // to wake us up.
+                        Some(receiver)
+                    } else {
+                        None
+                    }
+                } else {
+                    if ts <= inner.safe_read_ts {
+                        return Ok(());
+                    }
+                    // pending.is_empty() which implies last_ts=safe_read_ts already.
+                    if ts.saturating_duration_since(Timestamp::now()) < Duration::from_millis(10) {
+                        inner.safe_read_ts = ts;
+                        inner.last_ts = ts;
+                        return Ok(());
+                    }
+                    None
                 }
-            } else {
-                if ts <= inner.safe_read_ts {
-                    return Ok(());
-                }
-                // pending.is_empty() which implies last_ts=safe_read_ts already.
-                if ts.saturating_duration_since(Timestamp::now()) < Duration::from_millis(10) {
-                    inner.safe_read_ts = ts;
-                    inner.last_ts = ts;
-                    return Ok(());
-                }
+            };
+            if let Some(receiver) = maybe_receiver {
+                receiver.await.unwrap();
+                return Ok(());
             }
-            drop(inner);
             tokio::time::sleep(ts.saturating_duration_since(Timestamp::now())).await;
         }
     }

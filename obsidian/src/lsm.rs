@@ -32,12 +32,10 @@ use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
-use crate::lock_mgr::LockMgr;
 use crate::memtable::Memtable;
 use crate::range::Bound;
 use crate::range::KeyOrBound;
 use crate::range::Range;
-use crate::sequencer::Sequencer;
 use crate::storage::MemStorage;
 use crate::storage::Storage;
 use crate::types::Direction;
@@ -114,15 +112,13 @@ impl LsmBuilder {
     }
 }
 
-struct Lsm {
+pub(crate) struct Lsm {
     l0_max_size: u64,
     run_target_size: u64,
     block_size: u64,
 
     inner: Arc<AtomicArc<HashMap<KeyspaceId, Arc<LsmInner>>>>,
     wal: Arc<wal::Wal<WalEntry>>,
-    sequencer: Sequencer,
-    lock_mgr: LockMgr,
     storage: Arc<MemStorage>,
 
     wal_process: tokio::task::JoinHandle<anyhow::Result<()>>,
@@ -180,13 +176,18 @@ impl Lsm {
 
             inner,
             wal,
-            // TODO: recover from WAL, otherwise timestamps can go backwards
-            sequencer: Sequencer::new(),
-            lock_mgr: LockMgr::new(16384),
             storage,
             wal_process,
             wal_processed: wal_processed_recv,
         })
+    }
+
+    pub async fn get_latest(
+        &self,
+        keyspace_id: KeyspaceId,
+        key: &[u8],
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        todo!();
     }
 
     pub async fn get(
@@ -221,20 +222,10 @@ impl Lsm {
 
     pub async fn write(
         &self,
+        ts: Timestamp,
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
-    ) -> Result<Timestamp, WriteError> {
-        let _ = self
-            .lock_mgr
-            .lock(
-                // TODO: Include keyspace in the hash.
-                preconds.iter().map(|precond| precond.key()),
-                muts.keys().map(|(_, k)| &k[..]),
-            )
-            .await;
-
-        let ts = self.sequencer.start_write();
-
+    ) -> Result<(), WriteError> {
         let keyspaces = self.inner.load();
 
         for precond in preconds {
@@ -242,7 +233,7 @@ impl Lsm {
                 .get(&precond.keyspace_id())
                 .ok_or_else(|| anyhow::anyhow!("keyspace not found"))?
                 .inner
-                .unsafe_get(*ts, precond.key())
+                .unsafe_get(ts, precond.key())
                 .await?;
             match precond {
                 Precondition::NotChangedSince(_, _, ts) => {
@@ -258,7 +249,7 @@ impl Lsm {
         let seqno = self
             .wal
             .append(WalEntry::Write(
-                *ts,
+                ts,
                 muts.into_iter()
                     .map(|((keyspace_id, key), m)| {
                         let value = match m {
@@ -279,7 +270,7 @@ impl Lsm {
                 .map_err(|_| WriteError::Other(anyhow::anyhow!("wal processor missing")))?;
         }
 
-        Ok(*ts)
+        Ok(())
     }
 
     pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
@@ -788,8 +779,6 @@ struct LsmInnerInner {
     block_size: u64,
 
     l0_compact_notify: tokio::sync::mpsc::Sender<()>,
-    sequencer: Sequencer,
-    lock_mgr: LockMgr,
     storage: Arc<MemStorage>,
     // Outer lock just protects the arc, hold in W to swap it.
     // Inner lock protects memtable, use as normal.
@@ -813,8 +802,6 @@ impl LsmInnerInner {
             run_target_size,
             block_size,
             l0_compact_notify,
-            sequencer: Sequencer::new(),
-            lock_mgr: LockMgr::new(16384),
             storage,
             l0_active: AtomicArc::new(l0_active.clone()),
             manifest: AtomicArc::new(Arc::new(initial_manifest.with_ingest_l0(l0_active))),
@@ -822,8 +809,6 @@ impl LsmInnerInner {
     }
 
     async fn get(&self, ts: Timestamp, k: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
-        self.sequencer.wait_for_safe_read(ts).await?;
-
         Ok(match self.unsafe_get(ts, k).await? {
             Some((_, value)) => match value {
                 Value::Regular(v) => Some(v),
@@ -871,7 +856,6 @@ impl LsmInnerInner {
         direction: Direction,
         limit: usize,
     ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
-        self.sequencer.wait_for_safe_read(ts).await?;
         if range.is_empty() {
             return Ok((vec![], None));
         }
@@ -1477,7 +1461,7 @@ impl<'a> BlockVersions<'a> {
     }
 }
 #[derive(Clone, Debug)]
-enum WalEntry {
+pub(crate) enum WalEntry {
     Write(Timestamp, Vec<(KeyspaceId, Vec<u8>, Value)>),
     Manifest(KeyspaceId, wal::SeqNo, Vec<Vec<Uuid>>),
 }
