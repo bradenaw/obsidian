@@ -173,6 +173,15 @@ pub enum Mutation {
     Delete,
 }
 
+impl Mutation {
+    pub fn len(&self) -> usize {
+        match self {
+            Mutation::Put(v) => v.len(),
+            Mutation::Delete => 0,
+        }
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum WriteError {
     #[error("precondition failed")]

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::fmt::Debug;
-use std::sync::RwLock;
+use std::sync::Mutex;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -16,6 +16,7 @@ use futures::future;
 use rand::Rng;
 use thiserror::Error;
 
+use crate::lock_mgr::Guard;
 use crate::lock_mgr::LockMgr;
 use crate::lsm::Lsm;
 use crate::sequencer::Sequencer;
@@ -33,6 +34,7 @@ struct Obsidian {
 }
 
 const MAX_CONFLICT_RETRIES: u32 = 10;
+const MAX_PRECOND_VALUE_LEN: usize = 1024;
 
 impl Obsidian {
     pub async fn get(
@@ -47,7 +49,7 @@ impl Obsidian {
         let mut already_seen_conflicts = HashSet::new();
         for i in 0..MAX_CONFLICT_RETRIES {
             if i != 0 {
-                let delay = std::cmp::max(
+                let delay = std::cmp::min(
                     Duration::from_millis(10).saturating_mul(2u32.saturating_pow(i - 1)),
                     Duration::from_millis(5000),
                 );
@@ -72,7 +74,7 @@ impl Obsidian {
                 Err(e) => return Err(e.into()),
             }
         }
-        anyhow::bail!("too many conflicts");
+        anyhow::bail!("too much contention");
     }
 
     pub async fn write(
@@ -97,12 +99,16 @@ impl Obsidian {
                 .tablets
                 .tablet(tablet_id)?
                 .write(txid, preconds, muts)
-                .await;
+                .await
+                .map_err(|e| match e {
+                    InternalWriteError::PreconditionFailed => WriteError::PreconditionFailed,
+                    e => WriteError::Other(e.into()),
+                });
         }
 
         for i in 0..MAX_CONFLICT_RETRIES {
             if i != 0 {
-                let delay = std::cmp::max(
+                let delay = std::cmp::min(
                     Duration::from_millis(10).saturating_mul(2u32.saturating_pow(i - 1)),
                     Duration::from_millis(5000),
                 );
@@ -143,7 +149,7 @@ impl Obsidian {
                             pending_tablets.remove(&tablet_id);
                             max_prepare_ts = cmp::max(max_prepare_ts, prepare_ts);
                         }
-                        Err(PrepareError::Conflict(other_txid)) => {
+                        Err(InternalWriteError::Conflict(other_txid)) => {
                             if txid.can_preempt(&other_txid) {
                                 preempt_conflicts.insert(other_txid);
                             } else {
@@ -189,7 +195,7 @@ impl Obsidian {
                 }
             }
         }
-        Err(WriteError::Other(anyhow::anyhow!("retries exhausted")))
+        Err(WriteError::Other(anyhow::anyhow!("too much contention")))
     }
 
     fn split_write(
@@ -244,6 +250,8 @@ struct TxId {
 }
 
 impl TxId {
+    const ENCODED_LEN: usize = 32;
+
     fn new(owner: TabletId) -> Self {
         TxId {
             ts: SystemTime::now()
@@ -326,7 +334,7 @@ enum CommitError {
 }
 
 #[derive(Error, Debug)]
-enum PrepareError {
+enum InternalWriteError {
     #[error("precondition failed")]
     PreconditionFailed,
     #[error("conflict")]
@@ -357,14 +365,14 @@ trait Tablet {
         txid: TxId,
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
-    ) -> Result<Timestamp, WriteError>;
+    ) -> Result<Timestamp, InternalWriteError>;
 
     async fn prepare(
         &self,
         txid: TxId,
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
-    ) -> Result<Timestamp, PrepareError>;
+    ) -> Result<Timestamp, InternalWriteError>;
 
     async fn try_commit(&self, txid: TxId, ts: Timestamp) -> anyhow::Result<TxOutcome>;
     async fn try_abort(&self, txid: TxId) -> anyhow::Result<TxOutcome>;
@@ -378,7 +386,7 @@ struct LsmTablet {
     sequencer: Sequencer,
     lock_mgr: LockMgr,
 
-    waiters: RwLock<
+    waiters: Mutex<
         HashMap<
             TxId,
             (
@@ -423,8 +431,21 @@ impl Tablet for LsmTablet {
         txid: TxId,
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
-    ) -> Result<Timestamp, WriteError> {
-        todo!()
+    ) -> Result<Timestamp, InternalWriteError> {
+        let _guard = self.write_locks(&preconds, &muts).await;
+
+        if let Some(conflict_txid) = self.write_conflicts(&preconds, &muts).await? {
+            return Err(InternalWriteError::Conflict(conflict_txid));
+        }
+
+        let ts = self.sequencer.start_write();
+
+        self.lsm
+            .write(*ts, preconds, muts)
+            .await
+            .map_err(|e| InternalWriteError::Other(e.into()))?;
+
+        Ok(*ts)
     }
 
     async fn prepare(
@@ -432,8 +453,68 @@ impl Tablet for LsmTablet {
         txid: TxId,
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
-    ) -> Result<Timestamp, PrepareError> {
-        todo!()
+    ) -> Result<Timestamp, InternalWriteError> {
+        let _guard = self.write_locks(&preconds, &muts).await;
+
+        if let Some(conflict_txid) = self.write_conflicts(&preconds, &muts).await? {
+            return Err(InternalWriteError::Conflict(conflict_txid));
+        }
+
+        let ts = self.sequencer.start_write();
+
+        let mut actual_muts = BTreeMap::new();
+
+        for precond in &preconds {
+            let keyspace_id = precond
+                .keyspace_id()
+                .precond()
+                .ok_or_else(|| anyhow::anyhow!("non-userland keyspace"))?;
+            let mut value = self
+                .lsm
+                .get_latest(keyspace_id, precond.key())
+                .await?
+                .unwrap_or(vec![]);
+            value.extend_from_slice(&txid.to_bytes()[..]);
+
+            if value.len() > MAX_PRECOND_VALUE_LEN {
+                return Err(InternalWriteError::Other(anyhow::anyhow!(
+                    "too many prepares on key"
+                )));
+            }
+
+            actual_muts.insert((keyspace_id, precond.key().to_vec()), Mutation::Put(value));
+        }
+        for ((keyspace_id, key), m) in muts {
+            let txid_bytes = txid.to_bytes();
+
+            let mut value = Vec::with_capacity(txid_bytes.len() + 1 + m.len());
+
+            value.extend_from_slice(&txid_bytes[..]);
+            match m {
+                Mutation::Put(v) => {
+                    value.push(1);
+                    value.extend_from_slice(&v[..]);
+                }
+                Mutation::Delete => value.push(0),
+            }
+
+            actual_muts.insert(
+                (
+                    keyspace_id
+                        .pending()
+                        .ok_or_else(|| anyhow::anyhow!("non-userland keyspace"))?,
+                    key,
+                ),
+                Mutation::Put(value),
+            );
+        }
+
+        self.lsm
+            .write(*ts, preconds, actual_muts)
+            .await
+            .map_err(|e| InternalWriteError::Other(e.into()))?;
+
+        Ok(*ts)
     }
 
     async fn try_commit(&self, txid: TxId, ts: Timestamp) -> anyhow::Result<TxOutcome> {
@@ -464,7 +545,7 @@ impl Tablet for LsmTablet {
                     return Ok(tx_outcome);
                 }
 
-                let mut waiters = self.waiters.write().unwrap();
+                let mut waiters = self.waiters.lock().unwrap();
                 let (_, rx) = waiters
                     .entry(txid)
                     .or_insert_with(|| tokio::sync::watch::channel(()));
@@ -487,8 +568,50 @@ impl LsmTablet {
             router,
             sequencer: Sequencer::new(),
             lock_mgr: LockMgr::new(16384),
-            waiters: RwLock::new(HashMap::new()),
+            waiters: Mutex::new(HashMap::new()),
         }
+    }
+
+    async fn write_locks<'a>(
+        &'a self,
+        preconds: &Vec<Precondition>,
+        muts: &BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+    ) -> Guard<'a> {
+        self.lock_mgr
+            .lock(
+                preconds.iter().map(|precond| precond.key()),
+                muts.keys().map(|(_, k)| &k[..]),
+            )
+            .await
+    }
+
+    async fn write_conflicts(
+        &self,
+        preconds: &Vec<Precondition>,
+        muts: &BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+    ) -> anyhow::Result<Option<TxId>> {
+        for (keyspace_id, key) in Iterator::chain(
+            preconds
+                .iter()
+                .map(|precond| (precond.keyspace_id(), precond.key())),
+            muts.keys()
+                .map(|(keyspace_id, key)| (*keyspace_id, &key[..])),
+        ) {
+            if let Some(value) = self
+                .lsm
+                .get_latest(
+                    keyspace_id
+                        .pending()
+                        .ok_or_else(|| anyhow::anyhow!("non-userland keyspace"))?,
+                    key,
+                )
+                .await?
+            {
+                let other_txid = TxId::try_from(&value[..TxId::ENCODED_LEN])?;
+                return Ok(Some(other_txid));
+            }
+        }
+        Ok(None)
     }
 
     async fn try_write_tx_outcome(
@@ -521,8 +644,8 @@ impl LsmTablet {
             )
             .await
             .map_err(|e| CommitError::Other(e.into()))?;
-        let waiters = self.waiters.write().unwrap();
-        if let Some((tx, _)) = waiters.get(&txid) {
+        let mut waiters = self.waiters.lock().unwrap();
+        if let Some((tx, _)) = waiters.remove(&txid) {
             _ = tx.send(());
         }
         Ok(tx_outcome)
