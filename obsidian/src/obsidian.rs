@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::fmt::Debug;
+use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -13,6 +15,10 @@ use async_trait::async_trait;
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
 use futures::future;
+use futures::pin_mut;
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
+use futures::TryStreamExt;
 use rand::Rng;
 use thiserror::Error;
 
@@ -651,46 +657,89 @@ impl LsmTablet {
         Ok(tx_outcome)
     }
 
-    async fn resolve(&self, txid: TxId) -> anyhow::Result<()> {
-        let owner_tablet = self.tablets.tablet(txid.owner)?;
-        let tx_outcome = owner_tablet.wait(txid).await?;
+    async fn cleanup(
+        &self,
+        txid: TxId,
+        tx_outcome: TxOutcome,
+        keyspace_id: KeyspaceId,
+        key: Vec<u8>,
+    ) -> anyhow::Result<()> {
         let mut muts = BTreeMap::new();
-        let (pending_ts, pending_keys) = self.pending_keys(txid);
         let _guard = self
             .lock_mgr
-            .lock(
-                std::iter::empty(),
-                pending_keys.iter().map(|(_, key, _)| &key[..]),
-            )
+            .lock(std::iter::empty(), std::iter::once(&key[..]))
             .await;
 
+        let pending_keyspace_id = keyspace_id
+            .pending()
+            .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?;
+
+        let (pending_ts, value) = match self
+            .lsm
+            .get_latest_record(pending_keyspace_id, &key)
+            .await?
+        {
+            Some((pending_ts, value)) => (pending_ts, value),
+            None => return Ok(()),
+        };
+        let m = match value {
+            // TODO: must parse and check txid
+            Value::Regular(v) => Mutation::Put(v),
+            Value::Tombstone => return Ok(()),
+        };
         let resolve_ts = match tx_outcome {
             TxOutcome::Committed(commit_ts) => commit_ts,
             TxOutcome::Aborted => Timestamp(pending_ts.0 + 1),
         };
-        for (keyspace_id, key, value) in pending_keys {
-            let m = match value {
-                Value::Regular(v) => Mutation::Put(v),
-                Value::Tombstone => Mutation::Delete,
-            };
-            if let TxOutcome::Committed(_) = tx_outcome {
-                muts.insert((keyspace_id, key.clone()), m);
-            }
-            muts.insert(
-                (
-                    keyspace_id
-                        .pending()
-                        .ok_or_else(|| anyhow::anyhow!("non userland keyspace"))?,
-                    key,
-                ),
-                Mutation::Delete,
-            );
+        muts.insert((pending_keyspace_id, key.clone()), Mutation::Delete);
+        if let TxOutcome::Committed(_) = tx_outcome {
+            muts.insert((keyspace_id, key.clone()), m);
         }
         self.lsm.write(resolve_ts, vec![], muts).await?;
         Ok(())
     }
+}
 
-    fn pending_keys(&self, txid: TxId) -> (Timestamp, Vec<(KeyspaceId, Vec<u8>, Value)>) {
-        todo!();
+async fn resolve_txs<S: futures::stream::Stream<Item = (TxId, KeyspaceId, Vec<u8>)>>(
+    tablet: Arc<LsmTablet>,
+    rx: S,
+) -> anyhow::Result<()> {
+    const MAX_CONCURRENT: usize = 64;
+    let mut waits = FuturesUnordered::new();
+
+    pin_mut!(rx);
+    let mut done = false;
+    loop {
+        tokio::select! {
+            // Hmm, doesn't seem right if this isn't Some() here, since this side might keep
+            // getting polled.
+            next = rx.next() => {
+                match next {
+                    Some((txid, keyspace_id, key)) => {
+                        let owner_tablet = tablet.tablets.tablet(txid.owner)?;
+                        waits.push(async move {
+                            let tx_outcome = owner_tablet.wait(txid).await;
+                            tx_outcome.map(|tx_outcome| (txid, tx_outcome, keyspace_id, key))
+                        });
+                        if waits.len() == MAX_CONCURRENT {
+                            if let Some((txid, tx_outcome, keyspace_id, key)) = waits.try_next().await? {
+                                tablet.cleanup(txid, tx_outcome, keyspace_id, key).await?;
+                            }
+                        }
+                    },
+                    None => {
+                        done = true;
+                    }
+                }
+            }
+            Some(wait) = waits.next() => {
+                let (txid, tx_outcome, keyspace_id, key) = wait?;
+                tablet.cleanup(txid, tx_outcome, keyspace_id, key).await?;
+                if done && waits.len() == 0 {
+                    break;
+                }
+            }
+        }
     }
+    Ok(())
 }
