@@ -13,6 +13,7 @@ use std::time::SystemTime;
 use async_trait::async_trait;
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
+use byteorder::LittleEndian;
 use futures::future;
 use futures::pin_mut;
 use futures::stream::FuturesUnordered;
@@ -310,11 +311,39 @@ enum TxOutcome {
 
 impl TxOutcome {
     fn encode(&self) -> Vec<u8> {
-        todo!()
+        match self {
+            TxOutcome::Aborted => {
+                vec![0]
+            }
+            TxOutcome::Committed(ts) => {
+                let mut out = vec![0; 9];
+                out[1] = 1;
+                LittleEndian::write_u64(&mut out[1..], ts.as_nanos());
+                out
+            }
+        }
     }
 
-    fn decode(value: &[u8]) -> anyhow::Result<Self> {
-        todo!()
+    fn decode(b: &[u8]) -> anyhow::Result<Self> {
+        if b.len() == 0 {
+            anyhow::bail!("invalid tx outcome: empty");
+        }
+        match b[0] {
+            0 => {
+                if b.len() != 1 {
+                    anyhow::bail!("invalid tx outcome: extra bytes");
+                }
+                Ok(TxOutcome::Aborted)
+            }
+            1 => {
+                if b.len() != 9 {
+                    anyhow::bail!("invalid tx outcome: wrong length");
+                }
+                let ts = Timestamp::from_nanos(BigEndian::read_u64(&b[1..]));
+                Ok(TxOutcome::Committed(ts))
+            }
+            _ => anyhow::bail!("invalid tx outcome: tag not 0 or 1"),
+        }
     }
 }
 
