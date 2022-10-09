@@ -570,10 +570,7 @@ impl Tablet for LsmTablet {
         loop {
             let mut rx = {
                 let tx_outcome_key = txid.to_bytes();
-                let _guard = self
-                    .lock_mgr
-                    .lock(std::iter::once(&tx_outcome_key[..]), std::iter::empty())
-                    .await;
+                let _guard = self.lock_mgr.read_lock(&tx_outcome_key[..]).await;
 
                 if let Some(tx_outcome) = self
                     .get_latest(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
@@ -626,7 +623,7 @@ impl LsmTablet {
         muts: &BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
     ) -> Guard<'a> {
         self.lock_mgr
-            .lock(
+            .lock_all(
                 preconds.iter().map(|precond| precond.key()),
                 muts.keys().map(|(_, k)| &k[..]),
             )
@@ -668,10 +665,7 @@ impl LsmTablet {
         tx_outcome: TxOutcome,
     ) -> anyhow::Result<TxOutcome> {
         let tx_outcome_key = txid.to_bytes();
-        let _guard = self
-            .lock_mgr
-            .lock(std::iter::empty(), std::iter::once(&tx_outcome_key[..]))
-            .await;
+        let _guard = self.lock_mgr.write_lock(&tx_outcome_key[..]).await;
         let maybe_tx_outcome = self
             .get_latest(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
             .await?
@@ -707,10 +701,7 @@ impl LsmTablet {
         key: Vec<u8>,
     ) -> anyhow::Result<()> {
         let mut muts = BTreeMap::new();
-        let _guard = self
-            .lock_mgr
-            .lock(std::iter::empty(), std::iter::once(&key[..]))
-            .await;
+        let _guard = self.lock_mgr.write_lock(&key[..]).await;
 
         let pending_keyspace_id = keyspace_id
             .pending()
