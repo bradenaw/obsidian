@@ -309,7 +309,11 @@ enum TxOutcome {
 }
 
 impl TxOutcome {
-    fn to_bytes(&self) -> Vec<u8> {
+    fn encode(&self) -> Vec<u8> {
+        todo!()
+    }
+
+    fn decode(value: &[u8]) -> anyhow::Result<Self> {
         todo!()
     }
 }
@@ -317,14 +321,6 @@ impl TxOutcome {
 impl Debug for TxId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}/{}", self.ts, hexlify(&self.rand), self.owner.0)
-    }
-}
-
-impl TryFrom<&[u8]> for TxOutcome {
-    type Error = anyhow::Error;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        todo!()
     }
 }
 
@@ -533,7 +529,7 @@ impl Tablet for LsmTablet {
                     .lsm
                     .get_latest(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
                     .await?
-                    .map(|bytes| TxOutcome::try_from(&bytes[..]))
+                    .map(|bytes| TxOutcome::decode(&bytes[..]))
                     .transpose()?
                 {
                     return Ok(tx_outcome);
@@ -622,7 +618,7 @@ impl LsmTablet {
             .lsm
             .get_latest(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
             .await?
-            .map(|bytes| TxOutcome::try_from(&bytes[..]))
+            .map(|bytes| TxOutcome::decode(&bytes[..]))
             .transpose()?;
         if let Some(existing_tx_outcome) = maybe_tx_outcome {
             return Ok(existing_tx_outcome);
@@ -633,7 +629,7 @@ impl LsmTablet {
                 vec![],
                 BTreeMap::from([(
                     (KeyspaceId::TX_OUTCOMES, tx_outcome_key.to_vec()),
-                    Mutation::Put(tx_outcome.to_bytes()),
+                    Mutation::Put(tx_outcome.encode()),
                 )]),
             )
             .await
