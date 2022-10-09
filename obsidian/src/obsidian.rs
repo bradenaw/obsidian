@@ -17,6 +17,7 @@ use byteorder::LittleEndian;
 use futures::future;
 use futures::pin_mut;
 use futures::stream::FuturesUnordered;
+use futures::FutureExt;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use rand::Rng;
@@ -390,6 +391,12 @@ trait Tablet {
         key: Vec<u8>,
     ) -> Result<Option<Vec<u8>>, ReadError>;
 
+    async fn get_latest(
+        &self,
+        keyspace_id: KeyspaceId,
+        key: &[u8],
+    ) -> Result<(Timestamp, Option<Vec<u8>>), ReadError>;
+
     async fn write(
         &self,
         txid: TxId,
@@ -439,12 +446,17 @@ impl Tablet for LsmTablet {
 
         let (maybe_value, maybe_pending_value) = future::try_join(
             self.lsm.get(ts, keyspace_id, &key),
-            self.lsm.get_latest(
+            self.get_latest(
                 keyspace_id
                     .pending()
                     .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?,
                 &key,
-            ),
+            )
+            .map(|result| {
+                result
+                    .map(|(ts, maybe_value)| maybe_value)
+                    .map_err(|e| e.into())
+            }),
         )
         .await?;
 
@@ -456,15 +468,23 @@ impl Tablet for LsmTablet {
         Ok(maybe_value)
     }
 
+    async fn get_latest(
+        &self,
+        keyspace_id: KeyspaceId,
+        key: &[u8],
+    ) -> Result<(Timestamp, Option<Vec<u8>>), ReadError> {
+        todo!();
+    }
+
     async fn write(
         &self,
         txid: TxId,
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
     ) -> Result<Timestamp, InternalWriteError> {
-        let _guard = self.write_locks(&preconds, &muts).await;
+        let _guard = self.acquire_write_locks(&preconds, &muts).await;
 
-        if let Some(conflict_txid) = self.write_conflicts(&preconds, &muts).await? {
+        if let Some(conflict_txid) = self.check_write_conflicts(&preconds, &muts).await? {
             return Err(InternalWriteError::Conflict(conflict_txid));
         }
 
@@ -484,9 +504,9 @@ impl Tablet for LsmTablet {
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
     ) -> Result<Timestamp, InternalWriteError> {
-        let _guard = self.write_locks(&preconds, &muts).await;
+        let _guard = self.acquire_write_locks(&preconds, &muts).await;
 
-        if let Some(conflict_txid) = self.write_conflicts(&preconds, &muts).await? {
+        if let Some(conflict_txid) = self.check_write_conflicts(&preconds, &muts).await? {
             return Err(InternalWriteError::Conflict(conflict_txid));
         }
 
@@ -500,9 +520,10 @@ impl Tablet for LsmTablet {
                 .precond()
                 .ok_or_else(|| anyhow::anyhow!("non-userland keyspace"))?;
             let mut value = self
-                .lsm
                 .get_latest(keyspace_id, precond.key())
-                .await?
+                .await
+                .map_err(|e| InternalWriteError::Other(e.into()))?
+                .1
                 .unwrap_or(vec![]);
             value.extend_from_slice(&txid.to_bytes()[..]);
 
@@ -555,9 +576,9 @@ impl Tablet for LsmTablet {
                     .await;
 
                 if let Some(tx_outcome) = self
-                    .lsm
                     .get_latest(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
                     .await?
+                    .1
                     .map(|bytes| TxOutcome::decode(&bytes[..]))
                     .transpose()?
                 {
@@ -591,7 +612,15 @@ impl LsmTablet {
         }
     }
 
-    async fn write_locks<'a>(
+    async fn get_latest_record(
+        &self,
+        keyspace_id: KeyspaceId,
+        key: &[u8],
+    ) -> anyhow::Result<(Timestamp, Option<(Timestamp, Value)>)> {
+        todo!();
+    }
+
+    async fn acquire_write_locks<'a>(
         &'a self,
         preconds: &Vec<Precondition>,
         muts: &BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
@@ -604,7 +633,7 @@ impl LsmTablet {
             .await
     }
 
-    async fn write_conflicts(
+    async fn check_write_conflicts(
         &self,
         preconds: &Vec<Precondition>,
         muts: &BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
@@ -617,7 +646,6 @@ impl LsmTablet {
                 .map(|(keyspace_id, key)| (*keyspace_id, &key[..])),
         ) {
             if let Some(value) = self
-                .lsm
                 .get_latest(
                     keyspace_id
                         .pending()
@@ -625,6 +653,7 @@ impl LsmTablet {
                     key,
                 )
                 .await?
+                .1
             {
                 let other_txid = TxId::try_from(&value[..TxId::ENCODED_LEN])?;
                 return Ok(Some(other_txid));
@@ -644,9 +673,9 @@ impl LsmTablet {
             .lock(std::iter::empty(), std::iter::once(&tx_outcome_key[..]))
             .await;
         let maybe_tx_outcome = self
-            .lsm
             .get_latest(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
             .await?
+            .1
             .map(|bytes| TxOutcome::decode(&bytes[..]))
             .transpose()?;
         if let Some(existing_tx_outcome) = maybe_tx_outcome {
@@ -687,11 +716,7 @@ impl LsmTablet {
             .pending()
             .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?;
 
-        let (pending_ts, value) = match self
-            .lsm
-            .get_latest_record(pending_keyspace_id, &key)
-            .await?
-        {
+        let (pending_ts, value) = match self.get_latest_record(pending_keyspace_id, &key).await?.1 {
             Some((pending_ts, value)) => (pending_ts, value),
             None => return Ok(()),
         };

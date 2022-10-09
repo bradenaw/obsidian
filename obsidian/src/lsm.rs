@@ -182,22 +182,6 @@ impl Lsm {
         })
     }
 
-    pub async fn get_latest(
-        &self,
-        keyspace_id: KeyspaceId,
-        key: &[u8],
-    ) -> anyhow::Result<Option<Vec<u8>>> {
-        todo!();
-    }
-
-    pub async fn get_latest_record(
-        &self,
-        keyspace_id: KeyspaceId,
-        key: &[u8],
-    ) -> anyhow::Result<Option<(Timestamp, Value)>> {
-        todo!();
-    }
-
     pub async fn get(
         &self,
         ts: Timestamp,
