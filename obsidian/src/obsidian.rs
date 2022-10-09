@@ -444,28 +444,30 @@ impl Tablet for LsmTablet {
     ) -> Result<Option<Vec<u8>>, ReadError> {
         self.sequencer.wait_for_safe_read(ts).await?;
 
-        let (maybe_value, maybe_pending_value) = future::try_join(
+        let (maybe_record, maybe_pending_value) = future::try_join(
             self.lsm.get(ts, keyspace_id, &key),
-            self.get_latest(
+            self.unsafe_get_latest_record(
                 keyspace_id
                     .pending()
                     .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?,
                 &key,
             )
-            .map(|result| {
-                result
-                    .map(|(ts, maybe_value)| maybe_value)
-                    .map_err(|e| e.into())
-            }),
+            .map(|result| result.map_err(|e| e.into())),
         )
         .await?;
 
-        if let Some(pending_value) = maybe_pending_value {
+        if let Some((_, Value::Regular(pending_value))) = maybe_pending_value {
             let other_txid = TxId::try_from(&pending_value[..])?;
             return Err(ReadError::Conflict(other_txid));
         }
 
-        Ok(maybe_value)
+        Ok(match maybe_record {
+            Some((_, value)) => match value {
+                Value::Regular(v) => Some(v),
+                Value::Tombstone => None,
+            },
+            None => None,
+        })
     }
 
     async fn get_latest(
@@ -520,10 +522,13 @@ impl Tablet for LsmTablet {
                 .precond()
                 .ok_or_else(|| anyhow::anyhow!("non-userland keyspace"))?;
             let mut value = self
-                .get_latest(keyspace_id, precond.key())
+                .unsafe_get_latest_record(keyspace_id, precond.key())
                 .await
                 .map_err(|e| InternalWriteError::Other(e.into()))?
-                .1
+                .map(|(_, v)| match v {
+                    Value::Regular(v) => v,
+                    Value::Tombstone => vec![],
+                })
                 .unwrap_or(vec![]);
             value.extend_from_slice(&txid.to_bytes()[..]);
 
@@ -572,13 +577,11 @@ impl Tablet for LsmTablet {
                 let tx_outcome_key = txid.to_bytes();
                 let _guard = self.lock_mgr.read_lock(&tx_outcome_key[..]).await;
 
-                if let Some(tx_outcome) = self
-                    .get_latest(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
+                if let Some((_, Value::Regular(tx_outcome_bytes))) = self
+                    .unsafe_get_latest_record(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
                     .await?
-                    .1
-                    .map(|bytes| TxOutcome::decode(&bytes[..]))
-                    .transpose()?
                 {
+                    let tx_outcome = TxOutcome::decode(&tx_outcome_bytes[..])?;
                     return Ok(tx_outcome);
                 }
 
@@ -609,12 +612,13 @@ impl LsmTablet {
         }
     }
 
-    async fn get_latest_record(
+    // TODO: make this take a lockmgr guard that proves the lock is held
+    async fn unsafe_get_latest_record(
         &self,
         keyspace_id: KeyspaceId,
         key: &[u8],
-    ) -> anyhow::Result<(Timestamp, Option<(Timestamp, Value)>)> {
-        todo!();
+    ) -> anyhow::Result<Option<(Timestamp, Value)>> {
+        self.lsm.get(Timestamp(u64::MAX), keyspace_id, key).await
     }
 
     async fn acquire_write_locks<'a>(
@@ -630,6 +634,7 @@ impl LsmTablet {
             .await
     }
 
+    // TODO: make this take a lockmgr guard that proves the lock is held
     async fn check_write_conflicts(
         &self,
         preconds: &Vec<Precondition>,
@@ -642,15 +647,14 @@ impl LsmTablet {
             muts.keys()
                 .map(|(keyspace_id, key)| (*keyspace_id, &key[..])),
         ) {
-            if let Some(value) = self
-                .get_latest(
+            if let Some((_, Value::Regular(value))) = self
+                .unsafe_get_latest_record(
                     keyspace_id
                         .pending()
                         .ok_or_else(|| anyhow::anyhow!("non-userland keyspace"))?,
                     key,
                 )
                 .await?
-                .1
             {
                 let other_txid = TxId::try_from(&value[..TxId::ENCODED_LEN])?;
                 return Ok(Some(other_txid));
@@ -666,13 +670,11 @@ impl LsmTablet {
     ) -> anyhow::Result<TxOutcome> {
         let tx_outcome_key = txid.to_bytes();
         let _guard = self.lock_mgr.write_lock(&tx_outcome_key[..]).await;
-        let maybe_tx_outcome = self
-            .get_latest(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
+        if let Some((_, Value::Regular(tx_outcome_bytes))) = self
+            .unsafe_get_latest_record(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
             .await?
-            .1
-            .map(|bytes| TxOutcome::decode(&bytes[..]))
-            .transpose()?;
-        if let Some(existing_tx_outcome) = maybe_tx_outcome {
+        {
+            let existing_tx_outcome = TxOutcome::decode(&tx_outcome_bytes[..])?;
             return Ok(existing_tx_outcome);
         }
         self.lsm
@@ -707,7 +709,10 @@ impl LsmTablet {
             .pending()
             .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?;
 
-        let (pending_ts, value) = match self.get_latest_record(pending_keyspace_id, &key).await?.1 {
+        let (pending_ts, value) = match self
+            .unsafe_get_latest_record(pending_keyspace_id, &key)
+            .await?
+        {
             Some((pending_ts, value)) => (pending_ts, value),
             None => return Ok(()),
         };

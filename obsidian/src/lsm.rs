@@ -187,7 +187,7 @@ impl Lsm {
         ts: Timestamp,
         keyspace_id: KeyspaceId,
         key: &[u8],
-    ) -> anyhow::Result<Option<Vec<u8>>> {
+    ) -> anyhow::Result<Option<(Timestamp, Value)>> {
         self.inner
             .load()
             .get(&keyspace_id)
@@ -225,7 +225,7 @@ impl Lsm {
                 .get(&precond.keyspace_id())
                 .ok_or_else(|| anyhow::anyhow!("keyspace not found"))?
                 .inner
-                .unsafe_get(ts, precond.key())
+                .get(ts, precond.key())
                 .await?;
             match precond {
                 Precondition::NotChangedSince(_, _, ts) => {
@@ -449,7 +449,11 @@ impl LsmInner {
         })
     }
 
-    pub async fn get(&self, ts: Timestamp, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+    pub async fn get(
+        &self,
+        ts: Timestamp,
+        key: &[u8],
+    ) -> anyhow::Result<Option<(Timestamp, Value)>> {
         self.inner.get(ts, key).await
     }
 
@@ -800,21 +804,7 @@ impl LsmInnerInner {
         }
     }
 
-    async fn get(&self, ts: Timestamp, k: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
-        Ok(match self.unsafe_get(ts, k).await? {
-            Some((_, value)) => match value {
-                Value::Regular(v) => Some(v),
-                Value::Tombstone => None,
-            },
-            None => None,
-        })
-    }
-
-    async fn unsafe_get(
-        &self,
-        ts: Timestamp,
-        k: &[u8],
-    ) -> anyhow::Result<Option<(Timestamp, Value)>> {
+    async fn get(&self, ts: Timestamp, k: &[u8]) -> anyhow::Result<Option<(Timestamp, Value)>> {
         let manifest = self.manifest.load();
 
         // Any memtable might have the latest for the key, so must check all of them.
