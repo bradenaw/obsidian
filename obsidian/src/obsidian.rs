@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::fmt::Debug;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -491,18 +490,7 @@ impl Tablet for LsmTablet {
             actual_muts.insert((keyspace_id, precond.key().to_vec()), Mutation::Put(value));
         }
         for ((keyspace_id, key), m) in muts {
-            let txid_bytes = txid.to_bytes();
-
-            let mut value = Vec::with_capacity(txid_bytes.len() + 1 + m.len());
-
-            value.extend_from_slice(&txid_bytes[..]);
-            match m {
-                Mutation::Put(v) => {
-                    value.push(1);
-                    value.extend_from_slice(&v[..]);
-                }
-                Mutation::Delete => value.push(0),
-            }
+            let value = PendingMutation { txid, m }.encode();
 
             actual_muts.insert(
                 (
@@ -683,8 +671,13 @@ impl LsmTablet {
             None => return Ok(()),
         };
         let m = match value {
-            // TODO: must parse and check txid
-            Value::Regular(v) => Mutation::Put(v),
+            Value::Regular(v) => {
+                let pending_m = PendingMutation::decode(&v)?;
+                if pending_m.txid != txid {
+                    return Ok(());
+                }
+                pending_m.m
+            }
             Value::Tombstone => return Ok(()),
         };
         let resolve_ts = match tx_outcome {
@@ -711,9 +704,7 @@ async fn resolve_txs<S: futures::stream::Stream<Item = (TxId, KeyspaceId, Vec<u8
     let mut done = false;
     loop {
         tokio::select! {
-            // Hmm, doesn't seem right if this isn't Some() here, since this side might keep
-            // getting polled.
-            next = rx.next() => {
+            next = rx.next(), if !done => {
                 match next {
                     Some((txid, keyspace_id, key)) => {
                         let owner_tablet = tablet.tablets.tablet(txid.owner)?;
@@ -742,4 +733,44 @@ async fn resolve_txs<S: futures::stream::Stream<Item = (TxId, KeyspaceId, Vec<u8
         }
     }
     Ok(())
+}
+
+struct PendingMutation {
+    txid: TxId,
+    m: Mutation,
+}
+
+impl PendingMutation {
+    fn encode(&self) -> Vec<u8> {
+        let txid_bytes = self.txid.to_bytes();
+
+        let mut value = Vec::with_capacity(txid_bytes.len() + 1 + self.m.len());
+
+        value.extend_from_slice(&txid_bytes[..]);
+        match &self.m {
+            Mutation::Put(v) => {
+                value.push(1);
+                value.extend_from_slice(&v[..]);
+            }
+            Mutation::Delete => value.push(0),
+        }
+
+        value
+    }
+
+    fn decode(b: &[u8]) -> anyhow::Result<Self> {
+        if b.len() < TxId::ENCODED_LEN + 1 {
+            anyhow::bail!("invalid pending mutation: too short");
+        }
+
+        let txid = TxId::try_from(&b[..TxId::ENCODED_LEN])?;
+
+        let m = match b[TxId::ENCODED_LEN] {
+            0 => Mutation::Delete,
+            1 => Mutation::Put(b[TxId::ENCODED_LEN + 1..].to_vec()),
+            _ => anyhow::bail!("invalid pending mutation: type tag not in [0, 1]"),
+        };
+
+        Ok(Self { txid, m })
+    }
 }
