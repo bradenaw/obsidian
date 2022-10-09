@@ -18,6 +18,7 @@ use futures::future;
 use futures::pin_mut;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
+use futures::Stream;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use rand::Rng;
@@ -417,6 +418,102 @@ trait Tablet {
 }
 
 struct LsmTablet {
+    inner: Arc<LsmTabletInner>,
+}
+
+#[async_trait]
+impl Tablet for LsmTablet {
+    async fn get(
+        &self,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        key: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, ReadError> {
+        self.inner.get(ts, keyspace_id, key).await
+    }
+
+    async fn get_latest(
+        &self,
+        keyspace_id: KeyspaceId,
+        key: &[u8],
+    ) -> Result<(Timestamp, Option<Vec<u8>>), ReadError> {
+        self.inner.get_latest(keyspace_id, key).await
+    }
+
+    async fn write(
+        &self,
+        txid: TxId,
+        preconds: Vec<Precondition>,
+        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+    ) -> Result<Timestamp, InternalWriteError> {
+        self.inner.write(txid, preconds, muts).await
+    }
+
+    async fn prepare(
+        &self,
+        txid: TxId,
+        preconds: Vec<Precondition>,
+        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+    ) -> Result<Timestamp, InternalWriteError> {
+        self.inner.prepare(txid, preconds, muts).await
+    }
+
+    async fn try_commit(&self, txid: TxId, ts: Timestamp) -> anyhow::Result<TxOutcome> {
+        self.inner.try_commit(txid, ts).await
+    }
+    async fn try_abort(&self, txid: TxId) -> anyhow::Result<TxOutcome> {
+        self.inner.try_abort(txid).await
+    }
+    async fn wait(&self, txid: TxId) -> anyhow::Result<TxOutcome> {
+        self.inner.wait(txid).await
+    }
+}
+
+impl LsmTablet {
+    async fn resolve_txs<S: Stream<Item = (TxId, KeyspaceId, Vec<u8>)>>(
+        tablet: Arc<LsmTabletInner>,
+        rx: S,
+    ) -> anyhow::Result<()> {
+        const MAX_CONCURRENT: usize = 64;
+        let mut waits = FuturesUnordered::new();
+
+        pin_mut!(rx);
+        let mut done = false;
+        loop {
+            tokio::select! {
+                next = rx.next(), if !done => {
+                    match next {
+                        Some((txid, keyspace_id, key)) => {
+                            let owner_tablet = tablet.tablets.tablet(txid.owner)?;
+                            waits.push(async move {
+                                let tx_outcome = owner_tablet.wait(txid).await;
+                                tx_outcome.map(|tx_outcome| (txid, tx_outcome, keyspace_id, key))
+                            });
+                            if waits.len() == MAX_CONCURRENT {
+                                if let Some((txid, tx_outcome, keyspace_id, key)) = waits.try_next().await? {
+                                    tablet.cleanup(txid, tx_outcome, keyspace_id, key).await?;
+                                }
+                            }
+                        },
+                        None => {
+                            done = true;
+                        }
+                    }
+                }
+                Some(wait) = waits.next() => {
+                    let (txid, tx_outcome, keyspace_id, key) = wait?;
+                    tablet.cleanup(txid, tx_outcome, keyspace_id, key).await?;
+                    if done && waits.len() == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+struct LsmTabletInner {
     lsm: Lsm,
     tablets: Box<dyn Tablets + Sync + Send>,
     router: Box<dyn Router + Sync + Send>,
@@ -434,8 +531,7 @@ struct LsmTablet {
     >,
 }
 
-#[async_trait]
-impl Tablet for LsmTablet {
+impl LsmTabletInner {
     async fn get(
         &self,
         ts: Timestamp,
@@ -594,9 +690,7 @@ impl Tablet for LsmTablet {
             _ = rx.changed().await;
         }
     }
-}
 
-impl LsmTablet {
     fn new(
         lsm: Lsm,
         tablets: Box<dyn Tablets + Sync + Send>,
@@ -737,48 +831,6 @@ impl LsmTablet {
         self.lsm.write(resolve_ts, vec![], muts).await?;
         Ok(())
     }
-}
-
-async fn resolve_txs<S: futures::stream::Stream<Item = (TxId, KeyspaceId, Vec<u8>)>>(
-    tablet: Arc<LsmTablet>,
-    rx: S,
-) -> anyhow::Result<()> {
-    const MAX_CONCURRENT: usize = 64;
-    let mut waits = FuturesUnordered::new();
-
-    pin_mut!(rx);
-    let mut done = false;
-    loop {
-        tokio::select! {
-            next = rx.next(), if !done => {
-                match next {
-                    Some((txid, keyspace_id, key)) => {
-                        let owner_tablet = tablet.tablets.tablet(txid.owner)?;
-                        waits.push(async move {
-                            let tx_outcome = owner_tablet.wait(txid).await;
-                            tx_outcome.map(|tx_outcome| (txid, tx_outcome, keyspace_id, key))
-                        });
-                        if waits.len() == MAX_CONCURRENT {
-                            if let Some((txid, tx_outcome, keyspace_id, key)) = waits.try_next().await? {
-                                tablet.cleanup(txid, tx_outcome, keyspace_id, key).await?;
-                            }
-                        }
-                    },
-                    None => {
-                        done = true;
-                    }
-                }
-            }
-            Some(wait) = waits.next() => {
-                let (txid, tx_outcome, keyspace_id, key) = wait?;
-                tablet.cleanup(txid, tx_outcome, keyspace_id, key).await?;
-                if done && waits.len() == 0 {
-                    break;
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 struct PendingMutation {
