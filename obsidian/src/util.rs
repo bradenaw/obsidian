@@ -4,11 +4,13 @@ use std::collections::BinaryHeap;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::time::Duration;
 
 use async_stream::try_stream;
 use byteorder::WriteBytesExt;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
+use rand::Rng;
 
 pub(crate) fn merge_sorted<'a, T: Ord + 'a>(
     mut iters: Vec<impl Iterator<Item = T> + 'a>,
@@ -213,4 +215,15 @@ pub(crate) async fn bounded_unordered_map<T, F: Fn(T) -> Fut, Fut: futures::Futu
             }
         }
     }
+}
+
+pub(crate) fn delay_for_retry(i: usize, min_delay: Duration, max_delay: Duration) -> Duration {
+    let avg_delay = std::cmp::min(
+        min_delay.saturating_mul(2u32.saturating_pow(i as u32)),
+        max_delay,
+    );
+    rand::thread_rng().gen_range(avg_delay / 2..avg_delay * 3 / 2)
+}
+pub(crate) async fn sleep_for_retry(i: usize, min_delay: Duration, max_delay: Duration) {
+    tokio::time::sleep(delay_for_retry(i, min_delay, max_delay)).await;
 }

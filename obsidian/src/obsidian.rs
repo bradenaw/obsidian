@@ -35,6 +35,7 @@ use crate::types::Value;
 use crate::types::WriteError;
 use crate::util::hexlify;
 use crate::util::longest_shared_prefix_len;
+use crate::util::sleep_for_retry;
 use crate::util::write_varint_to;
 
 struct Obsidian {
@@ -58,11 +59,12 @@ impl Obsidian {
         let mut already_seen_conflicts = HashSet::new();
         for i in 0..MAX_CONFLICT_RETRIES {
             if i != 0 {
-                let delay = std::cmp::min(
-                    Duration::from_millis(10).saturating_mul(2u32.saturating_pow(i - 1)),
+                sleep_for_retry(
+                    i as usize,
+                    Duration::from_millis(10),
                     Duration::from_millis(5000),
-                );
-                tokio::time::sleep(rand::thread_rng().gen_range(delay / 2..delay * 3 / 2)).await;
+                )
+                .await;
             }
 
             match tablet.get(ts, keyspace_id, key.clone()).await {
@@ -115,13 +117,15 @@ impl Obsidian {
                 });
         }
 
+        let mut already_seen_conflicts = HashSet::new();
         for i in 0..MAX_CONFLICT_RETRIES {
             if i != 0 {
-                let delay = std::cmp::min(
-                    Duration::from_millis(10).saturating_mul(2u32.saturating_pow(i - 1)),
+                sleep_for_retry(
+                    i as usize,
+                    Duration::from_millis(10),
                     Duration::from_millis(5000),
-                );
-                tokio::time::sleep(rand::thread_rng().gen_range(delay / 2..delay * 3 / 2)).await;
+                )
+                .await;
             }
             let mut pending_tablets: BTreeSet<_> = write_by_tablet.keys().collect();
             let mut max_prepare_ts = Timestamp::ZERO;
@@ -134,6 +138,7 @@ impl Obsidian {
                 })
                 .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
 
+            let mut j = 0;
             while !pending_tablets.is_empty() {
                 let mut prepare_futures = Vec::with_capacity(write_by_tablet.len());
                 for tablet_id in &pending_tablets {
@@ -152,6 +157,7 @@ impl Obsidian {
                 let prepare_results = future::join_all(prepare_futures).await;
                 let mut preempt_conflicts = BTreeSet::new();
                 let mut wait_conflicts = BTreeSet::new();
+                let mut saw_an_already_seen = false;
                 for (tablet_id, prepare_result) in prepare_results {
                     match prepare_result {
                         Ok(prepare_ts) => {
@@ -159,7 +165,9 @@ impl Obsidian {
                             max_prepare_ts = cmp::max(max_prepare_ts, prepare_ts);
                         }
                         Err(InternalWriteError::Conflict(other_txid)) => {
-                            if txid.can_preempt(&other_txid) {
+                            if already_seen_conflicts.contains(&other_txid) {
+                                saw_an_already_seen = true;
+                            } else if txid.can_preempt(&other_txid) {
                                 preempt_conflicts.insert(other_txid);
                             } else {
                                 wait_conflicts.insert(other_txid);
@@ -177,6 +185,10 @@ impl Obsidian {
                     ))
                     .await
                     .map_err(|e| WriteError::Other(e.into()))?;
+
+                    for other_txid in wait_conflicts {
+                        already_seen_conflicts.insert(other_txid);
+                    }
                 }
                 if !preempt_conflicts.is_empty() {
                     future::try_join_all(preempt_conflicts.iter().cloned().map(
@@ -187,7 +199,15 @@ impl Obsidian {
                     ))
                     .await
                     .map_err(|e| WriteError::Other(e.into()))?;
+                    for other_txid in preempt_conflicts {
+                        already_seen_conflicts.insert(other_txid);
+                    }
                 }
+                if saw_an_already_seen {
+                    sleep_for_retry(j, Duration::from_millis(10), Duration::from_millis(5000))
+                        .await;
+                }
+                j += 1
             }
             let commit_ts = max_prepare_ts;
 
