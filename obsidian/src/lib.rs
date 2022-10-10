@@ -11,6 +11,7 @@ mod obsidian;
 mod range;
 mod sequencer;
 mod storage;
+mod tablet;
 mod types;
 mod util;
 mod wal;
