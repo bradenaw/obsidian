@@ -94,7 +94,7 @@ impl Obsidian {
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
     ) -> Result<Timestamp, WriteError> {
-        let write_by_tablet = self.split_write(preconds, muts)?;
+        let write_by_tablet = self.split_write(preconds.clone(), muts.clone())?;
 
         let owner_tablet_id = write_by_tablet
             .keys()
@@ -197,7 +197,15 @@ impl Obsidian {
             match tablets
                 .get(&owner_tablet_id)
                 .unwrap()
-                .try_commit(txid, commit_ts)
+                .try_commit(
+                    txid,
+                    commit_ts,
+                    preconds
+                        .iter()
+                        .map(|precond| (precond.keyspace_id(), precond.key().to_vec()))
+                        .collect(),
+                    muts.keys().cloned().collect(),
+                )
                 .await?
             {
                 TxOutcome::Committed(commit_ts) => return Ok(commit_ts),
@@ -363,6 +371,13 @@ enum TxOutcomeRecord {
 }
 
 impl TxOutcomeRecord {
+    fn tx_outcome(&self) -> TxOutcome {
+        match self {
+            TxOutcomeRecord::Aborted => TxOutcome::Aborted,
+            TxOutcomeRecord::Committed { ts, .. } => TxOutcome::Committed(*ts),
+        }
+    }
+
     fn encode(&self) -> Vec<u8> {
         match self {
             TxOutcomeRecord::Aborted => TxOutcome::Aborted.encode(),
@@ -480,7 +495,13 @@ trait Tablet {
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
     ) -> Result<Timestamp, InternalWriteError>;
 
-    async fn try_commit(&self, txid: TxId, ts: Timestamp) -> anyhow::Result<TxOutcome>;
+    async fn try_commit(
+        &self,
+        txid: TxId,
+        ts: Timestamp,
+        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+    ) -> anyhow::Result<TxOutcome>;
     async fn try_abort(&self, txid: TxId) -> anyhow::Result<TxOutcome>;
     async fn wait(&self, txid: TxId) -> anyhow::Result<TxOutcome>;
 }
@@ -526,8 +547,16 @@ impl Tablet for LsmTablet {
         self.inner.prepare(txid, preconds, muts).await
     }
 
-    async fn try_commit(&self, txid: TxId, ts: Timestamp) -> anyhow::Result<TxOutcome> {
-        self.inner.try_commit(txid, ts).await
+    async fn try_commit(
+        &self,
+        txid: TxId,
+        ts: Timestamp,
+        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+    ) -> anyhow::Result<TxOutcome> {
+        self.inner
+            .try_commit(txid, ts, precond_keys, mut_keys)
+            .await
     }
     async fn try_abort(&self, txid: TxId) -> anyhow::Result<TxOutcome> {
         self.inner.try_abort(txid).await
@@ -726,13 +755,27 @@ impl LsmTabletInner {
         Ok(*ts)
     }
 
-    async fn try_commit(&self, txid: TxId, ts: Timestamp) -> anyhow::Result<TxOutcome> {
-        self.try_write_tx_outcome(txid, TxOutcome::Committed(ts))
-            .await
+    async fn try_commit(
+        &self,
+        txid: TxId,
+        ts: Timestamp,
+        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+    ) -> anyhow::Result<TxOutcome> {
+        self.try_write_tx_outcome(
+            txid,
+            TxOutcomeRecord::Committed {
+                ts,
+                precond_keys,
+                mut_keys,
+            },
+        )
+        .await
     }
 
     async fn try_abort(&self, txid: TxId) -> anyhow::Result<TxOutcome> {
-        self.try_write_tx_outcome(txid, TxOutcome::Aborted).await
+        self.try_write_tx_outcome(txid, TxOutcomeRecord::Aborted)
+            .await
     }
 
     async fn wait(&self, txid: TxId) -> anyhow::Result<TxOutcome> {
@@ -828,7 +871,7 @@ impl LsmTabletInner {
     async fn try_write_tx_outcome(
         &self,
         txid: TxId,
-        tx_outcome: TxOutcome,
+        tx_outcome_record: TxOutcomeRecord,
     ) -> anyhow::Result<TxOutcome> {
         let tx_outcome_key = txid.to_bytes();
         let _guard = self.lock_mgr.write_lock(&tx_outcome_key[..]).await;
@@ -845,7 +888,7 @@ impl LsmTabletInner {
                 vec![],
                 BTreeMap::from([(
                     (KeyspaceId::TX_OUTCOMES, tx_outcome_key.to_vec()),
-                    Mutation::Put(tx_outcome.encode()),
+                    Mutation::Put(tx_outcome_record.encode()),
                 )]),
             )
             .await
@@ -854,7 +897,7 @@ impl LsmTabletInner {
         if let Some((tx, _)) = waiters.remove(&txid) {
             _ = tx.send(());
         }
-        Ok(tx_outcome)
+        Ok(tx_outcome_record.tx_outcome())
     }
 
     async fn cleanup(
