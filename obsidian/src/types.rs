@@ -97,6 +97,14 @@ impl KeyspaceId {
     pub(crate) fn is_precond(&self) -> bool {
         self.0 & 0xFF000000 == 0x02000000
     }
+
+    pub(crate) fn is_tablet_routed(&self) -> bool {
+        self.0 & 0xFF000000 == 0xFE000000
+    }
+
+    pub(crate) fn is_meta(&self) -> bool {
+        self.0 & 0xFF000000 == 0xFF000000
+    }
 }
 
 #[derive(Eq, PartialEq, Clone)]

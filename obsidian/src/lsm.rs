@@ -55,7 +55,7 @@ use crate::util::AtomicArc;
 use crate::util::OrdEqByFirst;
 use crate::wal;
 
-struct LsmBuilder {
+pub(crate) struct LsmBuilder {
     l0_max_size: u64,
     run_target_size: u64,
     block_size: u64,
@@ -64,7 +64,7 @@ struct LsmBuilder {
 }
 
 impl LsmBuilder {
-    fn new() -> Self {
+    pub fn new() -> Self {
         LsmBuilder {
             l0_max_size: 8_000_000,
             run_target_size: 64_000_000,
@@ -74,32 +74,32 @@ impl LsmBuilder {
         }
     }
 
-    fn l0_max_size(mut self, x: u64) -> Self {
+    pub fn l0_max_size(mut self, x: u64) -> Self {
         self.l0_max_size = x;
         self
     }
 
-    fn run_target_size(mut self, x: u64) -> Self {
+    pub fn run_target_size(mut self, x: u64) -> Self {
         self.run_target_size = x;
         self
     }
 
-    fn block_size(mut self, x: u64) -> Self {
+    pub fn block_size(mut self, x: u64) -> Self {
         self.block_size = x;
         self
     }
 
-    fn wal(mut self, wal: Arc<wal::Wal<WalEntry>>) -> Self {
+    pub fn wal(mut self, wal: Arc<wal::Wal<WalEntry>>) -> Self {
         self.wal = Some(wal);
         self
     }
 
-    fn storage(mut self, storage: Arc<MemStorage>) -> Self {
+    pub fn storage(mut self, storage: Arc<MemStorage>) -> Self {
         self.storage = Some(storage);
         self
     }
 
-    async fn build(self) -> anyhow::Result<Lsm> {
+    pub async fn build(self) -> anyhow::Result<Lsm> {
         Lsm::new(
             self.l0_max_size,
             self.run_target_size,

@@ -31,6 +31,10 @@ struct Obsidian {
 const MAX_CONFLICT_RETRIES: u32 = 10;
 
 impl Obsidian {
+    fn new(router: Box<dyn Router>, tablets: Box<dyn Tablets>) -> Self {
+        Self { router, tablets }
+    }
+
     pub async fn get(
         &self,
         ts: Timestamp,
@@ -398,4 +402,118 @@ pub(crate) enum ReadError {
     Conflict(TxId),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+#[cfg(test)]
+mod test {
+    use std::collections::BTreeMap;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use byteorder::BigEndian;
+    use byteorder::ByteOrder;
+
+    use crate::lsm::LsmBuilder;
+    use crate::storage::MemStorage;
+    use crate::tablet::LsmTablet;
+    use crate::tablet::Tablet;
+    use crate::types::KeyspaceId;
+    use crate::types::Mutation;
+
+    use super::Obsidian;
+    use super::Router;
+    use super::TabletId;
+    use super::Tablets;
+
+    struct CheeseRouter {}
+
+    impl Router for CheeseRouter {
+        fn tablet_id_for_key(
+            &self,
+            keyspace_id: KeyspaceId,
+            key: &[u8],
+        ) -> anyhow::Result<TabletId> {
+            if keyspace_id.is_meta() {
+                return Ok(TabletId(1));
+            }
+            if keyspace_id.is_tablet_routed() {
+                if key.len() < 8 {
+                    anyhow::bail!("tablet-routed key not long enough");
+                }
+                let tablet_id = TabletId(BigEndian::read_u64(&key[0..8]));
+                return Ok(tablet_id);
+            }
+            if key.len() < 1 {
+                anyhow::bail!("key too short for CheeseRouter");
+            }
+            Ok(TabletId(key[0] as u64))
+        }
+    }
+
+    struct StaticTablets {
+        m: Mutex<HashMap<TabletId, Arc<LsmTablet>>>,
+    }
+
+    impl Tablets for StaticTablets {
+        fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Box<dyn Tablet + Send + Sync>> {
+            Ok(Box::new(
+                *self
+                    .m
+                    .lock()
+                    .unwrap()
+                    .get(&tablet_id)
+                    .ok_or_else(|| anyhow::anyhow!("no tablet"))?
+                    .clone(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_2pc() -> anyhow::Result<()> {
+        let mut tablets = Box::new(StaticTablets {
+            m: Mutex::new(HashMap::new()),
+        });
+
+        let storage = Arc::new(MemStorage::new());
+        let tablet1 = LsmTablet::new(
+            LsmBuilder::new().storage(storage.clone()).build().await?,
+            tablets,
+            Box::new(CheeseRouter {}),
+        );
+        let tablet2 = LsmTablet::new(
+            LsmBuilder::new().storage(storage.clone()).build().await?,
+            tablets,
+            Box::new(CheeseRouter {}),
+        );
+
+        {
+            let m = tablets.m.lock().unwrap();
+            m.insert(TabletId(1), Arc::new(tablet1));
+            m.insert(TabletId(2), Arc::new(tablet2));
+        }
+
+        let obs = Obsidian::new(Box::new(CheeseRouter {}), tablets);
+
+        let write_ts = obs
+            .write(
+                vec![],
+                BTreeMap::from([
+                    ((KeyspaceId(1), vec![1, 1]), Mutation::Put(vec![1, 2, 3])),
+                    ((KeyspaceId(1), vec![2, 2]), Mutation::Put(vec![4, 5, 6])),
+                ]),
+            )
+            .await?;
+
+        assert_eq!(
+            obs.get(write_ts, KeyspaceId(1), vec![1, 1]).await?,
+            Some(vec![1, 2, 3])
+        );
+        assert_eq!(
+            obs.get(write_ts, KeyspaceId(1), vec![2, 2]).await?,
+            Some(vec![4, 5, 6])
+        );
+
+        Ok(())
+    }
 }

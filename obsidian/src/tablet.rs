@@ -156,7 +156,7 @@ impl Tablet for LsmTablet {
 }
 
 impl LsmTablet {
-    fn new(
+    pub fn new(
         lsm: Lsm,
         tablets: Box<dyn Tablets + Sync + Send>,
         router: Box<dyn Router + Sync + Send>,
