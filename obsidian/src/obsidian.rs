@@ -17,12 +17,7 @@ use byteorder::BigEndian;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use futures::future;
-use futures::pin_mut;
-use futures::stream::FuturesUnordered;
 use futures::FutureExt;
-use futures::Stream;
-use futures::StreamExt;
-use futures::TryStreamExt;
 use rand::Rng;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -48,7 +43,7 @@ struct Obsidian {
 }
 
 const MAX_CONFLICT_RETRIES: u32 = 10;
-const MAX_PRECOND_VALUE_LEN: usize = 1024;
+const MAX_PRECOND_VALUE_LEN: usize = 256;
 
 impl Obsidian {
     pub async fn get(
@@ -261,7 +256,7 @@ trait Router {
 }
 
 trait Tablets {
-    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Box<dyn Tablet + Send>>;
+    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Box<dyn Tablet + Send + Sync>>;
 }
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
@@ -520,6 +515,7 @@ struct LsmTablet {
     inner: Arc<LsmTabletInner>,
 
     bg_cleanup_committed_outcomes: JoinHandle<()>,
+    bg_resolve_pending: JoinHandle<()>,
 }
 
 #[async_trait]
@@ -595,9 +591,16 @@ impl LsmTablet {
         tablets: Box<dyn Tablets + Sync + Send>,
         router: Box<dyn Router + Sync + Send>,
     ) -> Self {
+        let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
         let (commit_sender, commit_receiver) = mpsc::channel(128);
 
-        let inner = Arc::new(LsmTabletInner::new(lsm, tablets, router, commit_sender));
+        let inner = Arc::new(LsmTabletInner::new(
+            lsm,
+            tablets,
+            router,
+            prepare_sender,
+            commit_sender,
+        ));
 
         // TODO: also read already-committed outcomes into commit_sender
 
@@ -609,58 +612,23 @@ impl LsmTablet {
                 .await;
         });
 
+        let inner_ = inner.clone();
+        let bg_resolve_pending = tokio::spawn(async move {
+            inner_.clone().resolve_prepared(prepare_receiver).await;
+        });
+
         Self {
             inner,
             bg_cleanup_committed_outcomes,
+            bg_resolve_pending,
         }
-    }
-
-    async fn resolve_txs<S: Stream<Item = (TxId, KeyspaceId, Vec<u8>)>>(
-        &self,
-        rx: S,
-    ) -> anyhow::Result<()> {
-        const MAX_CONCURRENT: usize = 64;
-        let mut waits = FuturesUnordered::new();
-
-        pin_mut!(rx);
-        let mut done = false;
-        loop {
-            tokio::select! {
-                next = rx.next(), if !done => {
-                    match next {
-                        Some((txid, keyspace_id, key)) => {
-                            let owner_tablet = self.inner.tablets.tablet(txid.owner)?;
-                            waits.push(async move {
-                                let tx_outcome = owner_tablet.wait(txid).await;
-                                tx_outcome.map(|tx_outcome| (txid, tx_outcome, keyspace_id, key))
-                            });
-                            if waits.len() == MAX_CONCURRENT {
-                                if let Some((txid, tx_outcome, keyspace_id, key)) = waits.try_next().await? {
-                                    self.inner.cleanup_one_key(txid, tx_outcome, keyspace_id, key).await?;
-                                }
-                            }
-                        },
-                        None => {
-                            done = true;
-                        }
-                    }
-                }
-                Some(wait) = waits.next() => {
-                    let (txid, tx_outcome, keyspace_id, key) = wait?;
-                    self.inner.cleanup_one_key(txid, tx_outcome, keyspace_id, key).await?;
-                    if done && waits.len() == 0 {
-                        break;
-                    }
-                }
-            }
-        }
-        Ok(())
     }
 }
 
 impl Drop for LsmTablet {
     fn drop(&mut self) {
-        self.bg_cleanup_committed_outcomes.abort()
+        self.bg_cleanup_committed_outcomes.abort();
+        self.bg_resolve_pending.abort();
     }
 }
 
@@ -671,6 +639,7 @@ struct LsmTabletInner {
     sequencer: Sequencer,
     lock_mgr: LockMgr,
 
+    prepare_sender: mpsc::Sender<(TxId, KeyspaceId, Vec<u8>, PrepareType)>,
     commit_sender: mpsc::Sender<(
         TxId,
         Timestamp,
@@ -693,6 +662,7 @@ impl LsmTabletInner {
         lsm: Lsm,
         tablets: Box<dyn Tablets + Sync + Send>,
         router: Box<dyn Router + Sync + Send>,
+        prepare_sender: mpsc::Sender<(TxId, KeyspaceId, Vec<u8>, PrepareType)>,
         commit_sender: mpsc::Sender<(
             TxId,
             Timestamp,
@@ -704,6 +674,7 @@ impl LsmTabletInner {
             lsm,
             tablets,
             router,
+            prepare_sender,
             commit_sender,
             sequencer: Sequencer::new(),
             lock_mgr: LockMgr::new(16384),
@@ -809,30 +780,48 @@ impl LsmTabletInner {
 
             if value.len() > MAX_PRECOND_VALUE_LEN {
                 return Err(InternalWriteError::Other(anyhow::anyhow!(
-                    "too many prepares on key"
+                    "too much contention"
                 )));
             }
 
             actual_muts.insert((keyspace_id, precond.key().to_vec()), Mutation::Put(value));
         }
-        for ((keyspace_id, key), m) in muts {
-            let value = PendingMutation { txid, m }.encode();
+        for ((keyspace_id, key), m) in &muts {
+            let value = PendingMutation { txid, m: m.clone() }.encode();
 
             actual_muts.insert(
                 (
                     keyspace_id
                         .pending()
                         .ok_or_else(|| anyhow::anyhow!("non-userland keyspace"))?,
-                    key,
+                    key.clone(),
                 ),
                 Mutation::Put(value),
             );
         }
 
         self.lsm
-            .write(*ts, preconds, actual_muts)
+            .write(*ts, preconds.clone(), actual_muts)
             .await
             .map_err(|e| InternalWriteError::Other(e.into()))?;
+
+        for precond in preconds {
+            _ = self
+                .prepare_sender
+                .send((
+                    txid,
+                    precond.keyspace_id(),
+                    precond.key().to_vec(),
+                    PrepareType::Precondition,
+                ))
+                .await;
+        }
+        for ((keyspace_id, key), _) in muts {
+            _ = self
+                .prepare_sender
+                .send((txid, keyspace_id, key, PrepareType::Mutation))
+                .await;
+        }
 
         Ok(*ts)
     }
@@ -1167,6 +1156,41 @@ impl LsmTabletInner {
             .map_err(|e| CommitError::Other(e.into()))?;
         Ok(())
     }
+
+    async fn resolve_prepared(
+        &self,
+        receiver: mpsc::Receiver<(TxId, KeyspaceId, Vec<u8>, PrepareType)>,
+    ) {
+        crate::util::bounded_unordered_map(
+            receiver,
+            64,
+            |(txid, keyspace_id, key, prepare_type)| async move {
+                let owner_tablet = self.tablets.tablet(txid.owner).unwrap();
+                let tx_outcome = owner_tablet.wait(txid).await.unwrap();
+                // Commits get cleaned up by the owner tablet calling cleanup_committed. Ignore them
+                // here to avoid duplicating work.
+                // TODO: retry instead of unwrap
+                if let TxOutcome::Aborted = tx_outcome {
+                    match prepare_type {
+                        PrepareType::Precondition => self
+                            .cleanup_precond_key(txid, keyspace_id, key)
+                            .await
+                            .unwrap(),
+                        PrepareType::Mutation => self
+                            .cleanup_pending_key(txid, tx_outcome, keyspace_id, key)
+                            .await
+                            .unwrap(),
+                    }
+                }
+            },
+        )
+        .await;
+    }
+}
+
+enum PrepareType {
+    Precondition,
+    Mutation,
 }
 
 struct PendingMutation {
