@@ -2056,27 +2056,24 @@ mod test {
         let v = b"foo";
 
         lsm.create_keyspace(keyspace_id).await?;
-        let write_ts = lsm
-            .write(
-                vec![],
-                BTreeMap::from([((keyspace_id, k.to_vec()), Mutation::Put(v.to_vec()))]),
-            )
-            .await?;
-        assert_eq!(lsm.get(write_ts.minus_one(), keyspace_id, k).await?, None);
-        assert_eq!(lsm.get(write_ts, keyspace_id, k).await?, Some(v.to_vec()));
+        lsm.write(
+            Timestamp(5),
+            vec![],
+            BTreeMap::from([((keyspace_id, k.to_vec()), Mutation::Put(v.to_vec()))]),
+        )
+        .await?;
+        assert_eq!(lsm.get(Timestamp(4), keyspace_id, k).await?, None);
         assert_eq!(
-            lsm.get(write_ts.plus_one(), keyspace_id, k).await?,
-            Some(v.to_vec())
+            lsm.get(Timestamp(5), keyspace_id, k).await?,
+            Some((Timestamp(5), Value::Regular(v.to_vec())))
         );
         assert_eq!(
-            lsm.get(write_ts.minus_one(), keyspace_id, not_k).await?,
-            None
+            lsm.get(Timestamp(6), keyspace_id, k).await?,
+            Some((Timestamp(5), Value::Regular(v.to_vec())))
         );
-        assert_eq!(lsm.get(write_ts, keyspace_id, not_k).await?, None);
-        assert_eq!(
-            lsm.get(write_ts.plus_one(), keyspace_id, not_k).await?,
-            None
-        );
+        assert_eq!(lsm.get(Timestamp(4), keyspace_id, not_k).await?, None);
+        assert_eq!(lsm.get(Timestamp(5), keyspace_id, not_k).await?, None);
+        assert_eq!(lsm.get(Timestamp(6), keyspace_id, not_k).await?, None);
 
         Ok(())
     }
@@ -2090,22 +2087,23 @@ mod test {
         let kb = b"b";
 
         lsm.create_keyspace(keyspace_id).await?;
-        let write_0_ts = lsm
-            .write(
-                vec![],
-                BTreeMap::from([
-                    ((keyspace_id, ka.to_vec()), Mutation::Put(b"a0".to_vec())),
-                    ((keyspace_id, kb.to_vec()), Mutation::Put(b"b0".to_vec())),
-                ]),
-            )
-            .await?;
+        lsm.write(
+            Timestamp(5),
+            vec![],
+            BTreeMap::from([
+                ((keyspace_id, ka.to_vec()), Mutation::Put(b"a0".to_vec())),
+                ((keyspace_id, kb.to_vec()), Mutation::Put(b"b0".to_vec())),
+            ]),
+        )
+        .await?;
 
         assert!(matches!(
             lsm.write(
+                Timestamp(10),
                 vec![Precondition::NotChangedSince(
                     keyspace_id,
                     ka.to_vec(),
-                    write_0_ts.minus_one()
+                    Timestamp(4),
                 )],
                 BTreeMap::from([((keyspace_id, ka.to_vec()), Mutation::Put(b"a1".to_vec()))]),
             )
@@ -2113,33 +2111,38 @@ mod test {
             Err(WriteError::PreconditionFailed),
         ));
 
-        let write_1_ts = lsm
-            .write(
-                vec![Precondition::NotChangedSince(
-                    keyspace_id,
-                    ka.to_vec(),
-                    write_0_ts,
-                )],
-                BTreeMap::from([
-                    ((keyspace_id, ka.to_vec()), Mutation::Put(b"a1".to_vec())),
-                    ((keyspace_id, kb.to_vec()), Mutation::Delete),
-                ]),
-            )
-            .await?;
+        lsm.write(
+            Timestamp(10),
+            vec![Precondition::NotChangedSince(
+                keyspace_id,
+                ka.to_vec(),
+                Timestamp(5),
+            )],
+            BTreeMap::from([
+                ((keyspace_id, ka.to_vec()), Mutation::Put(b"a1".to_vec())),
+                ((keyspace_id, kb.to_vec()), Mutation::Delete),
+            ]),
+        )
+        .await?;
 
+        assert_eq!(lsm.get(Timestamp(4), keyspace_id, ka).await?, None);
+        assert_eq!(lsm.get(Timestamp(4), keyspace_id, kb).await?, None);
         assert_eq!(
-            lsm.get(write_1_ts.minus_one(), keyspace_id, ka).await?,
-            Some(b"a0".to_vec())
+            lsm.get(Timestamp(9), keyspace_id, ka).await?,
+            Some((Timestamp(5), Value::Regular(b"a0".to_vec())))
         );
         assert_eq!(
-            lsm.get(write_1_ts.minus_one(), keyspace_id, kb).await?,
-            Some(b"b0".to_vec())
+            lsm.get(Timestamp(9), keyspace_id, kb).await?,
+            Some((Timestamp(5), Value::Regular(b"b0".to_vec())))
         );
         assert_eq!(
-            lsm.get(write_1_ts, keyspace_id, ka).await?,
-            Some(b"a1".to_vec())
+            lsm.get(Timestamp(10), keyspace_id, ka).await?,
+            Some((Timestamp(10), Value::Regular(b"a1".to_vec())))
         );
-        assert_eq!(lsm.get(write_1_ts, keyspace_id, kb).await?, None);
+        assert_eq!(
+            lsm.get(Timestamp(10), keyspace_id, kb).await?,
+            Some((Timestamp(10), Value::Tombstone))
+        );
 
         Ok(())
     }
@@ -2162,19 +2165,22 @@ mod test {
             // enough to overfill a memtable.
             for i in 0..24 {
                 let v = (i % 179) as u8;
-                let put_ts = lsm
-                    .write(
-                        vec![],
-                        BTreeMap::from([((keyspace_id, vec![i as u8]), Mutation::Put(vec![v]))]),
-                    )
-                    .await?;
-                last_ts = std::cmp::max(put_ts, last_ts);
+                last_ts = Timestamp(last_ts.0 + 1);
+                lsm.write(
+                    last_ts,
+                    vec![],
+                    BTreeMap::from([((keyspace_id, vec![i as u8]), Mutation::Put(vec![v]))]),
+                )
+                .await?;
                 map.insert(i as u8, v);
             }
             compacted.await;
 
             for (k, v) in &map {
-                assert_eq!(lsm.get(last_ts, keyspace_id, &[*k]).await?, Some(vec![*v]));
+                assert_eq!(
+                    lsm.get(last_ts, keyspace_id, &[*k]).await?.map(|(_, b)| b),
+                    Some(Value::Regular(vec![*v])),
+                );
             }
         }
 
@@ -2218,13 +2224,13 @@ mod test {
                     let mut v = [0u8; 4];
                     BigEndian::write_u32(&mut v, ctr);
                     ctr += 1;
-                    let put_ts = lsm
-                        .write(
-                            vec![],
-                            BTreeMap::from([((keyspace_id, vec![k]), Mutation::Put(v.to_vec()))]),
-                        )
-                        .await?;
-                    last_ts = std::cmp::max(put_ts, last_ts);
+                    lsm.write(
+                        Timestamp(ctr as u64),
+                        vec![],
+                        BTreeMap::from([((keyspace_id, vec![k]), Mutation::Put(v.to_vec()))]),
+                    )
+                    .await?;
+                    last_ts = Timestamp(ctr as u64);
                     map.insert(k, v.to_vec());
                 }
 
@@ -2249,8 +2255,8 @@ mod test {
             dump_lsm(&lsm).await?;
 
             for (k, v) in &map {
-                let actual = lsm.get(last_ts, keyspace_id, &[*k]).await?.unwrap();
-                assert_eq!(Some(actual), Some(v.clone()));
+                let actual = lsm.get(last_ts, keyspace_id, &[*k]).await?.map(|(_, b)| b);
+                assert_eq!(actual, Some(Value::Regular(v.clone())));
             }
         }
 
@@ -2275,25 +2281,30 @@ mod test {
         lsm.create_keyspace(keyspace_id).await?;
 
         let mut map = BTreeMap::new();
-        let mut last_ts = Timestamp::ZERO;
+        let mut write_ts = 5;
         for _ in 0..10 {
             // We consider these writes to be 10 bytes (1 key + 8 ts + 1 value), so this is
             // enough to overfill a memtable.
             for i in 0..24 {
                 let v = (i % 179) as u8;
-                let put_ts = lsm
-                    .write(
-                        vec![],
-                        BTreeMap::from([((keyspace_id, vec![i as u8]), Mutation::Put(vec![v]))]),
-                    )
-                    .await?;
-                last_ts = std::cmp::max(put_ts, last_ts);
+                lsm.write(
+                    Timestamp(write_ts),
+                    vec![],
+                    BTreeMap::from([((keyspace_id, vec![i as u8]), Mutation::Put(vec![v]))]),
+                )
+                .await?;
+                write_ts += 2;
                 map.insert(i as u8, v);
             }
             lsm.pending_compactions().await;
 
             for (k, v) in &map {
-                assert_eq!(lsm.get(last_ts, keyspace_id, &[*k]).await?, Some(vec![*v]));
+                assert_eq!(
+                    lsm.get(Timestamp(write_ts), keyspace_id, &[*k])
+                        .await?
+                        .map(|(_, b)| b),
+                    Some(Value::Regular(vec![*v])),
+                );
             }
         }
 
@@ -2318,7 +2329,12 @@ mod test {
         let lsm = LsmBuilder::new().wal(wal).storage(storage).build().await?;
 
         for (k, v) in &map {
-            assert_eq!(lsm.get(last_ts, keyspace_id, &[*k]).await?, Some(vec![*v]));
+            assert_eq!(
+                lsm.get(Timestamp(write_ts), keyspace_id, &[*k])
+                    .await?
+                    .map(|(_, b)| b),
+                Some(Value::Regular(vec![*v]))
+            );
         }
 
         Ok(())
@@ -2579,18 +2595,21 @@ mod test {
                 let keyspace_id = KeyspaceId(1);
                 lsm.create_keyspace(keyspace_id).await.unwrap();
 
+                let mut write_ts = 5;
                 for (i, index) in write_indexes.iter().enumerate() {
                     let key = keys_vec[index.index(keys_vec.len())];
                     let mut value = vec![0; 16];
                     BigEndian::write_u64(&mut value[8..], i as u64);
-                    let ts = lsm
+                    lsm
                         .write(
+                            Timestamp(write_ts),
                             vec![],
                             BTreeMap::from([((keyspace_id, key.clone()), Mutation::Put(value.clone()))]),
                         )
                         .await
                         .unwrap();
-                    writes.push((key.clone(), ts, value.clone()));
+                    writes.push((key.clone(), Timestamp(write_ts), value.clone()));
+                    write_ts += 2;
                 }
 
                 for (log_index_gen, range) in std::iter::zip(log_indexes, ranges) {
