@@ -65,6 +65,13 @@ pub struct KeyspaceId(pub u32);
 impl KeyspaceId {
     pub(crate) const TX_OUTCOMES: Self = Self(0xFE000001);
 
+    pub(crate) fn userland(&self) -> Option<KeyspaceId> {
+        if !self.is_pending() && !self.is_precond() {
+            return None;
+        }
+        Some(KeyspaceId(self.0 & 0x00FFFFFF))
+    }
+
     pub(crate) fn is_userland(&self) -> bool {
         self.0 & 0xFF000000 == 0
     }
@@ -76,11 +83,19 @@ impl KeyspaceId {
         Some(KeyspaceId(self.0 | 0x01000000))
     }
 
+    pub(crate) fn is_pending(&self) -> bool {
+        self.0 & 0xFF000000 == 0x01000000
+    }
+
     pub(crate) fn precond(&self) -> Option<KeyspaceId> {
         if !self.is_userland() {
             return None;
         }
         Some(KeyspaceId(self.0 | 0x02000000))
+    }
+
+    pub(crate) fn is_precond(&self) -> bool {
+        self.0 & 0xFF000000 == 0x02000000
     }
 }
 

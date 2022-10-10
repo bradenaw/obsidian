@@ -598,6 +598,8 @@ impl LsmTablet {
 
         let inner = Arc::new(LsmTabletInner::new(lsm, tablets, router, commit_sender));
 
+        // TODO: also read already-committed outcomes into commit_sender
+
         let inner_ = inner.clone();
         let bg_cleanup_committed_outcomes = tokio::spawn(async move {
             inner_
