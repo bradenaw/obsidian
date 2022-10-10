@@ -471,7 +471,7 @@ impl Tablet for LsmTablet {
 
 impl LsmTablet {
     async fn resolve_txs<S: Stream<Item = (TxId, KeyspaceId, Vec<u8>)>>(
-        tablet: Arc<LsmTabletInner>,
+        &self,
         rx: S,
     ) -> anyhow::Result<()> {
         const MAX_CONCURRENT: usize = 64;
@@ -484,14 +484,14 @@ impl LsmTablet {
                 next = rx.next(), if !done => {
                     match next {
                         Some((txid, keyspace_id, key)) => {
-                            let owner_tablet = tablet.tablets.tablet(txid.owner)?;
+                            let owner_tablet = self.inner.tablets.tablet(txid.owner)?;
                             waits.push(async move {
                                 let tx_outcome = owner_tablet.wait(txid).await;
                                 tx_outcome.map(|tx_outcome| (txid, tx_outcome, keyspace_id, key))
                             });
                             if waits.len() == MAX_CONCURRENT {
                                 if let Some((txid, tx_outcome, keyspace_id, key)) = waits.try_next().await? {
-                                    tablet.cleanup(txid, tx_outcome, keyspace_id, key).await?;
+                                    self.inner.cleanup(txid, tx_outcome, keyspace_id, key).await?;
                                 }
                             }
                         },
@@ -502,7 +502,7 @@ impl LsmTablet {
                 }
                 Some(wait) = waits.next() => {
                     let (txid, tx_outcome, keyspace_id, key) = wait?;
-                    tablet.cleanup(txid, tx_outcome, keyspace_id, key).await?;
+                    self.inner.cleanup(txid, tx_outcome, keyspace_id, key).await?;
                     if done && waits.len() == 0 {
                         break;
                     }
