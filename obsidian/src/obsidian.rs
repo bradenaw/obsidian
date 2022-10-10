@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::fmt::Debug;
+use std::io::Cursor;
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -35,6 +37,8 @@ use crate::types::Timestamp;
 use crate::types::Value;
 use crate::types::WriteError;
 use crate::util::hexlify;
+use crate::util::longest_shared_prefix_len;
+use crate::util::write_varint_to;
 
 struct Obsidian {
     router: Box<dyn Router>,
@@ -346,6 +350,70 @@ impl TxOutcome {
             }
             _ => anyhow::bail!("invalid tx outcome: tag not 0 or 1"),
         }
+    }
+}
+
+enum TxOutcomeRecord {
+    Committed {
+        ts: Timestamp,
+        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+    },
+    Aborted,
+}
+
+impl TxOutcomeRecord {
+    fn encode(&self) -> Vec<u8> {
+        match self {
+            TxOutcomeRecord::Aborted => TxOutcome::Aborted.encode(),
+            TxOutcomeRecord::Committed {
+                ts,
+                precond_keys,
+                mut_keys,
+            } => {
+                let mut m = BTreeMap::new();
+                for (keyspace_id, key) in precond_keys {
+                    m.entry(key)
+                        .or_insert_with(BTreeMap::new)
+                        .entry(keyspace_id)
+                        .or_insert(0x01);
+                }
+                for (keyspace_id, key) in mut_keys {
+                    let entry = m
+                        .entry(key)
+                        .or_insert_with(BTreeMap::new)
+                        .entry(keyspace_id)
+                        .or_insert(0);
+                    *entry = *entry | 0x02;
+                }
+
+                let mut maybe_prev_key = None;
+                let mut out = Cursor::new(vec![]);
+                out.write(&TxOutcome::Committed(*ts).encode()).unwrap();
+                for (key, keyspace_ids) in m {
+                    let n_shared = match maybe_prev_key {
+                        Some(prev_key) => longest_shared_prefix_len(prev_key, key),
+                        None => 0,
+                    };
+
+                    write_varint_to(&mut out, n_shared as u64).unwrap();
+                    write_varint_to(&mut out, (key.len() - n_shared) as u64).unwrap();
+                    out.write(&key[n_shared..]).unwrap();
+                    write_varint_to(&mut out, keyspace_ids.len() as u64).unwrap();
+
+                    for (keyspace_id, bits) in keyspace_ids {
+                        write_varint_to(&mut out, (keyspace_id.0 as u64) << 2 | bits).unwrap();
+                    }
+
+                    maybe_prev_key = Some(key);
+                }
+                out.into_inner()
+            }
+        }
+    }
+
+    fn decode(b: &[u8]) -> anyhow::Result<Self> {
+        todo!();
     }
 }
 

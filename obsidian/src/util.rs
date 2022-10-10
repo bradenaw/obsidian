@@ -1,9 +1,12 @@
+use std::cmp;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::RwLock;
 
 use async_stream::try_stream;
+use byteorder::WriteBytesExt;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
 
@@ -96,6 +99,13 @@ pub(crate) fn longest_shared_prefix(a: &[u8], b: &[u8]) -> Vec<u8> {
         .collect()
 }
 
+pub(crate) fn longest_shared_prefix_len(a: &[u8], b: &[u8]) -> usize {
+    std::iter::zip(a.iter(), b.iter())
+        .take_while(|(a, b)| *a == *b)
+        .map(|(a, _)| *a)
+        .count()
+}
+
 // Returns the number of bytes needed to represent x.
 pub(crate) fn byte_width(x: u64) -> usize {
     let bits_needed = 64 - x.leading_zeros();
@@ -131,4 +141,46 @@ impl<T> AtomicArc<T> {
         }
         false
     }
+}
+
+pub(crate) fn write_varint(b: &mut [u8], mut x: u64) -> usize {
+    for i in 0..10 {
+        b[i] = (x & 0x7F) as u8;
+        x >>= 7;
+        if x != 0 {
+            b[i] |= 0x80;
+        } else {
+            return i;
+        }
+    }
+    10
+}
+
+pub(crate) fn write_varint_to(mut w: impl Write, mut x: u64) -> std::io::Result<usize> {
+    for i in 0..10 {
+        let mut b = (x & 0x7F) as u8;
+        x >>= 7;
+        if x != 0 {
+            b |= 0x80;
+        }
+
+        w.write_u8(b)?;
+
+        if x == 0 {
+            return Ok(i);
+        }
+    }
+    Ok(10)
+}
+
+pub(crate) fn read_varint(b: &[u8]) -> anyhow::Result<(u64, usize)> {
+    let mut x = 0u64;
+    for i in 0..cmp::min(10, b.len()) {
+        x <<= 7;
+        x |= (b[i] & 0x7F) as u64;
+        if b[i] & 0x80 == 0 {
+            return Ok((x, i));
+        }
+    }
+    anyhow::bail!("invalid varint");
 }
