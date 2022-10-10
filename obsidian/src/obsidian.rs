@@ -25,6 +25,8 @@ use futures::StreamExt;
 use futures::TryStreamExt;
 use rand::Rng;
 use thiserror::Error;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::lock_mgr::Guard;
 use crate::lock_mgr::LockMgr;
@@ -504,10 +506,19 @@ trait Tablet {
     ) -> anyhow::Result<TxOutcome>;
     async fn try_abort(&self, txid: TxId) -> anyhow::Result<TxOutcome>;
     async fn wait(&self, txid: TxId) -> anyhow::Result<TxOutcome>;
+    async fn cleanup_committed(
+        &self,
+        txid: TxId,
+        ts: Timestamp,
+        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+    ) -> anyhow::Result<()>;
 }
 
 struct LsmTablet {
     inner: Arc<LsmTabletInner>,
+
+    bg_cleanup_committed_outcomes: JoinHandle<()>,
 }
 
 #[async_trait]
@@ -564,9 +575,43 @@ impl Tablet for LsmTablet {
     async fn wait(&self, txid: TxId) -> anyhow::Result<TxOutcome> {
         self.inner.wait(txid).await
     }
+    async fn cleanup_committed(
+        &self,
+        txid: TxId,
+        ts: Timestamp,
+        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .cleanup_committed(txid, ts, precond_keys, mut_keys)
+            .await
+    }
 }
 
 impl LsmTablet {
+    fn new(
+        lsm: Lsm,
+        tablets: Box<dyn Tablets + Sync + Send>,
+        router: Box<dyn Router + Sync + Send>,
+    ) -> Self {
+        let (commit_sender, commit_receiver) = mpsc::channel(128);
+
+        let inner = Arc::new(LsmTabletInner::new(lsm, tablets, router, commit_sender));
+
+        let inner_ = inner.clone();
+        let bg_cleanup_committed_outcomes = tokio::spawn(async move {
+            inner_
+                .clone()
+                .cleanup_committed_outcomes(commit_receiver)
+                .await;
+        });
+
+        Self {
+            inner,
+            bg_cleanup_committed_outcomes,
+        }
+    }
+
     async fn resolve_txs<S: Stream<Item = (TxId, KeyspaceId, Vec<u8>)>>(
         &self,
         rx: S,
@@ -588,7 +633,7 @@ impl LsmTablet {
                             });
                             if waits.len() == MAX_CONCURRENT {
                                 if let Some((txid, tx_outcome, keyspace_id, key)) = waits.try_next().await? {
-                                    self.inner.cleanup(txid, tx_outcome, keyspace_id, key).await?;
+                                    self.inner.cleanup_one_key(txid, tx_outcome, keyspace_id, key).await?;
                                 }
                             }
                         },
@@ -599,7 +644,7 @@ impl LsmTablet {
                 }
                 Some(wait) = waits.next() => {
                     let (txid, tx_outcome, keyspace_id, key) = wait?;
-                    self.inner.cleanup(txid, tx_outcome, keyspace_id, key).await?;
+                    self.inner.cleanup_one_key(txid, tx_outcome, keyspace_id, key).await?;
                     if done && waits.len() == 0 {
                         break;
                     }
@@ -610,6 +655,12 @@ impl LsmTablet {
     }
 }
 
+impl Drop for LsmTablet {
+    fn drop(&mut self) {
+        self.bg_cleanup_committed_outcomes.abort()
+    }
+}
+
 struct LsmTabletInner {
     lsm: Lsm,
     tablets: Box<dyn Tablets + Sync + Send>,
@@ -617,6 +668,12 @@ struct LsmTabletInner {
     sequencer: Sequencer,
     lock_mgr: LockMgr,
 
+    commit_sender: mpsc::Sender<(
+        TxId,
+        Timestamp,
+        BTreeSet<(KeyspaceId, Vec<u8>)>,
+        BTreeSet<(KeyspaceId, Vec<u8>)>,
+    )>,
     waiters: Mutex<
         HashMap<
             TxId,
@@ -629,6 +686,28 @@ struct LsmTabletInner {
 }
 
 impl LsmTabletInner {
+    fn new(
+        lsm: Lsm,
+        tablets: Box<dyn Tablets + Sync + Send>,
+        router: Box<dyn Router + Sync + Send>,
+        commit_sender: mpsc::Sender<(
+            TxId,
+            Timestamp,
+            BTreeSet<(KeyspaceId, Vec<u8>)>,
+            BTreeSet<(KeyspaceId, Vec<u8>)>,
+        )>,
+    ) -> Self {
+        Self {
+            lsm,
+            tablets,
+            router,
+            commit_sender,
+            sequencer: Sequencer::new(),
+            lock_mgr: LockMgr::new(16384),
+            waiters: Mutex::new(HashMap::new()),
+        }
+    }
+
     async fn get(
         &self,
         ts: Timestamp,
@@ -802,19 +881,14 @@ impl LsmTabletInner {
         }
     }
 
-    fn new(
-        lsm: Lsm,
-        tablets: Box<dyn Tablets + Sync + Send>,
-        router: Box<dyn Router + Sync + Send>,
-    ) -> Self {
-        Self {
-            lsm,
-            tablets,
-            router,
-            sequencer: Sequencer::new(),
-            lock_mgr: LockMgr::new(16384),
-            waiters: Mutex::new(HashMap::new()),
-        }
+    async fn cleanup_committed(
+        &self,
+        txid: TxId,
+        ts: Timestamp,
+        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+    ) -> anyhow::Result<()> {
+        todo!();
     }
 
     // TODO: make this take a lockmgr guard that proves the lock is held
@@ -874,33 +948,47 @@ impl LsmTabletInner {
         tx_outcome_record: TxOutcomeRecord,
     ) -> anyhow::Result<TxOutcome> {
         let tx_outcome_key = txid.to_bytes();
-        let _guard = self.lock_mgr.write_lock(&tx_outcome_key[..]).await;
-        if let Some((_, Value::Regular(tx_outcome_bytes))) = self
-            .unsafe_get_latest_record(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
-            .await?
         {
-            let existing_tx_outcome = TxOutcome::decode(&tx_outcome_bytes[..])?;
-            return Ok(existing_tx_outcome);
+            let _guard = self.lock_mgr.write_lock(&tx_outcome_key[..]).await;
+            if let Some((_, Value::Regular(tx_outcome_bytes))) = self
+                .unsafe_get_latest_record(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
+                .await?
+            {
+                let existing_tx_outcome = TxOutcome::decode(&tx_outcome_bytes[..])?;
+                return Ok(existing_tx_outcome);
+            }
+            self.lsm
+                .write(
+                    Timestamp::ZERO,
+                    vec![],
+                    BTreeMap::from([(
+                        (KeyspaceId::TX_OUTCOMES, tx_outcome_key.to_vec()),
+                        Mutation::Put(tx_outcome_record.encode()),
+                    )]),
+                )
+                .await
+                .map_err(|e| CommitError::Other(e.into()))?;
         }
-        self.lsm
-            .write(
-                Timestamp::ZERO,
-                vec![],
-                BTreeMap::from([(
-                    (KeyspaceId::TX_OUTCOMES, tx_outcome_key.to_vec()),
-                    Mutation::Put(tx_outcome_record.encode()),
-                )]),
-            )
-            .await
-            .map_err(|e| CommitError::Other(e.into()))?;
+        let tx_outcome = tx_outcome_record.tx_outcome();
+        if let TxOutcomeRecord::Committed {
+            ts,
+            precond_keys,
+            mut_keys,
+        } = tx_outcome_record
+        {
+            _ = self
+                .commit_sender
+                .send((txid, ts, precond_keys, mut_keys))
+                .await;
+        }
         let mut waiters = self.waiters.lock().unwrap();
         if let Some((tx, _)) = waiters.remove(&txid) {
             _ = tx.send(());
         }
-        Ok(tx_outcome_record.tx_outcome())
+        Ok(tx_outcome)
     }
 
-    async fn cleanup(
+    async fn cleanup_one_key(
         &self,
         txid: TxId,
         tx_outcome: TxOutcome,
@@ -940,6 +1028,80 @@ impl LsmTabletInner {
             muts.insert((keyspace_id, key.clone()), m);
         }
         self.lsm.write(resolve_ts, vec![], muts).await?;
+        Ok(())
+    }
+
+    async fn cleanup_committed_outcomes(
+        &self,
+        mut r: mpsc::Receiver<(
+            TxId,
+            Timestamp,
+            BTreeSet<(KeyspaceId, Vec<u8>)>,
+            BTreeSet<(KeyspaceId, Vec<u8>)>,
+        )>,
+    ) {
+        while let Some((txid, ts, precond_keys, mut_keys)) = r.recv().await {
+            self.cleanup_one_committed_outcome(txid, ts, precond_keys, mut_keys)
+                .await
+                .unwrap();
+        }
+    }
+
+    async fn cleanup_one_committed_outcome(
+        &self,
+        txid: TxId,
+        ts: Timestamp,
+        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+    ) -> anyhow::Result<()> {
+        let mut by_tablet = HashMap::new();
+
+        for (keyspace_id, key) in precond_keys {
+            let tablet_id = self.router.tablet_id_for_key(keyspace_id, &key)?;
+            by_tablet
+                .entry(tablet_id)
+                .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()))
+                .0
+                .insert((keyspace_id, key));
+        }
+        for (keyspace_id, key) in mut_keys {
+            let tablet_id = self.router.tablet_id_for_key(keyspace_id, &key)?;
+            by_tablet
+                .entry(tablet_id)
+                .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()))
+                .1
+                .insert((keyspace_id, key));
+        }
+
+        // Lifetime shenanigans.
+        let tablets = by_tablet
+            .keys()
+            .map(|tablet_id| {
+                self.tablets
+                    .tablet(*tablet_id)
+                    .map(|tablet| (*tablet_id, tablet))
+            })
+            .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+        let mut futures = Vec::with_capacity(by_tablet.len());
+        for (tablet_id, (precond_keys, mut_keys)) in by_tablet {
+            let tablet = tablets.get(&tablet_id).unwrap();
+            futures.push(tablet.cleanup_committed(txid, ts, precond_keys, mut_keys));
+        }
+        future::try_join_all(futures).await?;
+
+        // TODO: mutual exclusion
+        let tx_outcome_key = txid.to_bytes();
+        self.lsm
+            .write(
+                Timestamp::ZERO.plus_one(),
+                vec![],
+                BTreeMap::from([(
+                    (KeyspaceId::TX_OUTCOMES, tx_outcome_key.to_vec()),
+                    Mutation::Delete,
+                )]),
+            )
+            .await
+            .map_err(|e| CommitError::Other(e.into()))?;
         Ok(())
     }
 }
