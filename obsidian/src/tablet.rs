@@ -3,11 +3,16 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::io::Cursor;
+use std::io::Read;
+use std::io::Seek;
+use std::io::SeekFrom;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use byteorder::ByteOrder;
+use byteorder::LittleEndian;
 use futures::future;
 use futures::FutureExt;
 use tokio::sync::mpsc;
@@ -30,6 +35,8 @@ use crate::types::Precondition;
 use crate::types::Timestamp;
 use crate::types::Value;
 use crate::util::longest_shared_prefix_len;
+use crate::util::read_varint;
+use crate::util::read_varint_from;
 use crate::util::write_varint_to;
 
 const MAX_PRECOND_VALUE_LEN: usize = 256;
@@ -156,13 +163,15 @@ impl Tablet for LsmTablet {
 }
 
 impl LsmTablet {
-    pub fn new(
+    pub async fn new(
         lsm: Lsm,
         tablets: Box<dyn Tablets + Sync + Send>,
         router: Box<dyn Router + Sync + Send>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
         let (commit_sender, commit_receiver) = mpsc::channel(128);
+
+        lsm.create_keyspace(KeyspaceId::TX_OUTCOMES).await?;
 
         let inner = Arc::new(LsmTabletInner::new(
             lsm,
@@ -187,11 +196,27 @@ impl LsmTablet {
             inner_.clone().resolve_prepared(prepare_receiver).await;
         });
 
-        Self {
+        Ok(Self {
             inner,
             bg_cleanup_committed_outcomes,
             bg_resolve_pending,
+        })
+    }
+
+    pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        self.inner.lsm.create_keyspace(keyspace_id).await?;
+        if keyspace_id.is_userland() {
+            self.inner
+                .lsm
+                .create_keyspace(keyspace_id.pending().unwrap())
+                .await?;
+            self.inner
+                .lsm
+                .create_keyspace(keyspace_id.precond().unwrap())
+                .await?;
         }
+
+        Ok(())
     }
 }
 
@@ -272,9 +297,9 @@ impl LsmTabletInner {
         )
         .await?;
 
-        if let Some((_, Value::Regular(pending_value))) = maybe_pending_value {
-            let other_txid = TxId::try_from(&pending_value[..])?;
-            return Err(ReadError::Conflict(other_txid));
+        if let Some((_, Value::Regular(bytes))) = maybe_pending_value {
+            let pending_mut = PendingMutation::decode(&bytes)?;
+            return Err(ReadError::Conflict(pending_mut.txid));
         }
 
         Ok(match maybe_record {
@@ -429,8 +454,8 @@ impl LsmTabletInner {
                     .unsafe_get_latest_record(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
                     .await?
                 {
-                    let tx_outcome = TxOutcome::decode(&tx_outcome_bytes[..])?;
-                    return Ok(tx_outcome);
+                    let tx_outcome_record = TxOutcomeRecord::decode(&tx_outcome_bytes[..])?;
+                    return Ok(tx_outcome_record.tx_outcome());
                 }
 
                 let mut waiters = self.waiters.lock().unwrap();
@@ -526,8 +551,8 @@ impl LsmTabletInner {
                 .unsafe_get_latest_record(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
                 .await?
             {
-                let existing_tx_outcome = TxOutcome::decode(&tx_outcome_bytes[..])?;
-                return Ok(existing_tx_outcome);
+                let existing_tx_outcome_record = TxOutcomeRecord::decode(&tx_outcome_bytes[..])?;
+                return Ok(existing_tx_outcome_record.tx_outcome());
             }
             self.lsm
                 .write(
@@ -822,7 +847,7 @@ impl TxOutcomeRecord {
 
     fn encode(&self) -> Vec<u8> {
         match self {
-            TxOutcomeRecord::Aborted => TxOutcome::Aborted.encode(),
+            TxOutcomeRecord::Aborted => vec![0],
             TxOutcomeRecord::Committed {
                 ts,
                 precond_keys,
@@ -845,8 +870,13 @@ impl TxOutcomeRecord {
                 }
 
                 let mut maybe_prev_key = None;
-                let mut out = Cursor::new(vec![]);
-                out.write(&TxOutcome::Committed(*ts).encode()).unwrap();
+
+                let mut out = vec![0; 9];
+                out[0] = 1;
+                LittleEndian::write_u64(&mut out[1..], ts.as_nanos());
+                let mut out = Cursor::new(out);
+                out.seek(SeekFrom::End(0)).unwrap();
+                write_varint_to(&mut out, m.len() as u64).unwrap();
                 for (key, keyspace_ids) in m {
                     let n_shared = match maybe_prev_key {
                         Some(prev_key) => longest_shared_prefix_len(prev_key, key),
@@ -870,6 +900,41 @@ impl TxOutcomeRecord {
     }
 
     pub fn decode(b: &[u8]) -> anyhow::Result<Self> {
-        todo!();
+        if b.len() == 0 {
+            anyhow::bail!("invalid tx outcome: empty");
+        }
+        match b[0] {
+            0 => {
+                if b.len() != 1 {
+                    anyhow::bail!("invalid tx outcome: extra bytes");
+                }
+                Ok(TxOutcomeRecord::Aborted)
+            }
+            1 => {
+                if b.len() < 9 {
+                    anyhow::bail!("invalid tx outcome: wrong length");
+                }
+                let ts = Timestamp::from_nanos(LittleEndian::read_u64(&b[1..9]));
+
+                let mut precond_keys = BTreeSet::new();
+                let mut mut_keys = BTreeSet::new();
+
+                let c = Cursor::new(&b[9..]);
+
+                let n_keys = read_varint_from(c)?.0;
+                let prev_key = vec![];
+                for i in 0..n_keys {
+                    let n_shared = read_varint_from(c)?.0 as usize;
+                    if n_shared > prev_key.len() {
+                        anyhow::bail!("invalid tx outcome: shared prefix longer than prev key");
+                    }
+                    let n_more = read_varint_from(c)?.0 as usize;
+                    c.read_exact(
+                }
+
+                Ok(TxOutcome::Committed(ts))
+            }
+            _ => anyhow::bail!("invalid tx outcome: tag not 0 or 1"),
+        }
     }
 }

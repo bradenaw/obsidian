@@ -1,12 +1,14 @@
 use std::cmp;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::io::Read;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
 
 use async_stream::try_stream;
+use byteorder::ReadBytesExt;
 use byteorder::WriteBytesExt;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
@@ -181,6 +183,19 @@ pub(crate) fn read_varint(b: &[u8]) -> anyhow::Result<(u64, usize)> {
         x <<= 7;
         x |= (b[i] & 0x7F) as u64;
         if b[i] & 0x80 == 0 {
+            return Ok((x, i));
+        }
+    }
+    anyhow::bail!("invalid varint");
+}
+
+pub(crate) fn read_varint_from(r: impl Read) -> anyhow::Result<(u64, usize)> {
+    let mut x = 0u64;
+    for i in 0..10 {
+        let b = r.read_u8()?;
+        x <<= 7;
+        x |= (b & 0x7F) as u64;
+        if b & 0x80 == 0 {
             return Ok((x, i));
         }
     }

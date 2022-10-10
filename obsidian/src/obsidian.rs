@@ -341,7 +341,7 @@ impl TxOutcome {
             }
             TxOutcome::Committed(ts) => {
                 let mut out = vec![0; 9];
-                out[1] = 1;
+                out[0] = 1;
                 LittleEndian::write_u64(&mut out[1..], ts.as_nanos());
                 out
             }
@@ -407,10 +407,12 @@ pub(crate) enum ReadError {
 #[cfg(test)]
 mod test {
     use std::collections::BTreeMap;
+    use std::collections::BTreeSet;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::Mutex;
 
+    use async_trait::async_trait;
     use byteorder::BigEndian;
     use byteorder::ByteOrder;
 
@@ -420,11 +422,17 @@ mod test {
     use crate::tablet::Tablet;
     use crate::types::KeyspaceId;
     use crate::types::Mutation;
+    use crate::types::Precondition;
+    use crate::types::Timestamp;
 
+    use super::InternalWriteError;
     use super::Obsidian;
+    use super::ReadError;
     use super::Router;
     use super::TabletId;
     use super::Tablets;
+    use super::TxId;
+    use super::TxOutcome;
 
     struct CheeseRouter {}
 
@@ -451,15 +459,80 @@ mod test {
         }
     }
 
+    #[async_trait]
+    impl<T: Tablet + Send + Sync> Tablet for Arc<T> {
+        async fn get(
+            &self,
+            ts: Timestamp,
+            keyspace_id: KeyspaceId,
+            key: Vec<u8>,
+        ) -> Result<Option<Vec<u8>>, ReadError> {
+            T::get(self, ts, keyspace_id, key).await
+        }
+
+        async fn get_latest(
+            &self,
+            keyspace_id: KeyspaceId,
+            key: &[u8],
+        ) -> Result<(Timestamp, Option<Vec<u8>>), ReadError> {
+            T::get_latest(self, keyspace_id, key).await
+        }
+
+        async fn write(
+            &self,
+            txid: TxId,
+            preconds: Vec<Precondition>,
+            muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+        ) -> Result<Timestamp, InternalWriteError> {
+            T::write(self, txid, preconds, muts).await
+        }
+
+        async fn prepare(
+            &self,
+            txid: TxId,
+            preconds: Vec<Precondition>,
+            muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+        ) -> Result<Timestamp, InternalWriteError> {
+            T::prepare(self, txid, preconds, muts).await
+        }
+
+        async fn try_commit(
+            &self,
+            txid: TxId,
+            ts: Timestamp,
+            precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+            mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        ) -> anyhow::Result<TxOutcome> {
+            T::try_commit(self, txid, ts, precond_keys, mut_keys).await
+        }
+
+        async fn try_abort(&self, txid: TxId) -> anyhow::Result<TxOutcome> {
+            T::try_abort(self, txid).await
+        }
+
+        async fn wait(&self, txid: TxId) -> anyhow::Result<TxOutcome> {
+            T::wait(self, txid).await
+        }
+
+        async fn cleanup_committed(
+            &self,
+            txid: TxId,
+            ts: Timestamp,
+            precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+            mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        ) -> anyhow::Result<()> {
+            T::cleanup_committed(self, txid, ts, precond_keys, mut_keys).await
+        }
+    }
+
     struct StaticTablets {
         m: Mutex<HashMap<TabletId, Arc<LsmTablet>>>,
     }
 
-    impl Tablets for StaticTablets {
+    impl Tablets for Arc<StaticTablets> {
         fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Box<dyn Tablet + Send + Sync>> {
             Ok(Box::new(
-                *self
-                    .m
+                self.m
                     .lock()
                     .unwrap()
                     .get(&tablet_id)
@@ -470,50 +543,61 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_2pc() -> anyhow::Result<()> {
-        let mut tablets = Box::new(StaticTablets {
-            m: Mutex::new(HashMap::new()),
-        });
+    async fn test_2pc() {
+        async fn inner() -> anyhow::Result<()> {
+            let tablets = Arc::new(StaticTablets {
+                m: Mutex::new(HashMap::new()),
+            });
 
-        let storage = Arc::new(MemStorage::new());
-        let tablet1 = LsmTablet::new(
-            LsmBuilder::new().storage(storage.clone()).build().await?,
-            tablets,
-            Box::new(CheeseRouter {}),
-        );
-        let tablet2 = LsmTablet::new(
-            LsmBuilder::new().storage(storage.clone()).build().await?,
-            tablets,
-            Box::new(CheeseRouter {}),
-        );
-
-        {
-            let m = tablets.m.lock().unwrap();
-            m.insert(TabletId(1), Arc::new(tablet1));
-            m.insert(TabletId(2), Arc::new(tablet2));
-        }
-
-        let obs = Obsidian::new(Box::new(CheeseRouter {}), tablets);
-
-        let write_ts = obs
-            .write(
-                vec![],
-                BTreeMap::from([
-                    ((KeyspaceId(1), vec![1, 1]), Mutation::Put(vec![1, 2, 3])),
-                    ((KeyspaceId(1), vec![2, 2]), Mutation::Put(vec![4, 5, 6])),
-                ]),
+            let storage = Arc::new(MemStorage::new());
+            let tablet1 = LsmTablet::new(
+                LsmBuilder::new().storage(storage.clone()).build().await?,
+                Box::new(tablets.clone()),
+                Box::new(CheeseRouter {}),
             )
             .await?;
+            tablet1.create_keyspace(KeyspaceId(1)).await?;
+            let tablet2 = LsmTablet::new(
+                LsmBuilder::new().storage(storage.clone()).build().await?,
+                Box::new(tablets.clone()),
+                Box::new(CheeseRouter {}),
+            )
+            .await?;
+            tablet2.create_keyspace(KeyspaceId(1)).await?;
 
-        assert_eq!(
-            obs.get(write_ts, KeyspaceId(1), vec![1, 1]).await?,
-            Some(vec![1, 2, 3])
-        );
-        assert_eq!(
-            obs.get(write_ts, KeyspaceId(1), vec![2, 2]).await?,
-            Some(vec![4, 5, 6])
-        );
+            {
+                let mut m = tablets.m.lock().unwrap();
+                m.insert(TabletId(1), Arc::new(tablet1));
+                m.insert(TabletId(2), Arc::new(tablet2));
+            }
 
-        Ok(())
+            let obs = Obsidian::new(Box::new(CheeseRouter {}), Box::new(tablets));
+
+            let write_ts = obs
+                .write(
+                    vec![],
+                    BTreeMap::from([
+                        ((KeyspaceId(1), vec![1, 1]), Mutation::Put(vec![1, 2, 3])),
+                        ((KeyspaceId(1), vec![2, 2]), Mutation::Put(vec![4, 5, 6])),
+                    ]),
+                )
+                .await?;
+
+            assert_eq!(
+                obs.get(write_ts, KeyspaceId(1), vec![1, 1]).await?,
+                Some(vec![1, 2, 3])
+            );
+            assert_eq!(
+                obs.get(write_ts, KeyspaceId(1), vec![2, 2]).await?,
+                Some(vec![4, 5, 6])
+            );
+
+            Ok(())
+        }
+
+        if let Err(e) = inner().await {
+            println!("{:?}", e);
+            assert!(false);
+        }
     }
 }
