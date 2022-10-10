@@ -320,6 +320,7 @@ impl TryFrom<&[u8]> for TxId {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 enum TxOutcome {
     Committed(Timestamp),
     Aborted,
@@ -890,7 +891,17 @@ impl LsmTabletInner {
         precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
         mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
     ) -> anyhow::Result<()> {
-        todo!();
+        let tx_outcome = TxOutcome::Committed(ts);
+
+        for (keyspace_id, key) in precond_keys {
+            self.cleanup_precond_key(txid, keyspace_id, key).await?;
+        }
+        for (keyspace_id, key) in mut_keys {
+            self.cleanup_pending_key(txid, tx_outcome, keyspace_id, key)
+                .await?;
+        }
+
+        Ok(())
     }
 
     // TODO: make this take a lockmgr guard that proves the lock is held
@@ -990,19 +1001,19 @@ impl LsmTabletInner {
         Ok(tx_outcome)
     }
 
-    async fn cleanup_one_key(
+    async fn cleanup_pending_key(
         &self,
         txid: TxId,
         tx_outcome: TxOutcome,
         keyspace_id: KeyspaceId,
         key: Vec<u8>,
     ) -> anyhow::Result<()> {
-        let mut muts = BTreeMap::new();
-        let _guard = self.lock_mgr.write_lock(&key[..]).await;
-
         let pending_keyspace_id = keyspace_id
             .pending()
             .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?;
+
+        let mut muts = BTreeMap::new();
+        let _guard = self.lock_mgr.write_lock(&key[..]).await;
 
         let (pending_ts, value) = match self
             .unsafe_get_latest_record(pending_keyspace_id, &key)
@@ -1030,6 +1041,56 @@ impl LsmTabletInner {
             muts.insert((keyspace_id, key.clone()), m);
         }
         self.lsm.write(resolve_ts, vec![], muts).await?;
+        Ok(())
+    }
+
+    async fn cleanup_precond_key(
+        &self,
+        txid: TxId,
+        keyspace_id: KeyspaceId,
+        key: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        let precond_keyspace_id = keyspace_id
+            .precond()
+            .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?;
+
+        let mut muts = BTreeMap::new();
+        let _guard = self.lock_mgr.write_lock(&key[..]).await;
+
+        let (overwrite_ts, m) = if let Some((prepare_ts, Value::Regular(bytes))) = self
+            .unsafe_get_latest_record(precond_keyspace_id, &key)
+            .await?
+        {
+            let n = bytes.len();
+            let new_value_bytes = bytes
+                .chunks(TxId::ENCODED_LEN)
+                .filter_map(|txid_bytes| match TxId::try_from(txid_bytes) {
+                    Ok(other_txid) => {
+                        if other_txid == txid {
+                            None
+                        } else {
+                            Some(Ok(txid_bytes))
+                        }
+                    }
+                    Err(e) => Some(Err(e)),
+                })
+                .try_fold(Vec::with_capacity(n), |mut acc, elem| {
+                    acc.extend_from_slice(elem?);
+                    Ok::<Vec<u8>, anyhow::Error>(acc)
+                })?;
+
+            let m = if new_value_bytes.is_empty() {
+                Mutation::Delete
+            } else {
+                Mutation::Put(new_value_bytes)
+            };
+
+            (prepare_ts.plus_one(), m)
+        } else {
+            return Ok(());
+        };
+        muts.insert((precond_keyspace_id, key.clone()), m);
+        self.lsm.write(overwrite_ts, vec![], muts).await?;
         Ok(())
     }
 
