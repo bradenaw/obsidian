@@ -9,7 +9,6 @@ use std::time::SystemTime;
 
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
-use byteorder::LittleEndian;
 use futures::future;
 use rand::Rng;
 use thiserror::Error;
