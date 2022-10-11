@@ -333,43 +333,6 @@ pub(crate) enum TxOutcome {
     Aborted,
 }
 
-impl TxOutcome {
-    pub fn encode(&self) -> Vec<u8> {
-        match self {
-            TxOutcome::Aborted => {
-                vec![0]
-            }
-            TxOutcome::Committed(ts) => {
-                let mut out = vec![0; 9];
-                out[0] = 1;
-                LittleEndian::write_u64(&mut out[1..], ts.as_nanos());
-                out
-            }
-        }
-    }
-
-    pub fn decode(b: &[u8]) -> anyhow::Result<Self> {
-        if b.len() == 0 {
-            anyhow::bail!("invalid tx outcome: empty");
-        }
-        match b[0] {
-            0 => {
-                if b.len() != 1 {
-                    anyhow::bail!("invalid tx outcome: extra bytes");
-                }
-                Ok(TxOutcome::Aborted)
-            }
-            1 => {
-                if b.len() != 9 {
-                    anyhow::bail!("invalid tx outcome: wrong length");
-                }
-                let ts = Timestamp::from_nanos(BigEndian::read_u64(&b[1..]));
-                Ok(TxOutcome::Committed(ts))
-            }
-            _ => anyhow::bail!("invalid tx outcome: tag not 0 or 1"),
-        }
-    }
-}
 impl Debug for TxId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}/{}", self.ts, hexlify(&self.rand), self.owner.0)

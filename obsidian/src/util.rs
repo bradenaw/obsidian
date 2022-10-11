@@ -189,7 +189,7 @@ pub(crate) fn read_varint(b: &[u8]) -> anyhow::Result<(u64, usize)> {
     anyhow::bail!("invalid varint");
 }
 
-pub(crate) fn read_varint_from(r: impl Read) -> anyhow::Result<(u64, usize)> {
+pub(crate) fn read_varint_from(mut r: impl Read) -> anyhow::Result<(u64, usize)> {
     let mut x = 0u64;
     for i in 0..10 {
         let b = r.read_u8()?;

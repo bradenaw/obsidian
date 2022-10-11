@@ -35,7 +35,6 @@ use crate::types::Precondition;
 use crate::types::Timestamp;
 use crate::types::Value;
 use crate::util::longest_shared_prefix_len;
-use crate::util::read_varint;
 use crate::util::read_varint_from;
 use crate::util::write_varint_to;
 
@@ -919,20 +918,37 @@ impl TxOutcomeRecord {
                 let mut precond_keys = BTreeSet::new();
                 let mut mut_keys = BTreeSet::new();
 
-                let c = Cursor::new(&b[9..]);
+                let mut c = Cursor::new(&b[9..]);
 
-                let n_keys = read_varint_from(c)?.0;
+                let n_keys = read_varint_from(&mut c)?.0;
                 let prev_key = vec![];
-                for i in 0..n_keys {
-                    let n_shared = read_varint_from(c)?.0 as usize;
+                for _ in 0..n_keys {
+                    let n_shared = read_varint_from(&mut c)?.0 as usize;
                     if n_shared > prev_key.len() {
                         anyhow::bail!("invalid tx outcome: shared prefix longer than prev key");
                     }
-                    let n_more = read_varint_from(c)?.0 as usize;
-                    c.read_exact(
+                    let n_more = read_varint_from(&mut c)?.0 as usize;
+                    let mut key = vec![0u8; n_shared + n_more];
+                    key.extend_from_slice(&prev_key[..n_shared]);
+                    c.read_exact(&mut key[n_shared..])?;
+                    let n_keyspace_ids = read_varint_from(&mut c)?.0 as usize;
+                    for _ in 0..n_keyspace_ids {
+                        let keyspace_id_and_tag = read_varint_from(&mut c)?.0;
+                        let keyspace_id = KeyspaceId((keyspace_id_and_tag >> 2) as u32);
+                        if keyspace_id_and_tag & 0x01 != 0 {
+                            precond_keys.insert((keyspace_id, key.clone()));
+                        }
+                        if keyspace_id_and_tag & 0x02 != 0 {
+                            mut_keys.insert((keyspace_id, key.clone()));
+                        }
+                    }
                 }
 
-                Ok(TxOutcome::Committed(ts))
+                Ok(TxOutcomeRecord::Committed {
+                    ts,
+                    precond_keys,
+                    mut_keys,
+                })
             }
             _ => anyhow::bail!("invalid tx outcome: tag not 0 or 1"),
         }
