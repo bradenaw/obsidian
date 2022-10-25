@@ -1,6 +1,7 @@
 use std::cmp;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::future::Future;
 use std::io::Read;
 use std::io::Write;
 use std::sync::Arc;
@@ -241,4 +242,99 @@ pub(crate) fn delay_for_retry(i: usize, min_delay: Duration, max_delay: Duration
 }
 pub(crate) async fn sleep_for_retry(i: usize, min_delay: Duration, max_delay: Duration) {
     tokio::time::sleep(delay_for_retry(i, min_delay, max_delay)).await;
+}
+
+pub(crate) struct Retry {
+    min_delay: Duration,
+    max_delay: Duration,
+    timeout: Duration,
+    n_attempts: usize,
+}
+
+impl Retry {
+    pub fn new() -> Self {
+        Self {
+            min_delay: Duration::from_millis(10),
+            max_delay: Duration::from_millis(5000),
+            timeout: Duration::MAX,
+            n_attempts: 5,
+        }
+    }
+
+    pub fn min_delay(mut self, x: Duration) -> Self {
+        self.min_delay = x;
+        self
+    }
+
+    pub fn max_delay(mut self, x: Duration) -> Self {
+        self.max_delay = x;
+        self
+    }
+
+    pub fn timeout(mut self, x: Duration) -> Self {
+        self.timeout = x;
+        self
+    }
+
+    pub fn n_attempts(mut self, x: usize) -> Self {
+        self.n_attempts = x;
+        self
+    }
+
+    pub async fn indefinitely<
+        F: Fn() -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+        T,
+        E: std::error::Error + Send + Sync + 'static,
+    >(
+        self,
+        f: F,
+    ) -> T {
+        let mut i = 0;
+        loop {
+            if let Ok(t) = f().await {
+                return t;
+            }
+            sleep_for_retry(i, self.min_delay, self.max_delay).await;
+            i = i.saturating_add(1);
+        }
+    }
+
+    pub async fn with_retry<
+        F: Fn() -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+        T,
+        E: std::error::Error + Send + Sync + 'static,
+    >(
+        self,
+        f: F,
+    ) -> anyhow::Result<T> {
+        let start = std::time::Instant::now();
+        let mut last_err = None;
+        for i in 0..self.n_attempts {
+            match tokio::time::timeout(self.timeout - start.elapsed(), f()).await {
+                Ok(Ok(t)) => return Ok(t),
+                Ok(Err(e)) => {
+                    last_err = Some(e);
+                }
+                Err(_) => {
+                    // Timeout. Bubble out the last actual error if possible.
+                    if let Some(e) = last_err {
+                        return Err(e.into());
+                    }
+                    anyhow::bail!("timed out")
+                }
+            }
+            let delay = delay_for_retry(i, self.min_delay, self.max_delay);
+            if delay > self.timeout - start.elapsed() {
+                // last_err can't be None here, if it were we would have already returned.
+                return Err(last_err.unwrap().into());
+            }
+            tokio::time::sleep(delay).await;
+        }
+        if let Some(e) = last_err {
+            return Err(e.into());
+        }
+        anyhow::bail!("no attempts")
+    }
 }

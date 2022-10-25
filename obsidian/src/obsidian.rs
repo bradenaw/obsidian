@@ -1,12 +1,15 @@
+use std::cell::RefCell;
 use std::cmp;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::fmt::Debug;
+use std::rc::Rc;
 use std::time::Duration;
 use std::time::SystemTime;
 
+use anyhow::Context;
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
 use futures::future;
@@ -21,13 +24,14 @@ use crate::types::Timestamp;
 use crate::types::WriteError;
 use crate::util::hexlify;
 use crate::util::sleep_for_retry;
+use crate::util::Retry;
 
 struct Obsidian {
     router: Box<dyn Router>,
     tablets: Box<dyn Tablets>,
 }
 
-const MAX_CONFLICT_RETRIES: u32 = 10;
+const MAX_CONFLICT_RETRIES: usize = 10;
 
 impl Obsidian {
     fn new(router: Box<dyn Router>, tablets: Box<dyn Tablets>) -> Self {
@@ -43,36 +47,32 @@ impl Obsidian {
         let tablet_id = self.router.tablet_id_for_key(keyspace_id, &key)?;
         let tablet = self.tablets.tablet(tablet_id)?;
         let txid = TxId::new(tablet_id);
-        let mut already_seen_conflicts = HashSet::new();
-        for i in 0..MAX_CONFLICT_RETRIES {
-            if i != 0 {
-                sleep_for_retry(
-                    i as usize,
-                    Duration::from_millis(10),
-                    Duration::from_millis(5000),
-                )
-                .await;
-            }
+        let already_seen_conflicts = Rc::new(RefCell::new(HashSet::new()));
 
-            match tablet.get(ts, keyspace_id, key.clone()).await {
-                Ok(v) => return Ok(v),
-                Err(ReadError::Conflict(other_txid)) => {
-                    if already_seen_conflicts.contains(&other_txid) {
-                        continue;
+        Retry::new()
+            .n_attempts(MAX_CONFLICT_RETRIES + 1)
+            .with_retry(|| async {
+                let mut already_seen_conflicts = already_seen_conflicts.borrow_mut();
+                match tablet.get(ts, keyspace_id, key.clone()).await {
+                    Ok(v) => return Ok(v),
+                    Err(ReadError::Conflict(other_txid)) => {
+                        if already_seen_conflicts.contains(&other_txid) {
+                            return Err(ReadError::Conflict(other_txid));
+                        }
+                        let other_txid_owner_tablet = self.tablets.tablet(other_txid.owner)?;
+                        if txid.can_preempt(&other_txid) {
+                            other_txid_owner_tablet.try_abort(other_txid).await?;
+                        } else {
+                            other_txid_owner_tablet.wait(other_txid).await?;
+                        }
+                        already_seen_conflicts.insert(other_txid);
+                        Err(ReadError::Conflict(other_txid))
                     }
-                    let other_txid_owner_tablet = self.tablets.tablet(other_txid.owner)?;
-                    if txid.can_preempt(&other_txid) {
-                        other_txid_owner_tablet.try_abort(other_txid).await?;
-                    } else {
-                        other_txid_owner_tablet.wait(other_txid).await?;
-                    }
-                    already_seen_conflicts.insert(other_txid);
-                    continue;
+                    Err(e) => return Err(e.into()),
                 }
-                Err(e) => return Err(e.into()),
-            }
-        }
-        anyhow::bail!("too much contention");
+            })
+            .await
+            .context("too much contention")
     }
 
     pub async fn write(
