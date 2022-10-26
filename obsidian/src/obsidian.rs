@@ -46,7 +46,7 @@ impl Obsidian {
     ) -> anyhow::Result<Option<Vec<u8>>> {
         let tablet_id = self.router.tablet_id_for_key(keyspace_id, &key)?;
         let tablet = self.tablets.tablet(tablet_id)?;
-        let txid = TxId::new(tablet_id);
+        let txid = Txid::new(tablet_id);
         let already_seen_conflicts = Rc::new(RefCell::new(HashSet::new()));
 
         Retry::new()
@@ -87,7 +87,7 @@ impl Obsidian {
             .skip(rand::thread_rng().gen_range(0..write_by_tablet.len()))
             .next()
             .unwrap();
-        let mut txid = TxId::new(*owner_tablet_id);
+        let mut txid = Txid::new(*owner_tablet_id);
 
         // TODO: move into loop, since need to resolve conflicts
         if write_by_tablet.len() == 1 {
@@ -267,17 +267,17 @@ pub(crate) trait Tablets {
 }
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
-pub(crate) struct TxId {
+pub(crate) struct Txid {
     ts: u64,
     rand: [u8; 16],
     owner: TabletId,
 }
 
-impl TxId {
+impl Txid {
     pub const ENCODED_LEN: usize = 32;
 
     pub fn new(owner: TabletId) -> Self {
-        TxId {
+        Txid {
             ts: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
@@ -293,7 +293,7 @@ impl TxId {
         return self;
     }
 
-    pub fn can_preempt(&self, other: &TxId) -> bool {
+    pub fn can_preempt(&self, other: &Txid) -> bool {
         self < other
     }
 
@@ -310,7 +310,7 @@ impl TxId {
     }
 }
 
-impl TryFrom<&[u8]> for TxId {
+impl TryFrom<&[u8]> for Txid {
     type Error = anyhow::Error;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
@@ -332,7 +332,7 @@ pub(crate) enum TxOutcome {
     Aborted,
 }
 
-impl Debug for TxId {
+impl Debug for Txid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}/{}", self.ts, hexlify(&self.rand), self.owner.0)
     }
@@ -353,7 +353,7 @@ pub(crate) enum InternalWriteError {
     #[error("precondition failed")]
     PreconditionFailed,
     #[error("conflict")]
-    Conflict(TxId),
+    Conflict(Txid),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -361,7 +361,7 @@ pub(crate) enum InternalWriteError {
 #[derive(Error, Debug)]
 pub(crate) enum ReadError {
     #[error("conflict")]
-    Conflict(TxId),
+    Conflict(Txid),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -393,8 +393,8 @@ mod test {
     use super::Router;
     use super::TabletId;
     use super::Tablets;
-    use super::TxId;
     use super::TxOutcome;
+    use super::Txid;
 
     struct CheeseRouter {}
 
@@ -442,7 +442,7 @@ mod test {
 
         async fn write(
             &self,
-            txid: TxId,
+            txid: Txid,
             preconds: Vec<Precondition>,
             muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
         ) -> Result<Timestamp, InternalWriteError> {
@@ -451,7 +451,7 @@ mod test {
 
         async fn prepare(
             &self,
-            txid: TxId,
+            txid: Txid,
             preconds: Vec<Precondition>,
             muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
         ) -> Result<Timestamp, InternalWriteError> {
@@ -460,7 +460,7 @@ mod test {
 
         async fn try_commit(
             &self,
-            txid: TxId,
+            txid: Txid,
             ts: Timestamp,
             precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
             mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
@@ -468,17 +468,17 @@ mod test {
             T::try_commit(self, txid, ts, precond_keys, mut_keys).await
         }
 
-        async fn try_abort(&self, txid: TxId) -> anyhow::Result<TxOutcome> {
+        async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
             T::try_abort(self, txid).await
         }
 
-        async fn wait(&self, txid: TxId) -> anyhow::Result<TxOutcome> {
+        async fn wait(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
             T::wait(self, txid).await
         }
 
         async fn cleanup_committed(
             &self,
-            txid: TxId,
+            txid: Txid,
             ts: Timestamp,
             precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
             mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
