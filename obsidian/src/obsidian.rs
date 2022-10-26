@@ -5,7 +5,6 @@ use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::fmt::Debug;
-use std::rc::Rc;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -47,7 +46,7 @@ impl Obsidian {
         let tablet_id = self.router.tablet_id_for_key(keyspace_id, &key)?;
         let tablet = self.tablets.tablet(tablet_id)?;
         let txid = Txid::new(tablet_id);
-        let already_seen_conflicts = Rc::new(RefCell::new(HashSet::new()));
+        let already_seen_conflicts = RefCell::new(HashSet::new());
 
         Retry::new()
             .n_attempts(MAX_CONFLICT_RETRIES + 1)
