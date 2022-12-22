@@ -381,15 +381,18 @@ impl Meta for MemMeta {
         inner.ts = Timestamp::now_after(inner.ts);
         let new_ts = inner.ts;
 
+        if curr_state == TabletState::Empty {
+            inner
+                .keyspaces
+                .get_mut(&keyspace_id)
+                .unwrap()
+                .insert(tablet_id);
+        }
         inner
             .tablets
             .insert(tablet_id, (keyspace_id, range, curr_ts, new_ts, next_state));
 
-        if let Some(transfer_id) = inner
-            .transfer_locks
-            .get(&tablet_id)
-            .map(|transfer_id| *transfer_id)
-        {
+        if let Some(transfer_id) = inner.transfer_locks.get(&tablet_id).copied() {
             let (srcs, dsts) = inner.transfers.get(&transfer_id).unwrap().clone();
 
             let src_states: Vec<_> = srcs
