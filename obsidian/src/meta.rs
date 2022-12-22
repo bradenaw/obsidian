@@ -69,7 +69,7 @@ impl std::fmt::Display for TransferId {
 //    all dest Hydrating, nearly caught up╶│     │                             │                  //
 //                                         │     │                             │                  //
 //                                         │     │╴cancel transfer             │                  //
-//                                         v     │                             │                  //
+//                                         v     │                             v                  //
 //                                    ┌──────────┴─────┐                  ┌──────────┐            //
 //                                    │ Frozen   [cr_] ├─────────────────>│ Inactive │            //
 //                                    └────────────────┘        ╷         └────┬─────┘            //
