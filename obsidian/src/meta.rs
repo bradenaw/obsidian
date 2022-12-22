@@ -48,9 +48,9 @@ impl std::fmt::Display for TransferId {
 // In a range transfer, all source tablets start at Empty and all destinations start at
 // Active. The goal is to get destinations to Active and sources to Inactive.
 //
-//                  ┌───────┐         ┌────────────────┐                                          //
-//                  │ Empty ├────────>│ Hydrating      ├───────────────────────┐                  //
-//                  └───┬───┘         └───────┬────────┘                       │                  //
+//                  ┌───────┐           ┌───────────┐                                             //
+//                  │ Empty ├──────────>│ Hydrating ├──────────────────────────┐                  //
+//                  └───┬───┘           └─────┬─────┘                          │                  //
 //                      │                     │                                │                  //
 //                      │                     │╴all src Frozen, caught up      │                  //
 //                      │                     │                                │                  //
@@ -70,23 +70,16 @@ impl std::fmt::Display for TransferId {
 //                                         │     │                             │                  //
 //                                         │     │╴cancel transfer             │                  //
 //                                         v     │                             │                  //
-//                                    ┌──────────┴─────┐                       │                  //
-//                                    │ Frozen   [cr_] │                       │                  //
-//                                    └───────┬────────┘                       │                  //
-//                                            │                                │                  //
-//                          all dest Prepared╶│                                │                  //
-//                                            │                                │                  //
-//                                            v           all src Handoff      v                  //
-//                                    ┌────────────────┐         ╷        ┌──────────┐            //
-//                                    │ Handoff  [c__] ├─────────────────>│ Inactive │            //
-//                                    └────────────────┘                  └────┬─────┘            //
+//                                    ┌──────────┴─────┐                  ┌──────────┐            //
+//                                    │ Frozen   [cr_] ├─────────────────>│ Inactive │            //
+//                                    └────────────────┘        ╷         └────┬─────┘            //
+//                                                       all dest Prepared     │                  //
 //                                                                             │                  //
 //                                                     retention window passes╶│                  //
-//                                                                             │                  //
 //                                                                             v                  //
-//                                                                        ┌──────────┐            //
-//                                                                        │ Dropped  │            //
-//                                                                        └──────────┘            //
+//                                                                        ┌─────────┐             //
+//                                                                        │ Dropped │             //
+//                                                                        └─────────┘             //
 //
 //
 // And a state machine of the entire transfer, with sources on the left and destinations on the
@@ -113,14 +106,9 @@ impl std::fmt::Display for TransferId {
 //  └───────────────┬───────────────┘                                                             //
 //                  │                                                                             //
 //                  v                                                                             //
-//  ┌────────────────────────────────┐                                                            //
-//  │ Handoff [c__] │ Prepared [c__] │  Once any destination reaches handoff, it is no longer     //
-//  └───────────────┬────────────────┘  possible to abort                                         //
-//                  │                                                                             //
-//                  v                                                                             //
 //     ┌───────────────────────────┐                                                              //
-//     │ Inactive │ Prepared [c__] │                                                              //
-//     └────────────┬──────────────┘                                                              //
+//     │ Inactive │ Prepared [c__] │    Once any destination reaches inactive, it is no longer    //
+//     └────────────┬──────────────┘    possible to abort                                         //
 //                  │                                                                             //
 //                  v                                                                             //
 //      ┌─────────────────────────┐                                                               //
@@ -134,7 +122,6 @@ pub(crate) enum TabletState {
     Prepared,
     Active,
     Frozen,
-    Handoff,
     Inactive,
     Dropped,
 }
@@ -156,11 +143,6 @@ impl TabletState {
         fn no(states: &Vec<TabletState>, a: TabletState) -> bool {
             !states.iter().any(|tablet_state| *tablet_state == a)
         }
-        fn no_either(states: &Vec<TabletState>, a: TabletState, b: TabletState) -> bool {
-            !states
-                .iter()
-                .any(|tablet_state| *tablet_state == a || *tablet_state == b)
-        }
 
         match (self, next, transfer_states) {
             // Only actually allowed when the keyspace is brand new and has no tablets yet, but
@@ -180,26 +162,22 @@ impl TabletState {
             (TabletState::Active, TabletState::Frozen, Some((_, dst_states))) => {
                 all(&dst_states, TabletState::Hydrating)
             }
-            (TabletState::Frozen, TabletState::Handoff, Some((src_states, dst_states))) => {
+            (TabletState::Frozen, TabletState::Inactive, Some((src_states, dst_states))) => {
                 all(&dst_states, TabletState::Prepared)
-                    && all_either(&src_states, TabletState::Frozen, TabletState::Handoff)
-            }
-            (TabletState::Handoff, TabletState::Inactive, Some((src_states, _))) => {
-                all_either(&src_states, TabletState::Handoff, TabletState::Inactive)
+                    && all_either(&src_states, TabletState::Frozen, TabletState::Inactive)
             }
 
             // Transfer cancel for dsts:
             (TabletState::Hydrating, TabletState::Inactive, Some(_)) => true,
             (TabletState::Prepared, TabletState::Inactive, Some((src_states, _))) => {
-                // Transfer is committed and must continue if any source reaches handoff.
-                no_either(&src_states, TabletState::Handoff, TabletState::Inactive)
+                // Transfer is committed and must continue if any source reaches inactive.
+                no(&src_states, TabletState::Inactive)
             }
 
             // Transfer cancel for srcs:
             (TabletState::Frozen, TabletState::Active, Some((src_states, dst_states))) => {
-                // Transfer is committed and must continue if any source reaches handoff.
-                no_either(&src_states, TabletState::Handoff, TabletState::Inactive)
-                    && no(&dst_states, TabletState::Prepared)
+                // Transfer is committed and must continue if any source reaches inactive.
+                no(&src_states, TabletState::Inactive) && no(&dst_states, TabletState::Prepared)
             }
 
             (TabletState::Inactive, TabletState::Dropped, None) => true,
@@ -220,7 +198,6 @@ impl TabletState {
             TabletState::Frozen => {
                 TabletStateProperties::Complete | TabletStateProperties::Readable
             }
-            TabletState::Handoff => TabletStateProperties::Complete,
             TabletState::Inactive => TabletStateProperties::none(),
             TabletState::Dropped => TabletStateProperties::none(),
         }
