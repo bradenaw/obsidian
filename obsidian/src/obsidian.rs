@@ -257,6 +257,12 @@ impl Obsidian {
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct TabletId(u64);
 
+impl std::fmt::Display for TabletId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        write!(f, "tablet:{}", self.0)
+    }
+}
+
 pub(crate) trait Router {
     fn tablet_id_for_key(&self, keyspace_id: KeyspaceId, key: &[u8]) -> anyhow::Result<TabletId>;
 }
