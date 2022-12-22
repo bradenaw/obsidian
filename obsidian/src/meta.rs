@@ -72,7 +72,7 @@ impl std::fmt::Display for TransferId {
 //                                         v     │                             v                  //
 //                                    ┌──────────┴─────┐                  ┌──────────┐            //
 //                                    │ Frozen   [cr_] ├─────────────────>│ Inactive │            //
-//                                    └────────────────┘        ╷         └────┬─────┘            //
+//                                    └────────────────┘        │         └────┬─────┘            //
 //                                                       all dest Prepared     │                  //
 //                                                                             │                  //
 //                                                     retention window passes╶│                  //
