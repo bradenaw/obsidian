@@ -330,6 +330,13 @@ impl<K: Ord + HasPrefix + Clone> RangeSet<K> {
         self.ranges.is_empty()
     }
 
+    pub fn is_covering(&self) -> bool {
+        match self.contiguous() {
+            Some(range) => range == Range::all(),
+            _ => false,
+        }
+    }
+
     pub fn contiguous(&self) -> Option<Range<K>> {
         if self.ranges.len() == 0 {
             Some(Range::empty())
@@ -446,7 +453,7 @@ impl<K: Ord + HasPrefix + Clone> RangeSet<K> {
         result
     }
 
-    fn add_range(&mut self, mut range: Range<K>) {
+    pub fn add_range(&mut self, mut range: Range<K>) {
         if range.is_empty() {
             return;
         }
@@ -458,7 +465,7 @@ impl<K: Ord + HasPrefix + Clone> RangeSet<K> {
         self.ranges.insert(RangeByLowerBound(range));
     }
 
-    fn subtract_range(&mut self, range: Range<K>) {
+    pub fn subtract_range(&mut self, range: Range<K>) {
         if range.is_empty() {
             return;
         }

@@ -9,6 +9,7 @@ edition = "2018"
 anyhow = { version = "1.0.58", features = ["backtrace"] }
 async-stream = "0.3.3"
 async-trait = "0.1.57"
+bitmask-enum = "2.1.0"
 byteorder = "1.4.3"
 futures = "0.3.23"
 rand = "0.8.5"

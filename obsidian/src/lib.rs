@@ -7,6 +7,7 @@
 mod lock_mgr;
 mod lsm;
 mod memtable;
+mod meta;
 mod obsidian;
 mod range;
 mod sequencer;
