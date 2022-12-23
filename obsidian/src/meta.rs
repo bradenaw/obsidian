@@ -84,7 +84,9 @@ impl std::fmt::Display for TransferId {
 //
 // And a state machine of the entire transfer, with sources on the left and destinations on the
 // right. Note that there is always at least one [c**] tablet, and [**w] never exists alongside a
-// separate [c**].
+// separate [c**]. This is an example of a move with one source and one destination. m:n transfers
+// are similar.
+//
 //                                                                                                //
 //      ┌──────────────────────┐                                                                  //
 //      │ Active [crw] │ Empty │                                                                  //
@@ -237,7 +239,25 @@ struct MemMetaInner {
 
 impl Meta for MemMeta {
     fn create_keyspace(&self) -> anyhow::Result<KeyspaceId> {
-        todo!();
+        let mut inner = self.inner.write().unwrap();
+
+        let highest_in_use = inner
+            .keyspaces
+            .last_key_value()
+            .map(|(keyspace_id, _)| *keyspace_id)
+            .unwrap_or(KeyspaceId(0));
+
+        let keyspace_id = KeyspaceId(highest_in_use.0 + 1);
+
+        if !keyspace_id.is_userland() {
+            return Err(anyhow::anyhow!(
+                "cannot allocate keyspace ID: ID space exhausted"
+            ));
+        }
+
+        inner.keyspaces.insert(keyspace_id, BTreeSet::new());
+
+        Ok(keyspace_id)
     }
 
     fn transition(
