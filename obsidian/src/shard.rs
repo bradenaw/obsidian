@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
 use crate::meta::Meta;
 use crate::meta::TabletState;
@@ -61,7 +62,7 @@ impl Shard for ShardImpl {
             if new_state == curr_state {
                 return Ok(());
             } else if maybe_next_state == Some(new_state) {
-                if let Some(handle) = inner.transition_tasks.get(&tablet_id) {
+                if let Some((_, handle)) = inner.transition_tasks.get(&tablet_id) {
                     handle.clone()
                 } else {
                     self.spawn_transition(
@@ -106,7 +107,7 @@ impl ShardImpl {
         let (sender, receiver) = watch::channel(None);
         let inner_lock = self.inner.clone();
         let meta_ = self.meta.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let meta = meta_;
 
             // TODO: use retry
@@ -140,14 +141,16 @@ impl ShardImpl {
                 return;
             }
         });
-        let handle = MaybeFilled { r: receiver };
-        inner.transition_tasks.insert(tablet_id, handle.clone());
-        handle
+        let spawn_result = MaybeFilled { r: receiver };
+        inner
+            .transition_tasks
+            .insert(tablet_id, (handle, spawn_result.clone()));
+        spawn_result
     }
 }
 
 struct ShardInner {
-    transition_tasks: BTreeMap<TabletId, MaybeFilled<Result<(), String>>>,
+    transition_tasks: BTreeMap<TabletId, (JoinHandle<()>, MaybeFilled<Result<(), String>>)>,
     tablets: BTreeMap<
         TabletId,
         (
@@ -158,6 +161,14 @@ struct ShardInner {
             Option<TabletState>,
         ),
     >,
+}
+
+impl Drop for ShardInner {
+    fn drop(&mut self) {
+        for (_, (handle, _)) in &self.transition_tasks {
+            handle.abort();
+        }
+    }
 }
 
 #[derive(Clone)]
