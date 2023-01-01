@@ -212,3 +212,13 @@ pub enum WriteError {
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
+
+#[derive(Error, Debug)]
+pub enum InternalError {
+    #[error(transparent)]
+    TransitionRejected(anyhow::Error),
+    #[error(transparent)]
+    Fatal(anyhow::Error),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}

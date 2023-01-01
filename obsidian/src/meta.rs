@@ -2,31 +2,30 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::RwLock;
 
+use async_trait::async_trait;
 use bitmask_enum::bitmask;
 
 use crate::obsidian::TabletId;
 use crate::range::Range;
 use crate::range::RangeSet;
+use crate::types::InternalError;
 use crate::types::KeyspaceId;
 use crate::types::Timestamp;
 
+#[async_trait]
 pub(crate) trait Meta {
-    fn create_keyspace(&self) -> anyhow::Result<KeyspaceId>;
+    async fn create_keyspace(&self) -> anyhow::Result<KeyspaceId>;
 
-    //fn sync(
-    //    cursor: Timestamp,
-    //) -> anyhow::Result<(Vec<(Timestamp, KeyspaceId, Vec<u8>, Mutation)>, Timestamp)>;
-
-    fn transition(
+    async fn transition(
         &self,
         tablet_id: TabletId,
         keyspace_id: KeyspaceId,
         range: Range<Vec<u8>>,
         expected_ts: Timestamp,
         next: TabletState,
-    ) -> anyhow::Result<Timestamp>;
+    ) -> Result<Timestamp, InternalError>;
 
-    fn start_transfer(
+    async fn start_transfer(
         &self,
         transfer_id: TransferId,
         srcs: Vec<TabletId>,
@@ -237,8 +236,9 @@ struct MemMetaInner {
     ts: Timestamp,
 }
 
+#[async_trait]
 impl Meta for MemMeta {
-    fn create_keyspace(&self) -> anyhow::Result<KeyspaceId> {
+    async fn create_keyspace(&self) -> anyhow::Result<KeyspaceId> {
         let mut inner = self.inner.write().unwrap();
 
         let highest_in_use = inner
@@ -260,36 +260,38 @@ impl Meta for MemMeta {
         Ok(keyspace_id)
     }
 
-    fn transition(
+    async fn transition(
         &self,
         tablet_id: TabletId,
         keyspace_id: KeyspaceId,
         range: Range<Vec<u8>>,
         expected_ts: Timestamp,
         next_state: TabletState,
-    ) -> anyhow::Result<Timestamp> {
+    ) -> Result<Timestamp, InternalError> {
         let mut inner = self.inner.write().unwrap();
 
         let (prev_ts, curr_ts, curr_state) = match inner.tablets.get(&tablet_id) {
             Some((existing_keyspace_id, existing_range, prev_ts, curr_ts, curr_state)) => {
                 if *existing_keyspace_id != keyspace_id {
-                    return Err(anyhow::anyhow!("mismatched keyspace_id"));
+                    return Err(InternalError::Fatal(anyhow::anyhow!(
+                        "mismatched keyspace_id"
+                    )));
                 }
                 if existing_range != &range {
-                    return Err(anyhow::anyhow!("mismatched range"));
+                    return Err(InternalError::Fatal(anyhow::anyhow!("mismatched range")));
                 }
                 (*prev_ts, *curr_ts, *curr_state)
             }
             None => {
                 if expected_ts != Timestamp::ZERO {
-                    return Err(anyhow::anyhow!(
-                        "illegal transition: nonexistent tablet with expected_ts!=0"
-                    ));
+                    return Err(InternalError::Fatal(anyhow::anyhow!(
+                        "illegal transition: nonexistent tablet with expected_ts!=0",
+                    )));
                 }
                 if next_state != TabletState::Active {
-                    return Err(anyhow::anyhow!(
+                    return Err(InternalError::Fatal(anyhow::anyhow!(
                         "illegal transition: expected_ts=0 with next_state!=Active"
-                    ));
+                    )));
                 }
                 if !inner
                     .keyspaces
@@ -297,9 +299,9 @@ impl Meta for MemMeta {
                     .ok_or_else(|| anyhow::anyhow!("keyspace does not exist"))?
                     .is_empty()
                 {
-                    return Err(anyhow::anyhow!(
+                    return Err(InternalError::Fatal(anyhow::anyhow!(
                         "illegal transition: Empty->Active with non-empty keyspace"
-                    ));
+                    )));
                 }
 
                 (Timestamp::MAX, Timestamp::ZERO, TabletState::Empty)
@@ -310,13 +312,15 @@ impl Meta for MemMeta {
             if curr_state == next_state {
                 return Ok(curr_ts);
             } else {
-                return Err(anyhow::anyhow!(
+                return Err(InternalError::Fatal(anyhow::anyhow!(
                     "meta out of sync: already transitioned but to a different state"
-                ));
+                )));
             }
         }
         if expected_ts != curr_ts {
-            return Err(anyhow::anyhow!("meta out of sync: timestamp mismatch"));
+            return Err(InternalError::Fatal(anyhow::anyhow!(
+                "meta out of sync: timestamp mismatch"
+            )));
         }
 
         let transfer_states = match inner.transfer_locks.get(&tablet_id) {
@@ -336,9 +340,9 @@ impl Meta for MemMeta {
         };
 
         if !curr_state.can_transition(next_state, transfer_states) {
-            return Err(anyhow::anyhow!(
+            return Err(InternalError::TransitionRejected(anyhow::anyhow!(
                 "illegal transition: not allowed by state machine"
-            ));
+            )));
         }
 
         let ranges_and_states: Vec<_> = inner
@@ -378,24 +382,24 @@ impl Meta for MemMeta {
                 .contains(TabletStateProperties::Writable)
             {
                 if RangeSet::from(range.clone()).intersects(&writable) {
-                    return Err(anyhow::anyhow!(
+                    return Err(InternalError::TransitionRejected(anyhow::anyhow!(
                         "illegal transition: multiple tablets writable for some range"
-                    ));
+                    )));
                 }
                 writable.add_range(range.clone());
             }
         }
 
         if !complete_range_set.is_covering() {
-            return Err(anyhow::anyhow!(
+            return Err(InternalError::TransitionRejected(anyhow::anyhow!(
                 "illegal transition: some range has no complete tablets"
-            ));
+            )));
         }
 
         if writable.intersects(&complete_not_writable) {
-            return Err(anyhow::anyhow!(
+            return Err(InternalError::TransitionRejected(anyhow::anyhow!(
                 "illegal transition: some range has a writable tablet and a complete tablet"
-            ));
+            )));
         }
 
         inner.ts = Timestamp::now_after(inner.ts);
@@ -448,7 +452,7 @@ impl Meta for MemMeta {
         return Ok(new_ts);
     }
 
-    fn start_transfer(
+    async fn start_transfer(
         &self,
         transfer_id: TransferId,
         srcs: Vec<TabletId>,

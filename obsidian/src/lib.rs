@@ -11,6 +11,7 @@ mod meta;
 mod obsidian;
 mod range;
 mod sequencer;
+mod shard;
 mod storage;
 mod tablet;
 mod types;
