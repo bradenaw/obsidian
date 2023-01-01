@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
 use crate::meta::Meta;
 use crate::meta::TabletState;
@@ -49,26 +49,60 @@ impl Shard for ShardImpl {
         tablet_id: TabletId,
         new_state: TabletState,
     ) -> anyhow::Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let handle = {
+            let mut inner = self.inner.lock().unwrap();
 
-        let (keyspace_id, range, expected_ts, curr_state, maybe_next_state) = inner
-            .tablets
-            .get(&tablet_id)
-            .ok_or_else(|| anyhow::anyhow!("tablet {} not found", tablet_id))?
-            .clone();
+            let (keyspace_id, range, expected_ts, curr_state, maybe_next_state) = inner
+                .tablets
+                .get(&tablet_id)
+                .ok_or_else(|| anyhow::anyhow!("tablet {} not found", tablet_id))?
+                .clone();
 
-        if new_state == curr_state {
-            return Ok(());
-        } else if maybe_next_state == Some(new_state) {
-            if let Some(mut handle) = inner.transition_tasks.get(&tablet_id).cloned() {
-                handle.await;
+            if new_state == curr_state {
+                return Ok(());
+            } else if maybe_next_state == Some(new_state) {
+                if let Some(handle) = inner.transition_tasks.get(&tablet_id) {
+                    handle.clone()
+                } else {
+                    self.spawn_transition(
+                        &mut inner,
+                        tablet_id,
+                        keyspace_id,
+                        range,
+                        expected_ts,
+                        curr_state,
+                        new_state,
+                    )
+                }
+            } else if maybe_next_state.is_some() {
+                return Err(anyhow::anyhow!("already transitioning"));
+            } else {
+                self.spawn_transition(
+                    &mut inner,
+                    tablet_id,
+                    keyspace_id,
+                    range,
+                    expected_ts,
+                    curr_state,
+                    new_state,
+                )
             }
+        };
+        handle.wait().await.map_err(|e| anyhow::anyhow!("{}", e))
+    }
+}
 
-            // TODO: else spawn
-        } else if maybe_next_state.is_some() {
-            return Err(anyhow::anyhow!("already transitioning"));
-        }
-
+impl ShardImpl {
+    fn spawn_transition(
+        &self,
+        inner: &mut ShardInner,
+        tablet_id: TabletId,
+        keyspace_id: KeyspaceId,
+        range: Range<Vec<u8>>,
+        expected_ts: Timestamp,
+        curr_state: TabletState,
+        new_state: TabletState,
+    ) -> MaybeFilled<Result<(), String>> {
         let (sender, receiver) = watch::channel(None);
         let inner_lock = self.inner.clone();
         let meta_ = self.meta.clone();
@@ -89,32 +123,31 @@ impl Shard for ShardImpl {
 
                 let (ts, end_state) = match result {
                     Ok(new_ts) => (new_ts, new_state),
-                    Err(InternalError::TransitionRejected(e)) | Err(InternalError::Fatal(e)) => {
-                        (expected_ts, curr_state)
-                    }
+                    Err(InternalError::TransitionRejected(_))
+                    | Err(InternalError::TransitionFatal(_)) => (expected_ts, curr_state),
                     Err(_) => continue,
                 };
 
-                let inner = inner_lock.lock().unwrap();
+                let mut inner = inner_lock.lock().unwrap();
                 inner.transition_tasks.remove(&tablet_id);
                 inner
                     .tablets
                     .insert(tablet_id, (keyspace_id, range, ts, end_state, None));
 
-                sender.send(Some(result.map(|_| ()).map_err(|e| e.into())));
+                // Errors when receiver is dropped. We don't care.
+                _ = sender.send(Some(result.map(|_| ()).map_err(|e| e.to_string())));
 
                 return;
             }
         });
-
-        inner.transition_tasks.insert(tablet_id, receiver);
-
-        Ok(())
+        let handle = MaybeFilled { r: receiver };
+        inner.transition_tasks.insert(tablet_id, handle.clone());
+        handle
     }
 }
 
 struct ShardInner {
-    transition_tasks: BTreeMap<TabletId, watch::Receiver<Option<anyhow::Result<()>>>>,
+    transition_tasks: BTreeMap<TabletId, MaybeFilled<Result<(), String>>>,
     tablets: BTreeMap<
         TabletId,
         (
@@ -127,18 +160,20 @@ struct ShardInner {
     >,
 }
 
-struct Once<T> {
+#[derive(Clone)]
+struct MaybeFilled<T> {
     r: watch::Receiver<Option<T>>,
 }
 
-impl<T> Once<T> {
+impl<T: Clone> MaybeFilled<T> {
     async fn wait(&self) -> T {
+        let mut r = self.r.clone();
         loop {
-            if let Some(t) = self.r.borrow_and_update() {
-                return t;
+            if let Some(t) = r.borrow_and_update().deref() {
+                return t.clone();
             }
-
-            self.r.changed().await;
+            // Errors when sender is dropped.
+            r.changed().await.unwrap();
         }
     }
 }

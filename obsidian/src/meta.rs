@@ -273,23 +273,25 @@ impl Meta for MemMeta {
         let (prev_ts, curr_ts, curr_state) = match inner.tablets.get(&tablet_id) {
             Some((existing_keyspace_id, existing_range, prev_ts, curr_ts, curr_state)) => {
                 if *existing_keyspace_id != keyspace_id {
-                    return Err(InternalError::Fatal(anyhow::anyhow!(
+                    return Err(InternalError::TransitionFatal(anyhow::anyhow!(
                         "mismatched keyspace_id"
                     )));
                 }
                 if existing_range != &range {
-                    return Err(InternalError::Fatal(anyhow::anyhow!("mismatched range")));
+                    return Err(InternalError::TransitionFatal(anyhow::anyhow!(
+                        "mismatched range"
+                    )));
                 }
                 (*prev_ts, *curr_ts, *curr_state)
             }
             None => {
                 if expected_ts != Timestamp::ZERO {
-                    return Err(InternalError::Fatal(anyhow::anyhow!(
+                    return Err(InternalError::TransitionFatal(anyhow::anyhow!(
                         "illegal transition: nonexistent tablet with expected_ts!=0",
                     )));
                 }
                 if next_state != TabletState::Active {
-                    return Err(InternalError::Fatal(anyhow::anyhow!(
+                    return Err(InternalError::TransitionFatal(anyhow::anyhow!(
                         "illegal transition: expected_ts=0 with next_state!=Active"
                     )));
                 }
@@ -299,7 +301,7 @@ impl Meta for MemMeta {
                     .ok_or_else(|| anyhow::anyhow!("keyspace does not exist"))?
                     .is_empty()
                 {
-                    return Err(InternalError::Fatal(anyhow::anyhow!(
+                    return Err(InternalError::TransitionFatal(anyhow::anyhow!(
                         "illegal transition: Empty->Active with non-empty keyspace"
                     )));
                 }
@@ -312,13 +314,13 @@ impl Meta for MemMeta {
             if curr_state == next_state {
                 return Ok(curr_ts);
             } else {
-                return Err(InternalError::Fatal(anyhow::anyhow!(
+                return Err(InternalError::TransitionFatal(anyhow::anyhow!(
                     "meta out of sync: already transitioned but to a different state"
                 )));
             }
         }
         if expected_ts != curr_ts {
-            return Err(InternalError::Fatal(anyhow::anyhow!(
+            return Err(InternalError::TransitionFatal(anyhow::anyhow!(
                 "meta out of sync: timestamp mismatch"
             )));
         }

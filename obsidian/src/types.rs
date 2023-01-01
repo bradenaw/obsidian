@@ -218,7 +218,7 @@ pub enum InternalError {
     #[error(transparent)]
     TransitionRejected(anyhow::Error),
     #[error(transparent)]
-    Fatal(anyhow::Error),
+    TransitionFatal(anyhow::Error),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
