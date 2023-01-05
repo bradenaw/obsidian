@@ -98,7 +98,7 @@ impl KeyspaceId {
         self.0 & 0xFF000000 == 0x02000000
     }
 
-    pub(crate) fn is_tablet_routed(&self) -> bool {
+    pub(crate) fn is_shard_meta(&self) -> bool {
         self.0 & 0xFF000000 == 0xFE000000
     }
 
@@ -212,3 +212,16 @@ pub enum WriteError {
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
+
+#[derive(Error, Debug)]
+pub enum InternalError {
+    #[error(transparent)]
+    TransitionRejected(anyhow::Error),
+    #[error(transparent)]
+    TransitionFatal(anyhow::Error),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+#[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct ShardId(pub(crate) u32);

@@ -19,6 +19,7 @@ use crate::tablet::Tablet;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
+use crate::types::ShardId;
 use crate::types::Timestamp;
 use crate::types::WriteError;
 use crate::util::hexlify;
@@ -45,7 +46,7 @@ impl Obsidian {
     ) -> anyhow::Result<Option<Vec<u8>>> {
         let tablet_id = self.router.tablet_id_for_key(keyspace_id, &key)?;
         let tablet = self.tablets.tablet(tablet_id)?;
-        let txid = Txid::new(tablet_id);
+        let txid = Txid::new(tablet_id.0);
         let already_seen_conflicts = RefCell::new(HashSet::new());
 
         Retry::new()
@@ -58,7 +59,9 @@ impl Obsidian {
                         if already_seen_conflicts.contains(&other_txid) {
                             return Err(ReadError::Conflict(other_txid));
                         }
-                        let other_txid_owner_tablet = self.tablets.tablet(other_txid.owner)?;
+                        let other_txid_owner_tablet = self
+                            .tablets
+                            .tablet(TabletId::shard_meta(other_txid.owner))?;
                         if txid.can_preempt(&other_txid) {
                             other_txid_owner_tablet.try_abort(other_txid).await?;
                         } else {
@@ -86,7 +89,7 @@ impl Obsidian {
             .skip(rand::thread_rng().gen_range(0..write_by_tablet.len()))
             .next()
             .unwrap();
-        let mut txid = Txid::new(*owner_tablet_id);
+        let mut txid = Txid::new(owner_tablet_id.0);
 
         // TODO: move into loop, since need to resolve conflicts
         if write_by_tablet.len() == 1 {
@@ -165,7 +168,9 @@ impl Obsidian {
                 if !wait_conflicts.is_empty() {
                     future::try_join_all(wait_conflicts.iter().cloned().map(
                         |other_txid| async move {
-                            let tablet = self.tablets.tablet(other_txid.owner)?;
+                            let tablet = self
+                                .tablets
+                                .tablet(TabletId::shard_meta(other_txid.owner))?;
                             tablet.wait(other_txid).await
                         },
                     ))
@@ -179,7 +184,9 @@ impl Obsidian {
                 if !preempt_conflicts.is_empty() {
                     future::try_join_all(preempt_conflicts.iter().cloned().map(
                         |other_txid| async move {
-                            let tablet = self.tablets.tablet(other_txid.owner)?;
+                            let tablet = self
+                                .tablets
+                                .tablet(TabletId::shard_meta(other_txid.owner))?;
                             tablet.try_abort(other_txid).await
                         },
                     ))
@@ -255,7 +262,21 @@ impl Obsidian {
 }
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
-pub(crate) struct TabletId(u64);
+pub(crate) struct TabletId(ShardId, u64);
+
+impl TabletId {
+    const META: Self = TabletId(ShardId(1), 1);
+
+    pub(crate) fn shard_meta(shard_id: ShardId) -> Self {
+        TabletId(shard_id, 1)
+    }
+}
+
+impl std::fmt::Display for TabletId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        write!(f, "tablet:{}/{}", self.0 .0, self.1)
+    }
+}
 
 pub(crate) trait Router {
     fn tablet_id_for_key(&self, keyspace_id: KeyspaceId, key: &[u8]) -> anyhow::Result<TabletId>;
@@ -269,13 +290,13 @@ pub(crate) trait Tablets {
 pub(crate) struct Txid {
     ts: u64,
     rand: [u8; 16],
-    owner: TabletId,
+    owner: ShardId,
 }
 
 impl Txid {
-    pub const ENCODED_LEN: usize = 32;
+    pub const ENCODED_LEN: usize = 28;
 
-    pub fn new(owner: TabletId) -> Self {
+    pub fn new(owner: ShardId) -> Self {
         Txid {
             ts: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -296,15 +317,15 @@ impl Txid {
         self < other
     }
 
-    pub fn owner(&self) -> TabletId {
+    pub fn owner(&self) -> ShardId {
         self.owner
     }
 
-    pub fn to_bytes(&self) -> [u8; 32] {
-        let mut out = [0u8; 32];
+    pub fn to_bytes(&self) -> [u8; Self::ENCODED_LEN] {
+        let mut out = [0u8; Self::ENCODED_LEN];
         BigEndian::write_u64(&mut out[0..8], self.ts);
         out[8..24].copy_from_slice(&self.rand[..]);
-        BigEndian::write_u64(&mut out[24..32], self.owner.0);
+        BigEndian::write_u32(&mut out[24..28], self.owner.0);
         out
     }
 }
@@ -313,13 +334,13 @@ impl TryFrom<&[u8]> for Txid {
     type Error = anyhow::Error;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() != 32 {
-            anyhow::bail!("txid not 32 bytes");
+        if value.len() != Txid::ENCODED_LEN {
+            anyhow::bail!("txid not {} bytes", Txid::ENCODED_LEN);
         }
         let ts = BigEndian::read_u64(&value[0..8]);
         let mut rand = [0u8; 16];
         rand.copy_from_slice(&value[8..24]);
-        let owner = TabletId(BigEndian::read_u64(&value[24..32]));
+        let owner = ShardId(BigEndian::read_u32(&value[24..28]));
 
         Ok(Self { ts, rand, owner })
     }
@@ -384,6 +405,7 @@ mod test {
     use crate::types::KeyspaceId;
     use crate::types::Mutation;
     use crate::types::Precondition;
+    use crate::types::ShardId;
     use crate::types::Timestamp;
 
     use super::InternalWriteError;
@@ -404,19 +426,19 @@ mod test {
             key: &[u8],
         ) -> anyhow::Result<TabletId> {
             if keyspace_id.is_meta() {
-                return Ok(TabletId(1));
+                return Ok(TabletId::META);
             }
-            if keyspace_id.is_tablet_routed() {
-                if key.len() < 8 {
+            if keyspace_id.is_shard_meta() {
+                if key.len() < 4 {
                     anyhow::bail!("tablet-routed key not long enough");
                 }
-                let tablet_id = TabletId(BigEndian::read_u64(&key[0..8]));
+                let tablet_id = TabletId::shard_meta(ShardId(BigEndian::read_u32(&key[0..4])));
                 return Ok(tablet_id);
             }
             if key.len() < 1 {
                 anyhow::bail!("key too short for CheeseRouter");
             }
-            Ok(TabletId(key[0] as u64))
+            Ok(TabletId(ShardId(key[0] as u32), 2))
         }
     }
 
@@ -497,7 +519,7 @@ mod test {
                     .lock()
                     .unwrap()
                     .get(&tablet_id)
-                    .ok_or_else(|| anyhow::anyhow!("no tablet"))?
+                    .ok_or_else(|| anyhow::anyhow!("no tablet for {}", tablet_id))?
                     .clone(),
             ))
         }
@@ -528,8 +550,8 @@ mod test {
 
             {
                 let mut m = tablets.m.lock().unwrap();
-                m.insert(TabletId(1), Arc::new(tablet1));
-                m.insert(TabletId(2), Arc::new(tablet2));
+                m.insert(TabletId(ShardId(1), 2), Arc::new(tablet1));
+                m.insert(TabletId(ShardId(2), 2), Arc::new(tablet2));
             }
 
             let obs = Obsidian::new(Box::new(CheeseRouter {}), Box::new(tablets));

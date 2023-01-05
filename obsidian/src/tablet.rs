@@ -25,6 +25,7 @@ use crate::obsidian::CommitError;
 use crate::obsidian::InternalWriteError;
 use crate::obsidian::ReadError;
 use crate::obsidian::Router;
+use crate::obsidian::TabletId;
 use crate::obsidian::Tablets;
 use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
@@ -759,7 +760,10 @@ impl LsmTabletInner {
             receiver,
             64,
             |(txid, keyspace_id, key, prepare_type)| async move {
-                let owner_tablet = self.tablets.tablet(txid.owner()).unwrap();
+                let owner_tablet = self
+                    .tablets
+                    .tablet(TabletId::shard_meta(txid.owner()))
+                    .unwrap();
                 let tx_outcome = owner_tablet.wait(txid).await.unwrap();
                 // Commits get cleaned up by the owner tablet calling cleanup_committed. Ignore them
                 // here to avoid duplicating work.
