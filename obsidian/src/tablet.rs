@@ -893,6 +893,8 @@ impl TxOutcomeRecord {
                     write_varint_to(&mut out, keyspace_ids.len() as u64).unwrap();
 
                     for (keyspace_id, bits) in keyspace_ids {
+                        // TODO: compress keyspace IDs out, since likely only a handful are used
+                        // per transaction
                         write_varint_to(&mut out, keyspace_id.0 .0 as u64).unwrap();
                         write_varint_to(&mut out, (keyspace_id.1 as u64) << 2 | bits).unwrap();
                     }

@@ -297,7 +297,9 @@ impl Meta for MemMeta {
             Some((existing_colo_group_id, existing_range, prev_ts, curr_ts, curr_state)) => {
                 if *existing_colo_group_id != colo_group_id {
                     return Err(InternalError::TransitionFatal(anyhow!(
-                        "mismatched keyspace_id"
+                        "mismatched colo group: {:?} but expected {:?}",
+                        colo_group_id,
+                        *existing_colo_group_id,
                     )));
                 }
                 if existing_range != &range {
