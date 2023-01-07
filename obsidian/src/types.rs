@@ -59,11 +59,21 @@ impl Display for Timestamp {
     }
 }
 
-#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ColoGroupId(pub u32);
 
 impl ColoGroupId {
     pub(crate) const META: Self = ColoGroupId(0xFFFFFFFF);
+
+    pub(crate) fn is_reserved(&self) -> bool {
+        *self != Self::META
+    }
+}
+
+impl Debug for ColoGroupId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "colo_group:{}", self.0)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]

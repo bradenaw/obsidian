@@ -11,15 +11,15 @@ use crate::meta::Meta;
 use crate::meta::TabletState;
 use crate::obsidian::TabletId;
 use crate::range::Range;
+use crate::types::ColoGroupId;
 use crate::types::InternalError;
-use crate::types::KeyspaceId;
 use crate::types::Timestamp;
 
 #[async_trait]
 pub(crate) trait Shard {
     async fn create_tablet(
         &self,
-        keyspace_id: KeyspaceId,
+        colo_group_id: ColoGroupId,
         range: Range<Vec<u8>>,
     ) -> anyhow::Result<TabletId>;
 
@@ -39,7 +39,7 @@ struct ShardImpl {
 impl Shard for ShardImpl {
     async fn create_tablet(
         &self,
-        keyspace_id: KeyspaceId,
+        colo_group_id: ColoGroupId,
         range: Range<Vec<u8>>,
     ) -> anyhow::Result<TabletId> {
         todo!()
@@ -98,7 +98,7 @@ impl ShardImpl {
         &self,
         inner: &mut ShardInner,
         tablet_id: TabletId,
-        keyspace_id: KeyspaceId,
+        colo_group_id: ColoGroupId,
         range: Range<Vec<u8>>,
         expected_ts: Timestamp,
         curr_state: TabletState,
@@ -115,7 +115,7 @@ impl ShardImpl {
                 let result = meta
                     .transition(
                         tablet_id,
-                        keyspace_id,
+                        colo_group_id,
                         range.clone(),
                         expected_ts,
                         new_state,
@@ -133,7 +133,7 @@ impl ShardImpl {
                 inner.transition_tasks.remove(&tablet_id);
                 inner
                     .tablets
-                    .insert(tablet_id, (keyspace_id, range, ts, end_state, None));
+                    .insert(tablet_id, (colo_group_id, range, ts, end_state, None));
 
                 // Errors when receiver is dropped. We don't care.
                 _ = sender.send(Some(result.map(|_| ()).map_err(|e| e.to_string())));
@@ -154,7 +154,7 @@ struct ShardInner {
     tablets: BTreeMap<
         TabletId,
         (
-            KeyspaceId,
+            ColoGroupId,
             Range<Vec<u8>>,
             Timestamp,
             TabletState,

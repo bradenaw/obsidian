@@ -274,7 +274,14 @@ impl TabletId {
 
 impl std::fmt::Display for TabletId {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        write!(f, "tablet:{}/{}", self.0 .0, self.1)
+        write!(f, "{}/{}", self.0 .0, self.1)
+    }
+}
+
+impl std::fmt::Debug for TabletId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        write!(f, "tablet:")?;
+        std::fmt::Display::fmt(self, f)
     }
 }
 

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::RwLock;
 
+use anyhow::anyhow;
 use async_trait::async_trait;
 use bitmask_enum::bitmask;
 
@@ -15,12 +16,13 @@ use crate::types::Timestamp;
 
 #[async_trait]
 pub(crate) trait Meta {
-    async fn create_keyspace(&self) -> anyhow::Result<KeyspaceId>;
+    async fn create_colo_group(&self) -> anyhow::Result<ColoGroupId>;
+    async fn create_keyspace(&self, colo_group_id: ColoGroupId) -> anyhow::Result<KeyspaceId>;
 
     async fn transition(
         &self,
         tablet_id: TabletId,
-        keyspace_id: KeyspaceId,
+        colo_group_id: ColoGroupId,
         range: Range<Vec<u8>>,
         expected_ts: Timestamp,
         next: TabletState,
@@ -39,7 +41,14 @@ pub(crate) struct TransferId(uuid::Uuid);
 
 impl std::fmt::Display for TransferId {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        write!(f, "xfer:{}", self.0)
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::fmt::Debug for TransferId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        write!(f, "xfer:")?;
+        std::fmt::Display::fmt(self, f)
     }
 }
 
@@ -221,17 +230,20 @@ pub(crate) struct MemMeta {
 }
 
 struct MemMetaInner {
-    keyspaces: BTreeMap<KeyspaceId, BTreeSet<TabletId>>,
+    keyspaces_by_group: BTreeMap<ColoGroupId, BTreeSet<KeyspaceId>>,
+
+    tablets_by_group: BTreeMap<ColoGroupId, BTreeSet<TabletId>>,
     tablets: BTreeMap<
         TabletId,
         (
-            KeyspaceId,
+            ColoGroupId,
             Range<Vec<u8>>,
             Timestamp,
             Timestamp,
             TabletState,
         ),
     >,
+
     transfers: BTreeMap<TransferId, (Vec<TabletId>, Vec<TabletId>)>,
     transfer_locks: BTreeMap<TabletId, TransferId>,
     ts: Timestamp,
@@ -239,24 +251,49 @@ struct MemMetaInner {
 
 #[async_trait]
 impl Meta for MemMeta {
-    async fn create_keyspace(&self) -> anyhow::Result<KeyspaceId> {
+    async fn create_colo_group(&self) -> anyhow::Result<ColoGroupId> {
         let mut inner = self.inner.write().unwrap();
-
         let highest_in_use = inner
-            .keyspaces
+            .keyspaces_by_group
             .last_key_value()
-            .map(|(keyspace_id, _)| *keyspace_id)
-            .unwrap_or(KeyspaceId(ColoGroupId(1), 0));
+            .map(|(colo_group_id, _)| *colo_group_id)
+            .unwrap_or(ColoGroupId(0));
 
-        let keyspace_id = KeyspaceId(highest_in_use.0, highest_in_use.1 + 1);
+        let colo_group_id = ColoGroupId(highest_in_use.0 + 1);
 
-        if !keyspace_id.is_userland() {
-            return Err(anyhow::anyhow!(
-                "cannot allocate keyspace ID: ID space exhausted"
+        if colo_group_id.is_reserved() {
+            return Err(anyhow!(
+                "cannot allocate any more colo groups: ID space exhausted"
             ));
         }
 
-        inner.keyspaces.insert(keyspace_id, BTreeSet::new());
+        inner
+            .keyspaces_by_group
+            .insert(colo_group_id, BTreeSet::new());
+
+        Ok(colo_group_id)
+    }
+
+    async fn create_keyspace(&self, colo_group_id: ColoGroupId) -> anyhow::Result<KeyspaceId> {
+        let mut inner = self.inner.write().unwrap();
+
+        let keyspaces = inner
+            .keyspaces_by_group
+            .get_mut(&colo_group_id)
+            .ok_or_else(|| anyhow!("cannot find {:?}", colo_group_id))?;
+
+        let highest_in_use = keyspaces
+            .last()
+            .map(|keyspace_id| keyspace_id.1)
+            .unwrap_or(0);
+
+        let keyspace_id = KeyspaceId(colo_group_id, highest_in_use + 1);
+
+        if !keyspace_id.is_userland() {
+            return Err(anyhow!("cannot allocate keyspace ID: ID space exhausted"));
+        }
+
+        keyspaces.insert(keyspace_id);
 
         Ok(keyspace_id)
     }
@@ -264,7 +301,7 @@ impl Meta for MemMeta {
     async fn transition(
         &self,
         tablet_id: TabletId,
-        keyspace_id: KeyspaceId,
+        colo_group_id: ColoGroupId,
         range: Range<Vec<u8>>,
         expected_ts: Timestamp,
         next_state: TabletState,
@@ -272,37 +309,35 @@ impl Meta for MemMeta {
         let mut inner = self.inner.write().unwrap();
 
         let (prev_ts, curr_ts, curr_state) = match inner.tablets.get(&tablet_id) {
-            Some((existing_keyspace_id, existing_range, prev_ts, curr_ts, curr_state)) => {
-                if *existing_keyspace_id != keyspace_id {
-                    return Err(InternalError::TransitionFatal(anyhow::anyhow!(
+            Some((existing_colo_group_id, existing_range, prev_ts, curr_ts, curr_state)) => {
+                if *existing_colo_group_id != colo_group_id {
+                    return Err(InternalError::TransitionFatal(anyhow!(
                         "mismatched keyspace_id"
                     )));
                 }
                 if existing_range != &range {
-                    return Err(InternalError::TransitionFatal(anyhow::anyhow!(
-                        "mismatched range"
-                    )));
+                    return Err(InternalError::TransitionFatal(anyhow!("mismatched range")));
                 }
                 (*prev_ts, *curr_ts, *curr_state)
             }
             None => {
                 if expected_ts != Timestamp::ZERO {
-                    return Err(InternalError::TransitionFatal(anyhow::anyhow!(
+                    return Err(InternalError::TransitionFatal(anyhow!(
                         "illegal transition: nonexistent tablet with expected_ts!=0",
                     )));
                 }
                 if next_state != TabletState::Active {
-                    return Err(InternalError::TransitionFatal(anyhow::anyhow!(
+                    return Err(InternalError::TransitionFatal(anyhow!(
                         "illegal transition: expected_ts=0 with next_state!=Active"
                     )));
                 }
                 if !inner
-                    .keyspaces
-                    .get(&keyspace_id)
-                    .ok_or_else(|| anyhow::anyhow!("keyspace does not exist"))?
+                    .keyspaces_by_group
+                    .get(&colo_group_id)
+                    .ok_or_else(|| anyhow!("{:?} does not exist", colo_group_id))?
                     .is_empty()
                 {
-                    return Err(InternalError::TransitionFatal(anyhow::anyhow!(
+                    return Err(InternalError::TransitionFatal(anyhow!(
                         "illegal transition: Empty->Active with non-empty keyspace"
                     )));
                 }
@@ -315,13 +350,14 @@ impl Meta for MemMeta {
             if curr_state == next_state {
                 return Ok(curr_ts);
             } else {
-                return Err(InternalError::TransitionFatal(anyhow::anyhow!(
-                    "meta out of sync: already transitioned but to a different state"
+                return Err(InternalError::TransitionFatal(anyhow!(
+                    "meta out of sync: {:?} already transitioned but to a different state",
+                    tablet_id,
                 )));
             }
         }
         if expected_ts != curr_ts {
-            return Err(InternalError::TransitionFatal(anyhow::anyhow!(
+            return Err(InternalError::TransitionFatal(anyhow!(
                 "meta out of sync: timestamp mismatch"
             )));
         }
@@ -343,14 +379,14 @@ impl Meta for MemMeta {
         };
 
         if !curr_state.can_transition(next_state, transfer_states) {
-            return Err(InternalError::TransitionRejected(anyhow::anyhow!(
+            return Err(InternalError::TransitionRejected(anyhow!(
                 "illegal transition: not allowed by state machine"
             )));
         }
 
         let ranges_and_states: Vec<_> = inner
-            .keyspaces
-            .get(&keyspace_id)
+            .tablets_by_group
+            .get(&colo_group_id)
             .unwrap()
             .iter()
             .map(|other_tablet_id| {
@@ -385,7 +421,7 @@ impl Meta for MemMeta {
                 .contains(TabletStateProperties::Writable)
             {
                 if RangeSet::from(range.clone()).intersects(&writable) {
-                    return Err(InternalError::TransitionRejected(anyhow::anyhow!(
+                    return Err(InternalError::TransitionRejected(anyhow!(
                         "illegal transition: multiple tablets writable for some range"
                     )));
                 }
@@ -394,13 +430,13 @@ impl Meta for MemMeta {
         }
 
         if !complete_range_set.is_covering() {
-            return Err(InternalError::TransitionRejected(anyhow::anyhow!(
+            return Err(InternalError::TransitionRejected(anyhow!(
                 "illegal transition: some range has no complete tablets"
             )));
         }
 
         if writable.intersects(&complete_not_writable) {
-            return Err(InternalError::TransitionRejected(anyhow::anyhow!(
+            return Err(InternalError::TransitionRejected(anyhow!(
                 "illegal transition: some range has a writable tablet and a complete tablet"
             )));
         }
@@ -410,14 +446,15 @@ impl Meta for MemMeta {
 
         if curr_state == TabletState::Empty {
             inner
-                .keyspaces
-                .get_mut(&keyspace_id)
+                .tablets_by_group
+                .get_mut(&colo_group_id)
                 .unwrap()
                 .insert(tablet_id);
         }
-        inner
-            .tablets
-            .insert(tablet_id, (keyspace_id, range, curr_ts, new_ts, next_state));
+        inner.tablets.insert(
+            tablet_id,
+            (colo_group_id, range, curr_ts, new_ts, next_state),
+        );
 
         if let Some(transfer_id) = inner.transfer_locks.get(&tablet_id).copied() {
             let (srcs, dsts) = inner.transfers.get(&transfer_id).unwrap().clone();
@@ -463,26 +500,49 @@ impl Meta for MemMeta {
     ) -> anyhow::Result<()> {
         let mut inner = self.inner.write().unwrap();
 
+        if srcs.is_empty() {
+            return Err(anyhow!("can't transfer with empty srcs"));
+        }
+        if dsts.is_empty() {
+            return Err(anyhow!("can't transfer with empty dsts"));
+        }
+
         for src in &srcs {
             if dsts.contains(&src) {
-                return Err(anyhow::anyhow!("{} appears in both srcs and dsts", src));
+                return Err(anyhow!("{:?} appears in both srcs and dsts", src));
             }
         }
         for dst in &dsts {
             if srcs.contains(&dst) {
-                return Err(anyhow::anyhow!("{} appears in both srcs and dsts", dst));
+                return Err(anyhow!("{:?} appears in both srcs and dsts", dst));
             }
         }
 
         if inner.transfers.contains_key(&transfer_id) {
-            return Err(anyhow::anyhow!("{} already exists", transfer_id));
+            return Err(anyhow!("{:?} already exists", transfer_id));
         }
+        let mut maybe_colo_group_id = None;
         for tablet_id in srcs.iter().chain(dsts.iter()) {
-            if !inner.tablets.contains_key(&tablet_id) {
-                return Err(anyhow::anyhow!("{} not found", tablet_id));
+            let colo_group_id = inner
+                .tablets
+                .get(&tablet_id)
+                .ok_or_else(|| anyhow!("{:?} not found", tablet_id))?
+                .0;
+
+            if let Some(expected_colo_group_id) = maybe_colo_group_id {
+                if colo_group_id != expected_colo_group_id {
+                    return Err(anyhow!(
+                        "can't transfer between tablets of different colo groups {:?} and {:?}",
+                        colo_group_id,
+                        expected_colo_group_id,
+                    ));
+                }
+            } else {
+                maybe_colo_group_id = Some(colo_group_id);
             }
+
             if inner.transfer_locks.contains_key(tablet_id) {
-                return Err(anyhow::anyhow!("transfer already active for {}", tablet_id));
+                return Err(anyhow!("transfer already active for {:?}", tablet_id));
             }
         }
 
