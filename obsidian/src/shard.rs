@@ -3,6 +3,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use anyhow::anyhow;
 use async_trait::async_trait;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -56,7 +57,7 @@ impl Shard for ShardImpl {
             let (keyspace_id, range, expected_ts, curr_state, maybe_next_state) = inner
                 .tablets
                 .get(&tablet_id)
-                .ok_or_else(|| anyhow::anyhow!("tablet {} not found", tablet_id))?
+                .ok_or_else(|| anyhow!("{:?} not found", tablet_id))?
                 .clone();
 
             if new_state == curr_state {
@@ -76,7 +77,7 @@ impl Shard for ShardImpl {
                     )
                 }
             } else if maybe_next_state.is_some() {
-                return Err(anyhow::anyhow!("already transitioning"));
+                return Err(anyhow!("{:?} already transitioning", tablet_id));
             } else {
                 self.spawn_transition(
                     &mut inner,
@@ -89,7 +90,7 @@ impl Shard for ShardImpl {
                 )
             }
         };
-        handle.wait().await.map_err(|e| anyhow::anyhow!("{}", e))
+        handle.wait().await.map_err(|e| anyhow!("{}", e))
     }
 }
 
