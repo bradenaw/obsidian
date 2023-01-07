@@ -6,13 +6,14 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use bitmask_enum::bitmask;
 
-use crate::obsidian::TabletId;
 use crate::range::Range;
 use crate::range::RangeSet;
 use crate::types::ColoGroupId;
 use crate::types::InternalError;
 use crate::types::KeyspaceId;
+use crate::types::TabletId;
 use crate::types::Timestamp;
+use crate::types::TransferId;
 
 #[async_trait]
 pub(crate) trait Meta {
@@ -34,22 +35,6 @@ pub(crate) trait Meta {
         srcs: Vec<TabletId>,
         dsts: Vec<TabletId>,
     ) -> anyhow::Result<()>;
-}
-
-#[derive(Eq, PartialEq, Ord, PartialOrd, Clone, Copy)]
-pub(crate) struct TransferId(uuid::Uuid);
-
-impl std::fmt::Display for TransferId {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        std::fmt::Display::fmt(&self.0, f)
-    }
-}
-
-impl std::fmt::Debug for TransferId {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        write!(f, "xfer:")?;
-        std::fmt::Display::fmt(self, f)
-    }
 }
 
 // State properties shown as [crw] for complete, readable, writable on states that have any.

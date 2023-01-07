@@ -20,6 +20,7 @@ use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
 use crate::types::ShardId;
+use crate::types::TabletId;
 use crate::types::Timestamp;
 use crate::types::WriteError;
 use crate::util::hexlify;
@@ -46,7 +47,7 @@ impl Obsidian {
     ) -> anyhow::Result<Option<Vec<u8>>> {
         let tablet_id = self.router.tablet_id_for_key(keyspace_id, &key)?;
         let tablet = self.tablets.tablet(tablet_id)?;
-        let txid = Txid::new(tablet_id.0);
+        let txid = Txid::new(tablet_id.shard_id());
         let already_seen_conflicts = RefCell::new(HashSet::new());
 
         Retry::new()
@@ -89,7 +90,7 @@ impl Obsidian {
             .skip(rand::thread_rng().gen_range(0..write_by_tablet.len()))
             .next()
             .unwrap();
-        let mut txid = Txid::new(owner_tablet_id.0);
+        let mut txid = Txid::new(owner_tablet_id.shard_id());
 
         // TODO: move into loop, since need to resolve conflicts
         if write_by_tablet.len() == 1 {
@@ -258,30 +259,6 @@ impl Obsidian {
         }
 
         Ok(result)
-    }
-}
-
-#[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
-pub(crate) struct TabletId(ShardId, u64);
-
-impl TabletId {
-    const META: Self = TabletId(ShardId(1), 1);
-
-    pub(crate) fn shard_meta(shard_id: ShardId) -> Self {
-        TabletId(shard_id, 1)
-    }
-}
-
-impl std::fmt::Display for TabletId {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        write!(f, "{}/{}", self.0 .0, self.1)
-    }
-}
-
-impl std::fmt::Debug for TabletId {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        write!(f, "tablet:")?;
-        std::fmt::Display::fmt(self, f)
     }
 }
 

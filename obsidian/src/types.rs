@@ -70,14 +70,34 @@ impl ColoGroupId {
     }
 }
 
-impl Debug for ColoGroupId {
+impl Display for ColoGroupId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "colo_group:{}", self.0)
+        write!(f, "{}", self.0)
     }
 }
 
-#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
+impl Debug for ColoGroupId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "colo_group:")?;
+        Display::fmt(&self.0, f)
+    }
+}
+
+#[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct KeyspaceId(pub ColoGroupId, pub u32);
+
+impl Display for KeyspaceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.0, self.1)
+    }
+}
+
+impl Debug for KeyspaceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "keyspace:")?;
+        Display::fmt(&self.0, f)
+    }
+}
 
 impl KeyspaceId {
     pub(crate) const TX_OUTCOMES: Self = Self(ColoGroupId::META, 0xFE000001);
@@ -234,3 +254,60 @@ pub enum InternalError {
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct ShardId(pub(crate) u32);
+
+impl Display for ShardId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Debug for ShardId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        write!(f, "shard:")?;
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+#[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct TabletId(pub(crate) ShardId, pub(crate) u64);
+
+impl TabletId {
+    const META: Self = TabletId(ShardId(1), 1);
+
+    pub(crate) fn shard_meta(shard_id: ShardId) -> Self {
+        TabletId(shard_id, 1)
+    }
+
+    pub(crate) fn shard_id(&self) -> ShardId {
+        self.0
+    }
+}
+
+impl Display for TabletId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        write!(f, "{}/{}", self.0, self.1)
+    }
+}
+
+impl Debug for TabletId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        write!(f, "tablet:")?;
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+#[derive(Eq, PartialEq, Ord, PartialOrd, Clone, Copy)]
+pub(crate) struct TransferId(uuid::Uuid);
+
+impl Display for TransferId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        Display::fmt(&self.0, f)
+    }
+}
+
+impl std::fmt::Debug for TransferId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        write!(f, "xfer:")?;
+        Display::fmt(self, f)
+    }
+}

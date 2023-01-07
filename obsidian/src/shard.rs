@@ -9,10 +9,10 @@ use tokio::task::JoinHandle;
 
 use crate::meta::Meta;
 use crate::meta::TabletState;
-use crate::obsidian::TabletId;
 use crate::range::Range;
 use crate::types::ColoGroupId;
 use crate::types::InternalError;
+use crate::types::TabletId;
 use crate::types::Timestamp;
 
 #[async_trait]
