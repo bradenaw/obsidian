@@ -402,6 +402,7 @@ mod test {
     use crate::storage::MemStorage;
     use crate::tablet::LsmTablet;
     use crate::tablet::Tablet;
+    use crate::types::ColoGroupId;
     use crate::types::KeyspaceId;
     use crate::types::Mutation;
     use crate::types::Precondition;
@@ -425,10 +426,7 @@ mod test {
             keyspace_id: KeyspaceId,
             key: &[u8],
         ) -> anyhow::Result<TabletId> {
-            if keyspace_id.is_meta() {
-                return Ok(TabletId::META);
-            }
-            if keyspace_id.is_shard_meta() {
+            if keyspace_id.0 == ColoGroupId::META {
                 if key.len() < 4 {
                     anyhow::bail!("tablet-routed key not long enough");
                 }
@@ -533,20 +531,21 @@ mod test {
             });
 
             let storage = Arc::new(MemStorage::new());
+            let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
             let tablet1 = LsmTablet::new(
                 LsmBuilder::new().storage(storage.clone()).build().await?,
                 Box::new(tablets.clone()),
                 Box::new(CheeseRouter {}),
             )
             .await?;
-            tablet1.create_keyspace(KeyspaceId(1)).await?;
+            tablet1.create_keyspace(keyspace_id).await?;
             let tablet2 = LsmTablet::new(
                 LsmBuilder::new().storage(storage.clone()).build().await?,
                 Box::new(tablets.clone()),
                 Box::new(CheeseRouter {}),
             )
             .await?;
-            tablet2.create_keyspace(KeyspaceId(1)).await?;
+            tablet2.create_keyspace(keyspace_id).await?;
 
             {
                 let mut m = tablets.m.lock().unwrap();
@@ -560,18 +559,18 @@ mod test {
                 .write(
                     vec![],
                     BTreeMap::from([
-                        ((KeyspaceId(1), vec![1, 1]), Mutation::Put(vec![1, 2, 3])),
-                        ((KeyspaceId(1), vec![2, 2]), Mutation::Put(vec![4, 5, 6])),
+                        ((keyspace_id, vec![1, 1]), Mutation::Put(vec![1, 2, 3])),
+                        ((keyspace_id, vec![2, 2]), Mutation::Put(vec![4, 5, 6])),
                     ]),
                 )
                 .await?;
 
             assert_eq!(
-                obs.get(write_ts, KeyspaceId(1), vec![1, 1]).await?,
+                obs.get(write_ts, keyspace_id, vec![1, 1]).await?,
                 Some(vec![1, 2, 3])
             );
             assert_eq!(
-                obs.get(write_ts, KeyspaceId(1), vec![2, 2]).await?,
+                obs.get(write_ts, keyspace_id, vec![2, 2]).await?,
                 Some(vec![4, 5, 6])
             );
 

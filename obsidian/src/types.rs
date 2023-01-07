@@ -60,50 +60,49 @@ impl Display for Timestamp {
 }
 
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
-pub struct KeyspaceId(pub u32);
+pub struct ColoGroupId(pub u32);
+
+impl ColoGroupId {
+    pub(crate) const META: Self = ColoGroupId(0xFFFFFFFF);
+}
+
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
+pub struct KeyspaceId(pub ColoGroupId, pub u32);
 
 impl KeyspaceId {
-    pub(crate) const TX_OUTCOMES: Self = Self(0xFE000001);
+    pub(crate) const TX_OUTCOMES: Self = Self(ColoGroupId::META, 0xFE000001);
 
     pub(crate) fn userland(&self) -> Option<KeyspaceId> {
         if !self.is_pending() && !self.is_precond() {
             return None;
         }
-        Some(KeyspaceId(self.0 & 0x00FFFFFF))
+        Some(KeyspaceId(self.0, self.1 & 0x00FFFFFF))
     }
 
     pub(crate) fn is_userland(&self) -> bool {
-        self.0 & 0xFF000000 == 0
+        self.1 & 0xFF000000 == 0
     }
 
     pub(crate) fn pending(&self) -> Option<KeyspaceId> {
         if !self.is_userland() {
             return None;
         }
-        Some(KeyspaceId(self.0 | 0x01000000))
+        Some(KeyspaceId(self.0, self.1 | 0x01000000))
     }
 
     pub(crate) fn is_pending(&self) -> bool {
-        self.0 & 0xFF000000 == 0x01000000
+        self.1 & 0xFF000000 == 0x01000000
     }
 
     pub(crate) fn precond(&self) -> Option<KeyspaceId> {
         if !self.is_userland() {
             return None;
         }
-        Some(KeyspaceId(self.0 | 0x02000000))
+        Some(KeyspaceId(self.0, self.1 | 0x02000000))
     }
 
     pub(crate) fn is_precond(&self) -> bool {
-        self.0 & 0xFF000000 == 0x02000000
-    }
-
-    pub(crate) fn is_shard_meta(&self) -> bool {
-        self.0 & 0xFF000000 == 0xFE000000
-    }
-
-    pub(crate) fn is_meta(&self) -> bool {
-        self.0 & 0xFF000000 == 0xFF000000
+        self.1 & 0xFF000000 == 0x02000000
     }
 }
 
@@ -209,16 +208,6 @@ impl Mutation {
 pub enum WriteError {
     #[error("precondition failed")]
     PreconditionFailed,
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
-}
-
-#[derive(Error, Debug)]
-pub enum InternalError {
-    #[error(transparent)]
-    TransitionRejected(anyhow::Error),
-    #[error(transparent)]
-    TransitionFatal(anyhow::Error),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
