@@ -38,6 +38,7 @@ use crate::range::KeyOrBound;
 use crate::range::Range;
 use crate::storage::MemStorage;
 use crate::storage::Storage;
+use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
@@ -1668,7 +1669,7 @@ struct Run<R> {
     max_key: Vec<u8>,
 }
 
-const INDEX_BLOCK_HEADER_SIZE: usize = 44;
+const INDEX_BLOCK_HEADER_SIZE: usize = 48;
 
 impl<R> Run<R> {
     // Assumes S is in (key, rev(ts)) order, and assumes termination at a reasonable size limit.
@@ -1756,11 +1757,12 @@ impl<R> Run<R> {
         let index_block_offset = bytes_written;
         let mut header = [0u8; INDEX_BLOCK_HEADER_SIZE];
         header[0..16].copy_from_slice(&id.as_bytes()[..]);
-        LittleEndian::write_u32(&mut header[16..20], keyspace_id.0);
-        LittleEndian::write_u64(&mut header[20..28], min_ts.as_nanos());
-        LittleEndian::write_u64(&mut header[28..36], max_ts.as_nanos());
-        LittleEndian::write_u32(&mut header[36..40], last_key.len() as u32);
-        LittleEndian::write_u32(&mut header[40..44], index_compressed.len() as u32);
+        LittleEndian::write_u32(&mut header[16..20], keyspace_id.0 .0);
+        LittleEndian::write_u32(&mut header[20..24], keyspace_id.1);
+        LittleEndian::write_u64(&mut header[24..32], min_ts.as_nanos());
+        LittleEndian::write_u64(&mut header[32..40], max_ts.as_nanos());
+        LittleEndian::write_u32(&mut header[40..44], last_key.len() as u32);
+        LittleEndian::write_u32(&mut header[44..48], index_compressed.len() as u32);
         w.write_all(&header[..]).await?;
         w.write_all(&last_key[..]).await?;
         w.write_all(&index_compressed).await?;
@@ -1790,11 +1792,14 @@ impl<R: AsyncReadExactAt> Run<R> {
             uuid_bytes.copy_from_slice(&header[0..16]);
             Uuid::from_bytes(uuid_bytes)
         };
-        let keyspace_id = KeyspaceId(LittleEndian::read_u32(&header[16..20]));
-        let min_ts = Timestamp::from_nanos(LittleEndian::read_u64(&header[20..28]));
-        let max_ts = Timestamp::from_nanos(LittleEndian::read_u64(&header[28..36]));
-        let max_key_len = LittleEndian::read_u32(&header[36..40]);
-        let index_len = LittleEndian::read_u32(&header[40..44]);
+        let keyspace_id = KeyspaceId(
+            ColoGroupId(LittleEndian::read_u32(&header[16..20])),
+            LittleEndian::read_u32(&header[20..24]),
+        );
+        let min_ts = Timestamp::from_nanos(LittleEndian::read_u64(&header[24..32]));
+        let max_ts = Timestamp::from_nanos(LittleEndian::read_u64(&header[32..40]));
+        let max_key_len = LittleEndian::read_u32(&header[40..44]);
+        let index_len = LittleEndian::read_u32(&header[44..48]);
 
         let max_key = {
             let mut max_key = vec![0u8; max_key_len as usize];
@@ -2028,6 +2033,7 @@ mod test {
     use crate::range::Bound;
     use crate::range::Range;
     use crate::storage::MemStorage;
+    use crate::types::ColoGroupId;
     use crate::types::Direction;
     use crate::types::KeyspaceId;
     use crate::types::Mutation;
@@ -2050,7 +2056,7 @@ mod test {
     #[tokio::test]
     async fn test_put_get() -> anyhow::Result<()> {
         let lsm = LsmBuilder::new().build().await?;
-        let keyspace_id = KeyspaceId(1);
+        let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
         let k = b"abc";
         let not_k = b"def";
         let v = b"foo";
@@ -2082,7 +2088,7 @@ mod test {
     async fn test_write_tx() -> anyhow::Result<()> {
         let lsm = LsmBuilder::new().build().await?;
 
-        let keyspace_id = KeyspaceId(1);
+        let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
         let ka = b"a";
         let kb = b"b";
 
@@ -2155,7 +2161,7 @@ mod test {
             .run_target_size(512)
             .build()
             .await?;
-        let keyspace_id = KeyspaceId(1);
+        let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
         lsm.create_keyspace(keyspace_id).await?;
         let mut map = BTreeMap::new();
         let mut last_ts = Timestamp::ZERO;
@@ -2210,7 +2216,7 @@ mod test {
             .run_target_size(512)
             .build()
             .await?;
-        let keyspace_id = KeyspaceId(1);
+        let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
         lsm.create_keyspace(keyspace_id).await?;
         let mut map = BTreeMap::new();
         let mut last_ts = Timestamp::ZERO;
@@ -2277,7 +2283,7 @@ mod test {
             .build()
             .await?;
 
-        let keyspace_id = KeyspaceId(1);
+        let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
         lsm.create_keyspace(keyspace_id).await?;
 
         let mut map = BTreeMap::new();
@@ -2482,7 +2488,7 @@ mod test {
         Run::<()>::write(
             &mut v,
             Uuid::new_v4(),
-            KeyspaceId(1),
+            KeyspaceId(ColoGroupId(1), 1),
             32768,
             futures::stream::iter(records.iter().map(|record| Ok(record.clone()))),
         )
@@ -2541,7 +2547,7 @@ mod test {
                 Run::<()>::write(
                     &mut v,
                     Uuid::new_v4(),
-                    KeyspaceId(1),
+                    KeyspaceId(ColoGroupId(1), 1),
                     1024,
                     futures::stream::iter(records.iter().map(|record| Ok(record.clone()))),
                 ).await.unwrap();
@@ -2592,7 +2598,7 @@ mod test {
                     .build()
                     .await
                     .unwrap();
-                let keyspace_id = KeyspaceId(1);
+                let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
                 lsm.create_keyspace(keyspace_id).await.unwrap();
 
                 let mut write_ts = 5;

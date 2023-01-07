@@ -25,10 +25,12 @@ use crate::obsidian::CommitError;
 use crate::obsidian::InternalWriteError;
 use crate::obsidian::ReadError;
 use crate::obsidian::Router;
+use crate::obsidian::TabletId;
 use crate::obsidian::Tablets;
 use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
 use crate::sequencer::Sequencer;
+use crate::types::ColoGroupId;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
@@ -759,7 +761,10 @@ impl LsmTabletInner {
             receiver,
             64,
             |(txid, keyspace_id, key, prepare_type)| async move {
-                let owner_tablet = self.tablets.tablet(txid.owner()).unwrap();
+                let owner_tablet = self
+                    .tablets
+                    .tablet(TabletId::shard_meta(txid.owner()))
+                    .unwrap();
                 let tx_outcome = owner_tablet.wait(txid).await.unwrap();
                 // Commits get cleaned up by the owner tablet calling cleanup_committed. Ignore them
                 // here to avoid duplicating work.
@@ -888,7 +893,8 @@ impl TxOutcomeRecord {
                     write_varint_to(&mut out, keyspace_ids.len() as u64).unwrap();
 
                     for (keyspace_id, bits) in keyspace_ids {
-                        write_varint_to(&mut out, (keyspace_id.0 as u64) << 2 | bits).unwrap();
+                        write_varint_to(&mut out, keyspace_id.0 .0 as u64).unwrap();
+                        write_varint_to(&mut out, (keyspace_id.1 as u64) << 2 | bits).unwrap();
                     }
 
                     maybe_prev_key = Some(key);
@@ -933,8 +939,12 @@ impl TxOutcomeRecord {
                     c.read_exact(&mut key[n_shared..])?;
                     let n_keyspace_ids = read_varint_from(&mut c)?.0 as usize;
                     for _ in 0..n_keyspace_ids {
+                        let colo_group_id = read_varint_from(&mut c)?.0 as u32;
                         let keyspace_id_and_tag = read_varint_from(&mut c)?.0;
-                        let keyspace_id = KeyspaceId((keyspace_id_and_tag >> 2) as u32);
+                        let keyspace_id = KeyspaceId(
+                            ColoGroupId(colo_group_id),
+                            (keyspace_id_and_tag >> 2) as u32,
+                        );
                         if keyspace_id_and_tag & 0x01 != 0 {
                             precond_keys.insert((keyspace_id, key.clone()));
                         }

@@ -8,6 +8,7 @@ use bitmask_enum::bitmask;
 use crate::obsidian::TabletId;
 use crate::range::Range;
 use crate::range::RangeSet;
+use crate::types::ColoGroupId;
 use crate::types::InternalError;
 use crate::types::KeyspaceId;
 use crate::types::Timestamp;
@@ -245,9 +246,9 @@ impl Meta for MemMeta {
             .keyspaces
             .last_key_value()
             .map(|(keyspace_id, _)| *keyspace_id)
-            .unwrap_or(KeyspaceId(0));
+            .unwrap_or(KeyspaceId(ColoGroupId(1), 0));
 
-        let keyspace_id = KeyspaceId(highest_in_use.0 + 1);
+        let keyspace_id = KeyspaceId(highest_in_use.0, highest_in_use.1 + 1);
 
         if !keyspace_id.is_userland() {
             return Err(anyhow::anyhow!(
