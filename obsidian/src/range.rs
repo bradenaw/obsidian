@@ -314,7 +314,7 @@ impl<K: Ord + HasPrefix> Borrow<Range<K>> for RangeByLowerBound<K> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RangeSet<K: Ord + HasPrefix> {
     ranges: BTreeSet<RangeByLowerBound<K>>,
 }

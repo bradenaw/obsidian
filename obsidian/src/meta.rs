@@ -111,7 +111,7 @@ pub(crate) trait Meta {
 //      │ Inactive │ Active [crw] │                                                               //
 //      └─────────────────────────┘                                                               //
 //        * Transfer Succeeded! *                                                                 //
-#[derive(Eq, PartialEq, Clone, Copy)]
+#[derive(Eq, PartialEq, Clone, Copy, Debug)]
 pub(crate) enum TabletState {
     Empty,
     Hydrating,
@@ -318,6 +318,11 @@ impl Meta for MemMeta {
                         "illegal transition: expected_ts=0 with next_state!=Active"
                     )));
                 }
+                if range.is_empty() {
+                    return Err(InternalError::TransitionFatal(anyhow!(
+                        "illegal transition: empty range",
+                    )));
+                }
                 if !inner
                     .keyspaces_by_group
                     .get(&colo_group_id)
@@ -494,15 +499,60 @@ impl Meta for MemMeta {
             return Err(anyhow!("can't transfer with empty dsts"));
         }
 
+        let mut src_range_set = RangeSet::<Vec<u8>>::new();
         for src in &srcs {
             if dsts.contains(&src) {
                 return Err(anyhow!("{:?} appears in both srcs and dsts", src));
             }
+
+            let (_, range, _, _, state) = inner
+                .tablets
+                .get(&src)
+                .ok_or_else(|| anyhow!("{:?} not found", src))?;
+
+            if *state != TabletState::Active {
+                return Err(anyhow!(
+                    "src {:?} in state {:?}, expected {:?}",
+                    src,
+                    state,
+                    TabletState::Active
+                ));
+            }
+
+            src_range_set.add_range(range.clone());
         }
+        if src_range_set.contiguous().is_none() {
+            return Err(anyhow!("src ranges not contiguous"));
+        }
+
+        let mut dst_range_set = RangeSet::<Vec<u8>>::new();
         for dst in &dsts {
             if srcs.contains(&dst) {
                 return Err(anyhow!("{:?} appears in both srcs and dsts", dst));
             }
+
+            let (_, range, _, _, state) = inner
+                .tablets
+                .get(&dst)
+                .ok_or_else(|| anyhow!("{:?} not found", dst))?;
+
+            if *state != TabletState::Empty {
+                return Err(anyhow!(
+                    "src {:?} in state {:?}, expected {:?}",
+                    dst,
+                    state,
+                    TabletState::Empty,
+                ));
+            }
+
+            dst_range_set.add_range(range.clone());
+        }
+        if dst_range_set.contiguous().is_none() {
+            return Err(anyhow!("dst ranges not contiguous"));
+        }
+
+        if src_range_set != dst_range_set {
+            return Err(anyhow!("src and dst ranges not the same"));
         }
 
         if inner.transfers.contains_key(&transfer_id) {
