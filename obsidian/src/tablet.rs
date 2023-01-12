@@ -17,6 +17,7 @@ use futures::future;
 use futures::FutureExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use uuid::Uuid;
 
 use crate::lock_mgr::Guard;
 use crate::lock_mgr::LockMgr;
@@ -28,6 +29,7 @@ use crate::obsidian::Router;
 use crate::obsidian::Tablets;
 use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
+use crate::range::Range;
 use crate::sequencer::Sequencer;
 use crate::types::ColoGroupId;
 use crate::types::KeyspaceId;

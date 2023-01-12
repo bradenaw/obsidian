@@ -13,6 +13,7 @@ use crate::meta::TabletState;
 use crate::range::Range;
 use crate::types::ColoGroupId;
 use crate::types::InternalError;
+use crate::types::ShardId;
 use crate::types::TabletId;
 use crate::types::Timestamp;
 
@@ -32,6 +33,7 @@ pub(crate) trait Shard {
 }
 
 struct ShardImpl {
+    shard_id: ShardId,
     meta: Arc<dyn Meta + Sync + Send>,
     inner: Arc<Mutex<ShardInner>>,
 }
@@ -43,7 +45,26 @@ impl Shard for ShardImpl {
         colo_group_id: ColoGroupId,
         range: Range<Vec<u8>>,
     ) -> anyhow::Result<TabletId> {
-        todo!()
+        let mut inner = self.inner.lock().unwrap();
+        let highest_in_use = inner
+            .tablets
+            .first_key_value()
+            .map(|(tablet_id, _)| tablet_id.1)
+            .unwrap_or(0);
+        let tablet_id = TabletId(self.shard_id, highest_in_use + 1);
+
+        inner.tablets.insert(
+            tablet_id,
+            (
+                colo_group_id,
+                range,
+                Timestamp::ZERO,
+                TabletState::Empty,
+                None,
+            ),
+        );
+
+        Ok(tablet_id)
     }
 
     async fn transition_tablet(

@@ -81,7 +81,7 @@ pub(crate) trait Meta {
 // separate [c**]. This is an example of a move with one source and one destination. m:n transfers
 // are similar.
 //
-//                                                                                                //
+//            src         dst                                                                     //
 //      ┌──────────────────────┐                                                                  //
 //      │ Active [crw] │ Empty │                                                                  //
 //      └───────────┬──────────┘                                                                  //
