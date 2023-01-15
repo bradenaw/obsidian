@@ -231,6 +231,14 @@ impl<K: Ord + HasPrefix + Clone> Range<K> {
         self.lower.cmp_key(k) != Ordering::Greater && self.upper.cmp_key(k) != Ordering::Less
     }
 
+    pub fn contains_range(&self, other: &Range<K>) -> bool {
+        self.lower <= other.lower && self.upper >= other.upper
+    }
+
+    pub fn intersects(&self, other: &Range<K>) -> bool {
+        std::cmp::max(&self.lower, &other.lower) < std::cmp::min(&self.upper, &other.upper)
+    }
+
     pub fn intersection(&self, other: &Range<K>) -> Range<K> {
         Range {
             lower: std::cmp::max(&self.lower, &other.lower).clone(),
@@ -575,6 +583,54 @@ impl<'a, K: Ord + HasPrefix + Clone> Iterator for Intersections<'a, K> {
                 (None, _) | (_, None) => return None,
             }
         }
+    }
+}
+
+pub(crate) struct RangeMap<K, V> {
+    // TODO: impl with BTreeMap<RangeByLowerBound...>
+    inner: Vec<(Range<K>, V)>,
+}
+
+impl<K: Ord + Clone + HasPrefix, V> RangeMap<K, V> {
+    pub(crate) fn new() -> Self {
+        Self { inner: vec![] }
+    }
+
+    pub(crate) fn get_range(&self, range: Range<K>) -> Vec<&V> {
+        let mut result = vec![];
+        for (other_range, v) in &self.inner {
+            if !other_range.intersects(&range) {
+                result.push(v);
+            }
+        }
+        result
+    }
+
+    pub(crate) fn contains_range(&self, range: Range<K>) -> bool {
+        todo!();
+    }
+
+    pub(crate) fn set(&mut self, range: Range<K>, v: V) {
+        self.remove(&range);
+        self.inner.push((range, v));
+        self.inner.sort_by_key(|(range, _)| range.lower);
+    }
+
+    pub(crate) fn remove(&mut self, range: &Range<K>) {
+        for (other_range, other_v) in self
+            .inner
+            .drain_filter(|(other_range, _)| other_range.intersects(&range))
+        {
+            let mut other_range_set = RangeSet::from(other_range);
+            other_range_set.subtract_range(range.clone());
+            for new_other_range in other_range_set.into_iter() {
+                self.inner.push((new_other_range, other_v));
+            }
+        }
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Range<K>, &V)> + '_ {
+        self.inner.iter().map(|(range, v)| (range, v))
     }
 }
 

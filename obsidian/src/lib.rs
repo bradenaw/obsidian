@@ -1,8 +1,9 @@
 #![allow(dead_code)]
+#![feature(build_hasher_simple_hash_one)]
+#![feature(drain_filter)]
 #![feature(generators)]
 #![feature(is_sorted)]
 #![feature(map_first_last)]
-#![feature(build_hasher_simple_hash_one)]
 
 mod lock_mgr;
 mod lsm;
