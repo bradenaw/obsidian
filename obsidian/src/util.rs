@@ -1,6 +1,7 @@
 use std::cmp;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::collections::HashMap;
 use std::fs::File;
 use std::future::Future;
 use std::io::Read;
@@ -409,5 +410,39 @@ impl Retry {
             return Err(e.into());
         }
         anyhow::bail!("no attempts")
+    }
+}
+
+/// Background is a set of owned tasks which are aborted on drop.
+pub(crate) struct Background {
+    tasks: std::sync::Arc<std::sync::Mutex<(u64, HashMap<u64, tokio::task::JoinHandle<()>>)>>,
+}
+
+impl Background {
+    pub(crate) fn new() -> Self {
+        Self {
+            tasks: std::sync::Arc::new(std::sync::Mutex::new((0, HashMap::new()))),
+        }
+    }
+
+    pub(crate) fn spawn<F: Future<Output = ()> + Send + 'static>(&self, f: F) {
+        let mut guard = self.tasks.lock().unwrap();
+        let id = guard.0;
+        let tasks_arc = self.tasks.clone();
+        let handle = tokio::task::spawn(async move {
+            f.await;
+            let mut guard = tasks_arc.lock().unwrap();
+            guard.1.remove(&id);
+        });
+        guard.0 += 1;
+        guard.1.insert(id, handle);
+    }
+}
+
+impl Drop for Background {
+    fn drop(&mut self) {
+        for (_, handle) in self.tasks.lock().unwrap().1.drain() {
+            handle.abort();
+        }
     }
 }

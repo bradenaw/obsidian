@@ -38,6 +38,7 @@ use crate::util::binary_search_by_idx;
 use crate::util::merge_sorted;
 use crate::util::merge_sorted_streams;
 use crate::util::AtomicArc;
+use crate::util::Background;
 use crate::util::OrdEqByFirst;
 use crate::wal;
 
@@ -107,7 +108,7 @@ pub(crate) struct Lsm {
     wal: Arc<wal::Wal<WalEntry>>,
     storage: Arc<MemStorage>,
 
-    wal_process: tokio::task::JoinHandle<anyhow::Result<()>>,
+    bg: Background,
     wal_processed: tokio::sync::watch::Receiver<wal::SeqNo>,
 }
 
@@ -147,8 +148,9 @@ impl Lsm {
 
         let inner = Arc::new(AtomicArc::new(Arc::new(lsms)));
 
+        let bg = Background::new();
         let (wal_processed_send, wal_processed_recv) = tokio::sync::watch::channel(wal::SeqNo(0));
-        let wal_process = tokio::spawn(Self::process_wal(
+        bg.spawn(Self::process_wal(
             inner.clone(),
             wal.clone(),
             newest_seqno.unwrap_or(wal::SeqNo(0)),
@@ -163,7 +165,7 @@ impl Lsm {
             inner,
             wal,
             storage,
-            wal_process,
+            bg,
             wal_processed: wal_processed_recv,
         })
     }
@@ -360,6 +362,18 @@ impl Lsm {
         wal: Arc<wal::Wal<WalEntry>>,
         start: wal::SeqNo,
         wal_processed: tokio::sync::watch::Sender<wal::SeqNo>,
+    ) {
+        // TODO: retry
+        Self::process_wal_once(inner, wal, start, wal_processed)
+            .await
+            .unwrap();
+    }
+
+    async fn process_wal_once(
+        inner: Arc<AtomicArc<HashMap<KeyspaceId, Arc<LsmInner>>>>,
+        wal: Arc<wal::Wal<WalEntry>>,
+        start: wal::SeqNo,
+        wal_processed: tokio::sync::watch::Sender<wal::SeqNo>,
     ) -> anyhow::Result<()> {
         let mut log = wal.stream(start, true).boxed();
         while let Some((seqno, entry)) = log.try_next().await? {
@@ -383,16 +397,10 @@ impl Lsm {
     }
 }
 
-impl Drop for Lsm {
-    fn drop(&mut self) {
-        self.wal_process.abort();
-    }
-}
-
 struct LsmInner {
     inner: Arc<LsmInnerInner>,
 
-    compaction: tokio::task::JoinHandle<()>,
+    bg: Background,
     compacted: tokio::sync::broadcast::Receiver<()>,
 }
 
@@ -417,7 +425,8 @@ impl LsmInner {
             l0_compact_notify,
         ));
 
-        let compaction = tokio::spawn(Self::compaction_loop(
+        let bg = Background::new();
+        bg.spawn(Self::compaction_loop(
             l0_max_size,
             run_target_size,
             block_size,
@@ -430,7 +439,7 @@ impl LsmInner {
 
         Ok(Self {
             inner,
-            compaction,
+            bg,
             compacted,
         })
     }
@@ -746,12 +755,6 @@ impl LsmInner {
         }
 
         Ok((runs, removes))
-    }
-}
-
-impl Drop for LsmInner {
-    fn drop(&mut self) {
-        self.compaction.abort();
     }
 }
 
