@@ -1,6 +1,7 @@
 use std::cmp;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::collections::HashMap;
 use std::future::Future;
 use std::io::Read;
 use std::io::Write;
@@ -336,5 +337,40 @@ impl Retry {
             return Err(e.into());
         }
         anyhow::bail!("no attempts")
+    }
+}
+
+struct Background {
+    tasks: std::sync::Mutex<(u64, HashMap<u64, tokio::task::JoinHandle<()>>)>,
+}
+
+impl Background {
+    fn new() -> Self {
+        Self {
+            tasks: std::sync::Mutex::new((0, HashMap::new())),
+        }
+    }
+
+    fn spawn<F: Future<Output = ()> + Send>(&self, f: F) {
+        let guard = self.tasks.lock().unwrap();
+        let mut next_id = &mut guard.0;
+        let mut tasks = &mut guard.1;
+        let id = *next_id;
+        let handle = tokio::task::spawn(async move {
+            f.await;
+            let guard = self.tasks.lock().unwrap();
+            let mut tasks = &mut guard.1;
+            tasks.remove(&id);
+        });
+        *next_id += 1;
+        tasks.insert(id, handle);
+    }
+}
+
+impl Drop for Background {
+    fn drop(&mut self) {
+        for (_, handle) in self.tasks.lock().unwrap().1.drain() {
+            handle.abort();
+        }
     }
 }
