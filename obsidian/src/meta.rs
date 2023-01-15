@@ -41,32 +41,38 @@ pub(crate) trait Meta {
 // In a range transfer, the source tablet starts at Active and the destination starts at None. The
 // goal is to get the source to None and the destination to Active.
 //
-//                  ┌──────┐                             ┌───────────┐                            //
-//                  │ None ├────────────────────────────>│ Hydrating │                            //
-//                  └───┬──┘                             └┬────┬─────┘                            //
-//                   ^  │ ^                               │    │                                  //
-//                   │  │ ├───────────────────────────────┘    │╴src Frozen, all caught up        //
-//                   │  │ │                                    │                                  //
-//                   │  │ │                                    v                                  //
-//                   │  │ │                            ┌────────────────┐                         //
-//                   │  │ └────────────────────────────┤ Prepared [c__] │                         //
-//                   │  │╴new colo group               └───────┬────────┘                         //
-//                   │  │                                      │                                  //
-//                   │  │                             src None╶│                                  //
-//                   │  │                                      │                                  //
-//                   │  │                                      v                                  //
-//                   │  │                              ┌────────────────┐                         //
-//                   │  └─────────────────────────────>│ Active   [crw] │                         //
-//                   │                                 └────┬───────────┘                         //
-//                   │                                      │     ^                               //
-//                   │      dst Hydrating, nearly caught up╶│     │                               //
-//                   │                                      │     │                               //
-//                   │                                      │     │╴cancel transfer               //
-//                   │                                      v     │                               //
-//                   │                                 ┌──────────┴─────┐                         //
-//                   └─────────────────────────────────┤ Frozen   [cr_] │                         //
-//                           │                         └────────────────┘                         //
-//                     dst Prepared                                                               //
+//                                           ┌──────┐                                             //
+//                   ┌───────────────────────┤ None │<────────────────────────┐                   //
+//                   │                       └───┬──┘                         │                   //
+//                   │                           │                            │                   //
+//                   │                           │                            │                   //
+//                   │╴new colo group            v                            │                   //
+//                   │                     ┌───────────┐                      │                   //
+//                   │                     │ Hydrating ├──────────────────────┤                   //
+//                   │                     └─────┬─────┘           │          │                   //
+//                   │                           │               abort        │                   //
+//                   │                           │                            │                   //
+//                   │                           │╴src Frozen, all caught up  │                   //
+//                   │                           v                            │                   //
+//                   │                   ┌────────────────┐                   │                   //
+//                   │                   │ Prepared [c__] ├───────────────────┤                   //
+//                   │                   └───────┬────────┘        │          │                   //
+//                   │                           │               abort        │                   //
+//                   │                  src None╶│                            │                   //
+//                   │                           │                            │                   //
+//                   │                           v                            │                   //
+//                   │                   ┌────────────────┐                   │                   //
+//                   └──────────────────>│ Active   [crw] │                   │                   //
+//                                       └────┬───────────┘                   │                   //
+//                                            │     ^                         │                   //
+//            dst Hydrating, nearly caught up╶│     │                         │                   //
+//                                            │     │                         │                   //
+//                                            │     │╴cancel transfer         │                   //
+//                                            v     │                         │                   //
+//                                       ┌──────────┴─────┐                   │                   //
+//                                       │ Frozen   [cr_] ├───────────────────┘                   //
+//                                       └────────────────┘         │                             //
+//                                                            dst Prepared                        //
 //
 //
 // And a state machine of the entire transfer, with souce on the left and destination on the right.
