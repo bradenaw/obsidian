@@ -340,18 +340,18 @@ impl Retry {
     }
 }
 
-struct Background {
+pub(crate) struct Background {
     tasks: std::sync::Mutex<(u64, HashMap<u64, tokio::task::JoinHandle<()>>)>,
 }
 
 impl Background {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             tasks: std::sync::Mutex::new((0, HashMap::new())),
         }
     }
 
-    fn spawn<F: Future<Output = ()> + Send>(&self, f: F) {
+    pub(crate) fn spawn<F: Future<Output = ()> + Send>(&self, f: F) {
         let guard = self.tasks.lock().unwrap();
         let mut next_id = &mut guard.0;
         let mut tasks = &mut guard.1;

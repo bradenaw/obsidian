@@ -16,12 +16,13 @@ use byteorder::LittleEndian;
 use futures::future;
 use futures::FutureExt;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::lock_mgr::Guard;
 use crate::lock_mgr::LockMgr;
 use crate::lsm::Lsm;
+use crate::meta::Meta;
+use crate::meta::RangeState;
 use crate::obsidian::CommitError;
 use crate::obsidian::InternalWriteError;
 use crate::obsidian::ReadError;
@@ -41,6 +42,7 @@ use crate::types::Value;
 use crate::util::longest_shared_prefix_len;
 use crate::util::read_varint_from;
 use crate::util::write_varint_to;
+use crate::util::Background;
 
 const MAX_PRECOND_VALUE_LEN: usize = 256;
 
@@ -89,13 +91,22 @@ pub(crate) trait Tablet {
         precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
         mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
     ) -> anyhow::Result<()>;
+
+    async fn transition(
+        &self,
+        range: (ColoGroupId, Range<Vec<u8>>),
+        state: RangeState,
+    ) -> anyhow::Result<()>;
+    async fn prewarm(&self, range: (ColoGroupId, Range<Vec<u8>>)) -> anyhow::Result<()>;
+    async fn manifest(
+        &self,
+        range: (ColoGroupId, Range<Vec<u8>>),
+    ) -> anyhow::Result<(Vec<Vec<Uuid>>, bool)>;
 }
 
 pub(crate) struct LsmTablet {
     inner: Arc<LsmTabletInner>,
-
-    bg_cleanup_committed_outcomes: JoinHandle<()>,
-    bg_resolve_pending: JoinHandle<()>,
+    bg: Background,
 }
 
 #[async_trait]
@@ -163,6 +174,25 @@ impl Tablet for LsmTablet {
             .cleanup_committed(txid, ts, precond_keys, mut_keys)
             .await
     }
+
+    async fn transition(
+        &self,
+        range: (ColoGroupId, Range<Vec<u8>>),
+        state: RangeState,
+    ) -> anyhow::Result<()> {
+        todo!();
+    }
+
+    async fn prewarm(&self, range: (ColoGroupId, Range<Vec<u8>>)) -> anyhow::Result<()> {
+        todo!();
+    }
+
+    async fn manifest(
+        &self,
+        range: (ColoGroupId, Range<Vec<u8>>),
+    ) -> anyhow::Result<(Vec<Vec<Uuid>>, bool)> {
+        todo!();
+    }
 }
 
 impl LsmTablet {
@@ -170,6 +200,7 @@ impl LsmTablet {
         lsm: Lsm,
         tablets: Box<dyn Tablets + Sync + Send>,
         router: Box<dyn Router + Sync + Send>,
+        meta: Box<dyn Meta + Sync + Send>,
     ) -> anyhow::Result<Self> {
         let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
         let (commit_sender, commit_receiver) = mpsc::channel(128);
@@ -180,30 +211,25 @@ impl LsmTablet {
             lsm,
             tablets,
             router,
+            meta,
             prepare_sender,
             commit_sender,
         ));
 
+        let bg = Background::new();
+
         // TODO: also read already-committed outcomes into commit_sender
 
         let inner_ = inner.clone();
-        let bg_cleanup_committed_outcomes = tokio::spawn(async move {
-            inner_
-                .clone()
-                .cleanup_committed_outcomes(commit_receiver)
-                .await;
+        bg.spawn(async move {
+            inner_.cleanup_committed_outcomes(commit_receiver).await;
         });
-
         let inner_ = inner.clone();
-        let bg_resolve_pending = tokio::spawn(async move {
-            inner_.clone().resolve_prepared(prepare_receiver).await;
+        bg.spawn(async move {
+            inner_.resolve_prepared(prepare_receiver).await;
         });
 
-        Ok(Self {
-            inner,
-            bg_cleanup_committed_outcomes,
-            bg_resolve_pending,
-        })
+        Ok(Self { inner, bg })
     }
 
     pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
@@ -223,17 +249,11 @@ impl LsmTablet {
     }
 }
 
-impl Drop for LsmTablet {
-    fn drop(&mut self) {
-        self.bg_cleanup_committed_outcomes.abort();
-        self.bg_resolve_pending.abort();
-    }
-}
-
 struct LsmTabletInner {
     lsm: Lsm,
     tablets: Box<dyn Tablets + Sync + Send>,
     router: Box<dyn Router + Sync + Send>,
+    meta: Box<dyn Meta + Sync + Send>,
     sequencer: Sequencer,
     lock_mgr: LockMgr,
 
@@ -260,6 +280,7 @@ impl LsmTabletInner {
         lsm: Lsm,
         tablets: Box<dyn Tablets + Sync + Send>,
         router: Box<dyn Router + Sync + Send>,
+        meta: Box<dyn Meta + Sync + Send>,
         prepare_sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
         commit_sender: mpsc::Sender<(
             Txid,
@@ -272,6 +293,7 @@ impl LsmTabletInner {
             lsm,
             tablets,
             router,
+            meta,
             prepare_sender,
             commit_sender,
             sequencer: Sequencer::new(),
