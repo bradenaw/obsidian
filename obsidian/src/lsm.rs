@@ -2512,6 +2512,78 @@ mod test {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_scan_asc() -> anyhow::Result<()> {
+        let lsm = LsmBuilder::new()
+            .l0_max_size(128)
+            .block_size(128)
+            .run_target_size(512)
+            .build()
+            .await?;
+        let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
+        lsm.create_keyspace(keyspace_id).await?;
+
+        let writes = [
+            //   ts=0123456789
+            ("a", b"    o    o"),
+            ("b", b"   o     o"),
+            ("c", b"   o x    "),
+            ("d", b"   oxo    "),
+            ("e", b"    o     "),
+            ("f", b"     o    "),
+            ("g", b" o x  o   "),
+        ];
+
+        for ts in 1..writes[0].1.len() {
+            for (key, versions) in writes {
+                let mutation = match versions[ts] {
+                    b'o' => Mutation::Put(format!("{} {}", key, ts).into()),
+                    b'x' => Mutation::Delete,
+                    _ => continue,
+                };
+                lsm.write(
+                    Timestamp(ts as u64),
+                    vec![],
+                    BTreeMap::from([((keyspace_id, key.into()), mutation)]),
+                )
+                .await?;
+            }
+        }
+
+        let mut maybe_cursor: Option<Range<Vec<u8>>> = Some(Range {
+            lower: Bound::Before("b".into()),
+            upper: Bound::After("e".into()),
+        });
+        let mut results = vec![];
+        while let Some(cursor) = maybe_cursor {
+            let (page, continue_cursor) = lsm
+                .scan_page(
+                    Timestamp(5),
+                    keyspace_id,
+                    cursor.borrow(),
+                    Direction::Asc,
+                    2,
+                )
+                .await?;
+            results.extend(page);
+            maybe_cursor = continue_cursor;
+        }
+
+        assert_eq!(
+            results,
+            [("b", 3), ("d", 5), ("e", 4)]
+                .into_iter()
+                .map(|(key, ts)| Record {
+                    key: (*key).into(),
+                    ts: Timestamp(*ts),
+                    value: Value::Regular(format!("{} {}", key, ts).into()),
+                })
+                .collect::<Vec<Record>>()
+        );
+
+        Ok(())
+    }
+
     fn bound_strategy() -> impl Strategy<Value = Bound<Vec<u8>>> {
         prop_oneof![
             Just(Bound::BeforeAll),
@@ -2586,7 +2658,7 @@ mod test {
             log_indexes in proptest::collection::vec(any::<prop::sample::Index>(), 1000),
             ranges in proptest::collection::vec(range_strategy(), 1000),
         ) {
-            tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
+            tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap().block_on(async {
                 let keys_vec: Vec<_> = keys.iter().collect();
 
                 let mut writes = vec![];
