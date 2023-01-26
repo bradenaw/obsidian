@@ -875,32 +875,42 @@ impl LsmInnerInner {
             if level.runs.is_empty() {
                 continue;
             }
-            let start_idx = binary_search_by_idx(
+            let mut start_idx = binary_search_by_idx(
                 level.runs.len(),
                 range.lower.clone().map(Vec::from),
                 |idx| level.runs[idx].range().upper,
             )
             .unwrap_or_else(core::convert::identity);
-            let end_idx = binary_search_by_idx(
+            if level.runs[start_idx].range().upper.borrow() == range.lower {
+                start_idx += 1;
+            }
+
+            let mut end_idx = binary_search_by_idx(
                 level.runs.len(),
                 range.upper.clone().map(Vec::from),
                 |idx| level.runs[idx].range().lower,
             )
-            .unwrap_or_else(|idx| {
-                if idx == level.runs.len() {
-                    idx - 1
-                } else {
-                    idx
-                }
-            });
+            .unwrap_or_else(|idx| if idx == level.runs.len() { idx } else { idx });
+            if end_idx < level.runs.len()
+                && level.runs[end_idx].range().lower.borrow() == range.upper
+            {
+                end_idx -= 1;
+            }
 
             if end_idx < start_idx {
                 continue;
             }
 
             streams.push(
-                futures::stream::iter(level.runs[start_idx..=end_idx].iter())
-                    .inspect(|run| assert!(!run.range().intersection(&range.to_vec()).is_empty()))
+                futures::stream::iter(level.runs[start_idx..end_idx].iter())
+                    .inspect(|run| {
+                        assert!(
+                            !run.range().intersection(&range.to_vec()).is_empty(),
+                            "trying to scan {:?}, got run with range {:?}",
+                            range,
+                            run.range()
+                        )
+                    })
                     .map(|run| run.scan(ts, range.to_vec(), direction))
                     .flatten()
                     .boxed(),
@@ -2515,9 +2525,9 @@ mod test {
     #[tokio::test]
     async fn test_scan_asc() -> anyhow::Result<()> {
         let lsm = LsmBuilder::new()
-            .l0_max_size(128)
-            .block_size(128)
-            .run_target_size(512)
+            .l0_max_size(32)
+            .block_size(48)
+            .run_target_size(96)
             .build()
             .await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
@@ -2525,61 +2535,121 @@ mod test {
 
         let writes = [
             //   ts=0123456789
-            ("a", b"    o    o"),
+            ("a", b" o  o    o"),
             ("b", b"   o     o"),
             ("c", b"   o x    "),
             ("d", b"   oxo    "),
-            ("e", b"    o     "),
-            ("f", b"     o    "),
-            ("g", b" o x  o   "),
+            ("e", b"    o   o "),
+            ("f", b"     o  o "),
+            ("g", b" o x  o  o"),
+            ("h", b"  o oxo  o"),
+            ("i", b"  o  oo o "),
+            ("j", b" xoxoxoxox"),
+            ("k", b"        o "),
+            ("l", b" ooooooooo"),
         ];
 
+        //let mut expecteds = vec![];
         for ts in 1..writes[0].1.len() {
+            //let mut expected = match expecteds.last() {
+            //    Some(prev) => prev.clone(),
+            //    None => BTreeMap::new(),
+            //};
+
             for (key, versions) in writes {
                 let mutation = match versions[ts] {
                     b'o' => Mutation::Put(format!("{} {}", key, ts).into()),
                     b'x' => Mutation::Delete,
                     _ => continue,
                 };
+
+                //let value = match mutation {
+                //    Mutation::Put(v) => Value::Regular(v),
+                //    Mutation::Delete => Value::Tombstone,
+                //};
                 lsm.write(
                     Timestamp(ts as u64),
                     vec![],
                     BTreeMap::from([((keyspace_id, key.into()), mutation)]),
                 )
                 .await?;
+
+                //expected.insert(key, value);
             }
+            if ts < writes[0].1.len() - 2 && ts % 3 == 0 {
+                lsm.pending_compactions().await;
+            }
+            //expecteds.push(expected);
         }
 
-        let mut maybe_cursor: Option<Range<Vec<u8>>> = Some(Range {
-            lower: Bound::Before("b".into()),
-            upper: Bound::After("e".into()),
-        });
-        let mut results = vec![];
-        while let Some(cursor) = maybe_cursor {
-            let (page, continue_cursor) = lsm
-                .scan_page(
-                    Timestamp(5),
-                    keyspace_id,
-                    cursor.borrow(),
-                    Direction::Asc,
-                    2,
-                )
-                .await?;
-            results.extend(page);
-            maybe_cursor = continue_cursor;
+        async fn check(
+            lsm: &Lsm,
+            ts: Timestamp,
+            keyspace_id: KeyspaceId,
+            range: Range<Vec<u8>>,
+            expected: Vec<(&str, usize)>,
+        ) -> anyhow::Result<()> {
+            for page_size in 1..=expected.len() {
+                let mut maybe_cursor: Option<Range<Vec<u8>>> = Some(range.clone());
+                let mut results = vec![];
+                while let Some(cursor) = maybe_cursor {
+                    let (page, continue_cursor) = lsm
+                        .scan_page(ts, keyspace_id, cursor.borrow(), Direction::Asc, page_size)
+                        .await?;
+                    assert!(page.len() <= page_size);
+                    results.extend(page);
+                    maybe_cursor = continue_cursor;
+                }
+
+                assert_eq!(
+                    results,
+                    expected
+                        .clone()
+                        .into_iter()
+                        .map(|(key, ts)| Record {
+                            key: (key).into(),
+                            ts: Timestamp(ts as u64),
+                            value: Value::Regular(format!("{} {}", key, ts).into()),
+                        })
+                        .collect::<Vec<Record>>()
+                );
+            }
+
+            Ok(())
         }
 
-        assert_eq!(
-            results,
-            [("b", 3), ("d", 5), ("e", 4)]
-                .into_iter()
-                .map(|(key, ts)| Record {
-                    key: (*key).into(),
-                    ts: Timestamp(*ts),
-                    value: Value::Regular(format!("{} {}", key, ts).into()),
-                })
-                .collect::<Vec<Record>>()
-        );
+        check(
+            &lsm,
+            Timestamp(5),
+            keyspace_id,
+            Range {
+                lower: Bound::Before("b".into()),
+                upper: Bound::After("e".into()),
+            },
+            vec![("b", 3), ("d", 5), ("e", 4)],
+        )
+        .await?;
+
+        check(
+            &lsm,
+            Timestamp(4),
+            keyspace_id,
+            Range::all(),
+            vec![
+                ("a", 4),
+                ("b", 3),
+                ("c", 3),
+                // d got deleted at 4
+                ("e", 4),
+                // f doesn't exist yet
+                ("h", 4),
+                ("i", 2),
+                ("j", 4),
+                // k doesn't exist yet
+                ("l", 4),
+            ],
+        )
+        .await?;
 
         Ok(())
     }
