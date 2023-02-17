@@ -32,6 +32,8 @@ use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
+use crate::lsm_block::Block;
+use crate::lsm_util::PrefixCompressedKV;
 use crate::memtable::Memtable;
 use crate::range::Bound;
 use crate::range::KeyOrBound;
@@ -1193,266 +1195,6 @@ impl Level {
     }
 }
 
-struct Block<'a, R> {
-    values_len: usize,
-    n_versions: usize,
-    min_ts: Timestamp,
-    ts_bytes: usize,
-    offset_bytes: usize,
-    index: PrefixCompressedKV<u16>,
-    versions_bytes: Vec<u8>,
-    header_offset: u64,
-    r: &'a R,
-}
-
-const BLOCK_INDEX_HEADER_SIZE: usize = 18;
-
-impl<'a, R> Block<'a, R> {
-    // Assumes that kvs values are in reverse order by timestamp.
-    //
-    // Returns the encoded block and the offset of the header within the block.
-    pub fn encode(
-        kvs: &BTreeMap<Vec<u8>, Vec<(Timestamp, Value)>>,
-    ) -> anyhow::Result<(Vec<u8>, usize)> {
-        let (min_ts, max_ts, values_len) = kvs
-            .values()
-            .map(|versions| {
-                let min_ts = versions.last()?.0;
-                let max_ts = versions.first()?.0;
-                let values_len: usize = versions.iter().map(|(_, v)| v.len()).sum();
-                Some((min_ts, max_ts, values_len))
-            })
-            .flatten()
-            .reduce(
-                |(min_ts0, max_ts0, values_len0), (min_ts1, max_ts1, values_len1)| {
-                    (
-                        std::cmp::min(min_ts0, min_ts1),
-                        std::cmp::max(max_ts0, max_ts1),
-                        values_len0 + values_len1,
-                    )
-                },
-            )
-            .ok_or_else(|| anyhow!("malformed block"))?;
-        // Shift here for room for the tombstone bit.
-        let bytes_per_ts_offset =
-            std::cmp::max(byte_width((max_ts.as_nanos() - min_ts.as_nanos()) << 1), 1);
-        let bytes_per_value_offset = std::cmp::max(byte_width(values_len as u64), 1);
-
-        let mut index: BTreeMap<Vec<u8>, u16> = BTreeMap::new();
-        let mut block = vec![];
-
-        let mut n_versions = 0;
-        let mut versions = Vec::new();
-        for (key, key_versions) in kvs {
-            index.insert(key.clone(), n_versions as u16);
-            for (ts, value) in key_versions {
-                let value_offset = block.len();
-                let tombstone_bit = match value {
-                    Value::Regular(value) => {
-                        block.extend_from_slice(&value[..]);
-                        0
-                    }
-                    Value::Tombstone => 1,
-                };
-                let ts_offset_and_tombstone =
-                    ((ts.as_nanos() - min_ts.as_nanos()) << 1) | tombstone_bit;
-
-                let mut buf = [0u8; 16];
-                LittleEndian::write_u64(&mut buf[..], ts_offset_and_tombstone);
-                LittleEndian::write_u64(&mut buf[bytes_per_ts_offset..], value_offset as u64);
-                versions.extend_from_slice(&buf[..bytes_per_ts_offset + bytes_per_value_offset]);
-            }
-            n_versions += key_versions.len();
-        }
-        let values_len = block.len();
-        let encoded_index = PrefixCompressedKV::encode(&index);
-
-        let mut header = [0u8; BLOCK_INDEX_HEADER_SIZE];
-        LittleEndian::write_u32(&mut header[0..4], values_len as u32);
-        LittleEndian::write_u16(&mut header[4..6], n_versions as u16);
-        LittleEndian::write_u64(&mut header[6..14], min_ts.as_nanos());
-        LittleEndian::write_u16(&mut header[14..16], encoded_index.len() as u16);
-        header[16] = bytes_per_ts_offset as u8;
-        header[17] = bytes_per_value_offset as u8;
-
-        let header_idx = block.len();
-        block.extend_from_slice(&header[..]);
-        block.extend_from_slice(&encoded_index[..]);
-        block.extend_from_slice(&versions[..]);
-
-        Ok((block, header_idx))
-    }
-}
-
-impl<'a, R: AsyncReadExactAt> Block<'a, R> {
-    pub async fn open(r: &'a R, header_offset: u64) -> anyhow::Result<Block<'a, R>> {
-        let mut header = [0u8; BLOCK_INDEX_HEADER_SIZE];
-
-        r.read_exact_at(&mut header[..], header_offset).await?;
-
-        let values_len = LittleEndian::read_u32(&header[0..4]) as usize;
-        let n_versions = LittleEndian::read_u16(&header[4..6]) as usize;
-        let min_ts = Timestamp::from_nanos(LittleEndian::read_u64(&header[6..14]));
-        let index_len = LittleEndian::read_u16(&header[14..16]) as usize;
-        let bytes_per_ts_offset = header[16] as usize;
-        let bytes_per_value_offset = header[17] as usize;
-        let versions_len = n_versions * (bytes_per_ts_offset + bytes_per_value_offset);
-
-        let mut index_bytes = vec![0u8; index_len];
-        r.read_exact_at(
-            &mut index_bytes[..],
-            header_offset + (BLOCK_INDEX_HEADER_SIZE as u64),
-        )
-        .await?;
-        let index = PrefixCompressedKV::decode(index_bytes);
-
-        let mut versions_bytes = vec![0u8; versions_len];
-        r.read_exact_at(
-            &mut versions_bytes[..],
-            header_offset + (BLOCK_INDEX_HEADER_SIZE as u64) + (index_len as u64),
-        )
-        .await?;
-
-        Ok(Self {
-            r,
-            values_len,
-            n_versions,
-            min_ts,
-            index,
-            versions_bytes,
-            header_offset,
-            ts_bytes: bytes_per_ts_offset,
-            offset_bytes: bytes_per_value_offset,
-        })
-    }
-
-    fn versions(&self) -> BlockVersions<'_> {
-        BlockVersions {
-            ts_bytes: self.ts_bytes,
-            offset_bytes: self.offset_bytes,
-            min_ts: self.min_ts,
-            end_offset: self.values_len,
-            b: &self.versions_bytes[..],
-        }
-    }
-
-    fn versions_for_key(&self, key_idx: usize) -> BlockVersions<'_> {
-        let start_idx = self.index.get_value(key_idx) as usize;
-        let end_idx = if key_idx == self.index.len() - 1 {
-            self.n_versions
-        } else {
-            self.index.get_value(key_idx + 1) as usize
-        };
-        self.versions().slice(start_idx, end_idx)
-    }
-
-    async fn value<'b>(
-        &'b self,
-        versions: &BlockVersions<'b>,
-        idx: usize,
-    ) -> anyhow::Result<Value> {
-        let (value_start, value_end) = match versions.value_offsets(idx) {
-            Some(v) => v,
-            None => return Ok(Value::Tombstone),
-        };
-        let value_len = value_end - value_start;
-
-        let mut value = vec![0u8; value_len];
-        self.r
-            .read_exact_at(
-                &mut value[..],
-                self.header_offset - (self.values_len as u64) + (value_start as u64),
-            )
-            .await?;
-
-        Ok(Value::Regular(value))
-    }
-
-    pub async fn get(&self, ts: Timestamp, k: &[u8]) -> anyhow::Result<Option<(Timestamp, Value)>> {
-        let key_idx = match self.index.search(k) {
-            Ok(idx) => idx,
-            Err(_) => return Ok(None),
-        };
-        let key_versions = self.versions_for_key(key_idx);
-
-        let version_idx = binary_search_by_idx(key_versions.len(), Reverse(ts), |idx| {
-            Reverse(key_versions.ts(idx))
-        })
-        .unwrap_or_else(core::convert::identity);
-        if version_idx == key_versions.len() {
-            return Ok(None);
-        }
-        let record_ts = key_versions.ts(version_idx);
-
-        Ok(Some((
-            record_ts,
-            self.value(&key_versions, version_idx).await?,
-        )))
-    }
-}
-
-struct BlockVersions<'a> {
-    ts_bytes: usize,
-    offset_bytes: usize,
-    min_ts: Timestamp,
-    end_offset: usize,
-    b: &'a [u8],
-}
-
-impl<'a> BlockVersions<'a> {
-    fn len(&self) -> usize {
-        self.b.len() / (self.ts_bytes + self.offset_bytes)
-    }
-
-    fn elem(&self, idx: usize) -> (Timestamp, bool, usize) {
-        let width = self.ts_bytes + self.offset_bytes;
-        let elem = &self.b[width * idx..width * (idx + 1)];
-        let mut ts_offset_buf = [0u8; 8];
-        ts_offset_buf[..self.ts_bytes].copy_from_slice(&elem[..self.ts_bytes]);
-        let ts_offset_and_tombstone = LittleEndian::read_u64(&ts_offset_buf[..]);
-        let tombstone = ts_offset_and_tombstone & 1 == 1;
-        let ts = Timestamp::from_nanos((ts_offset_and_tombstone >> 1) + self.min_ts.as_nanos());
-
-        let mut value_offset_buf = [0u8; 8];
-        value_offset_buf[..self.offset_bytes].copy_from_slice(&elem[self.ts_bytes..]);
-        let value_offset = LittleEndian::read_u64(&value_offset_buf[..]) as usize;
-        (ts, tombstone, value_offset)
-    }
-
-    fn slice(&self, start_idx: usize, end_idx: usize) -> BlockVersions<'a> {
-        let width = self.ts_bytes + self.offset_bytes;
-        let b = &self.b[start_idx * width..end_idx * width];
-        let end_offset = if end_idx == self.len() {
-            self.end_offset
-        } else {
-            self.elem(end_idx).2
-        };
-        BlockVersions {
-            ts_bytes: self.ts_bytes,
-            offset_bytes: self.offset_bytes,
-            min_ts: self.min_ts,
-            end_offset,
-            b,
-        }
-    }
-
-    fn ts(&self, idx: usize) -> Timestamp {
-        self.elem(idx).0
-    }
-
-    fn value_offsets(&self, idx: usize) -> Option<(usize, usize)> {
-        let (_, tombstone, start) = self.elem(idx);
-        if tombstone {
-            return None;
-        }
-        let end = if idx == self.len() - 1 {
-            self.end_offset
-        } else {
-            self.elem(idx + 1).2
-        };
-        Some((start, end))
-    }
-}
 #[derive(Clone, Debug)]
 pub(crate) enum WalEntry {
     Write(Timestamp, Vec<(KeyspaceId, Vec<u8>, Value)>),
@@ -1469,189 +1211,6 @@ impl wal::Entry for WalEntry {
                 16u64 + (levels.iter().map(|level| level.len() as u64).sum::<u64>() * 16u64)
             }
         }
-    }
-}
-
-#[derive(Clone)]
-struct PrefixCompressedKV<V> {
-    v: PhantomData<V>,
-    offset_width: usize,
-    prefix_len: usize,
-    n: usize,
-    suffixes_len: usize,
-    data: Vec<u8>,
-}
-
-const PREFIX_COMPRESSED_KV_HEADER_SIZE: usize = 9;
-
-impl<V: FixedSizeSerializable> PrefixCompressedKV<V> {
-    fn encode(m: &BTreeMap<Vec<u8>, V>) -> Vec<u8> {
-        let prefix: Vec<u8> = match (m.first_key_value(), m.last_key_value()) {
-            (Some((first_key, _)), Some((last_key, _))) => {
-                longest_shared_prefix(&first_key[..], &last_key[..])
-            }
-            _ => vec![],
-        };
-        let suffixes_len: usize = m.keys().map(|k| k.len() - prefix.len()).sum();
-
-        let offset_width = std::cmp::max(byte_width(suffixes_len as u64), 1);
-
-        let offset_and_value_width = offset_width + V::size();
-        let mut suffixes = Vec::with_capacity(suffixes_len);
-        let mut offset_and_values = Vec::with_capacity(m.len() * offset_and_value_width);
-
-        let mut offset_and_value = vec![0u8; std::cmp::max(4, offset_and_value_width)];
-        for (k, v) in m {
-            let offset = suffixes.len();
-
-            suffixes.extend_from_slice(&k[prefix.len()..]);
-
-            for i in 0..offset_and_value.len() {
-                offset_and_value[i] = 0;
-            }
-            LittleEndian::write_u32(&mut offset_and_value[..], offset as u32);
-            v.write(&mut offset_and_value[offset_width..]);
-            offset_and_values.extend_from_slice(&offset_and_value[..offset_and_value_width]);
-        }
-
-        let mut header = [0u8; PREFIX_COMPRESSED_KV_HEADER_SIZE];
-        header[0] = offset_width as u8;
-        LittleEndian::write_u16(&mut header[1..3], m.len() as u16);
-        LittleEndian::write_u16(&mut header[3..5], prefix.len() as u16);
-        LittleEndian::write_u32(&mut header[5..9], suffixes.len() as u32);
-
-        let mut out = Vec::with_capacity(
-            header.len() + prefix.len() + offset_and_values.len() + suffixes.len(),
-        );
-
-        out.extend_from_slice(&header[..]);
-        out.extend_from_slice(&prefix[..]);
-        out.extend_from_slice(&offset_and_values[..]);
-        out.extend_from_slice(&suffixes[..]);
-
-        out
-    }
-
-    fn decode(data: Vec<u8>) -> Self {
-        let header = &data[0..PREFIX_COMPRESSED_KV_HEADER_SIZE];
-        let offset_width = header[0] as usize;
-        let n = LittleEndian::read_u16(&header[1..3]) as usize;
-        let prefix_len = LittleEndian::read_u16(&header[3..5]) as usize;
-        let suffixes_len = LittleEndian::read_u32(&header[5..9]) as usize;
-
-        Self {
-            offset_width,
-            n,
-            prefix_len,
-            suffixes_len,
-            data,
-            v: PhantomData,
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.n
-    }
-
-    fn prefix(&self) -> &[u8] {
-        &self.data
-            [PREFIX_COMPRESSED_KV_HEADER_SIZE..PREFIX_COMPRESSED_KV_HEADER_SIZE + self.prefix_len]
-    }
-
-    fn suffixes(&self) -> &[u8] {
-        let start = PREFIX_COMPRESSED_KV_HEADER_SIZE
-            + self.prefix_len
-            + self.n * (self.offset_width + V::size());
-        &self.data[start..]
-    }
-
-    fn offset_and_values(&self) -> &[u8] {
-        let start = PREFIX_COMPRESSED_KV_HEADER_SIZE + self.prefix_len;
-        let end = start + self.n * (self.offset_width + V::size());
-        &self.data[start..end]
-    }
-
-    fn search(&self, k: &[u8]) -> Result<usize, usize> {
-        let prefix = self.prefix();
-        if !k.starts_with(&prefix) {
-            match k.cmp(&prefix) {
-                Ordering::Equal => unreachable!(),
-                Ordering::Less => return Err(0),
-                Ordering::Greater => return Err(self.len()),
-            }
-        }
-        let suffix = &k[prefix.len()..];
-        binary_search_by_idx(self.len(), suffix, |idx| self.get_suffix(idx))
-    }
-
-    fn offset(&self, idx: usize) -> usize {
-        let width = self.offset_width + V::size();
-        let offset_start = idx * width;
-        let offset_end = offset_start + self.offset_width;
-        let mut offset: u32 = 0;
-        for (i, b) in self.offset_and_values()[offset_start..offset_end]
-            .iter()
-            .enumerate()
-        {
-            offset |= (*b as u32) << (i * 8);
-        }
-        offset as usize
-    }
-
-    fn get_suffix(&self, idx: usize) -> &[u8] {
-        let start = self.offset(idx);
-        let end = if idx == self.len() - 1 {
-            self.suffixes_len
-        } else {
-            self.offset(idx + 1)
-        };
-        &self.suffixes()[start..end]
-    }
-
-    fn get_key(&self, idx: usize) -> Vec<u8> {
-        let prefix = self.prefix();
-        let suffix = self.get_suffix(idx);
-        let mut k = Vec::with_capacity(prefix.len() + suffix.len());
-        k.extend_from_slice(prefix);
-        k.extend_from_slice(suffix);
-        k
-    }
-
-    fn get_value(&self, idx: usize) -> V {
-        let width = self.offset_width + V::size();
-        let offset_start = idx * width + self.offset_width;
-        let offset_end = offset_start + V::size();
-        V::read(&self.offset_and_values()[offset_start..offset_end])
-    }
-}
-
-trait FixedSizeSerializable {
-    fn size() -> usize;
-    fn read(b: &[u8]) -> Self;
-    fn write(&self, b: &mut [u8]);
-}
-
-impl FixedSizeSerializable for u16 {
-    fn size() -> usize {
-        2
-    }
-    fn read(b: &[u8]) -> Self {
-        LittleEndian::read_u16(b)
-    }
-    fn write(&self, b: &mut [u8]) {
-        LittleEndian::write_u16(b, *self);
-    }
-}
-
-impl FixedSizeSerializable for u32 {
-    fn size() -> usize {
-        4
-    }
-    fn read(b: &[u8]) -> Self {
-        LittleEndian::read_u32(b)
-    }
-    fn write(&self, b: &mut [u8]) {
-        LittleEndian::write_u32(b, *self);
     }
 }
 
@@ -1718,7 +1277,7 @@ impl<R> Run<R> {
 
         let mut buffer: BTreeMap<Vec<u8>, Vec<(Timestamp, Value)>> = BTreeMap::new();
         let mut bytes_written = 0;
-        let mut buffer_size = BLOCK_INDEX_HEADER_SIZE as u64;
+        let mut buffer_size = 0;
         let mut index: BTreeMap<Vec<u8>, u32> = BTreeMap::new();
         let mut min_ts = Timestamp::MAX;
         let mut max_ts = Timestamp::ZERO;
@@ -1897,42 +1456,20 @@ impl<R: AsyncReadExactAt> Run<R> {
             )
             .unwrap_or_else(|idx| if idx != 0 { idx - 1 } else { idx });
 
-            'outer: for i in lower_block_idx..self.index.len() {
+            let upper_block_idx = binary_search_by_idx(
+                self.index.len(),
+                KeyOrBound::Bound(range.upper.clone()),
+                |idx| KeyOrBound::Key(self.index.get_key(idx)),
+            )
+            .unwrap_or_else(core::convert::identity);
+
+            for i in lower_block_idx..upper_block_idx {
                 let block_header_offset = self.index.get_value(i);
                 let block = Block::open(&self.r, block_header_offset as u64).await?;
-                let lower_key_idx = if i == lower_block_idx {
-                    binary_search_by_idx(
-                        block.index.len(),
-                        KeyOrBound::Bound(range.lower.clone()),
-                        |idx| KeyOrBound::Key(block.index.get_key(idx)),
-                    )
-                    .unwrap_or_else(core::convert::identity)
-                } else {
-                    0
-                };
-
-                for j in lower_key_idx..block.index.len() {
-                    let key = block.index.get_key(j);
-                    if !range.contains(&key) {
-                        break 'outer;
-                    }
-
-                    let versions = block.versions_for_key(j);
-                    let version_idx = binary_search_by_idx(versions.len(), Reverse(ts), |idx| {
-                        Reverse(versions.ts(idx))
-                    })
-                    .unwrap_or_else(core::convert::identity);
-                    if version_idx == versions.len() {
-                        continue;
-                    }
-
-                    let ts = versions.ts(version_idx);
-                    let value = block.value(&versions, version_idx).await?;
-                    if let Value::Tombstone = value {
-                        continue;
-                    }
-
-                    yield Record { key, ts, value };
+                let block_scan = block.scan_asc(ts, range.clone());
+                pin_mut!(block_scan);
+                while let Some(record) = block_scan.try_next().await? {
+                    yield record;
                 }
             }
         }
@@ -1950,14 +1487,10 @@ impl<R: AsyncReadExactAt> Run<R> {
             for i in 0..self.index.len() {
                 let block_header_offset = self.index.get_value(i);
                 let block = Block::open(&self.r, block_header_offset as u64).await?;
-                for j in 0..block.index.len() {
-                    let key = block.index.get_key(j);
-                    let versions = block.versions_for_key(j);
-                    for k in 0..versions.len() {
-                        let ts = versions.ts(k);
-                        let value = block.value(&versions, k).await?;
-                        yield Record{key: key.clone(), ts, value};
-                    }
+                let block_stream = block.stream();
+                pin_mut!(block_stream);
+                while let Some(record) = block_stream.try_next().await? {
+                    yield record;
                 }
             }
         }
@@ -2040,6 +1573,7 @@ mod test {
     use proptest::prelude::*;
     use uuid::Uuid;
 
+    use crate::lsm_block::dump_block;
     use crate::range::Bound;
     use crate::range::Range;
     use crate::storage::MemStorage;
@@ -2847,7 +2381,6 @@ mod test {
         println!("    min_ts: {}", run.min_ts);
         println!("    max_ts: {}", run.max_ts);
         println!("    index");
-        println!("    prefix: [{}]", hexlify(run.index.prefix()));
         for i in 0..run.index.len() {
             println!(
                 "      {} header offset {}",
@@ -2863,36 +2396,6 @@ mod test {
             let header_offset = run.index.get_value(i);
             let block = Block::open(&run.r, header_offset as u64).await?;
             dump_block(&block).await?;
-        }
-        Ok(())
-    }
-
-    async fn dump_block<'a, R: AsyncReadExactAt>(block: &Block<'a, R>) -> anyhow::Result<()> {
-        println!("    prefix: {}", hexlify(block.index.prefix()));
-        println!("    n_keys: {}", block.index.len());
-        println!("    n_versions: {}", block.n_versions);
-        println!("    values_len: {}", block.values_len);
-        println!("      == keys ======");
-        for i in 0..block.index.len() {
-            let key = block.index.get_key(i);
-            let versions_offset = block.index.get_value(i);
-            println!("        [{}] {}", hexlify(&key), versions_offset);
-        }
-        let versions = block.versions();
-        println!("      == versions ======");
-        for i in 0..block.n_versions {
-            let value_str = match versions.value_offsets(i) {
-                Some((value_start, value_end)) => format!("({}, {})", value_start, value_end),
-                None => "<TOMBSTONE>".into(),
-            };
-
-            println!(
-                "        {} {} {} {:?}",
-                i,
-                versions.ts(i),
-                value_str,
-                block.value(&versions, i).await?,
-            );
         }
         Ok(())
     }
