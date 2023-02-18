@@ -824,12 +824,12 @@ impl LsmInnerInner {
         direction: Direction,
         limit: usize,
     ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
-        if range.is_empty() {
-            return Ok((vec![], None));
-        }
-
         if direction == Direction::Desc {
             todo!();
+        }
+
+        if range.is_empty() {
+            return Ok((vec![], None));
         }
 
         let manifest = self.manifest.load();
@@ -876,7 +876,8 @@ impl LsmInnerInner {
                 |idx| level.runs[idx].range().lower,
             )
             .unwrap_or_else(|idx| if idx == level.runs.len() { idx } else { idx });
-            if end_idx < level.runs.len()
+            if end_idx > 0
+                && end_idx < level.runs.len()
                 && level.runs[end_idx].range().lower.borrow() == range.upper
             {
                 end_idx -= 1;
@@ -887,21 +888,52 @@ impl LsmInnerInner {
             }
 
             streams.push(
-                futures::stream::iter(level.runs[start_idx..end_idx].iter())
-                    .inspect(|run| {
-                        assert!(
-                            !run.range().intersection(&range.to_vec()).is_empty(),
-                            "trying to scan {:?}, got run with range {:?}",
-                            range,
-                            run.range()
-                        )
-                    })
-                    .map(|run| run.scan(ts, range.to_vec(), direction))
-                    .flatten()
-                    .boxed(),
+                futures::stream::iter(match direction {
+                    Direction::Asc => Box::new(level.runs[start_idx..end_idx].iter())
+                        as Box<dyn Iterator<Item = _> + Send>,
+                    Direction::Desc => Box::new(level.runs[start_idx..end_idx].iter().rev()),
+                })
+                .inspect(|run| {
+                    assert!(
+                        !run.range().intersection(&range.to_vec()).is_empty(),
+                        "trying to scan {:?}, got run with range {:?}",
+                        range,
+                        run.range()
+                    )
+                })
+                .map(|run| run.scan(ts, range.to_vec(), direction))
+                .flatten()
+                .boxed(),
             );
         }
-        let mut merged = merge_sorted_streams(streams).peekable().boxed_local();
+        let mut merged = match direction {
+            Direction::Asc => merge_sorted_streams(streams).peekable().boxed_local(),
+            Direction::Desc => merge_sorted_streams(
+                streams
+                    .into_iter()
+                    .map(|stream| {
+                        stream.map(|result| {
+                            result.map(|record| {
+                                OrdEqByFirst(
+                                    (Reverse(record.key), Reverse(record.ts)),
+                                    record.value,
+                                )
+                            })
+                        })
+                    })
+                    .collect(),
+            )
+            .map(|result| {
+                result.map(|OrdEqByFirst((Reverse(key), Reverse(ts)), value)| Record {
+                    key,
+                    ts,
+                    value,
+                })
+            })
+            .peekable()
+            .boxed_local(),
+        };
+
         let mut page = vec![];
         while let Some(record) = merged.next().await.transpose()? {
             if let Some(Record {
@@ -911,12 +943,12 @@ impl LsmInnerInner {
             }) = page.last()
             {
                 if last_key == &record.key {
-                    assert!(*last_ts > record.ts);
+                    match direction {
+                        Direction::Asc => assert!(*last_ts > record.ts),
+                        Direction::Desc => assert!(*last_ts < record.ts),
+                    }
                     continue;
                 }
-            }
-            if let Value::Tombstone = record.value {
-                continue;
             }
             page.push(record);
             if page.len() == limit {
@@ -925,12 +957,27 @@ impl LsmInnerInner {
         }
 
         let continue_cursor = match page.last() {
-            Some(Record { key: last_key, .. }) => Some(Range {
-                lower: Bound::After(last_key.clone()),
-                upper: range.upper.clone().map(Vec::from),
+            Some(Record { key: last_key, .. }) => Some(match direction {
+                Direction::Asc => Range {
+                    lower: Bound::After(last_key.clone()),
+                    upper: range.upper.clone().map(Vec::from),
+                },
+                Direction::Desc => Range {
+                    lower: range.lower.clone().map(Vec::from),
+                    upper: Bound::Before(last_key.clone()),
+                },
             }),
             None => None,
         };
+
+        page = page
+            .into_iter()
+            .filter(|record| match record.value {
+                Value::Tombstone => false,
+                _ => true,
+            })
+            .collect();
+
         Ok((page, continue_cursor))
     }
 
@@ -1535,7 +1582,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_scan_asc() -> anyhow::Result<()> {
+    async fn test_scan_page() -> anyhow::Result<()> {
         let lsm = LsmBuilder::new()
             .l0_max_size(32)
             .block_size(48)
@@ -1601,30 +1648,40 @@ mod test {
             range: Range<Vec<u8>>,
             expected: Vec<(&str, usize)>,
         ) -> anyhow::Result<()> {
-            for page_size in 1..=expected.len() {
-                let mut maybe_cursor: Option<Range<Vec<u8>>> = Some(range.clone());
-                let mut results = vec![];
-                while let Some(cursor) = maybe_cursor {
-                    let (page, continue_cursor) = lsm
-                        .scan_page(ts, keyspace_id, cursor.borrow(), Direction::Asc, page_size)
-                        .await?;
-                    assert!(page.len() <= page_size);
-                    results.extend(page);
-                    maybe_cursor = continue_cursor;
-                }
+            for direction in [Direction::Asc] {
+                // TODO: Direction::Desc
+                for page_size in 1..=expected.len() {
+                    let mut maybe_cursor: Option<Range<Vec<u8>>> = Some(range.clone());
+                    let mut results = vec![];
+                    while let Some(cursor) = maybe_cursor {
+                        let (page, continue_cursor) = lsm
+                            .scan_page(ts, keyspace_id, cursor.borrow(), direction, page_size)
+                            .await?;
+                        assert!(page.len() <= page_size);
+                        results.extend(page);
+                        maybe_cursor = continue_cursor;
+                    }
 
-                assert_eq!(
-                    results,
-                    expected
-                        .clone()
-                        .into_iter()
-                        .map(|(key, ts)| Record {
-                            key: (key).into(),
-                            ts: Timestamp(ts as u64),
-                            value: Value::Regular(format!("{} {}", key, ts).into()),
-                        })
-                        .collect::<Vec<Record>>()
-                );
+                    if direction == Direction::Desc {
+                        results.reverse();
+                    }
+
+                    assert_eq!(
+                        results,
+                        expected
+                            .clone()
+                            .into_iter()
+                            .map(|(key, ts)| Record {
+                                key: (key).into(),
+                                ts: Timestamp(ts as u64),
+                                value: Value::Regular(format!("{} {}", key, ts).into()),
+                            })
+                            .collect::<Vec<Record>>(),
+                        "direction={:?}, page_size={}",
+                        direction,
+                        page_size,
+                    );
+                }
             }
 
             Ok(())
@@ -1690,6 +1747,10 @@ mod test {
             write_indexes in proptest::collection::vec(any::<prop::sample::Index>(), 1..4096),
             log_indexes in proptest::collection::vec(any::<prop::sample::Index>(), 1000),
             ranges in proptest::collection::vec(range_strategy(), 1000),
+            direction in proptest::sample::select(std::borrow::Cow::Owned(vec![
+                Direction::Asc,
+                //Direction::Desc,
+            ])),
         ) {
             tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap().block_on(async {
                 let keys_vec: Vec<_> = keys.iter().collect();
@@ -1743,16 +1804,20 @@ mod test {
                             ts,
                             keyspace_id,
                             cursor.borrow(),
-                            Direction::Asc,
+                            direction,
                             100,
                         ).await.unwrap();
                         results.append(&mut page);
+                        assert!(Some(cursor) != continue_cursor);
                         maybe_cursor = continue_cursor;
                     }
 
-                    let expected_recs: Vec<Record> = expected.into_iter().map(|(key, (ts, value))| {
+                    let mut expected_recs: Vec<Record> = expected.into_iter().map(|(key, (ts, value))| {
                         Record{key: key.clone(), ts: *ts, value: Value::Regular(value.clone())}
                     }).collect();
+                    if direction == Direction::Desc {
+                        expected_recs.reverse();
+                    }
 
                     assert_eq!(results, expected_recs);
                 }

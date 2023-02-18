@@ -290,6 +290,22 @@ impl AsyncReadExactAt for File {
     }
 }
 
+pub(crate) enum IteratorEither<A, B> {
+    Left(A),
+    Right(B),
+}
+
+impl<T, A: Iterator<Item = T>, B: Iterator<Item = T>> Iterator for IteratorEither<A, B> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            IteratorEither::Left(inner) => inner.next(),
+            IteratorEither::Right(inner) => inner.next(),
+        }
+    }
+}
+
 pub(crate) fn delay_for_retry(i: usize, min_delay: Duration, max_delay: Duration) -> Duration {
     let avg_delay = std::cmp::min(
         min_delay.saturating_mul(2u32.saturating_pow(i as u32)),

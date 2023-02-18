@@ -10,6 +10,7 @@ use futures::Stream;
 use crate::lsm_util::PrefixCompressedKV;
 use crate::range::KeyOrBound;
 use crate::range::Range;
+use crate::types::Direction;
 use crate::types::Record;
 use crate::types::Timestamp;
 use crate::types::Value;
@@ -17,6 +18,7 @@ use crate::util::binary_search_by_idx;
 use crate::util::byte_width;
 use crate::util::hexlify;
 use crate::util::AsyncReadExactAt;
+use crate::util::IteratorEither;
 
 /// A Block is conceptually a BTreeMap<Vec<u8>, BTreeMap<Timestamp, Value>>, but it is compactly
 /// serialized and can be used as-is without fully deserializing.
@@ -238,21 +240,37 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         )))
     }
 
-    pub(crate) fn scan_asc(
+    pub(crate) fn scan(
         &self,
         ts: Timestamp,
         range: Range<Vec<u8>>,
+        direction: Direction,
     ) -> impl Stream<Item = anyhow::Result<Record>> + '_ {
         try_stream! {
-            let lower_key_idx =
-                binary_search_by_idx(
-                    self.index.len(),
-                    KeyOrBound::Bound(range.lower.clone()),
-                    |idx| KeyOrBound::Key(self.index.get_key(idx)),
-                )
-                .unwrap_or_else(core::convert::identity);
+            let key_idxs = match direction {
+                Direction::Asc => {
+                    let lower_key_idx =
+                        binary_search_by_idx(
+                            self.index.len(),
+                            KeyOrBound::Bound(range.lower.clone()),
+                            |idx| KeyOrBound::Key(self.index.get_key(idx)),
+                        )
+                        .unwrap_or_else(core::convert::identity);
+                    IteratorEither::Left(lower_key_idx..self.index.len())
+                },
+                Direction::Desc => {
+                    let upper_key_idx = binary_search_by_idx(
+                            self.index.len(),
+                            KeyOrBound::Bound(range.upper.clone()),
+                            |idx| KeyOrBound::Key(self.index.get_key(idx)),
+                        )
+                        .unwrap_or_else(core::convert::identity);
 
-            for j in lower_key_idx..self.index.len() {
+                    IteratorEither::Right((0..upper_key_idx).rev())
+                },
+            };
+
+            for j in key_idxs {
                 let key = self.index.get_key(j);
                 if !range.contains(&key) {
                     break;
@@ -272,6 +290,42 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
                 if let Value::Tombstone = value {
                     continue;
                 }
+
+                yield Record { key, ts, value };
+            }
+        }
+    }
+
+    pub(crate) fn scan_desc(
+        &self,
+        ts: Timestamp,
+        range: Range<Vec<u8>>,
+    ) -> impl Stream<Item = anyhow::Result<Record>> + '_ {
+        try_stream! {
+            let upper_key_idx = binary_search_by_idx(
+                    self.index.len(),
+                    KeyOrBound::Bound(range.upper.clone()),
+                    |idx| KeyOrBound::Key(self.index.get_key(idx)),
+                )
+                .unwrap_or_else(core::convert::identity);
+
+            for j in (0..upper_key_idx).rev() {
+                let key = self.index.get_key(j);
+                if !range.contains(&key) {
+                    break;
+                }
+
+                let versions = self.versions_for_key(j);
+                let version_idx = binary_search_by_idx(versions.len(), Reverse(ts), |idx| {
+                    Reverse(versions.ts(idx))
+                })
+                .unwrap_or_else(core::convert::identity);
+                if version_idx == versions.len() {
+                    continue;
+                }
+
+                let ts = versions.ts(version_idx);
+                let value = self.value(&versions, version_idx).await?;
 
                 yield Record { key, ts, value };
             }
@@ -435,13 +489,20 @@ pub(crate) async fn dump_block<'a, R: AsyncReadExactAt>(
 mod test {
     use std::collections::BTreeMap;
 
+    use futures::TryStreamExt;
+
+    use crate::range::Bound;
+    use crate::range::Range;
+    use crate::types::Direction;
+    use crate::types::Record;
     use crate::types::Timestamp;
     use crate::types::Value;
+    use crate::util::AsyncReadExactAt;
 
     use super::Block;
 
     #[tokio::test]
-    async fn test_block() -> anyhow::Result<()> {
+    async fn test_get() -> anyhow::Result<()> {
         let aa: Vec<u8> = "aa".into();
         let ab: Vec<u8> = "ab".into();
         let aa_279: Value = Value::Regular("foo".into());
@@ -526,6 +587,111 @@ mod test {
             block.get(Timestamp(296), &ab[..]).await?,
             Some((Timestamp(290), ab_290.clone()))
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scan() -> anyhow::Result<()> {
+        let writes = [
+            //   ts=0123456789
+            ("a", b" o  o    o"),
+            ("b", b"   o     o"),
+            ("c", b"   o x    "),
+            ("d", b"   oxo    "),
+            ("e", b"    o   o "),
+            ("f", b"     o  o "),
+            ("g", b" o x  o  o"),
+            ("h", b"  o oxo  o"),
+            ("i", b"  o  oo o "),
+            ("j", b" xoxoxoxox"),
+            ("k", b"        o "),
+            ("l", b" ooooooooo"),
+        ];
+
+        let mut kvs = BTreeMap::new();
+        for (key_str, versions_str) in writes {
+            let mut versions = vec![];
+            for ts in 1..versions_str.len() {
+                let value = match versions_str[ts] {
+                    b'o' => Value::Regular(format!("{} {}", key_str, ts).into()),
+                    b'x' => Value::Tombstone,
+                    _ => continue,
+                };
+
+                versions.push((Timestamp(ts as u64), value));
+            }
+            versions.reverse();
+            kvs.insert(key_str.into(), versions);
+        }
+
+        let (encoded, header_offset) = Block::<()>::encode(&kvs)?;
+        let block = Block::open(&encoded, header_offset as u64).await?;
+
+        async fn check<'a, R: AsyncReadExactAt>(
+            block: &Block<'a, R>,
+            ts: Timestamp,
+            range: Range<Vec<u8>>,
+            expected: Vec<(&str, usize)>,
+        ) -> anyhow::Result<()> {
+            for direction in [Direction::Asc, Direction::Desc] {
+                let mut results: Vec<_> = block
+                    .scan(ts, range.clone(), direction)
+                    .try_collect()
+                    .await?;
+
+                if direction == Direction::Desc {
+                    results.reverse();
+                }
+
+                assert_eq!(
+                    results,
+                    expected
+                        .clone()
+                        .into_iter()
+                        .map(|(key, ts)| Record {
+                            key: (key).into(),
+                            ts: Timestamp(ts as u64),
+                            value: Value::Regular(format!("{} {}", key, ts).into()),
+                        })
+                        .collect::<Vec<Record>>(),
+                    "direction={:?}",
+                    direction,
+                );
+            }
+            Ok(())
+        }
+
+        check(
+            &block,
+            Timestamp(5),
+            Range {
+                lower: Bound::Before("b".into()),
+                upper: Bound::After("e".into()),
+            },
+            vec![("b", 3), ("d", 5), ("e", 4)],
+        )
+        .await?;
+
+        check(
+            &block,
+            Timestamp(4),
+            Range::all(),
+            vec![
+                ("a", 4),
+                ("b", 3),
+                ("c", 3),
+                // d got deleted at 4
+                ("e", 4),
+                // f doesn't exist yet
+                ("h", 4),
+                ("i", 2),
+                ("j", 4),
+                // k doesn't exist yet
+                ("l", 4),
+            ],
+        )
+        .await?;
 
         Ok(())
     }

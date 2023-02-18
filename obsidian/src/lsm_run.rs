@@ -27,6 +27,7 @@ use crate::types::Value;
 use crate::util::binary_search_by_idx;
 use crate::util::hexlify;
 use crate::util::AsyncReadExactAt;
+use crate::util::IteratorEither;
 
 #[derive(Clone)]
 pub(crate) struct Run<R> {
@@ -273,10 +274,16 @@ impl<R: AsyncReadExactAt> Run<R> {
             )
             .unwrap_or_else(core::convert::identity);
 
-            for i in lower_block_idx..upper_block_idx {
+            let asc_block_idxs = lower_block_idx..upper_block_idx;
+            let block_idxs = match direction {
+                Direction::Asc => IteratorEither::Left(asc_block_idxs),
+                Direction::Desc => IteratorEither::Right(asc_block_idxs.rev()),
+            };
+
+            for i in block_idxs {
                 let block_header_offset = self.index.get_value(i);
                 let block = Block::open(&self.r, block_header_offset as u64).await?;
-                let block_scan = block.scan_asc(ts, range.clone());
+                let block_scan = block.scan(ts, range.clone(), direction);
                 pin_mut!(block_scan);
                 while let Some(record) = block_scan.try_next().await? {
                     yield record;

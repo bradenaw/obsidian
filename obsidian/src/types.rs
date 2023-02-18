@@ -171,6 +171,15 @@ pub enum Direction {
     Desc,
 }
 
+impl Debug for Direction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Direction::Asc => f.write_str("asc"),
+            Direction::Desc => f.write_str("desc"),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Precondition {
     NotChangedSince(KeyspaceId, Vec<u8>, Timestamp),
