@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 
-use crate::lsm::AsyncReadExactAt;
+use crate::util::AsyncReadExactAt;
 
 #[async_trait]
 pub(crate) trait Storage {

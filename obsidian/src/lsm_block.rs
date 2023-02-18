@@ -7,7 +7,6 @@ use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use futures::Stream;
 
-use crate::lsm::AsyncReadExactAt;
 use crate::lsm_util::PrefixCompressedKV;
 use crate::range::KeyOrBound;
 use crate::range::Range;
@@ -17,6 +16,7 @@ use crate::types::Value;
 use crate::util::binary_search_by_idx;
 use crate::util::byte_width;
 use crate::util::hexlify;
+use crate::util::AsyncReadExactAt;
 
 /// A Block is conceptually a BTreeMap<Vec<u8>, BTreeMap<Timestamp, Value>>, but it is compactly
 /// serialized and can be used as-is without fully deserializing.
@@ -212,6 +212,32 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         })
     }
 
+    pub(crate) async fn get(
+        &self,
+        ts: Timestamp,
+        k: &[u8],
+    ) -> anyhow::Result<Option<(Timestamp, Value)>> {
+        let key_idx = match self.index.search(k) {
+            Ok(idx) => idx,
+            Err(_) => return Ok(None),
+        };
+        let key_versions = self.versions_for_key(key_idx);
+
+        let version_idx = binary_search_by_idx(key_versions.len(), Reverse(ts), |idx| {
+            Reverse(key_versions.ts(idx))
+        })
+        .unwrap_or_else(core::convert::identity);
+        if version_idx == key_versions.len() {
+            return Ok(None);
+        }
+        let record_ts = key_versions.ts(version_idx);
+
+        Ok(Some((
+            record_ts,
+            self.value(&key_versions, version_idx).await?,
+        )))
+    }
+
     pub(crate) fn scan_asc(
         &self,
         ts: Timestamp,
@@ -250,32 +276,6 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
                 yield Record { key, ts, value };
             }
         }
-    }
-
-    pub(crate) async fn get(
-        &self,
-        ts: Timestamp,
-        k: &[u8],
-    ) -> anyhow::Result<Option<(Timestamp, Value)>> {
-        let key_idx = match self.index.search(k) {
-            Ok(idx) => idx,
-            Err(_) => return Ok(None),
-        };
-        let key_versions = self.versions_for_key(key_idx);
-
-        let version_idx = binary_search_by_idx(key_versions.len(), Reverse(ts), |idx| {
-            Reverse(key_versions.ts(idx))
-        })
-        .unwrap_or_else(core::convert::identity);
-        if version_idx == key_versions.len() {
-            return Ok(None);
-        }
-        let record_ts = key_versions.ts(version_idx);
-
-        Ok(Some((
-            record_ts,
-            self.value(&key_versions, version_idx).await?,
-        )))
     }
 
     /// Produces all records contained in this block in Record's natural ordering: (key,
@@ -429,4 +429,104 @@ pub(crate) async fn dump_block<'a, R: AsyncReadExactAt>(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use std::collections::BTreeMap;
+
+    use crate::types::Timestamp;
+    use crate::types::Value;
+
+    use super::Block;
+
+    #[tokio::test]
+    async fn test_block() -> anyhow::Result<()> {
+        let aa: Vec<u8> = "aa".into();
+        let ab: Vec<u8> = "ab".into();
+        let aa_279: Value = Value::Regular("foo".into());
+        let aa_265: Value = Value::Regular("bar".into());
+        let ab_341: Value = Value::Regular("baz".into());
+        let ab_302: Value = Value::Regular("qux".into());
+        let ab_290: Value = Value::Regular("garply".into());
+        let kvs = {
+            let mut kvs = BTreeMap::new();
+            kvs.insert(
+                aa.clone(),
+                vec![
+                    (Timestamp(279), aa_279.clone()),
+                    (Timestamp(265), aa_265.clone()),
+                ],
+            );
+            kvs.insert(
+                ab.clone(),
+                vec![
+                    (Timestamp(341), ab_341.clone()),
+                    (Timestamp(302), ab_302.clone()),
+                    (Timestamp(297), Value::Tombstone),
+                    (Timestamp(290), ab_290.clone()),
+                ],
+            );
+            kvs
+        };
+        let (encoded, header_offset) = Block::<()>::encode(&kvs)?;
+
+        let block = Block::open(&encoded, header_offset as u64).await?;
+
+        assert_eq!(
+            block.get(Timestamp(279), &aa[..]).await?,
+            Some((Timestamp(279), aa_279.clone()))
+        );
+        assert_eq!(
+            block.get(Timestamp(265), &aa[..]).await?,
+            Some((Timestamp(265), aa_265.clone()))
+        );
+        assert_eq!(block.get(Timestamp(123), &aa[..]).await?, None);
+
+        assert_eq!(
+            block.get(Timestamp(295), &aa[..]).await?,
+            Some((Timestamp(279), aa_279.clone()))
+        );
+        assert_eq!(
+            block.get(Timestamp(269), &aa[..]).await?,
+            Some((Timestamp(265), aa_265.clone()))
+        );
+
+        assert_eq!(
+            block.get(Timestamp(341), &ab[..]).await?,
+            Some((Timestamp(341), ab_341.clone()))
+        );
+        assert_eq!(
+            block.get(Timestamp(302), &ab[..]).await?,
+            Some((Timestamp(302), ab_302.clone()))
+        );
+        assert_eq!(
+            block.get(Timestamp(297), &ab[..]).await?,
+            Some((Timestamp(297), Value::Tombstone))
+        );
+        assert_eq!(
+            block.get(Timestamp(290), &ab[..]).await?,
+            Some((Timestamp(290), ab_290.clone()))
+        );
+        assert_eq!(block.get(Timestamp(289), &ab[..]).await?, None);
+
+        assert_eq!(
+            block.get(Timestamp(500), &ab[..]).await?,
+            Some((Timestamp(341), ab_341.clone()))
+        );
+        assert_eq!(
+            block.get(Timestamp(340), &ab[..]).await?,
+            Some((Timestamp(302), ab_302.clone()))
+        );
+        assert_eq!(
+            block.get(Timestamp(300), &ab[..]).await?,
+            Some((Timestamp(297), Value::Tombstone))
+        );
+        assert_eq!(
+            block.get(Timestamp(296), &ab[..]).await?,
+            Some((Timestamp(290), ab_290.clone()))
+        );
+
+        Ok(())
+    }
 }

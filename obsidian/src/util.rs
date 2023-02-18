@@ -1,14 +1,17 @@
 use std::cmp;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::fs::File;
 use std::future::Future;
 use std::io::Read;
 use std::io::Write;
+use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
 
 use async_stream::try_stream;
+use async_trait::async_trait;
 use byteorder::ReadBytesExt;
 use byteorder::WriteBytesExt;
 use futures::stream::Stream;
@@ -230,6 +233,60 @@ pub(crate) async fn bounded_unordered_map<T, F: Fn(T) -> Fut, Fut: futures::Futu
                 }
             }
         }
+    }
+}
+
+#[async_trait]
+pub(crate) trait AsyncReadExactAt {
+    async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()>;
+    async fn len(&self) -> anyhow::Result<u64>;
+}
+
+#[async_trait]
+impl AsyncReadExactAt for Vec<u8> {
+    async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
+        Ok(buf.copy_from_slice(&self[(offset as usize)..(offset as usize) + buf.len()]))
+    }
+    async fn len(&self) -> anyhow::Result<u64> {
+        Ok(self.len() as u64)
+    }
+}
+
+#[async_trait]
+impl AsyncReadExactAt for Arc<Vec<u8>> {
+    async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
+        Ok(buf.copy_from_slice(&self[(offset as usize)..(offset as usize) + buf.len()]))
+    }
+    async fn len(&self) -> anyhow::Result<u64> {
+        Ok(Vec::len(self) as u64)
+    }
+}
+
+#[async_trait]
+impl AsyncReadExactAt for File {
+    async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
+        // TODO: This requires an extra allocation because spawn_blocking can't hold onto a mut ref
+        // to buf because compiler isn't smart enough to know that we immediately await it and that
+        // awaiting it implies that the function is done running.
+        //
+        // Static-sized reads are not the common case here it seems, so it might be worth just
+        // changing this function to take a length and always do the allocation internally, or
+        // figure out how tokio implements AsyncRead::read_exact() when poll_read() requires a
+        // spawn_blocking.
+        let mut inner_buf = vec![0u8; buf.len()];
+        // We can safely clone this because the file descriptor's state is not affected by
+        // read_exact_at.
+        let other = self.try_clone()?;
+        let mut inner_buf = tokio::task::spawn_blocking(move || {
+            FileExt::read_exact_at(&other, &mut inner_buf, offset)?;
+            Ok::<Vec<u8>, anyhow::Error>(inner_buf)
+        })
+        .await??;
+        buf.copy_from_slice(&mut inner_buf);
+        Ok(())
+    }
+    async fn len(&self) -> anyhow::Result<u64> {
+        todo!()
     }
 }
 
