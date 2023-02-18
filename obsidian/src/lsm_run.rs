@@ -589,6 +589,36 @@ mod test {
         )
         .await?;
 
+        check(
+            &run,
+            Timestamp(4),
+            Range {
+                lower: Bound::Before("e".into()),
+                upper: Bound::After("g".into()),
+            },
+            vec![
+                ("e", 4),
+                // f doesn't exist yet
+                // g deleted at 3
+            ],
+        )
+        .await?;
+
+        check(
+            &run,
+            Timestamp(4),
+            Range {
+                lower: Bound::After("d".into()),
+                upper: Bound::Before("h".into()),
+            },
+            vec![
+                ("e", 4),
+                // f doesn't exist yet
+                // g deleted at 3
+            ],
+        )
+        .await?;
+
         Ok(())
     }
 
