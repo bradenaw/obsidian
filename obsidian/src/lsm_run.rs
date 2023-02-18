@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use anyhow::anyhow;
 use async_stream::stream;
 use async_stream::try_stream;
 use byteorder::ByteOrder;
@@ -56,96 +57,13 @@ impl<R> Run<R> {
         block_size_limit: u64,
         s: S,
     ) -> anyhow::Result<()> {
-        async fn flush<W: AsyncWrite + Unpin>(
-            w: &mut W,
-            bytes_written: &mut usize,
-            index: &mut BTreeMap<Vec<u8>, u32>,
-            last_key: &mut Vec<u8>,
-            buffer: &BTreeMap<Vec<u8>, Vec<(Timestamp, Value)>>,
-        ) -> anyhow::Result<()> {
-            let (first_key, last_key_) = match (buffer.first_key_value(), buffer.last_key_value()) {
-                (Some((first_key, _)), Some((last_key, _))) => (first_key, last_key),
-                _ => anyhow::bail!("empty block"),
-            };
-            *last_key = last_key_.clone();
-
-            let (block, header_offset_in_block) = Block::<()>::encode(buffer)?;
-            w.write_all(&block[..]).await?;
-            let header_offset_in_file = *bytes_written + header_offset_in_block;
-
-            index.insert(first_key.clone(), header_offset_in_file as u32);
-
-            *bytes_written += block.len();
-
-            Ok(())
-        }
-
         pin_mut!(s);
 
-        let mut buffer: BTreeMap<Vec<u8>, Vec<(Timestamp, Value)>> = BTreeMap::new();
-        let mut bytes_written = 0;
-        let mut buffer_size = 0;
-        let mut index: BTreeMap<Vec<u8>, u32> = BTreeMap::new();
-        let mut min_ts = Timestamp::MAX;
-        let mut max_ts = Timestamp::ZERO;
-        let mut last_key = vec![];
+        let mut b = RunBuilder::new(w, id, keyspace_id, block_size_limit);
         while let Some(record) = s.next().await.transpose()? {
-            let record_size = {
-                let key_len = if buffer.contains_key(&record.key) {
-                    0
-                } else {
-                    (record.key.len() as u64) + 4
-                };
-                (key_len as u64) + 10 + (record.value.len() as u64)
-            };
-
-            if !buffer.is_empty()
-                && buffer_size + record_size > block_size_limit
-                && !buffer.contains_key(&record.key)
-            {
-                flush(w, &mut bytes_written, &mut index, &mut last_key, &buffer).await?;
-                buffer.clear();
-                buffer_size = 0;
-            }
-
-            if let Some(prev_record) = buffer
-                .get(&record.key)
-                .map(|versions| versions.last())
-                .flatten()
-            {
-                assert!(prev_record.0 > record.ts);
-            }
-            buffer
-                .entry(record.key)
-                .or_insert_with(Vec::new)
-                .push((record.ts, record.value));
-            buffer_size += record_size;
-
-            min_ts = std::cmp::min(min_ts, record.ts);
-            max_ts = std::cmp::max(max_ts, record.ts);
+            b.push(record).await?;
         }
-        if !buffer.is_empty() {
-            flush(w, &mut bytes_written, &mut index, &mut last_key, &buffer).await?;
-        }
-
-        let index_compressed = PrefixCompressedKV::encode(&index);
-
-        let index_block_offset = bytes_written;
-        let mut header = [0u8; INDEX_BLOCK_HEADER_SIZE];
-        header[0..16].copy_from_slice(&id.as_bytes()[..]);
-        LittleEndian::write_u32(&mut header[16..20], keyspace_id.0 .0);
-        LittleEndian::write_u32(&mut header[20..24], keyspace_id.1);
-        LittleEndian::write_u64(&mut header[24..32], min_ts.as_nanos());
-        LittleEndian::write_u64(&mut header[32..40], max_ts.as_nanos());
-        LittleEndian::write_u32(&mut header[40..44], last_key.len() as u32);
-        LittleEndian::write_u32(&mut header[44..48], index_compressed.len() as u32);
-        w.write_all(&header[..]).await?;
-        w.write_all(&last_key[..]).await?;
-        w.write_all(&index_compressed).await?;
-
-        let mut index_block_offset_buf = [0u8; 4];
-        LittleEndian::write_u32(&mut index_block_offset_buf[..], index_block_offset as u32);
-        w.write_all(&index_block_offset_buf[..]).await?;
+        b.finish().await?;
 
         Ok(())
     }
@@ -252,10 +170,6 @@ impl<R: AsyncReadExactAt> Run<R> {
         direction: Direction,
     ) -> impl Stream<Item = anyhow::Result<Record>> + '_ {
         try_stream! {
-            if direction == Direction::Desc {
-                todo!();
-            }
-
             if ts < self.min_ts {
                 return;
             }
@@ -323,6 +237,129 @@ impl<R: AsyncReadExactAt> Run<R> {
     }
 }
 
+struct RunBuilder<W> {
+    w: W,
+    id: Uuid,
+    keyspace_id: KeyspaceId,
+    block_size_limit: u64,
+
+    bytes_written: usize,
+    index: BTreeMap<Vec<u8>, u32>,
+    last_key: Vec<u8>,
+    buffer: BTreeMap<Vec<u8>, Vec<(Timestamp, Value)>>,
+    buffer_size_estimate: u64,
+    min_ts: Timestamp,
+    max_ts: Timestamp,
+}
+
+impl<W: AsyncWrite + Unpin> RunBuilder<W> {
+    fn new(w: W, id: Uuid, keyspace_id: KeyspaceId, block_size_limit: u64) -> Self {
+        Self {
+            w,
+            id,
+            keyspace_id,
+            block_size_limit,
+            buffer: BTreeMap::new(),
+            bytes_written: 0,
+            buffer_size_estimate: 0,
+            index: BTreeMap::new(),
+            min_ts: Timestamp::MAX,
+            max_ts: Timestamp::ZERO,
+            last_key: vec![],
+        }
+    }
+
+    async fn push(&mut self, record: Record) -> anyhow::Result<()> {
+        let record_size_estimate = {
+            let key_len = if self.buffer.contains_key(&record.key) {
+                0
+            } else {
+                (record.key.len() as u64) + 4
+            };
+            (key_len as u64) + 10 + (record.value.len() as u64)
+        };
+
+        if !self.buffer.is_empty()
+            && self.buffer_size_estimate + record_size_estimate > self.block_size_limit
+            && !self.buffer.contains_key(&record.key)
+        {
+            self.flush_block().await?;
+        }
+
+        if let Some(prev_record) = self
+            .buffer
+            .get(&record.key)
+            .map(|versions| versions.last())
+            .flatten()
+        {
+            assert!(prev_record.0 > record.ts);
+        }
+        self.buffer
+            .entry(record.key)
+            .or_insert_with(Vec::new)
+            .push((record.ts, record.value));
+        self.buffer_size_estimate += record_size_estimate;
+
+        self.min_ts = std::cmp::min(self.min_ts, record.ts);
+        self.max_ts = std::cmp::max(self.max_ts, record.ts);
+
+        Ok(())
+    }
+
+    async fn flush_block(&mut self) -> anyhow::Result<()> {
+        let (first_key, last_key_) =
+            match (self.buffer.first_key_value(), self.buffer.last_key_value()) {
+                (Some((first_key, _)), Some((last_key, _))) => (first_key, last_key),
+                _ => anyhow::bail!("empty block"),
+            };
+        self.last_key = last_key_.clone();
+
+        let (block, header_offset_in_block) = Block::<()>::encode(&self.buffer)?;
+        self.w.write_all(&block[..]).await?;
+
+        let header_offset_in_file = self.bytes_written + header_offset_in_block;
+        self.index
+            .insert(first_key.clone(), header_offset_in_file as u32);
+
+        self.bytes_written += block.len();
+        self.buffer.clear();
+        self.buffer_size_estimate = 0;
+
+        Ok(())
+    }
+
+    async fn finish(&mut self) -> anyhow::Result<()> {
+        if !self.buffer.is_empty() {
+            self.flush_block().await?;
+        }
+
+        if self.bytes_written == 0 {
+            return Err(anyhow!("empty run"));
+        }
+
+        let index_compressed = PrefixCompressedKV::encode(&self.index);
+
+        let index_block_offset = self.bytes_written;
+        let mut header = [0u8; INDEX_BLOCK_HEADER_SIZE];
+        header[0..16].copy_from_slice(&self.id.as_bytes()[..]);
+        LittleEndian::write_u32(&mut header[16..20], self.keyspace_id.0 .0);
+        LittleEndian::write_u32(&mut header[20..24], self.keyspace_id.1);
+        LittleEndian::write_u64(&mut header[24..32], self.min_ts.as_nanos());
+        LittleEndian::write_u64(&mut header[32..40], self.max_ts.as_nanos());
+        LittleEndian::write_u32(&mut header[40..44], self.last_key.len() as u32);
+        LittleEndian::write_u32(&mut header[44..48], index_compressed.len() as u32);
+        self.w.write_all(&header[..]).await?;
+        self.w.write_all(&self.last_key[..]).await?;
+        self.w.write_all(&index_compressed).await?;
+
+        let mut index_block_offset_buf = [0u8; 4];
+        LittleEndian::write_u32(&mut index_block_offset_buf[..], index_block_offset as u32);
+        self.w.write_all(&index_block_offset_buf[..]).await?;
+
+        Ok(())
+    }
+}
+
 pub(crate) async fn dump_run<R: AsyncReadExactAt>(run: &Run<R>) -> anyhow::Result<()> {
     println!("    min_ts: {}", run.min_ts);
     println!("    max_ts: {}", run.max_ts);
@@ -351,18 +388,24 @@ mod test {
     use std::cmp::Reverse;
 
     use futures::StreamExt;
+    use futures::TryStreamExt;
     use proptest::prelude::*;
     use rand::RngCore;
     use uuid::Uuid;
 
+    use crate::range::Bound;
+    use crate::range::Range;
     use crate::types::ColoGroupId;
+    use crate::types::Direction;
     use crate::types::KeyspaceId;
     use crate::types::Record;
     use crate::types::Timestamp;
     use crate::types::Value;
+    use crate::util::AsyncReadExactAt;
 
     use super::dump_run;
     use super::Run;
+    use super::RunBuilder;
 
     #[tokio::test]
     async fn test_run_file() -> anyhow::Result<()> {
@@ -422,6 +465,129 @@ mod test {
                 Some((record.ts, record.value)),
             );
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scan() -> anyhow::Result<()> {
+        let writes = [
+            vec![
+                //   ts=0123456789
+                ("a", b" o  o    o"),
+                ("b", b"   o     o"),
+                ("c", b"   o x    "),
+                ("d", b"   oxo    "),
+            ],
+            vec![
+                ("e", b"    o   o "),
+                ("f", b"     o  o "),
+                ("g", b" o x  o  o"),
+            ],
+            vec![
+                ("h", b"  o oxo  o"),
+                ("i", b"  o  oo o "),
+                ("j", b" xoxoxoxox"),
+                ("k", b"        o "),
+                ("l", b" ooooooooo"),
+            ],
+        ];
+
+        let mut v = vec![];
+        let mut b = RunBuilder::new(
+            &mut v,
+            Uuid::new_v4(),
+            KeyspaceId(ColoGroupId(1), 1),
+            u64::MAX,
+        );
+
+        for block in writes {
+            for (key_str, versions_str) in block {
+                for ts in (1..versions_str.len()).rev() {
+                    let value = match versions_str[ts] {
+                        b'o' => Value::Regular(format!("{} {}", key_str, ts).into()),
+                        b'x' => Value::Tombstone,
+                        _ => continue,
+                    };
+
+                    b.push(Record {
+                        key: key_str.into(),
+                        ts: Timestamp(ts as u64),
+                        value,
+                    })
+                    .await?;
+                }
+            }
+            b.flush_block().await?;
+        }
+        b.finish().await?;
+
+        let run = Run::open(v).await?;
+
+        async fn check<R: AsyncReadExactAt>(
+            block: &Run<R>,
+            ts: Timestamp,
+            range: Range<Vec<u8>>,
+            expected: Vec<(&str, usize)>,
+        ) -> anyhow::Result<()> {
+            for direction in [Direction::Asc, Direction::Desc] {
+                let mut results: Vec<_> = block
+                    .scan(ts, range.clone(), direction)
+                    .try_collect()
+                    .await?;
+
+                if direction == Direction::Desc {
+                    results.reverse();
+                }
+
+                assert_eq!(
+                    results,
+                    expected
+                        .clone()
+                        .into_iter()
+                        .map(|(key, ts)| Record {
+                            key: (key).into(),
+                            ts: Timestamp(ts as u64),
+                            value: Value::Regular(format!("{} {}", key, ts).into()),
+                        })
+                        .collect::<Vec<Record>>(),
+                    "direction={:?}",
+                    direction,
+                );
+            }
+            Ok(())
+        }
+
+        check(
+            &run,
+            Timestamp(5),
+            Range {
+                lower: Bound::Before("b".into()),
+                upper: Bound::After("e".into()),
+            },
+            vec![("b", 3), ("d", 5), ("e", 4)],
+        )
+        .await?;
+
+        check(
+            &run,
+            Timestamp(4),
+            Range::all(),
+            vec![
+                ("a", 4),
+                ("b", 3),
+                ("c", 3),
+                // d got deleted at 4
+                ("e", 4),
+                // f doesn't exist yet
+                ("h", 4),
+                ("i", 2),
+                ("j", 4),
+                // k doesn't exist yet
+                ("l", 4),
+            ],
+        )
+        .await?;
 
         Ok(())
     }
