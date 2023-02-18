@@ -476,16 +476,16 @@ mod test {
                 //   ts=0123456789
                 ("a", b" o  o    o"),
                 ("b", b"   o     o"),
-                ("c", b"   o x    "),
-                ("d", b"   oxo    "),
             ],
             vec![
+                ("c", b"   o x    "),
+                ("d", b"   oxo    "),
                 ("e", b"    o   o "),
                 ("f", b"     o  o "),
                 ("g", b" o x  o  o"),
+                ("h", b"  o oxo  o"),
             ],
             vec![
-                ("h", b"  o oxo  o"),
                 ("i", b"  o  oo o "),
                 ("j", b" xoxoxoxox"),
                 ("k", b"        o "),
@@ -593,13 +593,16 @@ mod test {
             &run,
             Timestamp(4),
             Range {
-                lower: Bound::Before("e".into()),
-                upper: Bound::After("g".into()),
+                lower: Bound::Before("c".into()),
+                upper: Bound::After("h".into()),
             },
             vec![
+                ("c", 3),
+                // d got deleted at 4
                 ("e", 4),
                 // f doesn't exist yet
-                // g deleted at 3
+                // g got deleted at 3
+                ("h", 4),
             ],
         )
         .await?;
@@ -608,13 +611,16 @@ mod test {
             &run,
             Timestamp(4),
             Range {
-                lower: Bound::After("d".into()),
-                upper: Bound::Before("h".into()),
+                lower: Bound::After("b".into()),
+                upper: Bound::Before("i".into()),
             },
             vec![
+                ("c", 3),
+                // d got deleted at 4
                 ("e", 4),
                 // f doesn't exist yet
-                // g deleted at 3
+                // g got deleted at 3
+                ("h", 4),
             ],
         )
         .await?;
