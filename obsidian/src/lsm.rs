@@ -39,6 +39,7 @@ use crate::util::merge_sorted;
 use crate::util::merge_sorted_streams;
 use crate::util::AtomicArc;
 use crate::util::Background;
+use crate::util::IteratorEither;
 use crate::util::OrdEqByFirst;
 use crate::wal;
 
@@ -882,9 +883,10 @@ impl LsmInnerInner {
 
             streams.push(
                 futures::stream::iter(match direction {
-                    Direction::Asc => Box::new(level.runs[start_idx..end_idx].iter())
-                        as Box<dyn Iterator<Item = _> + Send>,
-                    Direction::Desc => Box::new(level.runs[start_idx..end_idx].iter().rev()),
+                    Direction::Asc => IteratorEither::Left(level.runs[start_idx..end_idx].iter()),
+                    Direction::Desc => {
+                        IteratorEither::Right(level.runs[start_idx..end_idx].iter().rev())
+                    }
                 })
                 .inspect(|run| {
                     assert!(
