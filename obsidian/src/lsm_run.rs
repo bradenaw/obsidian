@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use anyhow::anyhow;
-use async_stream::stream;
 use async_stream::try_stream;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
@@ -223,15 +222,6 @@ impl<R: AsyncReadExactAt> Run<R> {
                 while let Some(record) = block_stream.try_next().await? {
                     yield record;
                 }
-            }
-        }
-    }
-
-    pub(crate) fn into_stream(self) -> impl Stream<Item = anyhow::Result<Record>> {
-        stream! {
-            let mut s = self.stream().boxed_local();
-            while let Some(x) = s.next().await {
-                yield x;
             }
         }
     }
