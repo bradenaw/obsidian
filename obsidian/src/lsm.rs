@@ -681,26 +681,12 @@ impl LsmInner {
 
         let removes = overlapping_runs.iter().map(|run| run.id()).collect();
 
-        let existing_iter = futures::stream::iter(overlapping_runs.iter().map(Run::stream))
-            .flatten()
-            .map(|result| {
-                result.map(|record| OrdEqByFirst((record.key, Reverse(record.ts)), record.value))
-            });
+        let existing_iter =
+            futures::stream::iter(overlapping_runs.iter().map(Run::stream)).flatten();
 
-        let mut sorted = merge_sorted_streams(vec![
-            existing_iter.boxed(),
-            entries
-                .map(|result| {
-                    result
-                        .map(|record| OrdEqByFirst((record.key, Reverse(record.ts)), record.value))
-                })
-                .boxed(),
-        ])
-        .map(|result| {
-            result.map(|OrdEqByFirst((key, Reverse(ts)), value)| Record { key, ts, value })
-        })
-        .boxed()
-        .peekable();
+        let mut sorted = merge_sorted_streams(vec![existing_iter.boxed(), entries.boxed()])
+            .boxed()
+            .peekable();
 
         let mut runs = Vec::new();
         while let Some(_) = Pin::new(&mut sorted).peek().await {
