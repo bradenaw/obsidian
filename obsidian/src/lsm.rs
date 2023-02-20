@@ -855,6 +855,10 @@ impl LsmInnerInner {
                 |idx| level.runs[idx].range().upper,
             )
             .unwrap_or_else(core::convert::identity);
+            if start_idx >= level.runs.len() {
+                continue;
+            }
+
             if level.runs[start_idx].range().upper.borrow() == range.lower {
                 start_idx += 1;
             }
