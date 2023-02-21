@@ -287,9 +287,6 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
 
                 let ts = versions.ts(version_idx);
                 let value = self.value(&versions, version_idx).await?;
-                if let Value::Tombstone = value {
-                    continue;
-                }
 
                 yield Record { key, ts, value };
             }
@@ -632,7 +629,7 @@ mod test {
             block: &Block<'a, R>,
             ts: Timestamp,
             range: Range<Vec<u8>>,
-            expected: Vec<(&str, usize)>,
+            expected: Vec<(&str, usize, bool)>,
         ) -> anyhow::Result<()> {
             for direction in [Direction::Asc, Direction::Desc] {
                 let mut results: Vec<_> = block
@@ -649,10 +646,13 @@ mod test {
                     expected
                         .clone()
                         .into_iter()
-                        .map(|(key, ts)| Record {
+                        .map(|(key, ts, tombstone)| Record {
                             key: (key).into(),
                             ts: Timestamp(ts as u64),
-                            value: Value::Regular(format!("{} {}", key, ts).into()),
+                            value: match tombstone {
+                                false => Value::Regular(format!("{} {}", key, ts).into()),
+                                true => Value::Tombstone,
+                            },
                         })
                         .collect::<Vec<Record>>(),
                     "direction={:?}",
@@ -669,7 +669,12 @@ mod test {
                 lower: Bound::Before("b".into()),
                 upper: Bound::After("e".into()),
             },
-            vec![("b", 3), ("d", 5), ("e", 4)],
+            vec![
+                ("b", 3, false),
+                ("c", 5, true),
+                ("d", 5, false),
+                ("e", 4, false),
+            ],
         )
         .await?;
 
@@ -678,17 +683,18 @@ mod test {
             Timestamp(4),
             Range::all(),
             vec![
-                ("a", 4),
-                ("b", 3),
-                ("c", 3),
-                // d got deleted at 4
-                ("e", 4),
+                ("a", 4, false),
+                ("b", 3, false),
+                ("c", 3, false),
+                ("d", 4, true),
+                ("e", 4, false),
                 // f doesn't exist yet
-                ("h", 4),
-                ("i", 2),
-                ("j", 4),
+                ("g", 3, true),
+                ("h", 4, false),
+                ("i", 2, false),
+                ("j", 4, false),
                 // k doesn't exist yet
-                ("l", 4),
+                ("l", 4, false),
             ],
         )
         .await?;

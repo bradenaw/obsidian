@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::range::Bound;
 use crate::range::Range;
+use crate::types::Direction;
 use crate::types::Record;
 use crate::types::Timestamp;
 use crate::types::Value;
@@ -73,10 +74,11 @@ impl Memtable {
         }
     }
 
-    pub fn scan_asc(
+    pub fn scan(
         &self,
         ts: Timestamp,
         range: Range<&[u8]>,
+        direction: Direction,
     ) -> impl Iterator<Item = Record> + Send + '_ {
         let range_bounds = (
             match range.lower {
@@ -124,18 +126,22 @@ impl Memtable {
             _ => {}
         }
 
-        Box::new(
-            self.kvs
-                .range(range_bounds)
-                .filter_map(move |(key, versions)| {
-                    let (record_ts, value) = versions.range(Timestamp::ZERO..=ts).next_back()?;
-                    Some(Record {
-                        key: key.clone(),
-                        ts: *record_ts,
-                        value: value.clone(),
-                    })
-                }),
-        ) as Box<dyn Iterator<Item = Record> + Send>
+        let iter = self
+            .kvs
+            .range(range_bounds)
+            .filter_map(move |(key, versions)| {
+                let (record_ts, value) = versions.range(Timestamp::ZERO..=ts).next_back()?;
+                Some(Record {
+                    key: key.clone(),
+                    ts: *record_ts,
+                    value: value.clone(),
+                })
+            });
+
+        match direction {
+            Direction::Asc => Box::new(iter) as Box<dyn Iterator<Item = Record> + Send>,
+            Direction::Desc => Box::new(iter.rev()),
+        }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (Vec<u8>, Timestamp, Value)> + '_ {

@@ -835,14 +835,22 @@ impl LsmInnerInner {
         );
         for l0_run in &l0_active_guards {
             streams.push(
-                futures::stream::iter(l0_run.scan_asc(ts, range.clone()).map(|record| Ok(record)))
-                    .boxed(),
+                futures::stream::iter(
+                    l0_run
+                        .scan(ts, range.clone(), direction)
+                        .map(|record| Ok(record)),
+                )
+                .boxed(),
             );
         }
         for l0_run in &manifest.l0_sealed {
             streams.push(
-                futures::stream::iter(l0_run.scan_asc(ts, range.clone()).map(|record| Ok(record)))
-                    .boxed(),
+                futures::stream::iter(
+                    l0_run
+                        .scan(ts, range.clone(), direction)
+                        .map(|record| Ok(record)),
+                )
+                .boxed(),
             );
         }
         for i in 1..manifest.levels.len() {
@@ -944,6 +952,9 @@ impl LsmInnerInner {
                     }
                     continue;
                 }
+            }
+            if let Value::Tombstone = record.value {
+                continue;
             }
             page.push(record);
             if page.len() == limit {
@@ -1644,14 +1655,20 @@ mod test {
             expected: Vec<(&str, usize)>,
         ) -> anyhow::Result<()> {
             for direction in [Direction::Asc] {
-                // TODO: Direction::Desc
+                //, Direction::Desc] {
                 for page_size in 1..=expected.len() {
+                    println!("== check");
                     let mut maybe_cursor: Option<Range<Vec<u8>>> = Some(range.clone());
                     let mut results = vec![];
                     while let Some(cursor) = maybe_cursor {
                         let (page, continue_cursor) = lsm
                             .scan_page(ts, keyspace_id, cursor.borrow(), direction, page_size)
                             .await?;
+
+                        println!(
+                            "scan_page(ts={}, /*keyspace_id*/, {:?}, {:?}, {}) -> ({:?}, {:?})",
+                            ts, cursor, direction, page_size, continue_cursor, page,
+                        );
                         assert!(page.len() <= page_size);
                         results.extend(page);
                         maybe_cursor = continue_cursor;
@@ -1672,7 +1689,8 @@ mod test {
                                 value: Value::Regular(format!("{} {}", key, ts).into()),
                             })
                             .collect::<Vec<Record>>(),
-                        "direction={:?}, page_size={}",
+                        "scan_page(ts={:?}, /*keyspace_id*/, /*cursor*/, direction={:?}, page_size={})",
+                        ts,
                         direction,
                         page_size,
                     );
@@ -1681,6 +1699,8 @@ mod test {
 
             Ok(())
         }
+
+        dump_lsm(&lsm).await?;
 
         check(
             &lsm,
