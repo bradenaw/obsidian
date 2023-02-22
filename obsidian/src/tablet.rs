@@ -314,15 +314,15 @@ impl LsmTabletInner {
 
     async fn get_latest(
         &self,
-        keyspace_id: KeyspaceId,
-        key: &[u8],
+        _keyspace_id: KeyspaceId,
+        _key: &[u8],
     ) -> Result<(Timestamp, Option<Vec<u8>>), ReadError> {
         todo!();
     }
 
     async fn write(
         &self,
-        txid: Txid,
+        _txid: Txid,
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
     ) -> Result<Timestamp, InternalWriteError> {
