@@ -1118,9 +1118,10 @@ impl Manifest {
             if i == into_level {
                 levels.push(Level {
                     runs: merge_sorted(vec![
-                        Box::new(filtered_old_level.map(|run| OrdEqByFirst(run.range().lower, run)))
-                            as Box<dyn Iterator<Item = _>>,
-                        Box::new(
+                        IteratorEither::Left(
+                            filtered_old_level.map(|run| OrdEqByFirst(run.range().lower, run)),
+                        ),
+                        IteratorEither::Right(
                             std::mem::take(&mut add)
                                 .into_iter()
                                 .map(|run| OrdEqByFirst(run.range().lower, run)),

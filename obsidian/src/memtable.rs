@@ -9,6 +9,7 @@ use crate::types::Direction;
 use crate::types::Record;
 use crate::types::Timestamp;
 use crate::types::Value;
+use crate::util::IteratorEither;
 use crate::wal;
 
 impl Default for Memtable {
@@ -92,12 +93,12 @@ impl Memtable {
                         .collect(),
                 ),
                 Bound::AfterAll => {
-                    return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record> + Send>
+                    return IteratorEither::Right(std::iter::empty());
                 }
             },
             match range.upper {
                 Bound::BeforeAll => {
-                    return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record> + Send>
+                    return IteratorEither::Right(std::iter::empty());
                 }
                 Bound::Before(k) => std::ops::Bound::Excluded(k.to_vec()),
                 Bound::After(k) => std::ops::Bound::Included(k.to_vec()),
@@ -115,13 +116,13 @@ impl Memtable {
         // when the range is in fact empty.
         match (&range_bounds.0, &range_bounds.1) {
             (std::ops::Bound::Excluded(s), std::ops::Bound::Excluded(e)) if s == e => {
-                return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record> + Send>;
+                return IteratorEither::Right(std::iter::empty());
             }
             (
                 std::ops::Bound::Included(s) | std::ops::Bound::Excluded(s),
                 std::ops::Bound::Included(e) | std::ops::Bound::Excluded(e),
             ) if s > e => {
-                return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record> + Send>;
+                return IteratorEither::Right(std::iter::empty());
             }
             _ => {}
         }
@@ -139,8 +140,8 @@ impl Memtable {
             });
 
         match direction {
-            Direction::Asc => Box::new(iter) as Box<dyn Iterator<Item = Record> + Send>,
-            Direction::Desc => Box::new(iter.rev()),
+            Direction::Asc => IteratorEither::Left(IteratorEither::Left(iter)),
+            Direction::Desc => IteratorEither::Left(IteratorEither::Right(iter.rev())),
         }
     }
 
