@@ -573,19 +573,22 @@ impl<'a, K: Ord + HasPrefix + Clone> Iterator for Intersections<'a, K> {
     }
 }
 
-fn intersect_in_ranges_by_key<'a, T: 'a, F: Fn(&'a T) -> Range<&'a [u8]>>(
+pub(crate) fn intersect_in_ranges_by_key<'a, T: 'a, F: Fn(&'a T) -> Range<Vec<u8>>>(
     range: Range<&[u8]>,
     ranges: &'a [T],
     f: F,
 ) -> &'a [T] {
-    let start_idx =
-        match binary_search_by_idx(ranges.len(), range.lower, |idx| f(&ranges[idx]).upper) {
-            Ok(idx) => idx + 1,
-            Err(idx) => idx,
-        };
+    let start_idx = match binary_search_by_idx(ranges.len(), range.to_vec().lower, |idx| {
+        f(&ranges[idx]).upper
+    }) {
+        Ok(idx) => idx + 1,
+        Err(idx) => idx,
+    };
 
-    let end_idx = binary_search_by_idx(ranges.len(), range.upper, |idx| f(&ranges[idx]).lower)
-        .unwrap_or_else(core::convert::identity);
+    let end_idx = binary_search_by_idx(ranges.len(), range.to_vec().upper, |idx| {
+        f(&ranges[idx]).lower
+    })
+    .unwrap_or_else(core::convert::identity);
 
     &ranges[start_idx..end_idx]
 }
@@ -811,23 +814,23 @@ mod tests {
         ];
 
         assert_eq!(
-            intersect_in_ranges_by_key(Range::all(), &ranges[..], |range| { *range }),
+            intersect_in_ranges_by_key(Range::all(), &ranges[..], Range::to_vec),
             &ranges[..],
             "Range::all() overlaps everything",
         );
 
         assert_eq!(
-            intersect_in_ranges_by_key(ranges[0], &ranges[..], |range| { *range }),
+            intersect_in_ranges_by_key(ranges[0], &ranges[..], Range::to_vec),
             &ranges[0..1],
             "range in list only overlaps itself",
         );
         assert_eq!(
-            intersect_in_ranges_by_key(ranges[1], &ranges[..], |range| { *range }),
+            intersect_in_ranges_by_key(ranges[1], &ranges[..], Range::to_vec),
             &ranges[1..2],
             "range in list only overlaps itself",
         );
         assert_eq!(
-            intersect_in_ranges_by_key(ranges[2], &ranges[..], |range| { *range }),
+            intersect_in_ranges_by_key(ranges[2], &ranges[..], Range::to_vec),
             &ranges[2..3],
             "range in list only overlaps itself",
         );
@@ -839,7 +842,7 @@ mod tests {
                     upper: Bound::Before(&[0x00]),
                 },
                 &ranges[..],
-                |range| { *range }
+                Range::to_vec,
             )
             .is_empty(),
             "exact gap between ranges contains nothing",
@@ -851,7 +854,7 @@ mod tests {
                     upper: Bound::Before(&[0x02]),
                 },
                 &ranges[..],
-                |range| { *range }
+                Range::to_vec,
             )
             .is_empty(),
             "exact gap between ranges contains nothing",
@@ -863,7 +866,7 @@ mod tests {
                     upper: Bound::AfterAll,
                 },
                 &ranges[..],
-                |range| { *range }
+                Range::to_vec,
             )
             .is_empty(),
             "exact gap between ranges contains nothing",
@@ -876,7 +879,7 @@ mod tests {
                     upper: Bound::Before(&[]),
                 },
                 &ranges[..],
-                |range| { *range }
+                Range::to_vec,
             )
             .is_empty(),
             "within gap between ranges contains nothing",
@@ -888,7 +891,7 @@ mod tests {
                     upper: Bound::Before(&[0x01, 0x02]),
                 },
                 &ranges[..],
-                |range| { *range }
+                Range::to_vec,
             )
             .is_empty(),
             "within gap between ranges contains nothing",
@@ -900,7 +903,7 @@ mod tests {
                     upper: Bound::AfterAll,
                 },
                 &ranges[..],
-                |range| { *range }
+                Range::to_vec,
             )
             .is_empty(),
             "within gap between ranges contains nothing",
@@ -913,7 +916,7 @@ mod tests {
                     upper: Bound::After(&[0x02]),
                 },
                 &ranges[..],
-                |range| { *range }
+                Range::to_vec,
             ),
             &ranges[1..],
         );

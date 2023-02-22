@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use crate::lsm_run::Run;
 use crate::memtable::Memtable;
+use crate::range::intersect_in_ranges_by_key;
 use crate::range::Bound;
 use crate::range::KeyOrBound;
 use crate::range::Range;
@@ -34,7 +35,6 @@ use crate::types::Record;
 use crate::types::Timestamp;
 use crate::types::Value;
 use crate::types::WriteError;
-use crate::util::binary_search_by_idx;
 use crate::util::merge_sorted;
 use crate::util::merge_sorted_streams;
 use crate::util::AtomicArc;
@@ -854,47 +854,16 @@ impl LsmInnerInner {
             );
         }
         for i in 1..manifest.levels.len() {
-            let level = &manifest.levels[i];
-            if level.runs.is_empty() {
-                continue;
-            }
-            let mut start_idx = binary_search_by_idx(
-                level.runs.len(),
-                range.lower.clone().map(Vec::from),
-                |idx| level.runs[idx].range().upper,
-            )
-            .unwrap_or_else(core::convert::identity);
-            if start_idx >= level.runs.len() {
-                continue;
-            }
+            let overlapping_runs = manifest.levels[i].overlapping_runs(range.to_vec());
 
-            if level.runs[start_idx].range().upper.borrow() == range.lower {
-                start_idx += 1;
-            }
-
-            let mut end_idx = binary_search_by_idx(
-                level.runs.len(),
-                range.upper.clone().map(Vec::from),
-                |idx| level.runs[idx].range().lower,
-            )
-            .unwrap_or_else(|idx| if idx == level.runs.len() { idx } else { idx });
-            if end_idx > 0
-                && end_idx < level.runs.len()
-                && level.runs[end_idx].range().lower.borrow() == range.upper
-            {
-                end_idx -= 1;
-            }
-
-            if end_idx < start_idx {
+            if overlapping_runs.is_empty() {
                 continue;
             }
 
             streams.push(
                 futures::stream::iter(match direction {
-                    Direction::Asc => IteratorEither::Left(level.runs[start_idx..end_idx].iter()),
-                    Direction::Desc => {
-                        IteratorEither::Right(level.runs[start_idx..end_idx].iter().rev())
-                    }
+                    Direction::Asc => IteratorEither::Left(overlapping_runs.iter()),
+                    Direction::Desc => IteratorEither::Right(overlapping_runs.iter().rev()),
                 })
                 .inspect(|run| {
                     assert!(
@@ -1208,26 +1177,7 @@ impl Level {
     }
 
     fn overlapping_runs(&self, range: Range<Vec<u8>>) -> &[Run<Arc<Vec<u8>>>] {
-        let start_idx = self
-            .runs
-            .binary_search_by_key(&range.lower, |run| run.range().upper)
-            .unwrap_or_else(core::convert::identity);
-
-        let end_idx = match self
-            .runs
-            .binary_search_by_key(&range.upper, |run| run.range().lower)
-        {
-            Ok(idx) => idx + 1,
-            Err(idx) => idx,
-        };
-
-        let runs = &self.runs[start_idx..end_idx];
-
-        assert!(runs
-            .iter()
-            .all(|run| !run.range().intersection(&range).is_empty()));
-
-        runs
+        intersect_in_ranges_by_key(range.borrow(), &self.runs, |run| run.range())
     }
 }
 
