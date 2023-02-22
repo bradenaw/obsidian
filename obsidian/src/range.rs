@@ -5,7 +5,9 @@ use std::fmt::Debug;
 use std::iter::FromIterator;
 use std::iter::IntoIterator;
 
-#[derive(PartialEq, Eq, Clone)]
+use crate::util::binary_search_by_idx;
+
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum Bound<K> {
     BeforeAll,
     Before(K),
@@ -193,7 +195,7 @@ impl<K: Ord + HasPrefix> PartialOrd for KeyOrBound<K> {
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct Range<K> {
     pub lower: Bound<K>,
     pub upper: Bound<K>,
@@ -571,13 +573,32 @@ impl<'a, K: Ord + HasPrefix + Clone> Iterator for Intersections<'a, K> {
     }
 }
 
+fn intersect_in_ranges_by_key<'a, T: 'a, F: Fn(&'a T) -> Range<&'a [u8]>>(
+    range: Range<&[u8]>,
+    ranges: &'a [T],
+    f: F,
+) -> &'a [T] {
+    let start_idx =
+        match binary_search_by_idx(ranges.len(), range.lower, |idx| f(&ranges[idx]).upper) {
+            Ok(idx) => idx + 1,
+            Err(idx) => idx,
+        };
+
+    let end_idx = binary_search_by_idx(ranges.len(), range.upper, |idx| f(&ranges[idx]).lower)
+        .unwrap_or_else(core::convert::identity);
+
+    &ranges[start_idx..end_idx]
+}
+
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
+    use super::intersect_in_ranges_by_key;
     use super::Bound;
     use super::KeyOrBound;
     use super::Range;
     use super::RangeSet;
-    use proptest::prelude::*;
 
     #[test]
     fn test_bound_ord() {
@@ -770,6 +791,132 @@ mod tests {
             Some(c.clone())
         );
         assert_eq!(rs2.last_less_or_equal(&Bound::AfterAll).cloned(), Some(c));
+    }
+
+    #[test]
+    fn test_intersect_in_ranges_by_key() {
+        let ranges = [
+            Range {
+                lower: Bound::Before(&[0x00][..]),
+                upper: Bound::After(&[0x00]),
+            },
+            Range {
+                lower: Bound::After(&[0x00]),
+                upper: Bound::After(&[0x01]),
+            },
+            Range {
+                lower: Bound::Before(&[0x02]),
+                upper: Bound::AfterPrefix(&[0x02]),
+            },
+        ];
+
+        assert_eq!(
+            intersect_in_ranges_by_key(Range::all(), &ranges[..], |range| { *range }),
+            &ranges[..],
+            "Range::all() overlaps everything",
+        );
+
+        assert_eq!(
+            intersect_in_ranges_by_key(ranges[0], &ranges[..], |range| { *range }),
+            &ranges[0..1],
+            "range in list only overlaps itself",
+        );
+        assert_eq!(
+            intersect_in_ranges_by_key(ranges[1], &ranges[..], |range| { *range }),
+            &ranges[1..2],
+            "range in list only overlaps itself",
+        );
+        assert_eq!(
+            intersect_in_ranges_by_key(ranges[2], &ranges[..], |range| { *range }),
+            &ranges[2..3],
+            "range in list only overlaps itself",
+        );
+
+        assert!(
+            intersect_in_ranges_by_key(
+                Range {
+                    lower: Bound::BeforeAll,
+                    upper: Bound::Before(&[0x00]),
+                },
+                &ranges[..],
+                |range| { *range }
+            )
+            .is_empty(),
+            "exact gap between ranges contains nothing",
+        );
+        assert!(
+            intersect_in_ranges_by_key(
+                Range {
+                    lower: Bound::After(&[0x01]),
+                    upper: Bound::Before(&[0x02]),
+                },
+                &ranges[..],
+                |range| { *range }
+            )
+            .is_empty(),
+            "exact gap between ranges contains nothing",
+        );
+        assert!(
+            intersect_in_ranges_by_key(
+                Range {
+                    lower: Bound::AfterPrefix(&[0x02]),
+                    upper: Bound::AfterAll,
+                },
+                &ranges[..],
+                |range| { *range }
+            )
+            .is_empty(),
+            "exact gap between ranges contains nothing",
+        );
+
+        assert!(
+            intersect_in_ranges_by_key(
+                Range {
+                    lower: Bound::BeforeAll,
+                    upper: Bound::Before(&[]),
+                },
+                &ranges[..],
+                |range| { *range }
+            )
+            .is_empty(),
+            "within gap between ranges contains nothing",
+        );
+        assert!(
+            intersect_in_ranges_by_key(
+                Range {
+                    lower: Bound::After(&[0x01, 0x01]),
+                    upper: Bound::Before(&[0x01, 0x02]),
+                },
+                &ranges[..],
+                |range| { *range }
+            )
+            .is_empty(),
+            "within gap between ranges contains nothing",
+        );
+        assert!(
+            intersect_in_ranges_by_key(
+                Range {
+                    lower: Bound::After(&[0x03]),
+                    upper: Bound::AfterAll,
+                },
+                &ranges[..],
+                |range| { *range }
+            )
+            .is_empty(),
+            "within gap between ranges contains nothing",
+        );
+
+        assert_eq!(
+            intersect_in_ranges_by_key(
+                Range {
+                    lower: Bound::After(&[0x00, 0x00]),
+                    upper: Bound::After(&[0x02]),
+                },
+                &ranges[..],
+                |range| { *range }
+            ),
+            &ranges[1..],
+        );
     }
 
     fn simple_key() -> impl Strategy<Value = Vec<u8>> {
