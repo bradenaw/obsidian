@@ -969,12 +969,11 @@ impl LsmInnerInner {
             .map(|(_, memtable)| memtable.read().unwrap())
             .collect();
 
-        let mut streams = Vec::with_capacity(
-            manifest.l0_active.len() + manifest.l0_sealed.len() + manifest.levels.len(),
-        );
-
+        let mut streams = Vec::with_capacity(manifest.levels.len());
+        let mut l0_streams =
+            Vec::with_capacity(manifest.l0_active.len() + manifest.l0_sealed.len());
         for l0_run in &l0_active_guards {
-            streams.push(
+            l0_streams.push(
                 futures::stream::iter(
                     l0_run
                         .history(key, range, direction)
@@ -984,7 +983,7 @@ impl LsmInnerInner {
             );
         }
         for l0_run in &manifest.l0_sealed {
-            streams.push(
+            l0_streams.push(
                 futures::stream::iter(
                     l0_run
                         .history(key, range, direction)
@@ -993,8 +992,19 @@ impl LsmInnerInner {
                 .boxed(),
             );
         }
+        streams.push(merge_sorted_streams(l0_streams).boxed());
 
-        let merged_stream = merge_sorted_streams(streams);
+        for level in &manifest.levels[1..] {
+            if let Some(run) = level.run_for_key(key) {
+                streams.push(run.history(key, range, direction).boxed());
+            }
+        }
+
+        if direction == Direction::Asc {
+            streams.reverse();
+        }
+
+        let stream = futures::stream::iter(streams.into_iter()).flatten();
 
         todo!();
     }
@@ -1204,6 +1214,18 @@ impl Level {
     }
 
     async fn get(&self, ts: Timestamp, k: &[u8]) -> anyhow::Result<Option<(Timestamp, Value)>> {
+        let run = match self.run_for_key(k) {
+            Some(run) => run,
+            None => return Ok(None),
+        };
+        run.get(ts, k).await
+    }
+
+    fn size(&self) -> usize {
+        self.runs.iter().map(|run| run.size()).sum()
+    }
+
+    fn run_for_key<'a>(&'a self, k: &[u8]) -> Option<&'a Run<Arc<Vec<u8>>>> {
         let idx = self
             .runs
             .binary_search_by_key(&KeyOrBound::Key(k.to_vec()), |run| {
@@ -1211,13 +1233,13 @@ impl Level {
             })
             .unwrap_or_else(core::convert::identity);
         if idx >= self.runs.len() {
-            return Ok(None);
+            return None;
         }
-        self.runs[idx].get(ts, k).await
-    }
-
-    fn size(&self) -> usize {
-        self.runs.iter().map(|run| run.size()).sum()
+        let run = &self.runs[idx];
+        if !run.range().contains(&k.to_vec()) {
+            return None;
+        }
+        Some(run)
     }
 
     fn overlapping_runs(&self, range: Range<Vec<u8>>) -> &[Run<Arc<Vec<u8>>>] {

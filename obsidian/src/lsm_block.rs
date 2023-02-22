@@ -11,6 +11,7 @@ use crate::lsm_util::PrefixCompressedKV;
 use crate::range::KeyOrBound;
 use crate::range::Range;
 use crate::types::Direction;
+use crate::types::HistoryRange;
 use crate::types::Record;
 use crate::types::Timestamp;
 use crate::types::Value;
@@ -325,6 +326,49 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
                 let value = self.value(&versions, version_idx).await?;
 
                 yield Record { key, ts, value };
+            }
+        }
+    }
+
+    pub(crate) fn history<'b>(
+        &'b self,
+        k: &[u8],
+        range: HistoryRange,
+        direction: Direction,
+    ) -> impl Stream<Item = anyhow::Result<Record>> + 'b {
+        let k_owned = k.to_vec();
+        try_stream! {
+            let key_idx = match self.index.search(&k_owned) {
+                Ok(idx) => idx,
+                Err(_) => return,
+            };
+            let key_versions = self.versions_for_key(key_idx);
+            let (min, max) = range.as_min_max();
+
+            let min_version_idx = binary_search_by_idx(key_versions.len(), Reverse(min), |idx| {
+                Reverse(key_versions.ts(idx))
+            })
+            .unwrap_or_else(core::convert::identity);
+            let max_version_idx = binary_search_by_idx(key_versions.len(), Reverse(max), |idx| {
+                Reverse(key_versions.ts(idx))
+            })
+            .unwrap_or_else(core::convert::identity);
+
+            let version_idxs_asc = min_version_idx..=max_version_idx;
+            let version_idxs = match direction {
+                Direction::Asc => IteratorEither::Left(version_idxs_asc),
+                Direction::Desc => IteratorEither::Right(version_idxs_asc.rev()),
+            };
+
+            for idx in version_idxs {
+                let record_ts = key_versions.ts(idx);
+                let value = self.value(&key_versions, idx).await?;
+
+                yield Record {
+                    key: k_owned.clone(),
+                    ts: record_ts,
+                    value,
+                };
             }
         }
     }

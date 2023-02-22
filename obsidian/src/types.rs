@@ -230,3 +230,18 @@ pub enum HistoryRange {
     Between(Timestamp, Timestamp),
     Since(Timestamp),
 }
+
+impl HistoryRange {
+    pub(crate) fn as_min_max(&self) -> (Timestamp, Timestamp) {
+        match self {
+            HistoryRange::Until(max) => (Timestamp::ZERO, *max),
+            HistoryRange::Between(min, max) => (*min, *max),
+            HistoryRange::Since(min) => (*min, Timestamp::MAX),
+        }
+    }
+
+    pub(crate) fn intersects(&self, min: Timestamp, max: Timestamp) -> bool {
+        let (self_min, self_max) = self.as_min_max();
+        !(self_max < min || self_min > max)
+    }
+}

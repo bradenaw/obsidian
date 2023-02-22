@@ -157,11 +157,7 @@ impl Memtable {
             None => return IteratorEither::Right(std::iter::empty()),
         };
 
-        let (min, max) = match range {
-            HistoryRange::Until(max) => (Timestamp::ZERO, max),
-            HistoryRange::Between(min, max) => (min, max),
-            HistoryRange::Since(min) => (min, Timestamp::MAX),
-        };
+        let (min, max) = range.as_min_max();
 
         let key_owned = key.to_vec();
         let in_range = versions.range(min..=max).map(move |(ts, value)| Record {

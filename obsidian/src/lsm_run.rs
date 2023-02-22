@@ -20,6 +20,7 @@ use crate::range::KeyOrBound;
 use crate::range::Range;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
+use crate::types::HistoryRange;
 use crate::types::KeyspaceId;
 use crate::types::Record;
 use crate::types::Timestamp;
@@ -148,18 +149,10 @@ impl<R: AsyncReadExactAt> Run<R> {
         if ts < self.min_ts {
             return Ok(None);
         }
-        let block_header_idx = match self.index.search(k) {
-            Ok(idx) => idx,
-            Err(idx) => {
-                if idx == 0 {
-                    return Ok(None);
-                }
-                idx - 1
-            }
-        };
-        let block_header_offset = self.index.get_value(block_header_idx);
-        let block = Block::open(&self.r, block_header_offset as u64).await?;
-        block.get(ts, k).await
+        if let Some(block) = self.block_for_key(k).await? {
+            return block.get(ts, k).await;
+        }
+        return Ok(None);
     }
 
     pub(crate) fn scan(
@@ -205,6 +198,30 @@ impl<R: AsyncReadExactAt> Run<R> {
         }
     }
 
+    pub(crate) fn history<'a>(
+        &'a self,
+        k: &[u8],
+        range: HistoryRange,
+        direction: Direction,
+    ) -> impl Stream<Item = anyhow::Result<Record>> + 'a {
+        let k_owned = k.to_vec();
+        try_stream! {
+            if !range.intersects(self.min_ts, self.max_ts) {
+                return;
+            }
+            let block = match self.block_for_key(&k_owned).await? {
+                Some(block) => block,
+                None => return,
+            };
+
+            let history = block.history(&k_owned, range, direction);
+            pin_mut!(history);
+            while let Some(record) = history.try_next().await? {
+                yield record;
+            }
+        }
+    }
+
     pub(crate) fn range(&self) -> Range<Vec<u8>> {
         Range {
             lower: Bound::Before(self.min_key.clone()),
@@ -224,6 +241,22 @@ impl<R: AsyncReadExactAt> Run<R> {
                 }
             }
         }
+    }
+
+    async fn block_for_key(&self, k: &[u8]) -> anyhow::Result<Option<Block<R>>> {
+        let block_header_idx = match self.index.search(k) {
+            Ok(idx) => idx,
+            Err(idx) => {
+                if idx == 0 {
+                    return Ok(None);
+                }
+                idx - 1
+            }
+        };
+        let block_header_offset = self.index.get_value(block_header_idx);
+        Ok(Some(
+            Block::open(&self.r, block_header_offset as u64).await?,
+        ))
     }
 }
 
