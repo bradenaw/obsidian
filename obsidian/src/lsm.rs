@@ -624,13 +624,7 @@ impl LsmInner {
             storage,
             1,
             chosen_l0_range,
-            futures::stream::iter(chosen_l0.iter().map(|(k, ts, v)| {
-                Ok(Record {
-                    key: k,
-                    ts,
-                    value: v,
-                })
-            })),
+            futures::stream::iter(chosen_l0.iter().map(|record| Ok(record))),
         )
         .await?;
         removes.insert(chosen_l0_id);
@@ -1874,19 +1868,104 @@ mod test {
         println!("============");
     }
 
-    async fn lsm_from_diagram(diagram: Vec<(&str, &[u8])>) -> anyhow::Result<LsmInnerInner> {
-        //let diagram = vec![
-        //    //                        1
-        //    //   ts= 1 2 3 4 5 6 7 8 9 0
-        //    ("a", b"   o  |  o|  o|o o| ".as_slice()),
-        //    (" ", b"------+   |   | +-+ "),
-        //    ("b", b" o   x|o  |o o|x|o  "),
-        //    (" ", b"----+-+---+---+ +-+ "),
-        //    ("c", b"   o|o o     o|o x| "),
-        //    (" ", b"----+-+---+   | +-+ "),
-        //    ("d", b"     o|o o|x o|o|o  "),
+    #[tokio::test]
+    async fn test_lsm_from_diagram() -> anyhow::Result<()> {
+        let diagram = vec![
+            //                         1
+            //   ts= 1 2 3 4 5 6 7 8 9 0
+            ("a", b"   o  |  o|  o|o o| ".as_slice()),
+            (" ", b"------+   |   | +-+ "),
+            ("b", b" o   x|o  |o o|x|o  "),
+            (" ", b"----+-+---+---+ +-+ "),
+            ("c", b"   o|o o     o|o x| "),
+            (" ", b"----+-+---+   | +-+ "),
+            ("d", b"     o|o o|x o| |o  "),
+        ];
+
+        let lsm = lsm_from_diagram(diagram).await?;
+        let manifest = lsm.manifest.load();
+        let l0_active_guard = manifest.l0_active[0].1.write().unwrap();
+        assert_eq!(
+            l0_active_guard.iter().collect::<Vec<_>>(),
+            vec![
+                Record {
+                    key: "b".into(),
+                    ts: Timestamp(9),
+                    value: Value::Regular("b 9".into())
+                },
+                Record {
+                    key: "d".into(),
+                    ts: Timestamp(9),
+                    value: Value::Regular("d 9".into())
+                },
+            ],
+        );
+        assert_eq!(
+            manifest.l0_sealed[0].iter().collect::<Vec<_>>(),
+            vec![
+                Record {
+                    key: "a".into(),
+                    ts: Timestamp(9),
+                    value: Value::Regular("a 9".into())
+                },
+                Record {
+                    key: "a".into(),
+                    ts: Timestamp(8),
+                    value: Value::Regular("a 8".into())
+                },
+                Record {
+                    key: "b".into(),
+                    ts: Timestamp(8),
+                    value: Value::Tombstone,
+                },
+                Record {
+                    key: "c".into(),
+                    ts: Timestamp(9),
+                    value: Value::Tombstone,
+                },
+                Record {
+                    key: "c".into(),
+                    ts: Timestamp(8),
+                    value: Value::Regular("c 8".into())
+                },
+            ],
+        );
+
+        //let a = "a";
+        //let b = "b";
+        //let c = "c";
+        //let d = "d";
+
+        //manifest.levels[1..]
+        //    .iter()
+        //    .map(|level| level.runs.iter().map(|run| run.stream().try_collect()));
+        //vec![
+        //    vec![
+        //        vec![(a, 7, false), (b, 7, false), (b, 6, false)],
+        //        vec![
+        //            (c, 7, false),
+        //            (c, 4, false),
+        //            (c, 3, false),
+        //            (d, 7, false),
+        //            (d, 6, true),
+        //        ],
+        //    ],
+        //    vec![
+        //        vec![(a, 5, false), (b, 4, false)],
+        //        vec![(d, 5, false), (d, 4, false)],
+        //    ],
+        //    vec![
+        //        vec![(a, 2, false)],
+        //        vec![(b, 3, true), (b, 1, false)],
+        //        vec![(c, 2, false)],
+        //        vec![(d, 3, false)],
+        //    ],
         //];
 
+        Ok(())
+    }
+
+    async fn lsm_from_diagram(diagram: Vec<(&str, &[u8])>) -> anyhow::Result<LsmInnerInner> {
         fn find_touching(
             diagram: &[(&str, &[u8])],
             visited: &mut HashSet<(usize, usize)>,

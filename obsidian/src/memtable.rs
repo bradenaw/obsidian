@@ -145,14 +145,15 @@ impl Memtable {
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (Vec<u8>, Timestamp, Value)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = Record> + '_ {
         self.kvs
             .iter()
             .map(|(key, entries)| {
-                entries
-                    .into_iter()
-                    .rev()
-                    .map(move |(ts, value)| (key.clone(), *ts, value.clone()))
+                entries.into_iter().rev().map(move |(ts, value)| Record {
+                    key: key.clone(),
+                    ts: *ts,
+                    value: value.clone(),
+                })
             })
             .flatten()
     }
