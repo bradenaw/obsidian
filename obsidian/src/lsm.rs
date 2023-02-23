@@ -954,7 +954,7 @@ impl LsmInnerInner {
         Ok((page, continue_cursor))
     }
 
-    fn history_page(
+    async fn history_page(
         &self,
         key: &[u8],
         range: HistoryRange,
@@ -1004,9 +1004,35 @@ impl LsmInnerInner {
             streams.reverse();
         }
 
-        let stream = futures::stream::iter(streams.into_iter()).flatten();
+        let mut stream = futures::stream::iter(streams.into_iter()).flatten();
 
-        todo!();
+        let mut page = vec![];
+        while let Some(record) = stream.try_next().await? {
+            page.push(record);
+            if page.len() >= limit {
+                break;
+            }
+        }
+
+        let continue_cursor = match page.last() {
+            None => None,
+            Some(last_record) => Some(match direction {
+                Direction::Asc => match range {
+                    HistoryRange::Until(max) | HistoryRange::Between(_, max) => {
+                        HistoryRange::Between(last_record.ts, max)
+                    }
+                    HistoryRange::Since(_) => HistoryRange::Since(last_record.ts),
+                },
+                Direction::Desc => match range {
+                    HistoryRange::Until(_) => HistoryRange::Until(last_record.ts),
+                    HistoryRange::Between(min, _) | HistoryRange::Since(min) => {
+                        HistoryRange::Between(min, last_record.ts)
+                    }
+                },
+            }),
+        };
+
+        Ok((page, continue_cursor))
     }
 
     fn insert(&self, seqno: wal::SeqNo, k: Vec<u8>, ts: Timestamp, v: Value) {
