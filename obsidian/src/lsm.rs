@@ -922,9 +922,6 @@ impl LsmInnerInner {
                     continue;
                 }
             }
-            if let Value::Tombstone = record.value {
-                continue;
-            }
             page.push(record);
             if page.len() == limit {
                 break;
