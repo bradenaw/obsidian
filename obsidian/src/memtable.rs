@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::range::Bound;
 use crate::range::Range;
 use crate::types::Direction;
+use crate::types::HistoryRange;
 use crate::types::Record;
 use crate::types::Timestamp;
 use crate::types::Value;
@@ -142,6 +143,35 @@ impl Memtable {
         match direction {
             Direction::Asc => IteratorEither::Left(IteratorEither::Left(iter)),
             Direction::Desc => IteratorEither::Left(IteratorEither::Right(iter.rev())),
+        }
+    }
+
+    pub fn history(
+        &self,
+        key: &[u8],
+        range: HistoryRange,
+        direction: Direction,
+    ) -> impl Iterator<Item = Record> + Send + '_ {
+        let versions = match self.kvs.get(key) {
+            Some(versions) => versions,
+            None => return IteratorEither::Right(std::iter::empty()),
+        };
+
+        let (min, max) = match range {
+            HistoryRange::Until(max) => (Timestamp::ZERO, max),
+            HistoryRange::Between(min, max) => (min, max),
+            HistoryRange::Since(min) => (min, Timestamp::MAX),
+        };
+
+        let key_owned = key.to_vec();
+        let in_range = versions.range(min..=max).map(move |(ts, value)| Record {
+            key: key_owned.clone(),
+            ts: *ts,
+            value: value.clone(),
+        });
+        match direction {
+            Direction::Asc => IteratorEither::Left(IteratorEither::Left(in_range)),
+            Direction::Desc => IteratorEither::Left(IteratorEither::Right(in_range.rev())),
         }
     }
 

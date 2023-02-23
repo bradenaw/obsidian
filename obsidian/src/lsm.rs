@@ -28,6 +28,7 @@ use crate::range::Range;
 use crate::storage::MemStorage;
 use crate::storage::Storage;
 use crate::types::Direction;
+use crate::types::HistoryRange;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
@@ -951,6 +952,51 @@ impl LsmInnerInner {
             .collect();
 
         Ok((page, continue_cursor))
+    }
+
+    fn history_page(
+        &self,
+        key: &[u8],
+        range: HistoryRange,
+        direction: Direction,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<Record>, Option<HistoryRange>)> {
+        let manifest = self.manifest.load();
+
+        let l0_active_guards: Vec<_> = manifest
+            .l0_active
+            .iter()
+            .map(|(_, memtable)| memtable.read().unwrap())
+            .collect();
+
+        let mut streams = Vec::with_capacity(
+            manifest.l0_active.len() + manifest.l0_sealed.len() + manifest.levels.len(),
+        );
+
+        for l0_run in &l0_active_guards {
+            streams.push(
+                futures::stream::iter(
+                    l0_run
+                        .history(key, range, direction)
+                        .map(|record| Ok(record)),
+                )
+                .boxed(),
+            );
+        }
+        for l0_run in &manifest.l0_sealed {
+            streams.push(
+                futures::stream::iter(
+                    l0_run
+                        .history(key, range, direction)
+                        .map(|record| Ok(record)),
+                )
+                .boxed(),
+            );
+        }
+
+        let merged_stream = merge_sorted_streams(streams);
+
+        todo!();
     }
 
     fn insert(&self, seqno: wal::SeqNo, k: Vec<u8>, ts: Timestamp, v: Value) {

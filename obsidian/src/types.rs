@@ -223,3 +223,10 @@ pub enum WriteError {
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct ShardId(pub(crate) u32);
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum HistoryRange {
+    Until(Timestamp),
+    Between(Timestamp, Timestamp),
+    Since(Timestamp),
+}
