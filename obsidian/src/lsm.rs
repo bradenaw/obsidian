@@ -423,7 +423,6 @@ impl LsmInner {
             run_target_size,
             block_size,
             manifest,
-            storage,
             l0_compact_notify,
         ));
 
@@ -434,6 +433,7 @@ impl LsmInner {
             block_size,
             keyspace_id,
             inner.clone(),
+            storage.clone(),
             wal.clone(),
             l0_compact_ready,
             compacted_notify,
@@ -487,6 +487,7 @@ impl LsmInner {
         block_size: u64,
         keyspace_id: KeyspaceId,
         inner: Arc<LsmInnerInner>,
+        storage: Arc<MemStorage>,
         wal: Arc<wal::Wal<WalEntry>>,
         mut l0_compact_ready: tokio::sync::mpsc::Receiver<()>,
         compacted_notify: tokio::sync::broadcast::Sender<()>,
@@ -498,6 +499,7 @@ impl LsmInner {
                 block_size,
                 keyspace_id,
                 inner.clone(),
+                storage.clone(),
                 &wal,
                 compacted_notify.clone(),
             )
@@ -512,6 +514,7 @@ impl LsmInner {
         block_size: u64,
         keyspace_id: KeyspaceId,
         inner: Arc<LsmInnerInner>,
+        storage: Arc<MemStorage>,
         wal: &wal::Wal<WalEntry>,
         compacted_notify: tokio::sync::broadcast::Sender<()>,
     ) -> anyhow::Result<()> {
@@ -523,7 +526,7 @@ impl LsmInner {
                 block_size,
                 keyspace_id,
                 &manifest,
-                &inner.storage,
+                &storage,
             )
             .await?;
             if runs.is_empty() && remove_ids.is_empty() {
@@ -564,7 +567,7 @@ impl LsmInner {
                         block_size,
                         keyspace_id,
                         &manifest,
-                        &inner.storage,
+                        &storage,
                         i,
                     )
                     .await?;
@@ -752,10 +755,6 @@ struct LsmInnerInner {
     block_size: u64,
 
     l0_compact_notify: tokio::sync::mpsc::Sender<()>,
-    storage: Arc<MemStorage>,
-    // Outer lock just protects the arc, hold in W to swap it.
-    // Inner lock protects memtable, use as normal.
-    // Also exists in manifest.l0_active, so reads can go there.
     l0_active: AtomicArc<RwLock<MaybeActiveMemtable>>,
     manifest: AtomicArc<Manifest>,
 }
@@ -766,7 +765,6 @@ impl LsmInnerInner {
         run_target_size: u64,
         block_size: u64,
         initial_manifest: Manifest,
-        storage: Arc<MemStorage>,
         l0_compact_notify: tokio::sync::mpsc::Sender<()>,
     ) -> Self {
         let l0_active = Arc::new(RwLock::new(MaybeActiveMemtable::Active(Memtable::new())));
@@ -775,7 +773,6 @@ impl LsmInnerInner {
             run_target_size,
             block_size,
             l0_compact_notify,
-            storage,
             l0_active: AtomicArc::new(l0_active.clone()),
             manifest: AtomicArc::new(Arc::new(initial_manifest.with_ingest_l0(l0_active))),
         }
