@@ -1016,20 +1016,30 @@ impl LsmInnerInner {
 
         let continue_cursor = match page.last() {
             None => None,
-            Some(last_record) => Some(match direction {
+            Some(last_record) => match direction {
                 Direction::Asc => match range {
                     HistoryRange::Until(max) | HistoryRange::Between(_, max) => {
-                        HistoryRange::Between(last_record.ts, max)
+                        let min = last_record.ts.plus_one();
+                        if min > max {
+                            None
+                        } else {
+                            Some(HistoryRange::Between(min, max))
+                        }
                     }
-                    HistoryRange::Since(_) => HistoryRange::Since(last_record.ts),
+                    HistoryRange::Since(_) => Some(HistoryRange::Since(last_record.ts.plus_one())),
                 },
                 Direction::Desc => match range {
-                    HistoryRange::Until(_) => HistoryRange::Until(last_record.ts),
+                    HistoryRange::Until(_) => Some(HistoryRange::Until(last_record.ts.minus_one())),
                     HistoryRange::Between(min, _) | HistoryRange::Since(min) => {
-                        HistoryRange::Between(min, last_record.ts)
+                        let max = last_record.ts.minus_one();
+                        if min > max {
+                            None
+                        } else {
+                            Some(HistoryRange::Between(min, max))
+                        }
                     }
                 },
-            }),
+            },
         };
 
         Ok((page, continue_cursor))
