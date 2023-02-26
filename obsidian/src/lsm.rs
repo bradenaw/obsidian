@@ -983,8 +983,22 @@ impl LsmInnerInner {
                 .boxed(),
             );
         }
-        // XXX: map to non-rev ts for direction asc
-        streams.push(merge_sorted_streams(l0_streams).boxed());
+
+        streams.push(match direction {
+            Direction::Asc => merge_sorted_streams(
+                l0_streams
+                    .into_iter()
+                    .map(|s| {
+                        s.map(|result| {
+                            result.map(|record| OrdEqByFirst((record.key, record.ts), record.value))
+                        })
+                    })
+                    .collect(),
+            )
+            .map(|result| result.map(|OrdEqByFirst((key, ts), value)| Record { key, ts, value }))
+            .boxed(),
+            Direction::Desc => merge_sorted_streams(l0_streams).boxed(),
+        });
 
         for level in &manifest.levels[1..] {
             if let Some(run) = level.run_for_key(key) {
