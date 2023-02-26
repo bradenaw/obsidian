@@ -1198,14 +1198,19 @@ impl wal::Entry for WalEntry {
 #[cfg(test)]
 mod test {
     use std::collections::BTreeMap;
+    use std::collections::HashSet;
     use std::sync::Arc;
+    use std::sync::RwLock;
     use std::time::Duration;
 
     use byteorder::BigEndian;
     use byteorder::ByteOrder;
     use proptest::prelude::*;
+    use uuid::Uuid;
 
     use crate::lsm_run::dump_run;
+    use crate::lsm_run::Run;
+    use crate::memtable::Memtable;
     use crate::range::Bound;
     use crate::range::Range;
     use crate::storage::MemStorage;
@@ -1220,10 +1225,14 @@ mod test {
     use crate::types::WriteError;
     use crate::util::binary_search_by_idx;
     use crate::wal;
+    use crate::wal::SeqNo;
 
+    use super::Level;
     use super::Lsm;
     use super::LsmBuilder;
+    use super::LsmInnerInner;
     use super::Manifest;
+    use super::MaybeActiveMemtable;
 
     #[tokio::test]
     async fn test_put_get() -> anyhow::Result<()> {
@@ -1863,5 +1872,127 @@ mod test {
             }
         }
         println!("============");
+    }
+
+    async fn lsm_from_diagram(diagram: Vec<(&str, &[u8])>) -> anyhow::Result<LsmInnerInner> {
+        //let diagram = vec![
+        //    //                        1
+        //    //   ts= 1 2 3 4 5 6 7 8 9 0
+        //    ("a", b"   o  |  o|  o|o o| ".as_slice()),
+        //    (" ", b"------+   |   | +-+ "),
+        //    ("b", b" o   x|o  |o o|x|o  "),
+        //    (" ", b"----+-+---+---+ +-+ "),
+        //    ("c", b"   o|o o     o|o x| "),
+        //    (" ", b"----+-+---+   | +-+ "),
+        //    ("d", b"     o|o o|x o|o|o  "),
+        //];
+
+        fn find_touching(
+            diagram: &[(&str, &[u8])],
+            visited: &mut HashSet<(usize, usize)>,
+            x: usize,
+            y: usize,
+        ) -> Vec<Record> {
+            fn find_touching_inner(
+                diagram: &[(&str, &[u8])],
+                visited: &mut HashSet<(usize, usize)>,
+                x: usize,
+                y: usize,
+                out: &mut Vec<Record>,
+            ) {
+                if visited.contains(&(x, y)) {
+                    return;
+                }
+                visited.insert((x, y));
+
+                let key_str = diagram[y].0;
+                let key = key_str.as_bytes().to_vec();
+                let ts = Timestamp((x / 2 + 1) as u64);
+
+                if let Some(value) = match diagram[y].1[x] {
+                    b'o' => Some(Value::Regular(format!("{} {}", key_str, ts).into())),
+                    b'x' => Some(Value::Tombstone),
+                    b' ' => None,
+                    _ => return,
+                } {
+                    out.push(Record { key, ts, value });
+                }
+
+                for (dx, dy) in [(0isize, -1isize), (1, 0), (0, 1), (-1, 0)] {
+                    let next_x = (x as isize) + dx;
+                    let next_y = (y as isize) + dy;
+
+                    if next_x < 0
+                        || next_x >= diagram[0].1.len() as isize
+                        || next_y < 0
+                        || next_y >= diagram.len() as isize
+                    {
+                        continue;
+                    }
+
+                    find_touching_inner(diagram, visited, next_x as usize, next_y as usize, out);
+                }
+            }
+
+            let mut out = vec![];
+            find_touching_inner(diagram, visited, x, y, &mut out);
+            out
+        }
+
+        let mut visited = HashSet::new();
+
+        let x_max = diagram[0].1.len() - 1;
+        let l0_active_records = find_touching(&diagram[..], &mut visited, x_max, 0);
+        let mut l0_active = Memtable::new();
+        for record in l0_active_records {
+            l0_active.insert(SeqNo(1), record.key, record.ts, record.value);
+        }
+        let mut l0_sealed = Memtable::new();
+
+        let mut manifest = Manifest::new(0);
+        for x in (0..=x_max).rev().filter(|x| x % 2 == 1) {
+            let mut level = Level::new();
+            for y in (0..diagram.len()).filter(|y| y % 2 == 0) {
+                let records = find_touching(&diagram[..], &mut visited, x, y);
+                if records.is_empty() {
+                    continue;
+                }
+
+                if l0_sealed.size() == 0 {
+                    for record in records {
+                        l0_sealed.insert(SeqNo(1), record.key, record.ts, record.value);
+                    }
+                } else {
+                    let mut v = vec![];
+                    Run::<()>::write(
+                        &mut v,
+                        Uuid::new_v4(),
+                        KeyspaceId(ColoGroupId(1), 1),
+                        1024,
+                        futures::stream::iter(records.into_iter().map(|record| Ok(record))),
+                    )
+                    .await?;
+                    let run = Run::open(Arc::new(v)).await?;
+                    level.runs.push(run);
+                }
+            }
+
+            if level.runs.is_empty() {
+                continue;
+            }
+
+            manifest.levels.push(level);
+        }
+
+        manifest.l0_active = vec![(
+            l0_active.id(),
+            Arc::new(RwLock::new(MaybeActiveMemtable::Active(l0_active))),
+        )];
+        manifest.l0_sealed = vec![Arc::new(l0_sealed)];
+
+        let (l0_compact_notify, _) = tokio::sync::mpsc::channel::<()>(1);
+        let lsm = LsmInnerInner::new(64_000_000, 64_000_000, 32768, manifest, l0_compact_notify);
+
+        Ok(lsm)
     }
 }
