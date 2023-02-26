@@ -340,8 +340,12 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         try_stream! {
             let key_idx = match self.index.search(&k_owned) {
                 Ok(idx) => idx,
-                Err(_) => return,
+                Err(_) => {
+                    println!("key not found");
+                    return;
+                },
             };
+
             let key_versions = self.versions_for_key(key_idx);
             let (min, max) = range.as_min_max();
 
@@ -354,10 +358,13 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
             })
             .unwrap_or_else(core::convert::identity);
 
-            let version_idxs_asc = min_version_idx..=max_version_idx;
+            println!("key versions range: {}..={}", min_version_idx, max_version_idx);
+
+            // Reversed because versions are in descending order.
+            let version_idxs_desc = max_version_idx..=min_version_idx;
             let version_idxs = match direction {
-                Direction::Asc => IteratorEither::Left(version_idxs_asc),
-                Direction::Desc => IteratorEither::Right(version_idxs_asc.rev()),
+                Direction::Asc => IteratorEither::Left(version_idxs_desc.rev()),
+                Direction::Desc => IteratorEither::Right(version_idxs_desc),
             };
 
             for idx in version_idxs {
@@ -535,6 +542,7 @@ mod test {
     use crate::range::Bound;
     use crate::range::Range;
     use crate::types::Direction;
+    use crate::types::HistoryRange;
     use crate::types::Record;
     use crate::types::Timestamp;
     use crate::types::Value;
@@ -742,6 +750,61 @@ mod test {
             ],
         )
         .await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_history() -> anyhow::Result<()> {
+        let kvs = vec![
+            (
+                b"a".to_vec(),
+                vec![
+                    (Timestamp(5), Value::Regular(b"a five".to_vec())),
+                    (Timestamp(2), Value::Regular(b"a two".to_vec())),
+                ],
+            ),
+            (
+                b"b".to_vec(),
+                vec![
+                    (Timestamp(8), Value::Regular(b"b eight".to_vec())),
+                    (Timestamp(7), Value::Regular(b"b seven".to_vec())),
+                    (Timestamp(4), Value::Tombstone),
+                    (Timestamp(2), Value::Regular(b"b two".to_vec())),
+                ],
+            ),
+            (
+                b"c".to_vec(),
+                vec![(Timestamp(3), Value::Regular(b"c three".to_vec()))],
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let (encoded, header_offset) = Block::<()>::encode(&kvs)?;
+        let block = Block::open(&encoded, header_offset as u64).await?;
+
+        assert_eq!(
+            block
+                .history(
+                    b"b",
+                    HistoryRange::Between(Timestamp(4), Timestamp(7)),
+                    Direction::Asc,
+                )
+                .try_collect::<Vec<Record>>()
+                .await?,
+            vec![
+                Record {
+                    key: b"b".to_vec(),
+                    ts: Timestamp(4),
+                    value: Value::Tombstone
+                },
+                Record {
+                    key: b"b".to_vec(),
+                    ts: Timestamp(7),
+                    value: Value::Regular(b"b seven".to_vec())
+                },
+            ],
+        );
 
         Ok(())
     }

@@ -1315,6 +1315,7 @@ mod test {
     use crate::storage::MemStorage;
     use crate::types::ColoGroupId;
     use crate::types::Direction;
+    use crate::types::HistoryRange;
     use crate::types::KeyspaceId;
     use crate::types::Mutation;
     use crate::types::Precondition;
@@ -1791,6 +1792,111 @@ mod test {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_history_page() -> anyhow::Result<()> {
+        let diagram = vec![
+            //                         1
+            //   ts= 1 2 3 4 5 6 7 8 9 0
+            ("a", b"   o  |  o|  o|o o| ".as_slice()),
+            (" ", b"------+   |   | +-+ "),
+            ("b", b" o   x|o  |o o|x|o  "),
+            (" ", b"----+-+---+---+ +-+ "),
+            ("c", b"   o|o o     o|o x| "),
+            (" ", b"----+-+---+   | +-+ "),
+            ("d", b"     o|o o|x o| |o  "),
+        ];
+
+        let lsm = lsm_from_diagram(diagram).await?;
+
+        async fn check(
+            lsm: &LsmInnerInner,
+            key: &[u8],
+            range: HistoryRange,
+            expected: &[(usize, bool)],
+        ) -> anyhow::Result<()> {
+            for direction in [Direction::Asc, Direction::Desc] {
+                for page_size in 1..=expected.len() {
+                    let mut maybe_cursor = Some(range.clone());
+                    let mut results = vec![];
+                    while let Some(cursor) = maybe_cursor {
+                        let (page, continue_cursor) =
+                            lsm.history_page(key, cursor, direction, page_size).await?;
+
+                        println!(
+                            "history_page(key = {:?}, cursor = {:?}, direction={:?}, page_size={}) -> {:?}",
+                            key,
+                            cursor,
+                            direction,
+                            page_size,
+                            page,
+                        );
+
+                        assert!(page.len() <= page_size);
+                        results.extend(page);
+                        maybe_cursor = continue_cursor;
+                    }
+
+                    if direction == Direction::Desc {
+                        results.reverse();
+                    }
+
+                    assert_eq!(
+                        results,
+                        expected
+                            .clone()
+                            .into_iter()
+                            .map(|(ts, is_tombstone)| lsm_diagram_record(key, *ts, *is_tombstone))
+                            .collect::<Vec<Record>>(),
+                        "history_page(key = {:?}, range = {:?}, direction={:?}, page_size={})",
+                        key,
+                        range,
+                        direction,
+                        page_size,
+                    );
+                }
+            }
+            Ok(())
+        }
+
+        dump_lsm_inner_inner(&lsm).await?;
+
+        let all_b_versions = vec![
+            (1, false),
+            (3, true),
+            (4, false),
+            (6, false),
+            (7, false),
+            (8, true),
+            (9, false),
+        ];
+
+        check(
+            &lsm,
+            b"b",
+            HistoryRange::Between(Timestamp(1), Timestamp(9)),
+            &all_b_versions,
+        )
+        .await?;
+
+        check(
+            &lsm,
+            b"b",
+            HistoryRange::Until(Timestamp(9)),
+            &all_b_versions,
+        )
+        .await?;
+
+        check(
+            &lsm,
+            b"b",
+            HistoryRange::Since(Timestamp(1)),
+            &all_b_versions,
+        )
+        .await?;
+
+        Ok(())
+    }
+
     fn bound_strategy() -> impl Strategy<Value = Bound<Vec<u8>>> {
         prop_oneof![
             Just(Bound::BeforeAll),
@@ -1897,45 +2003,50 @@ mod test {
         let inner = lsm.inner.load();
         for (keyspace_id, lsm) in &*inner {
             println!("keyspace_id {:?}", keyspace_id);
-            let manifest = lsm.inner.manifest.load();
-            dump_manifest(&manifest);
-
-            println!("== kvs =====");
-            println!("l0_active");
-            for (_, memtable_lock) in &manifest.l0_active {
-                let memtable = memtable_lock.read().unwrap();
-                println!(
-                    "  {} ({} bytes) {:?}",
-                    memtable.id(),
-                    memtable.size(),
-                    memtable.range(),
-                );
-                memtable.dump();
-            }
-            println!("l0_sealed");
-            for memtable in &manifest.l0_sealed {
-                println!(
-                    "  {} ({} bytes) {:?}",
-                    memtable.id(),
-                    memtable.size(),
-                    memtable.range(),
-                );
-                memtable.dump();
-            }
-            for (i, level) in manifest.levels[1..]
-                .iter()
-                .enumerate()
-                .map(|(i, level)| (i + 1, level))
-            {
-                println!("l{} ({} bytes)", i, level.size());
-                for run in &level.runs {
-                    println!("  {} ({} bytes) {:?}", run.id(), run.size(), run.range());
-                    dump_run(&run).await?;
-                }
-            }
-            println!("============");
+            dump_lsm_inner_inner(&lsm.inner).await?;
         }
 
+        Ok(())
+    }
+
+    async fn dump_lsm_inner_inner(lsm: &LsmInnerInner) -> anyhow::Result<()> {
+        let manifest = lsm.manifest.load();
+        dump_manifest(&manifest);
+
+        println!("== kvs =====");
+        println!("l0_active");
+        for (_, memtable_lock) in &manifest.l0_active {
+            let memtable = memtable_lock.read().unwrap();
+            println!(
+                "  {} ({} bytes) {:?}",
+                memtable.id(),
+                memtable.size(),
+                memtable.range(),
+            );
+            memtable.dump();
+        }
+        println!("l0_sealed");
+        for memtable in &manifest.l0_sealed {
+            println!(
+                "  {} ({} bytes) {:?}",
+                memtable.id(),
+                memtable.size(),
+                memtable.range(),
+            );
+            memtable.dump();
+        }
+        for (i, level) in manifest.levels[1..]
+            .iter()
+            .enumerate()
+            .map(|(i, level)| (i + 1, level))
+        {
+            println!("l{} ({} bytes)", i, level.size());
+            for run in &level.runs {
+                println!("  {} ({} bytes) {:?}", run.id(), run.size(), run.range());
+                dump_run(&run).await?;
+            }
+        }
+        println!("============");
         Ok(())
     }
 
@@ -2082,13 +2193,8 @@ mod test {
                     .into_iter()
                     .map(|run| {
                         run.into_iter()
-                            .map(|(key, ts, is_tombstone)| Record {
-                                key: key.into(),
-                                ts: Timestamp(ts as u64),
-                                value: match is_tombstone {
-                                    false => Value::Regular(format!("{} {}", key, ts).into()),
-                                    true => Value::Tombstone,
-                                },
+                            .map(|(key, ts, is_tombstone)| {
+                                lsm_diagram_record(key.as_bytes(), ts, is_tombstone)
                             })
                             .collect::<Vec<Record>>()
                     })
@@ -2098,6 +2204,21 @@ mod test {
         );
 
         Ok(())
+    }
+
+    fn lsm_diagram_value(key: &[u8], ts: usize) -> Value {
+        Value::Regular(format!("{:?} {}", key, ts).into())
+    }
+
+    fn lsm_diagram_record(key: &[u8], ts: usize, is_tombstone: bool) -> Record {
+        Record {
+            key: key.into(),
+            ts: Timestamp(ts as u64),
+            value: match is_tombstone {
+                false => lsm_diagram_value(key, ts),
+                true => Value::Tombstone,
+            },
+        }
     }
 
     async fn lsm_from_diagram(diagram: Vec<(&str, &[u8])>) -> anyhow::Result<LsmInnerInner> {
@@ -2124,7 +2245,7 @@ mod test {
                 let ts = Timestamp((x / 2 + 1) as u64);
 
                 if let Some(value) = match diagram[y].1[x] {
-                    b'o' => Some(Value::Regular(format!("{} {}", key_str, ts).into())),
+                    b'o' => Some(lsm_diagram_value(&key, ts.0 as usize)),
                     b'x' => Some(Value::Tombstone),
                     b' ' => None,
                     _ => return,
@@ -2182,7 +2303,7 @@ mod test {
                         &mut v,
                         Uuid::new_v4(),
                         KeyspaceId(ColoGroupId(1), 1),
-                        1024,
+                        1024, // block_size
                         futures::stream::iter(records.into_iter().map(|record| Ok(record))),
                     )
                     .await?;
