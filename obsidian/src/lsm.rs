@@ -1199,6 +1199,7 @@ mod test {
 
     use byteorder::BigEndian;
     use byteorder::ByteOrder;
+    use futures::TryStreamExt;
     use proptest::prelude::*;
     use uuid::Uuid;
 
@@ -1931,36 +1932,66 @@ mod test {
             ],
         );
 
-        //let a = "a";
-        //let b = "b";
-        //let c = "c";
-        //let d = "d";
+        let a = "a";
+        let b = "b";
+        let c = "c";
+        let d = "d";
 
-        //manifest.levels[1..]
-        //    .iter()
-        //    .map(|level| level.runs.iter().map(|run| run.stream().try_collect()));
-        //vec![
-        //    vec![
-        //        vec![(a, 7, false), (b, 7, false), (b, 6, false)],
-        //        vec![
-        //            (c, 7, false),
-        //            (c, 4, false),
-        //            (c, 3, false),
-        //            (d, 7, false),
-        //            (d, 6, true),
-        //        ],
-        //    ],
-        //    vec![
-        //        vec![(a, 5, false), (b, 4, false)],
-        //        vec![(d, 5, false), (d, 4, false)],
-        //    ],
-        //    vec![
-        //        vec![(a, 2, false)],
-        //        vec![(b, 3, true), (b, 1, false)],
-        //        vec![(c, 2, false)],
-        //        vec![(d, 3, false)],
-        //    ],
-        //];
+        assert_eq!(
+            manifest.levels[1..]
+                .iter()
+                .map(|level| {
+                    level
+                        .runs
+                        .iter()
+                        .map(|run| {
+                            futures::executor::block_on(run.stream().try_collect::<Vec<_>>())
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?,
+            vec![
+                vec![
+                    vec![(a, 7, false), (b, 7, false), (b, 6, false)],
+                    vec![
+                        (c, 7, false),
+                        (c, 4, false),
+                        (c, 3, false),
+                        (d, 7, false),
+                        (d, 6, true),
+                    ],
+                ],
+                vec![
+                    vec![(a, 5, false), (b, 4, false)],
+                    vec![(d, 5, false), (d, 4, false)],
+                ],
+                vec![
+                    vec![(a, 2, false)],
+                    vec![(b, 3, true), (b, 1, false)],
+                    vec![(d, 3, false)],
+                ],
+                vec![vec![(c, 2, false)]],
+            ]
+            .into_iter()
+            .map(|level| {
+                level
+                    .into_iter()
+                    .map(|run| {
+                        run.into_iter()
+                            .map(|(key, ts, is_tombstone)| Record {
+                                key: key.into(),
+                                ts: Timestamp(ts as u64),
+                                value: match is_tombstone {
+                                    false => Value::Regular(format!("{} {}", key, ts).into()),
+                                    true => Value::Tombstone,
+                                },
+                            })
+                            .collect::<Vec<Record>>()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>(),
+        );
 
         Ok(())
     }
@@ -2028,7 +2059,7 @@ mod test {
         }
         let mut l0_sealed = Memtable::new();
 
-        let mut manifest = Manifest::new(0);
+        let mut manifest = Manifest::new(1);
         for x in (0..=x_max).rev().filter(|x| x % 2 == 1) {
             let mut level = Level::new();
             for y in (0..diagram.len()).filter(|y| y % 2 == 0) {
