@@ -348,10 +348,12 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
             let key_versions = self.versions_for_key(key_idx);
             let (min, max) = range.as_min_max();
 
-            let min_version_idx = binary_search_by_idx(key_versions.len(), Reverse(min), |idx| {
+            let min_version_idx = match binary_search_by_idx(key_versions.len(), Reverse(min), |idx| {
                 Reverse(key_versions.ts(idx))
-            })
-            .unwrap_or_else(core::convert::identity);
+            }) {
+                Ok(idx) => idx,
+                Err(idx) => if idx > 0 { idx-1 } else { return },
+            };
             let max_version_idx = binary_search_by_idx(key_versions.len(), Reverse(max), |idx| {
                 Reverse(key_versions.ts(idx))
             })
@@ -367,6 +369,9 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
             for idx in version_idxs {
                 let record_ts = key_versions.ts(idx);
                 let value = self.value(&key_versions, idx).await?;
+
+                assert!(min <= record_ts, "{:?} <= {:?}", min, record_ts);
+                assert!(max >= record_ts, "{:?} >= {:?}", max, record_ts);
 
                 yield Record {
                     key: k_owned.clone(),

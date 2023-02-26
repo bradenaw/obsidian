@@ -983,6 +983,7 @@ impl LsmInnerInner {
                 .boxed(),
             );
         }
+        // XXX: map to non-rev ts for direction asc
         streams.push(merge_sorted_streams(l0_streams).boxed());
 
         for level in &manifest.levels[1..] {
@@ -1823,12 +1824,13 @@ mod test {
                             lsm.history_page(key, cursor, direction, page_size).await?;
 
                         println!(
-                            "history_page(key = {:?}, cursor = {:?}, direction={:?}, page_size={}) -> {:?}",
+                            "history_page(key = {:?}, cursor = {:?}, direction={:?}, page_size={}) -> ({:?}, {:?})",
                             key,
                             cursor,
                             direction,
                             page_size,
                             page,
+                            continue_cursor,
                         );
 
                         assert!(page.len() <= page_size);
