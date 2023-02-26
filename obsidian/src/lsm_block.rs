@@ -341,7 +341,6 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
             let key_idx = match self.index.search(&k_owned) {
                 Ok(idx) => idx,
                 Err(_) => {
-                    println!("key not found");
                     return;
                 },
             };
@@ -357,8 +356,6 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
                 Reverse(key_versions.ts(idx))
             })
             .unwrap_or_else(core::convert::identity);
-
-            println!("key versions range: {}..={}", min_version_idx, max_version_idx);
 
             // Reversed because versions are in descending order.
             let version_idxs_desc = max_version_idx..=min_version_idx;
@@ -767,7 +764,7 @@ mod test {
             (
                 b"b".to_vec(),
                 vec![
-                    (Timestamp(8), Value::Regular(b"b eight".to_vec())),
+                    (Timestamp(9), Value::Regular(b"b nine".to_vec())),
                     (Timestamp(7), Value::Regular(b"b seven".to_vec())),
                     (Timestamp(4), Value::Tombstone),
                     (Timestamp(2), Value::Regular(b"b two".to_vec())),
@@ -788,6 +785,29 @@ mod test {
                 .history(
                     b"b",
                     HistoryRange::Between(Timestamp(4), Timestamp(7)),
+                    Direction::Asc,
+                )
+                .try_collect::<Vec<Record>>()
+                .await?,
+            vec![
+                Record {
+                    key: b"b".to_vec(),
+                    ts: Timestamp(4),
+                    value: Value::Tombstone
+                },
+                Record {
+                    key: b"b".to_vec(),
+                    ts: Timestamp(7),
+                    value: Value::Regular(b"b seven".to_vec())
+                },
+            ],
+        );
+
+        assert_eq!(
+            block
+                .history(
+                    b"b",
+                    HistoryRange::Between(Timestamp(3), Timestamp(8)),
                     Direction::Asc,
                 )
                 .try_collect::<Vec<Record>>()
