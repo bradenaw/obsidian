@@ -2117,56 +2117,29 @@ mod test {
         let lsm = lsm_from_diagram(diagram).await?;
         let manifest = lsm.manifest.load();
         let l0_active_guard = manifest.l0_active[0].1.write().unwrap();
-        assert_eq!(
-            l0_active_guard.iter().collect::<Vec<_>>(),
-            vec![
-                Record {
-                    key: "b".into(),
-                    ts: Timestamp(9),
-                    value: Value::Regular("b 9".into())
-                },
-                Record {
-                    key: "d".into(),
-                    ts: Timestamp(9),
-                    value: Value::Regular("d 9".into())
-                },
-            ],
-        );
-        assert_eq!(
-            manifest.l0_sealed[0].iter().collect::<Vec<_>>(),
-            vec![
-                Record {
-                    key: "a".into(),
-                    ts: Timestamp(9),
-                    value: Value::Regular("a 9".into())
-                },
-                Record {
-                    key: "a".into(),
-                    ts: Timestamp(8),
-                    value: Value::Regular("a 8".into())
-                },
-                Record {
-                    key: "b".into(),
-                    ts: Timestamp(8),
-                    value: Value::Tombstone,
-                },
-                Record {
-                    key: "c".into(),
-                    ts: Timestamp(9),
-                    value: Value::Tombstone,
-                },
-                Record {
-                    key: "c".into(),
-                    ts: Timestamp(8),
-                    value: Value::Regular("c 8".into())
-                },
-            ],
-        );
 
         let a = "a";
         let b = "b";
         let c = "c";
         let d = "d";
+
+        assert_eq!(
+            l0_active_guard.iter().collect::<Vec<_>>(),
+            vec![
+                lsm_diagram_record(b.as_bytes(), 9, false),
+                lsm_diagram_record(d.as_bytes(), 9, false),
+            ],
+        );
+        assert_eq!(
+            manifest.l0_sealed[0].iter().collect::<Vec<_>>(),
+            vec![
+                lsm_diagram_record(a.as_bytes(), 9, false),
+                lsm_diagram_record(a.as_bytes(), 8, false),
+                lsm_diagram_record(b.as_bytes(), 8, true),
+                lsm_diagram_record(c.as_bytes(), 9, true),
+                lsm_diagram_record(c.as_bytes(), 8, false),
+            ],
+        );
 
         assert_eq!(
             manifest.levels[1..]
