@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
 
+use anyhow::anyhow;
 use futures::future;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
@@ -181,7 +182,7 @@ impl Lsm {
         self.inner
             .load()
             .get(&keyspace_id)
-            .ok_or_else(|| anyhow::anyhow!("keyspace not found"))?
+            .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?
             .get(ts, key)
             .await
     }
@@ -197,8 +198,24 @@ impl Lsm {
         self.inner
             .load()
             .get(&keyspace_id)
-            .ok_or_else(|| anyhow::anyhow!("keyspace not found"))?
+            .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?
             .scan_page(ts, range, direction, limit)
+            .await
+    }
+
+    pub async fn history_page(
+        &self,
+        keyspace_id: KeyspaceId,
+        key: &[u8],
+        range: HistoryRange,
+        direction: Direction,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<Record>, Option<HistoryRange>)> {
+        self.inner
+            .load()
+            .get(&keyspace_id)
+            .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?
+            .history_page(key, range, direction, limit)
             .await
     }
 
@@ -213,7 +230,7 @@ impl Lsm {
         for precond in preconds {
             let res = keyspaces
                 .get(&precond.keyspace_id())
-                .ok_or_else(|| anyhow::anyhow!("keyspace not found"))?
+                .ok_or_else(|| anyhow!("{:?} not found", precond.keyspace_id()))?
                 .inner
                 .get(ts, precond.key())
                 .await?;
@@ -249,7 +266,7 @@ impl Lsm {
             wal_processed
                 .changed()
                 .await
-                .map_err(|_| WriteError::Other(anyhow::anyhow!("wal processor missing")))?;
+                .map_err(|_| WriteError::Other(anyhow!("wal processor missing")))?;
         }
 
         Ok(())
@@ -463,6 +480,17 @@ impl LsmInner {
     ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
         self.inner.scan_page(ts, range, direction, limit).await
     }
+
+    pub async fn history_page(
+        &self,
+        key: &[u8],
+        range: HistoryRange,
+        direction: Direction,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<Record>, Option<HistoryRange>)> {
+        self.inner.history_page(key, range, direction, limit).await
+    }
+
     pub fn next_compaction(&self) -> impl Future<Output = ()> {
         let mut compacted = self.compacted.resubscribe();
         async move {
