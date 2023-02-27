@@ -29,8 +29,11 @@ use crate::obsidian::TabletId;
 use crate::obsidian::Tablets;
 use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
+use crate::range::Range;
 use crate::sequencer::Sequencer;
 use crate::types::ColoGroupId;
+use crate::types::Direction;
+use crate::types::HistoryRange;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
@@ -56,6 +59,25 @@ pub(crate) trait Tablet {
         keyspace_id: KeyspaceId,
         key: &[u8],
     ) -> Result<(Timestamp, Option<Vec<u8>>), ReadError>;
+
+    async fn scan_page(
+        &self,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        range: Range<&[u8]>,
+        direction: Direction,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)>;
+
+    async fn history_page(
+        &self,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        key: &[u8],
+        range: HistoryRange,
+        direction: Direction,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>)>;
 
     async fn write(
         &self,
@@ -113,6 +135,29 @@ impl Tablet for LsmTablet {
         key: &[u8],
     ) -> Result<(Timestamp, Option<Vec<u8>>), ReadError> {
         self.inner.get_latest(keyspace_id, key).await
+    }
+
+    async fn scan_page(
+        &self,
+        _ts: Timestamp,
+        _keyspace_id: KeyspaceId,
+        _range: Range<&[u8]>,
+        _direction: Direction,
+        _limit: usize,
+    ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)> {
+        todo!();
+    }
+
+    async fn history_page(
+        &self,
+        _ts: Timestamp,
+        _keyspace_id: KeyspaceId,
+        _key: &[u8],
+        _range: HistoryRange,
+        _direction: Direction,
+        _limit: usize,
+    ) -> anyhow::Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>)> {
+        todo!();
     }
 
     async fn write(

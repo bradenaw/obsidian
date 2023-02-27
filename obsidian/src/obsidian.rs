@@ -399,15 +399,19 @@ mod test {
     use byteorder::ByteOrder;
 
     use crate::lsm::LsmBuilder;
+    use crate::range::Range;
     use crate::storage::MemStorage;
     use crate::tablet::LsmTablet;
     use crate::tablet::Tablet;
     use crate::types::ColoGroupId;
+    use crate::types::Direction;
+    use crate::types::HistoryRange;
     use crate::types::KeyspaceId;
     use crate::types::Mutation;
     use crate::types::Precondition;
     use crate::types::ShardId;
     use crate::types::Timestamp;
+    use crate::types::Value;
 
     use super::InternalWriteError;
     use super::Obsidian;
@@ -457,6 +461,29 @@ mod test {
             key: &[u8],
         ) -> Result<(Timestamp, Option<Vec<u8>>), ReadError> {
             T::get_latest(self, keyspace_id, key).await
+        }
+
+        async fn scan_page(
+            &self,
+            ts: Timestamp,
+            keyspace_id: KeyspaceId,
+            range: Range<&[u8]>,
+            direction: Direction,
+            limit: usize,
+        ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)> {
+            T::scan_page(self, ts, keyspace_id, range, direction, limit).await
+        }
+
+        async fn history_page(
+            &self,
+            ts: Timestamp,
+            keyspace_id: KeyspaceId,
+            key: &[u8],
+            range: HistoryRange,
+            direction: Direction,
+            limit: usize,
+        ) -> anyhow::Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>)> {
+            T::history_page(self, ts, keyspace_id, key, range, direction, limit).await
         }
 
         async fn write(
