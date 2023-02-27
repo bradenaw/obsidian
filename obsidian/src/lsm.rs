@@ -806,10 +806,6 @@ impl LsmInnerInner {
         direction: Direction,
         limit: usize,
     ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
-        if direction == Direction::Desc {
-            todo!();
-        }
-
         if range.is_empty() {
             return Ok((vec![], None));
         }
@@ -1723,8 +1719,7 @@ mod test {
             range: Range<Vec<u8>>,
             expected: Vec<(&str, usize)>,
         ) -> anyhow::Result<()> {
-            for direction in [Direction::Asc] {
-                //, Direction::Desc] {
+            for direction in [Direction::Asc, Direction::Desc] {
                 for page_size in 1..=expected.len() {
                     println!("== check");
                     let mut maybe_cursor: Option<Range<Vec<u8>>> = Some(range.clone());
