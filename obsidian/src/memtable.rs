@@ -5,9 +5,12 @@ use uuid::Uuid;
 
 use crate::range::Bound;
 use crate::range::Range;
+use crate::types::Direction;
+use crate::types::HistoryRange;
 use crate::types::Record;
 use crate::types::Timestamp;
 use crate::types::Value;
+use crate::util::IteratorEither;
 use crate::wal;
 
 impl Default for Memtable {
@@ -73,10 +76,11 @@ impl Memtable {
         }
     }
 
-    pub fn scan_asc(
+    pub fn scan(
         &self,
         ts: Timestamp,
         range: Range<&[u8]>,
+        direction: Direction,
     ) -> impl Iterator<Item = Record> + Send + '_ {
         let range_bounds = (
             match range.lower {
@@ -90,12 +94,12 @@ impl Memtable {
                         .collect(),
                 ),
                 Bound::AfterAll => {
-                    return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record> + Send>
+                    return IteratorEither::Right(std::iter::empty());
                 }
             },
             match range.upper {
                 Bound::BeforeAll => {
-                    return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record> + Send>
+                    return IteratorEither::Right(std::iter::empty());
                 }
                 Bound::Before(k) => std::ops::Bound::Excluded(k.to_vec()),
                 Bound::After(k) => std::ops::Bound::Included(k.to_vec()),
@@ -113,39 +117,69 @@ impl Memtable {
         // when the range is in fact empty.
         match (&range_bounds.0, &range_bounds.1) {
             (std::ops::Bound::Excluded(s), std::ops::Bound::Excluded(e)) if s == e => {
-                return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record> + Send>;
+                return IteratorEither::Right(std::iter::empty());
             }
             (
                 std::ops::Bound::Included(s) | std::ops::Bound::Excluded(s),
                 std::ops::Bound::Included(e) | std::ops::Bound::Excluded(e),
             ) if s > e => {
-                return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Record> + Send>;
+                return IteratorEither::Right(std::iter::empty());
             }
             _ => {}
         }
 
-        Box::new(
-            self.kvs
-                .range(range_bounds)
-                .filter_map(move |(key, versions)| {
-                    let (record_ts, value) = versions.range(Timestamp::ZERO..=ts).next_back()?;
-                    Some(Record {
-                        key: key.clone(),
-                        ts: *record_ts,
-                        value: value.clone(),
-                    })
-                }),
-        ) as Box<dyn Iterator<Item = Record> + Send>
+        let iter = self
+            .kvs
+            .range(range_bounds)
+            .filter_map(move |(key, versions)| {
+                let (record_ts, value) = versions.range(Timestamp::ZERO..=ts).next_back()?;
+                Some(Record {
+                    key: key.clone(),
+                    ts: *record_ts,
+                    value: value.clone(),
+                })
+            });
+
+        match direction {
+            Direction::Asc => IteratorEither::Left(IteratorEither::Left(iter)),
+            Direction::Desc => IteratorEither::Left(IteratorEither::Right(iter.rev())),
+        }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (Vec<u8>, Timestamp, Value)> + '_ {
+    pub fn history(
+        &self,
+        key: &[u8],
+        range: HistoryRange,
+        direction: Direction,
+    ) -> impl Iterator<Item = Record> + Send + '_ {
+        let versions = match self.kvs.get(key) {
+            Some(versions) => versions,
+            None => return IteratorEither::Right(std::iter::empty()),
+        };
+
+        let (min, max) = range.as_min_max();
+
+        let key_owned = key.to_vec();
+        let in_range = versions.range(min..=max).map(move |(ts, value)| Record {
+            key: key_owned.clone(),
+            ts: *ts,
+            value: value.clone(),
+        });
+        match direction {
+            Direction::Asc => IteratorEither::Left(IteratorEither::Left(in_range)),
+            Direction::Desc => IteratorEither::Left(IteratorEither::Right(in_range.rev())),
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Record> + '_ {
         self.kvs
             .iter()
             .map(|(key, entries)| {
-                entries
-                    .into_iter()
-                    .rev()
-                    .map(move |(ts, value)| (key.clone(), *ts, value.clone()))
+                entries.into_iter().rev().map(move |(ts, value)| Record {
+                    key: key.clone(),
+                    ts: *ts,
+                    value: value.clone(),
+                })
             })
             .flatten()
     }

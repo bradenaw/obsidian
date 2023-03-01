@@ -201,6 +201,15 @@ pub enum Direction {
     Desc,
 }
 
+impl Debug for Direction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Direction::Asc => f.write_str("asc"),
+            Direction::Desc => f.write_str("desc"),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Precondition {
     NotChangedSince(KeyspaceId, Vec<u8>, Timestamp),
@@ -309,5 +318,29 @@ impl std::fmt::Debug for TransferId {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         write!(f, "xfer:")?;
         Display::fmt(self, f)
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+pub enum HistoryRange {
+    All,
+    Until(Timestamp),
+    Between(Timestamp, Timestamp),
+    Since(Timestamp),
+}
+
+impl HistoryRange {
+    pub(crate) fn as_min_max(&self) -> (Timestamp, Timestamp) {
+        match self {
+            HistoryRange::All => (Timestamp::ZERO, Timestamp::MAX),
+            HistoryRange::Until(max) => (Timestamp::ZERO, *max),
+            HistoryRange::Between(min, max) => (*min, *max),
+            HistoryRange::Since(min) => (*min, Timestamp::MAX),
+        }
+    }
+
+    pub(crate) fn intersects(&self, min: Timestamp, max: Timestamp) -> bool {
+        let (self_min, self_max) = self.as_min_max();
+        !(self_max < min || self_min > max)
     }
 }

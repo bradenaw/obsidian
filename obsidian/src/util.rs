@@ -2,14 +2,17 @@ use std::cmp;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
+use std::fs::File;
 use std::future::Future;
 use std::io::Read;
 use std::io::Write;
+use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
 
 use async_stream::try_stream;
+use async_trait::async_trait;
 use byteorder::ReadBytesExt;
 use byteorder::WriteBytesExt;
 use futures::stream::Stream;
@@ -234,6 +237,76 @@ pub(crate) async fn bounded_unordered_map<T, F: Fn(T) -> Fut, Fut: futures::Futu
     }
 }
 
+#[async_trait]
+pub(crate) trait AsyncReadExactAt {
+    async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()>;
+    async fn len(&self) -> anyhow::Result<u64>;
+}
+
+#[async_trait]
+impl AsyncReadExactAt for Vec<u8> {
+    async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
+        Ok(buf.copy_from_slice(&self[(offset as usize)..(offset as usize) + buf.len()]))
+    }
+    async fn len(&self) -> anyhow::Result<u64> {
+        Ok(self.len() as u64)
+    }
+}
+
+#[async_trait]
+impl AsyncReadExactAt for Arc<Vec<u8>> {
+    async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
+        Ok(buf.copy_from_slice(&self[(offset as usize)..(offset as usize) + buf.len()]))
+    }
+    async fn len(&self) -> anyhow::Result<u64> {
+        Ok(Vec::len(self) as u64)
+    }
+}
+
+#[async_trait]
+impl AsyncReadExactAt for File {
+    async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
+        // TODO: This requires an extra allocation because spawn_blocking can't hold onto a mut ref
+        // to buf because compiler isn't smart enough to know that we immediately await it and that
+        // awaiting it implies that the function is done running.
+        //
+        // Static-sized reads are not the common case here it seems, so it might be worth just
+        // changing this function to take a length and always do the allocation internally, or
+        // figure out how tokio implements AsyncRead::read_exact() when poll_read() requires a
+        // spawn_blocking.
+        let mut inner_buf = vec![0u8; buf.len()];
+        // We can safely clone this because the file descriptor's state is not affected by
+        // read_exact_at.
+        let other = self.try_clone()?;
+        let mut inner_buf = tokio::task::spawn_blocking(move || {
+            FileExt::read_exact_at(&other, &mut inner_buf, offset)?;
+            Ok::<Vec<u8>, anyhow::Error>(inner_buf)
+        })
+        .await??;
+        buf.copy_from_slice(&mut inner_buf);
+        Ok(())
+    }
+    async fn len(&self) -> anyhow::Result<u64> {
+        todo!()
+    }
+}
+
+pub(crate) enum IteratorEither<A, B> {
+    Left(A),
+    Right(B),
+}
+
+impl<T, A: Iterator<Item = T>, B: Iterator<Item = T>> Iterator for IteratorEither<A, B> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            IteratorEither::Left(inner) => inner.next(),
+            IteratorEither::Right(inner) => inner.next(),
+        }
+    }
+}
+
 pub(crate) fn delay_for_retry(i: usize, min_delay: Duration, max_delay: Duration) -> Duration {
     let avg_delay = std::cmp::min(
         min_delay.saturating_mul(2u32.saturating_pow(i as u32)),
@@ -340,30 +413,29 @@ impl Retry {
     }
 }
 
+/// Background is a set of owned tasks which are aborted on drop.
 pub(crate) struct Background {
-    tasks: std::sync::Mutex<(u64, HashMap<u64, tokio::task::JoinHandle<()>>)>,
+    tasks: std::sync::Arc<std::sync::Mutex<(u64, HashMap<u64, tokio::task::JoinHandle<()>>)>>,
 }
 
 impl Background {
     pub(crate) fn new() -> Self {
         Self {
-            tasks: std::sync::Mutex::new((0, HashMap::new())),
+            tasks: std::sync::Arc::new(std::sync::Mutex::new((0, HashMap::new()))),
         }
     }
 
-    pub(crate) fn spawn<F: Future<Output = ()> + Send>(&self, f: F) {
-        let guard = self.tasks.lock().unwrap();
-        let mut next_id = &mut guard.0;
-        let mut tasks = &mut guard.1;
-        let id = *next_id;
+    pub(crate) fn spawn<F: Future<Output = ()> + Send + 'static>(&self, f: F) {
+        let mut guard = self.tasks.lock().unwrap();
+        let id = guard.0;
+        let tasks_arc = self.tasks.clone();
         let handle = tokio::task::spawn(async move {
             f.await;
-            let guard = self.tasks.lock().unwrap();
-            let mut tasks = &mut guard.1;
-            tasks.remove(&id);
+            let mut guard = tasks_arc.lock().unwrap();
+            guard.1.remove(&id);
         });
-        *next_id += 1;
-        tasks.insert(id, handle);
+        guard.0 += 1;
+        guard.1.insert(id, handle);
     }
 }
 

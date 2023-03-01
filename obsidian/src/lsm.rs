@@ -1,45 +1,35 @@
-use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::fs::File;
 use std::future::Future;
-use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ops::DerefMut;
-use std::os::unix::fs::FileExt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use async_stream::stream;
-use async_stream::try_stream;
-use async_trait::async_trait;
-use byteorder::ByteOrder;
-use byteorder::LittleEndian;
 use futures::future;
-use futures::pin_mut;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
 use futures::SinkExt;
 use futures::TryStreamExt;
 use rand::Rng;
-use tokio::io::AsyncWrite;
-use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
+use crate::lsm_run::Run;
 use crate::memtable::Memtable;
+use crate::range::intersect_in_ranges_by_key;
 use crate::range::Bound;
 use crate::range::KeyOrBound;
 use crate::range::Range;
 use crate::storage::MemStorage;
 use crate::storage::Storage;
-use crate::types::ColoGroupId;
 use crate::types::Direction;
+use crate::types::HistoryRange;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
@@ -47,12 +37,11 @@ use crate::types::Record;
 use crate::types::Timestamp;
 use crate::types::Value;
 use crate::types::WriteError;
-use crate::util::binary_search_by_idx;
-use crate::util::byte_width;
-use crate::util::longest_shared_prefix;
 use crate::util::merge_sorted;
 use crate::util::merge_sorted_streams;
 use crate::util::AtomicArc;
+use crate::util::Background;
+use crate::util::IteratorEither;
 use crate::util::OrdEqByFirst;
 use crate::wal;
 
@@ -122,7 +111,7 @@ pub(crate) struct Lsm {
     wal: Arc<wal::Wal<WalEntry>>,
     storage: Arc<MemStorage>,
 
-    wal_process: tokio::task::JoinHandle<anyhow::Result<()>>,
+    bg: Background,
     wal_processed: tokio::sync::watch::Receiver<wal::SeqNo>,
 }
 
@@ -162,8 +151,9 @@ impl Lsm {
 
         let inner = Arc::new(AtomicArc::new(Arc::new(lsms)));
 
+        let bg = Background::new();
         let (wal_processed_send, wal_processed_recv) = tokio::sync::watch::channel(wal::SeqNo(0));
-        let wal_process = tokio::spawn(Self::process_wal(
+        bg.spawn(Self::process_wal(
             inner.clone(),
             wal.clone(),
             newest_seqno.unwrap_or(wal::SeqNo(0)),
@@ -178,7 +168,7 @@ impl Lsm {
             inner,
             wal,
             storage,
-            wal_process,
+            bg,
             wal_processed: wal_processed_recv,
         })
     }
@@ -192,7 +182,7 @@ impl Lsm {
         self.inner
             .load()
             .get(&keyspace_id)
-            .ok_or_else(|| anyhow::anyhow!("keyspace not found"))?
+            .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?
             .get(ts, key)
             .await
     }
@@ -208,8 +198,24 @@ impl Lsm {
         self.inner
             .load()
             .get(&keyspace_id)
-            .ok_or_else(|| anyhow::anyhow!("keyspace not found"))?
+            .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?
             .scan_page(ts, range, direction, limit)
+            .await
+    }
+
+    pub async fn history_page(
+        &self,
+        keyspace_id: KeyspaceId,
+        key: &[u8],
+        range: HistoryRange,
+        direction: Direction,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<Record>, Option<HistoryRange>)> {
+        self.inner
+            .load()
+            .get(&keyspace_id)
+            .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?
+            .history_page(key, range, direction, limit)
             .await
     }
 
@@ -224,7 +230,7 @@ impl Lsm {
         for precond in preconds {
             let res = keyspaces
                 .get(&precond.keyspace_id())
-                .ok_or_else(|| anyhow::anyhow!("keyspace not found"))?
+                .ok_or_else(|| anyhow!("{:?} not found", precond.keyspace_id()))?
                 .inner
                 .get(ts, precond.key())
                 .await?;
@@ -260,7 +266,7 @@ impl Lsm {
             wal_processed
                 .changed()
                 .await
-                .map_err(|_| WriteError::Other(anyhow::anyhow!("wal processor missing")))?;
+                .map_err(|_| WriteError::Other(anyhow!("wal processor missing")))?;
         }
 
         Ok(())
@@ -375,6 +381,18 @@ impl Lsm {
         wal: Arc<wal::Wal<WalEntry>>,
         start: wal::SeqNo,
         wal_processed: tokio::sync::watch::Sender<wal::SeqNo>,
+    ) {
+        // TODO: retry
+        Self::process_wal_once(inner, wal, start, wal_processed)
+            .await
+            .unwrap();
+    }
+
+    async fn process_wal_once(
+        inner: Arc<AtomicArc<HashMap<KeyspaceId, Arc<LsmInner>>>>,
+        wal: Arc<wal::Wal<WalEntry>>,
+        start: wal::SeqNo,
+        wal_processed: tokio::sync::watch::Sender<wal::SeqNo>,
     ) -> anyhow::Result<()> {
         let mut log = wal.stream(start, true).boxed();
         while let Some((seqno, entry)) = log.try_next().await? {
@@ -398,16 +416,10 @@ impl Lsm {
     }
 }
 
-impl Drop for Lsm {
-    fn drop(&mut self) {
-        self.wal_process.abort();
-    }
-}
-
 struct LsmInner {
     inner: Arc<LsmInnerInner>,
 
-    compaction: tokio::task::JoinHandle<()>,
+    bg: Background,
     compacted: tokio::sync::broadcast::Receiver<()>,
 }
 
@@ -428,16 +440,17 @@ impl LsmInner {
             run_target_size,
             block_size,
             manifest,
-            storage,
             l0_compact_notify,
         ));
 
-        let compaction = tokio::spawn(Self::compaction_loop(
+        let bg = Background::new();
+        bg.spawn(Self::compaction_loop(
             l0_max_size,
             run_target_size,
             block_size,
             keyspace_id,
             inner.clone(),
+            storage.clone(),
             wal.clone(),
             l0_compact_ready,
             compacted_notify,
@@ -445,7 +458,7 @@ impl LsmInner {
 
         Ok(Self {
             inner,
-            compaction,
+            bg,
             compacted,
         })
     }
@@ -467,6 +480,17 @@ impl LsmInner {
     ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
         self.inner.scan_page(ts, range, direction, limit).await
     }
+
+    pub async fn history_page(
+        &self,
+        key: &[u8],
+        range: HistoryRange,
+        direction: Direction,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<Record>, Option<HistoryRange>)> {
+        self.inner.history_page(key, range, direction, limit).await
+    }
+
     pub fn next_compaction(&self) -> impl Future<Output = ()> {
         let mut compacted = self.compacted.resubscribe();
         async move {
@@ -491,6 +515,7 @@ impl LsmInner {
         block_size: u64,
         keyspace_id: KeyspaceId,
         inner: Arc<LsmInnerInner>,
+        storage: Arc<MemStorage>,
         wal: Arc<wal::Wal<WalEntry>>,
         mut l0_compact_ready: tokio::sync::mpsc::Receiver<()>,
         compacted_notify: tokio::sync::broadcast::Sender<()>,
@@ -502,6 +527,7 @@ impl LsmInner {
                 block_size,
                 keyspace_id,
                 inner.clone(),
+                storage.clone(),
                 &wal,
                 compacted_notify.clone(),
             )
@@ -516,6 +542,7 @@ impl LsmInner {
         block_size: u64,
         keyspace_id: KeyspaceId,
         inner: Arc<LsmInnerInner>,
+        storage: Arc<MemStorage>,
         wal: &wal::Wal<WalEntry>,
         compacted_notify: tokio::sync::broadcast::Sender<()>,
     ) -> anyhow::Result<()> {
@@ -527,7 +554,7 @@ impl LsmInner {
                 block_size,
                 keyspace_id,
                 &manifest,
-                &inner.storage,
+                &storage,
             )
             .await?;
             if runs.is_empty() && remove_ids.is_empty() {
@@ -568,7 +595,7 @@ impl LsmInner {
                         block_size,
                         keyspace_id,
                         &manifest,
-                        &inner.storage,
+                        &storage,
                         i,
                     )
                     .await?;
@@ -626,13 +653,7 @@ impl LsmInner {
             storage,
             1,
             chosen_l0_range,
-            futures::stream::iter(chosen_l0.iter().map(|(k, ts, v)| {
-                Ok(Record {
-                    key: k,
-                    ts,
-                    value: v,
-                })
-            })),
+            futures::stream::iter(chosen_l0.iter().map(|record| Ok(record))),
         )
         .await?;
         removes.insert(chosen_l0_id);
@@ -687,26 +708,12 @@ impl LsmInner {
 
         let removes = overlapping_runs.iter().map(|run| run.id()).collect();
 
-        let existing_iter = futures::stream::iter(overlapping_runs.iter().map(Run::stream))
-            .flatten()
-            .map(|result| {
-                result.map(|record| OrdEqByFirst((record.key, Reverse(record.ts)), record.value))
-            });
+        let existing_iter =
+            futures::stream::iter(overlapping_runs.iter().map(Run::stream)).flatten();
 
-        let mut sorted = merge_sorted_streams(vec![
-            existing_iter.boxed(),
-            entries
-                .map(|result| {
-                    result
-                        .map(|record| OrdEqByFirst((record.key, Reverse(record.ts)), record.value))
-                })
-                .boxed(),
-        ])
-        .map(|result| {
-            result.map(|OrdEqByFirst((key, Reverse(ts)), value)| Record { key, ts, value })
-        })
-        .boxed()
-        .peekable();
+        let mut sorted = merge_sorted_streams(vec![existing_iter.boxed(), entries.boxed()])
+            .boxed()
+            .peekable();
 
         let mut runs = Vec::new();
         while let Some(_) = Pin::new(&mut sorted).peek().await {
@@ -764,22 +771,12 @@ impl LsmInner {
     }
 }
 
-impl Drop for LsmInner {
-    fn drop(&mut self) {
-        self.compaction.abort();
-    }
-}
-
 struct LsmInnerInner {
     l0_max_size: u64,
     run_target_size: u64,
     block_size: u64,
 
     l0_compact_notify: tokio::sync::mpsc::Sender<()>,
-    storage: Arc<MemStorage>,
-    // Outer lock just protects the arc, hold in W to swap it.
-    // Inner lock protects memtable, use as normal.
-    // Also exists in manifest.l0_active, so reads can go there.
     l0_active: AtomicArc<RwLock<MaybeActiveMemtable>>,
     manifest: AtomicArc<Manifest>,
 }
@@ -790,7 +787,6 @@ impl LsmInnerInner {
         run_target_size: u64,
         block_size: u64,
         initial_manifest: Manifest,
-        storage: Arc<MemStorage>,
         l0_compact_notify: tokio::sync::mpsc::Sender<()>,
     ) -> Self {
         let l0_active = Arc::new(RwLock::new(MaybeActiveMemtable::Active(Memtable::new())));
@@ -799,7 +795,6 @@ impl LsmInnerInner {
             run_target_size,
             block_size,
             l0_compact_notify,
-            storage,
             l0_active: AtomicArc::new(l0_active.clone()),
             manifest: AtomicArc::new(Arc::new(initial_manifest.with_ingest_l0(l0_active))),
         }
@@ -843,10 +838,6 @@ impl LsmInnerInner {
             return Ok((vec![], None));
         }
 
-        if direction == Direction::Desc {
-            todo!();
-        }
-
         let manifest = self.manifest.load();
 
         let l0_active_guards: Vec<_> = manifest
@@ -860,53 +851,77 @@ impl LsmInnerInner {
         );
         for l0_run in &l0_active_guards {
             streams.push(
-                futures::stream::iter(l0_run.scan_asc(ts, range.clone()).map(|record| Ok(record)))
-                    .boxed(),
+                futures::stream::iter(
+                    l0_run
+                        .scan(ts, range.clone(), direction)
+                        .map(|record| Ok(record)),
+                )
+                .boxed(),
             );
         }
         for l0_run in &manifest.l0_sealed {
             streams.push(
-                futures::stream::iter(l0_run.scan_asc(ts, range.clone()).map(|record| Ok(record)))
-                    .boxed(),
+                futures::stream::iter(
+                    l0_run
+                        .scan(ts, range.clone(), direction)
+                        .map(|record| Ok(record)),
+                )
+                .boxed(),
             );
         }
         for i in 1..manifest.levels.len() {
-            let level = &manifest.levels[i];
-            if level.runs.is_empty() {
-                continue;
-            }
-            let start_idx = binary_search_by_idx(
-                level.runs.len(),
-                range.lower.clone().map(Vec::from),
-                |idx| level.runs[idx].range().upper,
-            )
-            .unwrap_or_else(core::convert::identity);
-            let end_idx = binary_search_by_idx(
-                level.runs.len(),
-                range.upper.clone().map(Vec::from),
-                |idx| level.runs[idx].range().lower,
-            )
-            .unwrap_or_else(|idx| {
-                if idx == level.runs.len() {
-                    idx - 1
-                } else {
-                    idx
-                }
-            });
+            let overlapping_runs = manifest.levels[i].overlapping_runs(range.to_vec());
 
-            if end_idx < start_idx {
+            if overlapping_runs.is_empty() {
                 continue;
             }
 
             streams.push(
-                futures::stream::iter(level.runs[start_idx..=end_idx].iter())
-                    .inspect(|run| assert!(!run.range().intersection(&range.to_vec()).is_empty()))
-                    .map(|run| run.scan(ts, range.to_vec(), direction))
-                    .flatten()
-                    .boxed(),
+                futures::stream::iter(match direction {
+                    Direction::Asc => IteratorEither::Left(overlapping_runs.iter()),
+                    Direction::Desc => IteratorEither::Right(overlapping_runs.iter().rev()),
+                })
+                .inspect(|run| {
+                    assert!(
+                        !run.range().intersection(&range.to_vec()).is_empty(),
+                        "trying to scan {:?}, got run with range {:?}",
+                        range,
+                        run.range()
+                    )
+                })
+                .map(|run| run.scan(ts, range.to_vec(), direction))
+                .flatten()
+                .boxed(),
             );
         }
-        let mut merged = merge_sorted_streams(streams).peekable().boxed_local();
+        let mut merged = match direction {
+            Direction::Asc => merge_sorted_streams(streams).peekable().boxed_local(),
+            Direction::Desc => merge_sorted_streams(
+                streams
+                    .into_iter()
+                    .map(|stream| {
+                        stream.map(|result| {
+                            result.map(|record| {
+                                OrdEqByFirst(
+                                    (Reverse(record.key), Reverse(record.ts)),
+                                    record.value,
+                                )
+                            })
+                        })
+                    })
+                    .collect(),
+            )
+            .map(|result| {
+                result.map(|OrdEqByFirst((Reverse(key), Reverse(ts)), value)| Record {
+                    key,
+                    ts,
+                    value,
+                })
+            })
+            .peekable()
+            .boxed_local(),
+        };
+
         let mut page = vec![];
         while let Some(record) = merged.next().await.transpose()? {
             if let Some(Record {
@@ -916,12 +931,12 @@ impl LsmInnerInner {
             }) = page.last()
             {
                 if last_key == &record.key {
-                    assert!(*last_ts > record.ts);
+                    match direction {
+                        Direction::Asc => assert!(*last_ts > record.ts),
+                        Direction::Desc => assert!(*last_ts < record.ts),
+                    }
                     continue;
                 }
-            }
-            if let Value::Tombstone = record.value {
-                continue;
             }
             page.push(record);
             if page.len() == limit {
@@ -930,12 +945,137 @@ impl LsmInnerInner {
         }
 
         let continue_cursor = match page.last() {
-            Some(Record { key: last_key, .. }) => Some(Range {
-                lower: Bound::After(last_key.clone()),
-                upper: range.upper.clone().map(Vec::from),
+            Some(Record { key: last_key, .. }) => Some(match direction {
+                Direction::Asc => Range {
+                    lower: Bound::After(last_key.clone()),
+                    upper: range.upper.clone().map(Vec::from),
+                },
+                Direction::Desc => Range {
+                    lower: range.lower.clone().map(Vec::from),
+                    upper: Bound::Before(last_key.clone()),
+                },
             }),
             None => None,
         };
+
+        page = page
+            .into_iter()
+            .filter(|record| match record.value {
+                Value::Tombstone => false,
+                _ => true,
+            })
+            .collect();
+
+        Ok((page, continue_cursor))
+    }
+
+    async fn history_page(
+        &self,
+        key: &[u8],
+        range: HistoryRange,
+        direction: Direction,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<Record>, Option<HistoryRange>)> {
+        let manifest = self.manifest.load();
+
+        let l0_active_guards: Vec<_> = manifest
+            .l0_active
+            .iter()
+            .map(|(_, memtable)| memtable.read().unwrap())
+            .collect();
+
+        let mut streams = Vec::with_capacity(manifest.levels.len());
+        let mut l0_streams =
+            Vec::with_capacity(manifest.l0_active.len() + manifest.l0_sealed.len());
+        for l0_run in &l0_active_guards {
+            l0_streams.push(
+                futures::stream::iter(
+                    l0_run
+                        .history(key, range, direction)
+                        .map(|record| Ok(record)),
+                )
+                .boxed(),
+            );
+        }
+        for l0_run in &manifest.l0_sealed {
+            l0_streams.push(
+                futures::stream::iter(
+                    l0_run
+                        .history(key, range, direction)
+                        .map(|record| Ok(record)),
+                )
+                .boxed(),
+            );
+        }
+
+        streams.push(match direction {
+            Direction::Asc => merge_sorted_streams(
+                l0_streams
+                    .into_iter()
+                    .map(|s| {
+                        s.map(|result| {
+                            result.map(|record| OrdEqByFirst((record.key, record.ts), record.value))
+                        })
+                    })
+                    .collect(),
+            )
+            .map(|result| result.map(|OrdEqByFirst((key, ts), value)| Record { key, ts, value }))
+            .boxed(),
+            Direction::Desc => merge_sorted_streams(l0_streams).boxed(),
+        });
+
+        for level in &manifest.levels[1..] {
+            if let Some(run) = level.run_for_key(key) {
+                streams.push(run.history(key, range, direction).boxed());
+            }
+        }
+
+        if direction == Direction::Asc {
+            streams.reverse();
+        }
+
+        let mut stream = futures::stream::iter(streams.into_iter()).flatten();
+
+        let mut page = vec![];
+        while let Some(record) = stream.try_next().await? {
+            page.push(record);
+            if page.len() >= limit {
+                break;
+            }
+        }
+
+        let continue_cursor = match page.last() {
+            None => None,
+            Some(last_record) => match direction {
+                Direction::Asc => match range {
+                    HistoryRange::Until(max) | HistoryRange::Between(_, max) => {
+                        let min = last_record.ts.plus_one();
+                        if min > max {
+                            None
+                        } else {
+                            Some(HistoryRange::Between(min, max))
+                        }
+                    }
+                    HistoryRange::All | HistoryRange::Since(_) => {
+                        Some(HistoryRange::Since(last_record.ts.plus_one()))
+                    }
+                },
+                Direction::Desc => match range {
+                    HistoryRange::All | HistoryRange::Until(_) => {
+                        Some(HistoryRange::Until(last_record.ts.minus_one()))
+                    }
+                    HistoryRange::Between(min, _) | HistoryRange::Since(min) => {
+                        let max = last_record.ts.minus_one();
+                        if min > max {
+                            None
+                        } else {
+                            Some(HistoryRange::Between(min, max))
+                        }
+                    }
+                },
+            },
+        };
+
         Ok((page, continue_cursor))
     }
 
@@ -1101,9 +1241,10 @@ impl Manifest {
             if i == into_level {
                 levels.push(Level {
                     runs: merge_sorted(vec![
-                        Box::new(filtered_old_level.map(|run| OrdEqByFirst(run.range().lower, run)))
-                            as Box<dyn Iterator<Item = _>>,
-                        Box::new(
+                        IteratorEither::Left(
+                            filtered_old_level.map(|run| OrdEqByFirst(run.range().lower, run)),
+                        ),
+                        IteratorEither::Right(
                             std::mem::take(&mut add)
                                 .into_iter()
                                 .map(|run| OrdEqByFirst(run.range().lower, run)),
@@ -1143,6 +1284,18 @@ impl Level {
     }
 
     async fn get(&self, ts: Timestamp, k: &[u8]) -> anyhow::Result<Option<(Timestamp, Value)>> {
+        let run = match self.run_for_key(k) {
+            Some(run) => run,
+            None => return Ok(None),
+        };
+        run.get(ts, k).await
+    }
+
+    fn size(&self) -> usize {
+        self.runs.iter().map(|run| run.size()).sum()
+    }
+
+    fn run_for_key<'a>(&'a self, k: &[u8]) -> Option<&'a Run<Arc<Vec<u8>>>> {
         let idx = self
             .runs
             .binary_search_by_key(&KeyOrBound::Key(k.to_vec()), |run| {
@@ -1150,299 +1303,20 @@ impl Level {
             })
             .unwrap_or_else(core::convert::identity);
         if idx >= self.runs.len() {
-            return Ok(None);
+            return None;
         }
-        self.runs[idx].get(ts, k).await
-    }
-
-    fn size(&self) -> usize {
-        self.runs.iter().map(|run| run.size()).sum()
+        let run = &self.runs[idx];
+        if !run.range().contains(&k.to_vec()) {
+            return None;
+        }
+        Some(run)
     }
 
     fn overlapping_runs(&self, range: Range<Vec<u8>>) -> &[Run<Arc<Vec<u8>>>] {
-        let start_idx = self
-            .runs
-            .binary_search_by_key(&range.lower, |run| run.range().upper)
-            .unwrap_or_else(core::convert::identity);
-
-        let end_idx = match self
-            .runs
-            .binary_search_by_key(&range.upper, |run| run.range().lower)
-        {
-            Ok(idx) => idx + 1,
-            Err(idx) => idx,
-        };
-
-        let runs = &self.runs[start_idx..end_idx];
-
-        assert!(runs
-            .iter()
-            .all(|run| !run.range().intersection(&range).is_empty()));
-
-        runs
+        intersect_in_ranges_by_key(range.borrow(), &self.runs, |run| run.range())
     }
 }
 
-struct Block<'a, R> {
-    values_len: usize,
-    n_versions: usize,
-    min_ts: Timestamp,
-    ts_bytes: usize,
-    offset_bytes: usize,
-    index: PrefixCompressedKV<u16>,
-    versions_bytes: Vec<u8>,
-    header_offset: u64,
-    r: &'a R,
-}
-
-const BLOCK_INDEX_HEADER_SIZE: usize = 18;
-
-impl<'a, R> Block<'a, R> {
-    // Assumes that kvs values are in reverse order by timestamp.
-    //
-    // Returns the encoded block and the offset of the header within the block.
-    pub fn encode(
-        kvs: &BTreeMap<Vec<u8>, Vec<(Timestamp, Value)>>,
-    ) -> anyhow::Result<(Vec<u8>, usize)> {
-        let (min_ts, max_ts, values_len) = kvs
-            .values()
-            .map(|versions| {
-                let min_ts = versions.last()?.0;
-                let max_ts = versions.first()?.0;
-                let values_len: usize = versions.iter().map(|(_, v)| v.len()).sum();
-                Some((min_ts, max_ts, values_len))
-            })
-            .flatten()
-            .reduce(
-                |(min_ts0, max_ts0, values_len0), (min_ts1, max_ts1, values_len1)| {
-                    (
-                        std::cmp::min(min_ts0, min_ts1),
-                        std::cmp::max(max_ts0, max_ts1),
-                        values_len0 + values_len1,
-                    )
-                },
-            )
-            .ok_or_else(|| anyhow!("malformed block"))?;
-        // Shift here for room for the tombstone bit.
-        let bytes_per_ts_offset =
-            std::cmp::max(byte_width((max_ts.as_nanos() - min_ts.as_nanos()) << 1), 1);
-        let bytes_per_value_offset = std::cmp::max(byte_width(values_len as u64), 1);
-
-        let mut index: BTreeMap<Vec<u8>, u16> = BTreeMap::new();
-        let mut block = vec![];
-
-        let mut n_versions = 0;
-        let mut versions = Vec::new();
-        for (key, key_versions) in kvs {
-            index.insert(key.clone(), n_versions as u16);
-            for (ts, value) in key_versions {
-                let value_offset = block.len();
-                let tombstone_bit = match value {
-                    Value::Regular(value) => {
-                        block.extend_from_slice(&value[..]);
-                        0
-                    }
-                    Value::Tombstone => 1,
-                };
-                let ts_offset_and_tombstone =
-                    ((ts.as_nanos() - min_ts.as_nanos()) << 1) | tombstone_bit;
-
-                let mut buf = [0u8; 16];
-                LittleEndian::write_u64(&mut buf[..], ts_offset_and_tombstone);
-                LittleEndian::write_u64(&mut buf[bytes_per_ts_offset..], value_offset as u64);
-                versions.extend_from_slice(&buf[..bytes_per_ts_offset + bytes_per_value_offset]);
-            }
-            n_versions += key_versions.len();
-        }
-        let values_len = block.len();
-        let encoded_index = PrefixCompressedKV::encode(&index);
-
-        let mut header = [0u8; BLOCK_INDEX_HEADER_SIZE];
-        LittleEndian::write_u32(&mut header[0..4], values_len as u32);
-        LittleEndian::write_u16(&mut header[4..6], n_versions as u16);
-        LittleEndian::write_u64(&mut header[6..14], min_ts.as_nanos());
-        LittleEndian::write_u16(&mut header[14..16], encoded_index.len() as u16);
-        header[16] = bytes_per_ts_offset as u8;
-        header[17] = bytes_per_value_offset as u8;
-
-        let header_idx = block.len();
-        block.extend_from_slice(&header[..]);
-        block.extend_from_slice(&encoded_index[..]);
-        block.extend_from_slice(&versions[..]);
-
-        Ok((block, header_idx))
-    }
-}
-
-impl<'a, R: AsyncReadExactAt> Block<'a, R> {
-    pub async fn open(r: &'a R, header_offset: u64) -> anyhow::Result<Block<'a, R>> {
-        let mut header = [0u8; BLOCK_INDEX_HEADER_SIZE];
-
-        r.read_exact_at(&mut header[..], header_offset).await?;
-
-        let values_len = LittleEndian::read_u32(&header[0..4]) as usize;
-        let n_versions = LittleEndian::read_u16(&header[4..6]) as usize;
-        let min_ts = Timestamp::from_nanos(LittleEndian::read_u64(&header[6..14]));
-        let index_len = LittleEndian::read_u16(&header[14..16]) as usize;
-        let bytes_per_ts_offset = header[16] as usize;
-        let bytes_per_value_offset = header[17] as usize;
-        let versions_len = n_versions * (bytes_per_ts_offset + bytes_per_value_offset);
-
-        let mut index_bytes = vec![0u8; index_len];
-        r.read_exact_at(
-            &mut index_bytes[..],
-            header_offset + (BLOCK_INDEX_HEADER_SIZE as u64),
-        )
-        .await?;
-        let index = PrefixCompressedKV::decode(index_bytes);
-
-        let mut versions_bytes = vec![0u8; versions_len];
-        r.read_exact_at(
-            &mut versions_bytes[..],
-            header_offset + (BLOCK_INDEX_HEADER_SIZE as u64) + (index_len as u64),
-        )
-        .await?;
-
-        Ok(Self {
-            r,
-            values_len,
-            n_versions,
-            min_ts,
-            index,
-            versions_bytes,
-            header_offset,
-            ts_bytes: bytes_per_ts_offset,
-            offset_bytes: bytes_per_value_offset,
-        })
-    }
-
-    fn versions(&self) -> BlockVersions<'_> {
-        BlockVersions {
-            ts_bytes: self.ts_bytes,
-            offset_bytes: self.offset_bytes,
-            min_ts: self.min_ts,
-            end_offset: self.values_len,
-            b: &self.versions_bytes[..],
-        }
-    }
-
-    fn versions_for_key(&self, key_idx: usize) -> BlockVersions<'_> {
-        let start_idx = self.index.get_value(key_idx) as usize;
-        let end_idx = if key_idx == self.index.len() - 1 {
-            self.n_versions
-        } else {
-            self.index.get_value(key_idx + 1) as usize
-        };
-        self.versions().slice(start_idx, end_idx)
-    }
-
-    async fn value<'b>(
-        &'b self,
-        versions: &BlockVersions<'b>,
-        idx: usize,
-    ) -> anyhow::Result<Value> {
-        let (value_start, value_end) = match versions.value_offsets(idx) {
-            Some(v) => v,
-            None => return Ok(Value::Tombstone),
-        };
-        let value_len = value_end - value_start;
-
-        let mut value = vec![0u8; value_len];
-        self.r
-            .read_exact_at(
-                &mut value[..],
-                self.header_offset - (self.values_len as u64) + (value_start as u64),
-            )
-            .await?;
-
-        Ok(Value::Regular(value))
-    }
-
-    pub async fn get(&self, ts: Timestamp, k: &[u8]) -> anyhow::Result<Option<(Timestamp, Value)>> {
-        let key_idx = match self.index.search(k) {
-            Ok(idx) => idx,
-            Err(_) => return Ok(None),
-        };
-        let key_versions = self.versions_for_key(key_idx);
-
-        let version_idx = binary_search_by_idx(key_versions.len(), Reverse(ts), |idx| {
-            Reverse(key_versions.ts(idx))
-        })
-        .unwrap_or_else(core::convert::identity);
-        if version_idx == key_versions.len() {
-            return Ok(None);
-        }
-        let record_ts = key_versions.ts(version_idx);
-
-        Ok(Some((
-            record_ts,
-            self.value(&key_versions, version_idx).await?,
-        )))
-    }
-}
-
-struct BlockVersions<'a> {
-    ts_bytes: usize,
-    offset_bytes: usize,
-    min_ts: Timestamp,
-    end_offset: usize,
-    b: &'a [u8],
-}
-
-impl<'a> BlockVersions<'a> {
-    fn len(&self) -> usize {
-        self.b.len() / (self.ts_bytes + self.offset_bytes)
-    }
-
-    fn elem(&self, idx: usize) -> (Timestamp, bool, usize) {
-        let width = self.ts_bytes + self.offset_bytes;
-        let elem = &self.b[width * idx..width * (idx + 1)];
-        let mut ts_offset_buf = [0u8; 8];
-        ts_offset_buf[..self.ts_bytes].copy_from_slice(&elem[..self.ts_bytes]);
-        let ts_offset_and_tombstone = LittleEndian::read_u64(&ts_offset_buf[..]);
-        let tombstone = ts_offset_and_tombstone & 1 == 1;
-        let ts = Timestamp::from_nanos((ts_offset_and_tombstone >> 1) + self.min_ts.as_nanos());
-
-        let mut value_offset_buf = [0u8; 8];
-        value_offset_buf[..self.offset_bytes].copy_from_slice(&elem[self.ts_bytes..]);
-        let value_offset = LittleEndian::read_u64(&value_offset_buf[..]) as usize;
-        (ts, tombstone, value_offset)
-    }
-
-    fn slice(&self, start_idx: usize, end_idx: usize) -> BlockVersions<'a> {
-        let width = self.ts_bytes + self.offset_bytes;
-        let b = &self.b[start_idx * width..end_idx * width];
-        let end_offset = if end_idx == self.len() {
-            self.end_offset
-        } else {
-            self.elem(end_idx).2
-        };
-        BlockVersions {
-            ts_bytes: self.ts_bytes,
-            offset_bytes: self.offset_bytes,
-            min_ts: self.min_ts,
-            end_offset,
-            b,
-        }
-    }
-
-    fn ts(&self, idx: usize) -> Timestamp {
-        self.elem(idx).0
-    }
-
-    fn value_offsets(&self, idx: usize) -> Option<(usize, usize)> {
-        let (_, tombstone, start) = self.elem(idx);
-        if tombstone {
-            return None;
-        }
-        let end = if idx == self.len() - 1 {
-            self.end_offset
-        } else {
-            self.elem(idx + 1).2
-        };
-        Some((start, end))
-    }
-}
 #[derive(Clone, Debug)]
 pub(crate) enum WalEntry {
     Write(Timestamp, Vec<(KeyspaceId, Vec<u8>, Value)>),
@@ -1462,579 +1336,29 @@ impl wal::Entry for WalEntry {
     }
 }
 
-#[derive(Clone)]
-struct PrefixCompressedKV<V> {
-    v: PhantomData<V>,
-    offset_width: usize,
-    prefix_len: usize,
-    n: usize,
-    suffixes_len: usize,
-    data: Vec<u8>,
-}
-
-const PREFIX_COMPRESSED_KV_HEADER_SIZE: usize = 9;
-
-impl<V: FixedSizeSerializable> PrefixCompressedKV<V> {
-    fn encode(m: &BTreeMap<Vec<u8>, V>) -> Vec<u8> {
-        let prefix: Vec<u8> = match (m.first_key_value(), m.last_key_value()) {
-            (Some((first_key, _)), Some((last_key, _))) => {
-                longest_shared_prefix(&first_key[..], &last_key[..])
-            }
-            _ => vec![],
-        };
-        let suffixes_len: usize = m.keys().map(|k| k.len() - prefix.len()).sum();
-
-        let offset_width = std::cmp::max(byte_width(suffixes_len as u64), 1);
-
-        let offset_and_value_width = offset_width + V::size();
-        let mut suffixes = Vec::with_capacity(suffixes_len);
-        let mut offset_and_values = Vec::with_capacity(m.len() * offset_and_value_width);
-
-        let mut offset_and_value = vec![0u8; std::cmp::max(4, offset_and_value_width)];
-        for (k, v) in m {
-            let offset = suffixes.len();
-
-            suffixes.extend_from_slice(&k[prefix.len()..]);
-
-            for i in 0..offset_and_value.len() {
-                offset_and_value[i] = 0;
-            }
-            LittleEndian::write_u32(&mut offset_and_value[..], offset as u32);
-            v.write(&mut offset_and_value[offset_width..]);
-            offset_and_values.extend_from_slice(&offset_and_value[..offset_and_value_width]);
-        }
-
-        let mut header = [0u8; PREFIX_COMPRESSED_KV_HEADER_SIZE];
-        header[0] = offset_width as u8;
-        LittleEndian::write_u16(&mut header[1..3], m.len() as u16);
-        LittleEndian::write_u16(&mut header[3..5], prefix.len() as u16);
-        LittleEndian::write_u32(&mut header[5..9], suffixes.len() as u32);
-
-        let mut out = Vec::with_capacity(
-            header.len() + prefix.len() + offset_and_values.len() + suffixes.len(),
-        );
-
-        out.extend_from_slice(&header[..]);
-        out.extend_from_slice(&prefix[..]);
-        out.extend_from_slice(&offset_and_values[..]);
-        out.extend_from_slice(&suffixes[..]);
-
-        out
-    }
-
-    fn decode(data: Vec<u8>) -> Self {
-        let header = &data[0..PREFIX_COMPRESSED_KV_HEADER_SIZE];
-        let offset_width = header[0] as usize;
-        let n = LittleEndian::read_u16(&header[1..3]) as usize;
-        let prefix_len = LittleEndian::read_u16(&header[3..5]) as usize;
-        let suffixes_len = LittleEndian::read_u32(&header[5..9]) as usize;
-
-        Self {
-            offset_width,
-            n,
-            prefix_len,
-            suffixes_len,
-            data,
-            v: PhantomData,
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.n
-    }
-
-    fn prefix(&self) -> &[u8] {
-        &self.data
-            [PREFIX_COMPRESSED_KV_HEADER_SIZE..PREFIX_COMPRESSED_KV_HEADER_SIZE + self.prefix_len]
-    }
-
-    fn suffixes(&self) -> &[u8] {
-        let start = PREFIX_COMPRESSED_KV_HEADER_SIZE
-            + self.prefix_len
-            + self.n * (self.offset_width + V::size());
-        &self.data[start..]
-    }
-
-    fn offset_and_values(&self) -> &[u8] {
-        let start = PREFIX_COMPRESSED_KV_HEADER_SIZE + self.prefix_len;
-        let end = start + self.n * (self.offset_width + V::size());
-        &self.data[start..end]
-    }
-
-    fn search(&self, k: &[u8]) -> Result<usize, usize> {
-        let prefix = self.prefix();
-        if !k.starts_with(&prefix) {
-            match k.cmp(&prefix) {
-                Ordering::Equal => unreachable!(),
-                Ordering::Less => return Err(0),
-                Ordering::Greater => return Err(self.len()),
-            }
-        }
-        let suffix = &k[prefix.len()..];
-        binary_search_by_idx(self.len(), suffix, |idx| self.get_suffix(idx))
-    }
-
-    fn offset(&self, idx: usize) -> usize {
-        let width = self.offset_width + V::size();
-        let offset_start = idx * width;
-        let offset_end = offset_start + self.offset_width;
-        let mut offset: u32 = 0;
-        for (i, b) in self.offset_and_values()[offset_start..offset_end]
-            .iter()
-            .enumerate()
-        {
-            offset |= (*b as u32) << (i * 8);
-        }
-        offset as usize
-    }
-
-    fn get_suffix(&self, idx: usize) -> &[u8] {
-        let start = self.offset(idx);
-        let end = if idx == self.len() - 1 {
-            self.suffixes_len
-        } else {
-            self.offset(idx + 1)
-        };
-        &self.suffixes()[start..end]
-    }
-
-    fn get_key(&self, idx: usize) -> Vec<u8> {
-        let prefix = self.prefix();
-        let suffix = self.get_suffix(idx);
-        let mut k = Vec::with_capacity(prefix.len() + suffix.len());
-        k.extend_from_slice(prefix);
-        k.extend_from_slice(suffix);
-        k
-    }
-
-    fn get_value(&self, idx: usize) -> V {
-        let width = self.offset_width + V::size();
-        let offset_start = idx * width + self.offset_width;
-        let offset_end = offset_start + V::size();
-        V::read(&self.offset_and_values()[offset_start..offset_end])
-    }
-}
-
-trait FixedSizeSerializable {
-    fn size() -> usize;
-    fn read(b: &[u8]) -> Self;
-    fn write(&self, b: &mut [u8]);
-}
-
-impl FixedSizeSerializable for u16 {
-    fn size() -> usize {
-        2
-    }
-    fn read(b: &[u8]) -> Self {
-        LittleEndian::read_u16(b)
-    }
-    fn write(&self, b: &mut [u8]) {
-        LittleEndian::write_u16(b, *self);
-    }
-}
-
-impl FixedSizeSerializable for u32 {
-    fn size() -> usize {
-        4
-    }
-    fn read(b: &[u8]) -> Self {
-        LittleEndian::read_u32(b)
-    }
-    fn write(&self, b: &mut [u8]) {
-        LittleEndian::write_u32(b, *self);
-    }
-}
-
-struct LittleEndianU32(u32);
-
-impl From<&[u8]> for LittleEndianU32 {
-    fn from(b: &[u8]) -> Self {
-        LittleEndianU32(LittleEndian::read_u32(b))
-    }
-}
-
-#[derive(Clone)]
-struct Run<R> {
-    r: R,
-
-    id: Uuid,
-    size: usize,
-    keyspace_id: KeyspaceId,
-    min_ts: Timestamp,
-    max_ts: Timestamp,
-
-    index: PrefixCompressedKV<u32>,
-
-    min_key: Vec<u8>,
-    max_key: Vec<u8>,
-}
-
-const INDEX_BLOCK_HEADER_SIZE: usize = 48;
-
-impl<R> Run<R> {
-    // Assumes S is in (key, rev(ts)) order, and assumes termination at a reasonable size limit.
-    async fn write<W: AsyncWrite + Unpin, S: Stream<Item = anyhow::Result<Record>>>(
-        w: &mut W,
-        id: Uuid,
-        keyspace_id: KeyspaceId,
-        block_size_limit: u64,
-        s: S,
-    ) -> anyhow::Result<()> {
-        async fn flush<W: AsyncWrite + Unpin>(
-            w: &mut W,
-            bytes_written: &mut usize,
-            index: &mut BTreeMap<Vec<u8>, u32>,
-            last_key: &mut Vec<u8>,
-            buffer: &BTreeMap<Vec<u8>, Vec<(Timestamp, Value)>>,
-        ) -> anyhow::Result<()> {
-            let (first_key, last_key_) = match (buffer.first_key_value(), buffer.last_key_value()) {
-                (Some((first_key, _)), Some((last_key, _))) => (first_key, last_key),
-                _ => anyhow::bail!("empty block"),
-            };
-            *last_key = last_key_.clone();
-
-            let (block, header_offset_in_block) = Block::<()>::encode(buffer)?;
-            w.write_all(&block[..]).await?;
-            let header_offset_in_file = *bytes_written + header_offset_in_block;
-
-            index.insert(first_key.clone(), header_offset_in_file as u32);
-
-            *bytes_written += block.len();
-
-            Ok(())
-        }
-
-        pin_mut!(s);
-
-        let mut buffer: BTreeMap<Vec<u8>, Vec<(Timestamp, Value)>> = BTreeMap::new();
-        let mut bytes_written = 0;
-        let mut buffer_size = BLOCK_INDEX_HEADER_SIZE as u64;
-        let mut index: BTreeMap<Vec<u8>, u32> = BTreeMap::new();
-        let mut min_ts = Timestamp::MAX;
-        let mut max_ts = Timestamp::ZERO;
-        let mut last_key = vec![];
-        while let Some(record) = s.next().await.transpose()? {
-            let record_size = {
-                let key_len = if buffer.contains_key(&record.key) {
-                    0
-                } else {
-                    (record.key.len() as u64) + 4
-                };
-                (key_len as u64) + 10 + (record.value.len() as u64)
-            };
-
-            if !buffer.is_empty()
-                && buffer_size + record_size > block_size_limit
-                && !buffer.contains_key(&record.key)
-            {
-                flush(w, &mut bytes_written, &mut index, &mut last_key, &buffer).await?;
-                buffer.clear();
-                buffer_size = 0;
-            }
-
-            if let Some(prev_record) = buffer
-                .get(&record.key)
-                .map(|versions| versions.last())
-                .flatten()
-            {
-                assert!(prev_record.0 > record.ts);
-            }
-            buffer
-                .entry(record.key)
-                .or_insert_with(Vec::new)
-                .push((record.ts, record.value));
-            buffer_size += record_size;
-
-            min_ts = std::cmp::min(min_ts, record.ts);
-            max_ts = std::cmp::max(max_ts, record.ts);
-        }
-        if !buffer.is_empty() {
-            flush(w, &mut bytes_written, &mut index, &mut last_key, &buffer).await?;
-        }
-
-        let index_compressed = PrefixCompressedKV::encode(&index);
-
-        let index_block_offset = bytes_written;
-        let mut header = [0u8; INDEX_BLOCK_HEADER_SIZE];
-        header[0..16].copy_from_slice(&id.as_bytes()[..]);
-        LittleEndian::write_u32(&mut header[16..20], keyspace_id.0 .0);
-        LittleEndian::write_u32(&mut header[20..24], keyspace_id.1);
-        LittleEndian::write_u64(&mut header[24..32], min_ts.as_nanos());
-        LittleEndian::write_u64(&mut header[32..40], max_ts.as_nanos());
-        LittleEndian::write_u32(&mut header[40..44], last_key.len() as u32);
-        LittleEndian::write_u32(&mut header[44..48], index_compressed.len() as u32);
-        w.write_all(&header[..]).await?;
-        w.write_all(&last_key[..]).await?;
-        w.write_all(&index_compressed).await?;
-
-        let mut index_block_offset_buf = [0u8; 4];
-        LittleEndian::write_u32(&mut index_block_offset_buf[..], index_block_offset as u32);
-        w.write_all(&index_block_offset_buf[..]).await?;
-
-        Ok(())
-    }
-}
-
-impl<R: AsyncReadExactAt> Run<R> {
-    async fn open(r: R) -> anyhow::Result<Self> {
-        let file_len = r.len().await?;
-        let mut index_block_offset_buf = [0u8; 4];
-        r.read_exact_at(&mut index_block_offset_buf[..], file_len - 4)
-            .await?;
-        let index_block_offset = LittleEndian::read_u32(&index_block_offset_buf[..]);
-
-        let mut header = [0u8; INDEX_BLOCK_HEADER_SIZE];
-        r.read_exact_at(&mut header[..], index_block_offset as u64)
-            .await?;
-
-        let id = {
-            let mut uuid_bytes = [0u8; 16];
-            uuid_bytes.copy_from_slice(&header[0..16]);
-            Uuid::from_bytes(uuid_bytes)
-        };
-        let keyspace_id = KeyspaceId(
-            ColoGroupId(LittleEndian::read_u32(&header[16..20])),
-            LittleEndian::read_u32(&header[20..24]),
-        );
-        let min_ts = Timestamp::from_nanos(LittleEndian::read_u64(&header[24..32]));
-        let max_ts = Timestamp::from_nanos(LittleEndian::read_u64(&header[32..40]));
-        let max_key_len = LittleEndian::read_u32(&header[40..44]);
-        let index_len = LittleEndian::read_u32(&header[44..48]);
-
-        let max_key = {
-            let mut max_key = vec![0u8; max_key_len as usize];
-            r.read_exact_at(
-                &mut max_key[..],
-                (index_block_offset as u64) + (header.len() as u64),
-            )
-            .await?;
-            max_key
-        };
-
-        let index = {
-            let mut index_bytes = vec![0u8; index_len as usize];
-            r.read_exact_at(
-                &mut index_bytes[..],
-                (index_block_offset as u64) + (header.len() as u64) + (max_key_len as u64),
-            )
-            .await?;
-            PrefixCompressedKV::decode(index_bytes)
-        };
-
-        let min_key = index.get_key(0);
-
-        let size = r.len().await? as usize;
-        Ok(Self {
-            r,
-
-            id,
-            size,
-            keyspace_id,
-            min_ts,
-            max_ts,
-            index,
-
-            min_key,
-            max_key,
-        })
-    }
-
-    fn id(&self) -> Uuid {
-        self.id
-    }
-
-    fn size(&self) -> usize {
-        self.size
-    }
-
-    async fn get(&self, ts: Timestamp, k: &[u8]) -> anyhow::Result<Option<(Timestamp, Value)>> {
-        if ts < self.min_ts {
-            return Ok(None);
-        }
-        let block_header_idx = match self.index.search(k) {
-            Ok(idx) => idx,
-            Err(idx) => {
-                if idx == 0 {
-                    return Ok(None);
-                }
-                idx - 1
-            }
-        };
-        let block_header_offset = self.index.get_value(block_header_idx);
-        let block = Block::open(&self.r, block_header_offset as u64).await?;
-        block.get(ts, k).await
-    }
-
-    fn scan(
-        &self,
-        ts: Timestamp,
-        range: Range<Vec<u8>>,
-        direction: Direction,
-    ) -> impl Stream<Item = anyhow::Result<Record>> + '_ {
-        try_stream! {
-            if direction == Direction::Desc {
-                todo!();
-            }
-
-            if ts < self.min_ts {
-                return;
-            }
-
-            let lower_block_idx = binary_search_by_idx(
-                self.index.len(),
-                KeyOrBound::Bound(range.lower.clone()),
-                |idx| KeyOrBound::Key(self.index.get_key(idx)),
-            )
-            .unwrap_or_else(|idx| if idx != 0 { idx - 1 } else { idx });
-
-            'outer: for i in lower_block_idx..self.index.len() {
-                let block_header_offset = self.index.get_value(i);
-                let block = Block::open(&self.r, block_header_offset as u64).await?;
-                let lower_key_idx = if i == lower_block_idx {
-                    binary_search_by_idx(
-                        block.index.len(),
-                        KeyOrBound::Bound(range.lower.clone()),
-                        |idx| KeyOrBound::Key(block.index.get_key(idx)),
-                    )
-                    .unwrap_or_else(core::convert::identity)
-                } else {
-                    0
-                };
-
-                for j in lower_key_idx..block.index.len() {
-                    let key = block.index.get_key(j);
-                    if !range.contains(&key) {
-                        break 'outer;
-                    }
-
-                    let versions = block.versions_for_key(j);
-                    let version_idx = binary_search_by_idx(versions.len(), Reverse(ts), |idx| {
-                        Reverse(versions.ts(idx))
-                    })
-                    .unwrap_or_else(core::convert::identity);
-                    if version_idx == versions.len() {
-                        continue;
-                    }
-
-                    let ts = versions.ts(version_idx);
-                    let value = block.value(&versions, version_idx).await?;
-                    if let Value::Tombstone = value {
-                        continue;
-                    }
-
-                    yield Record { key, ts, value };
-                }
-            }
-        }
-    }
-
-    fn range(&self) -> Range<Vec<u8>> {
-        Range {
-            lower: Bound::Before(self.min_key.clone()),
-            upper: Bound::After(self.max_key.clone()),
-        }
-    }
-
-    fn stream(&self) -> impl Stream<Item = anyhow::Result<Record>> + '_ {
-        try_stream! {
-            for i in 0..self.index.len() {
-                let block_header_offset = self.index.get_value(i);
-                let block = Block::open(&self.r, block_header_offset as u64).await?;
-                for j in 0..block.index.len() {
-                    let key = block.index.get_key(j);
-                    let versions = block.versions_for_key(j);
-                    for k in 0..versions.len() {
-                        let ts = versions.ts(k);
-                        let value = block.value(&versions, k).await?;
-                        yield Record{key: key.clone(), ts, value};
-                    }
-                }
-            }
-        }
-    }
-
-    fn into_stream(self) -> impl Stream<Item = anyhow::Result<Record>> {
-        stream! {
-            let mut s = self.stream().boxed_local();
-            while let Some(x) = s.next().await {
-                yield x;
-            }
-        }
-    }
-}
-
-#[async_trait]
-pub(crate) trait AsyncReadExactAt {
-    async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()>;
-    async fn len(&self) -> anyhow::Result<u64>;
-}
-
-#[async_trait]
-impl AsyncReadExactAt for Vec<u8> {
-    async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
-        Ok(buf.copy_from_slice(&self[(offset as usize)..(offset as usize) + buf.len()]))
-    }
-    async fn len(&self) -> anyhow::Result<u64> {
-        Ok(self.len() as u64)
-    }
-}
-
-#[async_trait]
-impl AsyncReadExactAt for Arc<Vec<u8>> {
-    async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
-        Ok(buf.copy_from_slice(&self[(offset as usize)..(offset as usize) + buf.len()]))
-    }
-    async fn len(&self) -> anyhow::Result<u64> {
-        Ok(Vec::len(self) as u64)
-    }
-}
-
-#[async_trait]
-impl AsyncReadExactAt for File {
-    async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
-        // TODO: This requires an extra allocation because spawn_blocking can't hold onto a mut ref
-        // to buf because compiler isn't smart enough to know that we immediately await it and that
-        // awaiting it implies that the function is done running.
-        //
-        // Static-sized reads are not the common case here it seems, so it might be worth just
-        // changing this function to take a length and always do the allocation internally, or
-        // figure out how tokio implements AsyncRead::read_exact() when poll_read() requires a
-        // spawn_blocking.
-        let mut inner_buf = vec![0u8; buf.len()];
-        // We can safely clone this because the file descriptor's state is not affected by
-        // read_exact_at.
-        let other = self.try_clone()?;
-        let mut inner_buf = tokio::task::spawn_blocking(move || {
-            FileExt::read_exact_at(&other, &mut inner_buf, offset)?;
-            Ok::<Vec<u8>, anyhow::Error>(inner_buf)
-        })
-        .await??;
-        buf.copy_from_slice(&mut inner_buf);
-        Ok(())
-    }
-    async fn len(&self) -> anyhow::Result<u64> {
-        todo!()
-    }
-}
-
 #[cfg(test)]
 mod test {
-    use std::cmp::Reverse;
     use std::collections::BTreeMap;
+    use std::collections::HashSet;
     use std::sync::Arc;
+    use std::sync::RwLock;
     use std::time::Duration;
 
     use byteorder::BigEndian;
     use byteorder::ByteOrder;
-    use futures::stream::StreamExt;
+    use futures::TryStreamExt;
     use proptest::prelude::*;
     use uuid::Uuid;
 
+    use crate::lsm_run::dump_run;
+    use crate::lsm_run::Run;
+    use crate::memtable::Memtable;
     use crate::range::Bound;
     use crate::range::Range;
     use crate::storage::MemStorage;
     use crate::types::ColoGroupId;
     use crate::types::Direction;
+    use crate::types::HistoryRange;
     use crate::types::KeyspaceId;
     use crate::types::Mutation;
     use crate::types::Precondition;
@@ -2043,15 +1367,15 @@ mod test {
     use crate::types::Value;
     use crate::types::WriteError;
     use crate::util::binary_search_by_idx;
-    use crate::util::hexlify;
     use crate::wal;
+    use crate::wal::SeqNo;
 
-    use super::AsyncReadExactAt;
-    use super::Block;
+    use super::Level;
     use super::Lsm;
     use super::LsmBuilder;
+    use super::LsmInnerInner;
     use super::Manifest;
-    use super::Run;
+    use super::MaybeActiveMemtable;
 
     #[tokio::test]
     async fn test_put_get() -> anyhow::Result<()> {
@@ -2361,153 +1685,259 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_block() -> anyhow::Result<()> {
-        let aa: Vec<u8> = "aa".into();
-        let ab: Vec<u8> = "ab".into();
-        let aa_279: Value = Value::Regular("foo".into());
-        let aa_265: Value = Value::Regular("bar".into());
-        let ab_341: Value = Value::Regular("baz".into());
-        let ab_302: Value = Value::Regular("qux".into());
-        let ab_290: Value = Value::Regular("garply".into());
-        let kvs = {
-            let mut kvs = BTreeMap::new();
-            kvs.insert(
-                aa.clone(),
-                vec![
-                    (Timestamp(279), aa_279.clone()),
-                    (Timestamp(265), aa_265.clone()),
-                ],
-            );
-            kvs.insert(
-                ab.clone(),
-                vec![
-                    (Timestamp(341), ab_341.clone()),
-                    (Timestamp(302), ab_302.clone()),
-                    (Timestamp(297), Value::Tombstone),
-                    (Timestamp(290), ab_290.clone()),
-                ],
-            );
-            kvs
-        };
-        let (encoded, header_offset) = Block::<()>::encode(&kvs)?;
+    async fn test_scan_page() -> anyhow::Result<()> {
+        let lsm = LsmBuilder::new()
+            .l0_max_size(32)
+            .block_size(48)
+            .run_target_size(96)
+            .build()
+            .await?;
+        let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
+        lsm.create_keyspace(keyspace_id).await?;
 
-        let block = Block::open(&encoded, header_offset as u64).await?;
+        let writes = [
+            //   ts=0123456789
+            ("a", b" o  o    o"),
+            ("b", b"   o     o"),
+            ("c", b"   o x    "),
+            ("d", b"   oxo    "),
+            ("e", b"    o   o "),
+            ("f", b"     o  o "),
+            ("g", b" o x  o  o"),
+            ("h", b"  o oxo  o"),
+            ("i", b"  o  oo o "),
+            ("j", b" xoxoxoxox"),
+            ("k", b"        o "),
+            ("l", b" ooooooooo"),
+        ];
 
-        assert_eq!(
-            block.get(Timestamp(279), &aa[..]).await?,
-            Some((Timestamp(279), aa_279.clone()))
-        );
-        assert_eq!(
-            block.get(Timestamp(265), &aa[..]).await?,
-            Some((Timestamp(265), aa_265.clone()))
-        );
-        assert_eq!(block.get(Timestamp(123), &aa[..]).await?, None);
+        //let mut expecteds = vec![];
+        for ts in 1..writes[0].1.len() {
+            //let mut expected = match expecteds.last() {
+            //    Some(prev) => prev.clone(),
+            //    None => BTreeMap::new(),
+            //};
 
-        assert_eq!(
-            block.get(Timestamp(295), &aa[..]).await?,
-            Some((Timestamp(279), aa_279.clone()))
-        );
-        assert_eq!(
-            block.get(Timestamp(269), &aa[..]).await?,
-            Some((Timestamp(265), aa_265.clone()))
-        );
+            for (key, versions) in writes {
+                let mutation = match versions[ts] {
+                    b'o' => Mutation::Put(format!("{} {}", key, ts).into()),
+                    b'x' => Mutation::Delete,
+                    _ => continue,
+                };
 
-        assert_eq!(
-            block.get(Timestamp(341), &ab[..]).await?,
-            Some((Timestamp(341), ab_341.clone()))
-        );
-        assert_eq!(
-            block.get(Timestamp(302), &ab[..]).await?,
-            Some((Timestamp(302), ab_302.clone()))
-        );
-        assert_eq!(
-            block.get(Timestamp(297), &ab[..]).await?,
-            Some((Timestamp(297), Value::Tombstone))
-        );
-        assert_eq!(
-            block.get(Timestamp(290), &ab[..]).await?,
-            Some((Timestamp(290), ab_290.clone()))
-        );
-        assert_eq!(block.get(Timestamp(289), &ab[..]).await?, None);
+                //let value = match mutation {
+                //    Mutation::Put(v) => Value::Regular(v),
+                //    Mutation::Delete => Value::Tombstone,
+                //};
+                lsm.write(
+                    Timestamp(ts as u64),
+                    vec![],
+                    BTreeMap::from([((keyspace_id, key.into()), mutation)]),
+                )
+                .await?;
 
-        assert_eq!(
-            block.get(Timestamp(500), &ab[..]).await?,
-            Some((Timestamp(341), ab_341.clone()))
-        );
-        assert_eq!(
-            block.get(Timestamp(340), &ab[..]).await?,
-            Some((Timestamp(302), ab_302.clone()))
-        );
-        assert_eq!(
-            block.get(Timestamp(300), &ab[..]).await?,
-            Some((Timestamp(297), Value::Tombstone))
-        );
-        assert_eq!(
-            block.get(Timestamp(296), &ab[..]).await?,
-            Some((Timestamp(290), ab_290.clone()))
-        );
+                //expected.insert(key, value);
+            }
+            if ts < writes[0].1.len() - 2 && ts % 3 == 0 {
+                lsm.pending_compactions().await;
+            }
+            //expecteds.push(expected);
+        }
+
+        async fn check(
+            lsm: &Lsm,
+            ts: Timestamp,
+            keyspace_id: KeyspaceId,
+            range: Range<Vec<u8>>,
+            expected: Vec<(&str, usize)>,
+        ) -> anyhow::Result<()> {
+            for direction in [Direction::Asc, Direction::Desc] {
+                for page_size in 1..=expected.len() {
+                    println!("== check");
+                    let mut maybe_cursor: Option<Range<Vec<u8>>> = Some(range.clone());
+                    let mut results = vec![];
+                    while let Some(cursor) = maybe_cursor {
+                        let (page, continue_cursor) = lsm
+                            .scan_page(ts, keyspace_id, cursor.borrow(), direction, page_size)
+                            .await?;
+
+                        println!(
+                            "scan_page(ts={}, /*keyspace_id*/, {:?}, {:?}, {}) -> ({:?}, {:?})",
+                            ts, cursor, direction, page_size, continue_cursor, page,
+                        );
+                        assert!(page.len() <= page_size);
+                        results.extend(page);
+                        maybe_cursor = continue_cursor;
+                    }
+
+                    if direction == Direction::Desc {
+                        results.reverse();
+                    }
+
+                    assert_eq!(
+                        results,
+                        expected
+                            .clone()
+                            .into_iter()
+                            .map(|(key, ts)| Record {
+                                key: (key).into(),
+                                ts: Timestamp(ts as u64),
+                                value: Value::Regular(format!("{} {}", key, ts).into()),
+                            })
+                            .collect::<Vec<Record>>(),
+                        "scan_page(ts={:?}, /*keyspace_id*/, /*cursor*/, direction={:?}, page_size={})",
+                        ts,
+                        direction,
+                        page_size,
+                    );
+                }
+            }
+
+            Ok(())
+        }
+
+        dump_lsm(&lsm).await?;
+
+        check(
+            &lsm,
+            Timestamp(5),
+            keyspace_id,
+            Range {
+                lower: Bound::Before("b".into()),
+                upper: Bound::After("e".into()),
+            },
+            vec![("b", 3), ("d", 5), ("e", 4)],
+        )
+        .await?;
+
+        check(
+            &lsm,
+            Timestamp(4),
+            keyspace_id,
+            Range::all(),
+            vec![
+                ("a", 4),
+                ("b", 3),
+                ("c", 3),
+                // d got deleted at 4
+                ("e", 4),
+                // f doesn't exist yet
+                ("h", 4),
+                ("i", 2),
+                ("j", 4),
+                // k doesn't exist yet
+                ("l", 4),
+            ],
+        )
+        .await?;
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_run_file() -> anyhow::Result<()> {
-        fn rand_bytes(n: usize) -> Vec<u8> {
-            let mut out = vec![0u8; n];
-            rand::thread_rng().fill_bytes(&mut out);
-            out
-        }
-        let records = vec![
-            Record {
-                key: b"prefixbar".to_vec(),
-                ts: Timestamp(20101),
-                value: Value::Regular(rand_bytes(10_000)),
-            },
-            Record {
-                key: b"prefixbar".to_vec(),
-                ts: Timestamp(19230),
-                value: Value::Tombstone,
-            },
-            Record {
-                key: b"prefixbar".to_vec(),
-                ts: Timestamp(10230),
-                value: Value::Regular(rand_bytes(128)),
-            },
-            Record {
-                key: b"prefixfoo".to_vec(),
-                ts: Timestamp(21925),
-                value: Value::Regular(rand_bytes(10_000)),
-            },
-            Record {
-                key: b"prefixfoo".to_vec(),
-                ts: Timestamp(12031),
-                value: Value::Regular(rand_bytes(10_000)),
-            },
+    async fn test_history_page() -> anyhow::Result<()> {
+        let diagram = vec![
+            //                         1
+            //   ts= 1 2 3 4 5 6 7 8 9 0
+            ("a", b"   o  |  o|  o|o o| ".as_slice()),
+            (" ", b"------+   |   | +-+ "),
+            ("b", b" o   x|o  |o o|x|o  "),
+            (" ", b"----+-+---+---+ +-+ "),
+            ("c", b"   o|o o     o|o x| "),
+            (" ", b"----+-+---+   | +-+ "),
+            ("d", b"     o|o o|x o| |o  "),
         ];
-        let mut v = vec![];
-        Run::<()>::write(
-            &mut v,
-            Uuid::new_v4(),
-            KeyspaceId(ColoGroupId(1), 1),
-            32768,
-            futures::stream::iter(records.iter().map(|record| Ok(record.clone()))),
-        )
-        .await
-        .unwrap();
 
-        let run = Run::open(v).await?;
+        let lsm = lsm_from_diagram(diagram).await?;
 
-        assert_eq!(run.min_ts, Timestamp(10230));
-        assert_eq!(run.max_ts, Timestamp(21925));
-        assert_eq!(run.min_key, b"prefixbar".to_vec());
-        assert_eq!(run.max_key, b"prefixfoo".to_vec());
+        async fn check(
+            lsm: &LsmInnerInner,
+            key: &[u8],
+            range: HistoryRange,
+            expected: &[(usize, bool)],
+        ) -> anyhow::Result<()> {
+            for direction in [Direction::Asc, Direction::Desc] {
+                for page_size in 1..=expected.len() {
+                    let mut maybe_cursor = Some(range.clone());
+                    let mut results = vec![];
+                    while let Some(cursor) = maybe_cursor {
+                        let (page, continue_cursor) =
+                            lsm.history_page(key, cursor, direction, page_size).await?;
 
-        for record in records {
-            assert_eq!(
-                run.get(record.ts, &record.key).await?,
-                Some((record.ts, record.value)),
-            );
+                        println!(
+                            "history_page(key = {:?}, cursor = {:?}, direction={:?}, page_size={}) -> ({:?}, {:?})",
+                            key,
+                            cursor,
+                            direction,
+                            page_size,
+                            page,
+                            continue_cursor,
+                        );
+
+                        assert!(page.len() <= page_size);
+                        results.extend(page);
+                        maybe_cursor = continue_cursor;
+                    }
+
+                    if direction == Direction::Desc {
+                        results.reverse();
+                    }
+
+                    assert_eq!(
+                        results,
+                        expected
+                            .clone()
+                            .into_iter()
+                            .map(|(ts, is_tombstone)| lsm_diagram_record(key, *ts, *is_tombstone))
+                            .collect::<Vec<Record>>(),
+                        "history_page(key = {:?}, range = {:?}, direction={:?}, page_size={})",
+                        key,
+                        range,
+                        direction,
+                        page_size,
+                    );
+                }
+            }
+            Ok(())
         }
+
+        dump_lsm_inner_inner(&lsm).await?;
+
+        let all_b_versions = vec![
+            (1, false),
+            (3, true),
+            (4, false),
+            (6, false),
+            (7, false),
+            (8, true),
+            (9, false),
+        ];
+
+        check(&lsm, b"b", HistoryRange::All, &all_b_versions).await?;
+
+        check(
+            &lsm,
+            b"b",
+            HistoryRange::Between(Timestamp(1), Timestamp(9)),
+            &all_b_versions,
+        )
+        .await?;
+
+        check(
+            &lsm,
+            b"b",
+            HistoryRange::Until(Timestamp(9)),
+            &all_b_versions,
+        )
+        .await?;
+
+        check(
+            &lsm,
+            b"b",
+            HistoryRange::Since(Timestamp(1)),
+            &all_b_versions,
+        )
+        .await?;
 
         Ok(())
     }
@@ -2527,55 +1957,6 @@ mod test {
 
     proptest! {
         #[test]
-        fn proptest_run_file(m in proptest::collection::btree_map(
-            (proptest::collection::vec(u8::arbitrary(), 0..2), 0..(1u64 << 63)),
-            proptest::option::of(proptest::collection::vec(u8::arbitrary(), 0..128)),
-            1..4096,
-        )) {
-            let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
-
-            rt.block_on(async {
-                let mut records = m.into_iter().map(|((key, ts), maybe_value)| Record{
-                    key, ts: Timestamp(ts), value: match maybe_value {
-                        Some(v) => Value::Regular(v),
-                        None => Value::Tombstone,
-                    },
-                }).collect::<Vec<Record>>();
-                records.sort_by_key(|record| (record.key.clone(), Reverse(record.ts)));
-
-                let mut v = vec![];
-                Run::<()>::write(
-                    &mut v,
-                    Uuid::new_v4(),
-                    KeyspaceId(ColoGroupId(1), 1),
-                    1024,
-                    futures::stream::iter(records.iter().map(|record| Ok(record.clone()))),
-                ).await.unwrap();
-
-                let run = Run::open(v).await.unwrap();
-
-                dump_run_file(&run).await.unwrap();
-
-                for record in &records {
-                    assert_eq!(
-                        run.get(record.ts, &record.key[..]).await.unwrap(),
-                        Some((record.ts, record.value.clone())),
-                    );
-                }
-
-                let streamed_out_records = run
-                    .stream()
-                    .collect::<Vec<anyhow::Result<Record>>>()
-                    .await
-                    .into_iter()
-                    .collect::<anyhow::Result<Vec<Record>>>()
-                    .unwrap();
-
-                assert_eq!(streamed_out_records, records);
-            });
-        }
-
-        #[test]
         #[ignore]
         fn proptest_lsm_scan(
             keys in proptest::collection::btree_set(
@@ -2585,8 +1966,12 @@ mod test {
             write_indexes in proptest::collection::vec(any::<prop::sample::Index>(), 1..4096),
             log_indexes in proptest::collection::vec(any::<prop::sample::Index>(), 1000),
             ranges in proptest::collection::vec(range_strategy(), 1000),
+            direction in proptest::sample::select(std::borrow::Cow::Owned(vec![
+                Direction::Asc,
+                //Direction::Desc,
+            ])),
         ) {
-            tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
+            tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap().block_on(async {
                 let keys_vec: Vec<_> = keys.iter().collect();
 
                 let mut writes = vec![];
@@ -2638,16 +2023,20 @@ mod test {
                             ts,
                             keyspace_id,
                             cursor.borrow(),
-                            Direction::Asc,
+                            direction,
                             100,
                         ).await.unwrap();
                         results.append(&mut page);
+                        assert!(Some(cursor) != continue_cursor);
                         maybe_cursor = continue_cursor;
                     }
 
-                    let expected_recs: Vec<Record> = expected.into_iter().map(|(key, (ts, value))| {
+                    let mut expected_recs: Vec<Record> = expected.into_iter().map(|(key, (ts, value))| {
                         Record{key: key.clone(), ts: *ts, value: Value::Regular(value.clone())}
                     }).collect();
+                    if direction == Direction::Desc {
+                        expected_recs.reverse();
+                    }
 
                     assert_eq!(results, expected_recs);
                 }
@@ -2659,99 +2048,50 @@ mod test {
         let inner = lsm.inner.load();
         for (keyspace_id, lsm) in &*inner {
             println!("keyspace_id {:?}", keyspace_id);
-            let manifest = lsm.inner.manifest.load();
-            dump_manifest(&manifest);
-
-            println!("== kvs =====");
-            println!("l0_active");
-            for (_, memtable_lock) in &manifest.l0_active {
-                let memtable = memtable_lock.read().unwrap();
-                println!(
-                    "  {} ({} bytes) {:?}",
-                    memtable.id(),
-                    memtable.size(),
-                    memtable.range(),
-                );
-                memtable.dump();
-            }
-            println!("l0_sealed");
-            for memtable in &manifest.l0_sealed {
-                println!(
-                    "  {} ({} bytes) {:?}",
-                    memtable.id(),
-                    memtable.size(),
-                    memtable.range(),
-                );
-                memtable.dump();
-            }
-            for (i, level) in manifest.levels[1..]
-                .iter()
-                .enumerate()
-                .map(|(i, level)| (i + 1, level))
-            {
-                println!("l{} ({} bytes)", i, level.size());
-                for run in &level.runs {
-                    println!("  {} ({} bytes) {:?}", run.id(), run.size(), run.range());
-                    dump_run_file(&run).await?;
-                }
-            }
-            println!("============");
+            dump_lsm_inner_inner(&lsm.inner).await?;
         }
 
         Ok(())
     }
 
-    async fn dump_run_file<R: AsyncReadExactAt>(run: &Run<R>) -> anyhow::Result<()> {
-        println!("    min_ts: {}", run.min_ts);
-        println!("    max_ts: {}", run.max_ts);
-        println!("    index");
-        println!("    prefix: [{}]", hexlify(run.index.prefix()));
-        for i in 0..run.index.len() {
-            println!(
-                "      {} header offset {}",
-                hexlify(&run.index.get_key(i)),
-                run.index.get_value(i)
-            );
-        }
-        println!("    blocks");
-        for i in 0..run.index.len() {
-            println!("    == block {} ======", i);
-            println!("    first key: [{}]", hexlify(&run.index.get_key(i)),);
-            println!("    header_offset: {}", run.index.get_value(i));
-            let header_offset = run.index.get_value(i);
-            let block = Block::open(&run.r, header_offset as u64).await?;
-            dump_block(&block).await?;
-        }
-        Ok(())
-    }
+    async fn dump_lsm_inner_inner(lsm: &LsmInnerInner) -> anyhow::Result<()> {
+        let manifest = lsm.manifest.load();
+        dump_manifest(&manifest);
 
-    async fn dump_block<'a, R: AsyncReadExactAt>(block: &Block<'a, R>) -> anyhow::Result<()> {
-        println!("    prefix: {}", hexlify(block.index.prefix()));
-        println!("    n_keys: {}", block.index.len());
-        println!("    n_versions: {}", block.n_versions);
-        println!("    values_len: {}", block.values_len);
-        println!("      == keys ======");
-        for i in 0..block.index.len() {
-            let key = block.index.get_key(i);
-            let versions_offset = block.index.get_value(i);
-            println!("        [{}] {}", hexlify(&key), versions_offset);
-        }
-        let versions = block.versions();
-        println!("      == versions ======");
-        for i in 0..block.n_versions {
-            let value_str = match versions.value_offsets(i) {
-                Some((value_start, value_end)) => format!("({}, {})", value_start, value_end),
-                None => "<TOMBSTONE>".into(),
-            };
-
+        println!("== kvs =====");
+        println!("l0_active");
+        for (_, memtable_lock) in &manifest.l0_active {
+            let memtable = memtable_lock.read().unwrap();
             println!(
-                "        {} {} {} {:?}",
-                i,
-                versions.ts(i),
-                value_str,
-                block.value(&versions, i).await?,
+                "  {} ({} bytes) {:?}",
+                memtable.id(),
+                memtable.size(),
+                memtable.range(),
             );
+            memtable.dump();
         }
+        println!("l0_sealed");
+        for memtable in &manifest.l0_sealed {
+            println!(
+                "  {} ({} bytes) {:?}",
+                memtable.id(),
+                memtable.size(),
+                memtable.range(),
+            );
+            memtable.dump();
+        }
+        for (i, level) in manifest.levels[1..]
+            .iter()
+            .enumerate()
+            .map(|(i, level)| (i + 1, level))
+        {
+            println!("l{} ({} bytes)", i, level.size());
+            for run in &level.runs {
+                println!("  {} ({} bytes) {:?}", run.id(), run.size(), run.range());
+                dump_run(&run).await?;
+            }
+        }
+        println!("============");
         Ok(())
     }
 
@@ -2787,5 +2127,225 @@ mod test {
             }
         }
         println!("============");
+    }
+
+    #[tokio::test]
+    async fn test_lsm_from_diagram() -> anyhow::Result<()> {
+        let diagram = vec![
+            //                         1
+            //   ts= 1 2 3 4 5 6 7 8 9 0
+            ("a", b"   o  |  o|  o|o o| ".as_slice()),
+            (" ", b"------+   |   | +-+ "),
+            ("b", b" o   x|o  |o o|x|o  "),
+            (" ", b"----+-+---+---+ +-+ "),
+            ("c", b"   o|o o     o|o x| "),
+            (" ", b"----+-+---+   | +-+ "),
+            ("d", b"     o|o o|x o| |o  "),
+        ];
+
+        let lsm = lsm_from_diagram(diagram).await?;
+        let manifest = lsm.manifest.load();
+        let l0_active_guard = manifest.l0_active[0].1.write().unwrap();
+
+        let a = "a";
+        let b = "b";
+        let c = "c";
+        let d = "d";
+
+        assert_eq!(
+            l0_active_guard.iter().collect::<Vec<_>>(),
+            vec![
+                lsm_diagram_record(b.as_bytes(), 9, false),
+                lsm_diagram_record(d.as_bytes(), 9, false),
+            ],
+        );
+        assert_eq!(
+            manifest.l0_sealed[0].iter().collect::<Vec<_>>(),
+            vec![
+                lsm_diagram_record(a.as_bytes(), 9, false),
+                lsm_diagram_record(a.as_bytes(), 8, false),
+                lsm_diagram_record(b.as_bytes(), 8, true),
+                lsm_diagram_record(c.as_bytes(), 9, true),
+                lsm_diagram_record(c.as_bytes(), 8, false),
+            ],
+        );
+
+        assert_eq!(
+            manifest.levels[1..]
+                .iter()
+                .map(|level| {
+                    level
+                        .runs
+                        .iter()
+                        .map(|run| {
+                            futures::executor::block_on(run.stream().try_collect::<Vec<_>>())
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?,
+            vec![
+                vec![
+                    vec![(a, 7, false), (b, 7, false), (b, 6, false)],
+                    vec![
+                        (c, 7, false),
+                        (c, 4, false),
+                        (c, 3, false),
+                        (d, 7, false),
+                        (d, 6, true),
+                    ],
+                ],
+                vec![
+                    vec![(a, 5, false), (b, 4, false)],
+                    vec![(d, 5, false), (d, 4, false)],
+                ],
+                vec![
+                    vec![(a, 2, false)],
+                    vec![(b, 3, true), (b, 1, false)],
+                    vec![(d, 3, false)],
+                ],
+                vec![vec![(c, 2, false)]],
+            ]
+            .into_iter()
+            .map(|level| {
+                level
+                    .into_iter()
+                    .map(|run| {
+                        run.into_iter()
+                            .map(|(key, ts, is_tombstone)| {
+                                lsm_diagram_record(key.as_bytes(), ts, is_tombstone)
+                            })
+                            .collect::<Vec<Record>>()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>(),
+        );
+
+        Ok(())
+    }
+
+    fn lsm_diagram_value(key: &[u8], ts: usize) -> Value {
+        Value::Regular(format!("{:?} {}", key, ts).into())
+    }
+
+    fn lsm_diagram_record(key: &[u8], ts: usize, is_tombstone: bool) -> Record {
+        Record {
+            key: key.into(),
+            ts: Timestamp(ts as u64),
+            value: match is_tombstone {
+                false => lsm_diagram_value(key, ts),
+                true => Value::Tombstone,
+            },
+        }
+    }
+
+    async fn lsm_from_diagram(diagram: Vec<(&str, &[u8])>) -> anyhow::Result<LsmInnerInner> {
+        fn find_touching(
+            diagram: &[(&str, &[u8])],
+            visited: &mut HashSet<(usize, usize)>,
+            x: usize,
+            y: usize,
+        ) -> Vec<Record> {
+            fn find_touching_inner(
+                diagram: &[(&str, &[u8])],
+                visited: &mut HashSet<(usize, usize)>,
+                x: usize,
+                y: usize,
+                out: &mut Vec<Record>,
+            ) {
+                if visited.contains(&(x, y)) {
+                    return;
+                }
+                visited.insert((x, y));
+
+                let key_str = diagram[y].0;
+                let key = key_str.as_bytes().to_vec();
+                let ts = Timestamp((x / 2 + 1) as u64);
+
+                if let Some(value) = match diagram[y].1[x] {
+                    b'o' => Some(lsm_diagram_value(&key, ts.0 as usize)),
+                    b'x' => Some(Value::Tombstone),
+                    b' ' => None,
+                    _ => return,
+                } {
+                    out.push(Record { key, ts, value });
+                }
+
+                for (dx, dy) in [(0isize, -1isize), (1, 0), (0, 1), (-1, 0)] {
+                    let next_x = (x as isize) + dx;
+                    let next_y = (y as isize) + dy;
+
+                    if next_x < 0
+                        || next_x >= diagram[0].1.len() as isize
+                        || next_y < 0
+                        || next_y >= diagram.len() as isize
+                    {
+                        continue;
+                    }
+
+                    find_touching_inner(diagram, visited, next_x as usize, next_y as usize, out);
+                }
+            }
+
+            let mut out = vec![];
+            find_touching_inner(diagram, visited, x, y, &mut out);
+            out
+        }
+
+        let mut visited = HashSet::new();
+
+        let x_max = diagram[0].1.len() - 1;
+        let l0_active_records = find_touching(&diagram[..], &mut visited, x_max, 0);
+        let mut l0_active = Memtable::new();
+        for record in l0_active_records {
+            l0_active.insert(SeqNo(1), record.key, record.ts, record.value);
+        }
+        let mut l0_sealed = Memtable::new();
+
+        let mut manifest = Manifest::new(1);
+        for x in (0..=x_max).rev().filter(|x| x % 2 == 1) {
+            let mut level = Level::new();
+            for y in (0..diagram.len()).filter(|y| y % 2 == 0) {
+                let records = find_touching(&diagram[..], &mut visited, x, y);
+                if records.is_empty() {
+                    continue;
+                }
+
+                if l0_sealed.size() == 0 {
+                    for record in records {
+                        l0_sealed.insert(SeqNo(1), record.key, record.ts, record.value);
+                    }
+                } else {
+                    let mut v = vec![];
+                    Run::<()>::write(
+                        &mut v,
+                        Uuid::new_v4(),
+                        KeyspaceId(ColoGroupId(1), 1),
+                        1024, // block_size
+                        futures::stream::iter(records.into_iter().map(|record| Ok(record))),
+                    )
+                    .await?;
+                    let run = Run::open(Arc::new(v)).await?;
+                    level.runs.push(run);
+                }
+            }
+
+            if level.runs.is_empty() {
+                continue;
+            }
+
+            manifest.levels.push(level);
+        }
+
+        manifest.l0_active = vec![(
+            l0_active.id(),
+            Arc::new(RwLock::new(MaybeActiveMemtable::Active(l0_active))),
+        )];
+        manifest.l0_sealed = vec![Arc::new(l0_sealed)];
+
+        let (l0_compact_notify, _) = tokio::sync::mpsc::channel::<()>(1);
+        let lsm = LsmInnerInner::new(64_000_000, 64_000_000, 32768, manifest, l0_compact_notify);
+
+        Ok(lsm)
     }
 }

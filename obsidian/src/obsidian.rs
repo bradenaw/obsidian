@@ -47,7 +47,7 @@ impl Obsidian {
     ) -> anyhow::Result<Option<Vec<u8>>> {
         let tablet_id = self.router.tablet_id_for_key(keyspace_id, &key)?;
         let tablet = self.tablets.tablet(tablet_id)?;
-        let txid = Txid::new(tablet_id.shard_id());
+        let txid = Txid::new(tablet_id);
         let already_seen_conflicts = RefCell::new(HashSet::new());
 
         Retry::new()
@@ -60,9 +60,7 @@ impl Obsidian {
                         if already_seen_conflicts.contains(&other_txid) {
                             return Err(ReadError::Conflict(other_txid));
                         }
-                        let other_txid_owner_tablet = self
-                            .tablets
-                            .tablet(TabletId::shard_meta(other_txid.owner))?;
+                        let other_txid_owner_tablet = self.tablets.tablet(other_txid.owner)?;
                         if txid.can_preempt(&other_txid) {
                             other_txid_owner_tablet.try_abort(other_txid).await?;
                         } else {
@@ -90,7 +88,7 @@ impl Obsidian {
             .skip(rand::thread_rng().gen_range(0..write_by_tablet.len()))
             .next()
             .unwrap();
-        let mut txid = Txid::new(owner_tablet_id.shard_id());
+        let mut txid = Txid::new(*owner_tablet_id);
 
         // TODO: move into loop, since need to resolve conflicts
         if write_by_tablet.len() == 1 {
@@ -169,9 +167,7 @@ impl Obsidian {
                 if !wait_conflicts.is_empty() {
                     future::try_join_all(wait_conflicts.iter().cloned().map(
                         |other_txid| async move {
-                            let tablet = self
-                                .tablets
-                                .tablet(TabletId::shard_meta(other_txid.owner))?;
+                            let tablet = self.tablets.tablet(other_txid.owner)?;
                             tablet.wait(other_txid).await
                         },
                     ))
@@ -185,9 +181,7 @@ impl Obsidian {
                 if !preempt_conflicts.is_empty() {
                     future::try_join_all(preempt_conflicts.iter().cloned().map(
                         |other_txid| async move {
-                            let tablet = self
-                                .tablets
-                                .tablet(TabletId::shard_meta(other_txid.owner))?;
+                            let tablet = self.tablets.tablet(other_txid.owner)?;
                             tablet.try_abort(other_txid).await
                         },
                     ))
@@ -274,13 +268,13 @@ pub(crate) trait Tablets {
 pub(crate) struct Txid {
     ts: u64,
     rand: [u8; 16],
-    owner: ShardId,
+    owner: TabletId,
 }
 
 impl Txid {
-    pub const ENCODED_LEN: usize = 28;
+    pub const ENCODED_LEN: usize = 36;
 
-    pub fn new(owner: ShardId) -> Self {
+    pub fn new(owner: TabletId) -> Self {
         Txid {
             ts: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -301,7 +295,7 @@ impl Txid {
         self < other
     }
 
-    pub fn owner(&self) -> ShardId {
+    pub fn owner(&self) -> TabletId {
         self.owner
     }
 
@@ -309,7 +303,8 @@ impl Txid {
         let mut out = [0u8; Self::ENCODED_LEN];
         BigEndian::write_u64(&mut out[0..8], self.ts);
         out[8..24].copy_from_slice(&self.rand[..]);
-        BigEndian::write_u32(&mut out[24..28], self.owner.0);
+        BigEndian::write_u32(&mut out[24..28], self.owner.0 .0);
+        BigEndian::write_u64(&mut out[28..36], self.owner.1);
         out
     }
 }
@@ -324,7 +319,10 @@ impl TryFrom<&[u8]> for Txid {
         let ts = BigEndian::read_u64(&value[0..8]);
         let mut rand = [0u8; 16];
         rand.copy_from_slice(&value[8..24]);
-        let owner = ShardId(BigEndian::read_u32(&value[24..28]));
+        let owner = TabletId(
+            ShardId(BigEndian::read_u32(&value[24..28])),
+            BigEndian::read_u64(&value[28..36]),
+        );
 
         Ok(Self { ts, rand, owner })
     }
@@ -338,7 +336,14 @@ pub(crate) enum TxOutcome {
 
 impl Debug for Txid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}/{}", self.ts, hexlify(&self.rand), self.owner.0)
+        write!(
+            f,
+            "{}/{}/{}/{}",
+            self.ts,
+            hexlify(&self.rand),
+            self.owner.0 .0,
+            self.owner.1
+        )
     }
 }
 
@@ -383,15 +388,19 @@ mod test {
     use byteorder::ByteOrder;
 
     use crate::lsm::LsmBuilder;
+    use crate::range::Range;
     use crate::storage::MemStorage;
     use crate::tablet::LsmTablet;
     use crate::tablet::Tablet;
     use crate::types::ColoGroupId;
+    use crate::types::Direction;
+    use crate::types::HistoryRange;
     use crate::types::KeyspaceId;
     use crate::types::Mutation;
     use crate::types::Precondition;
     use crate::types::ShardId;
     use crate::types::Timestamp;
+    use crate::types::Value;
 
     use super::InternalWriteError;
     use super::Obsidian;
@@ -441,6 +450,29 @@ mod test {
             key: &[u8],
         ) -> Result<(Timestamp, Option<Vec<u8>>), ReadError> {
             T::get_latest(self, keyspace_id, key).await
+        }
+
+        async fn scan_page(
+            &self,
+            ts: Timestamp,
+            keyspace_id: KeyspaceId,
+            range: Range<&[u8]>,
+            direction: Direction,
+            limit: usize,
+        ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)> {
+            T::scan_page(self, ts, keyspace_id, range, direction, limit).await
+        }
+
+        async fn history_page(
+            &self,
+            ts: Timestamp,
+            keyspace_id: KeyspaceId,
+            key: &[u8],
+            range: HistoryRange,
+            direction: Direction,
+            limit: usize,
+        ) -> anyhow::Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>)> {
+            T::history_page(self, ts, keyspace_id, key, range, direction, limit).await
         }
 
         async fn write(
