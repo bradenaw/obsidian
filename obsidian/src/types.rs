@@ -226,6 +226,7 @@ pub(crate) struct ShardId(pub(crate) u32);
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub enum HistoryRange {
+    All,
     Until(Timestamp),
     Between(Timestamp, Timestamp),
     Since(Timestamp),
@@ -234,6 +235,7 @@ pub enum HistoryRange {
 impl HistoryRange {
     pub(crate) fn as_min_max(&self) -> (Timestamp, Timestamp) {
         match self {
+            HistoryRange::All => (Timestamp::ZERO, Timestamp::MAX),
             HistoryRange::Until(max) => (Timestamp::ZERO, *max),
             HistoryRange::Between(min, max) => (*min, *max),
             HistoryRange::Since(min) => (*min, Timestamp::MAX),

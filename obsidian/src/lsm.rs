@@ -1056,10 +1056,14 @@ impl LsmInnerInner {
                             Some(HistoryRange::Between(min, max))
                         }
                     }
-                    HistoryRange::Since(_) => Some(HistoryRange::Since(last_record.ts.plus_one())),
+                    HistoryRange::All | HistoryRange::Since(_) => {
+                        Some(HistoryRange::Since(last_record.ts.plus_one()))
+                    }
                 },
                 Direction::Desc => match range {
-                    HistoryRange::Until(_) => Some(HistoryRange::Until(last_record.ts.minus_one())),
+                    HistoryRange::All | HistoryRange::Until(_) => {
+                        Some(HistoryRange::Until(last_record.ts.minus_one()))
+                    }
                     HistoryRange::Between(min, _) | HistoryRange::Since(min) => {
                         let max = last_record.ts.minus_one();
                         if min > max {
@@ -1908,6 +1912,8 @@ mod test {
             (8, true),
             (9, false),
         ];
+
+        check(&lsm, b"b", HistoryRange::All, &all_b_versions).await?;
 
         check(
             &lsm,
