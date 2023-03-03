@@ -260,10 +260,6 @@ pub(crate) struct TabletId(ShardId, u64);
 
 impl TabletId {
     const META: Self = TabletId(ShardId(1), 1);
-
-    pub(crate) fn shard_meta(shard_id: ShardId) -> Self {
-        TabletId(shard_id, 1)
-    }
 }
 
 impl std::fmt::Display for TabletId {
@@ -432,20 +428,17 @@ mod test {
     impl Router for CheeseRouter {
         fn tablet_id_for_key(
             &self,
-            keyspace_id: KeyspaceId,
+            _keyspace_id: KeyspaceId,
             key: &[u8],
         ) -> anyhow::Result<TabletId> {
-            if keyspace_id.0 == ColoGroupId::META {
-                if key.len() < 4 {
-                    anyhow::bail!("tablet-routed key not long enough");
-                }
-                let tablet_id = TabletId::shard_meta(ShardId(BigEndian::read_u32(&key[0..4])));
-                return Ok(tablet_id);
+            if key.len() < 12 {
+                anyhow::bail!("cheese-routed key not long enough");
             }
-            if key.len() < 1 {
-                anyhow::bail!("key too short for CheeseRouter");
-            }
-            Ok(TabletId(ShardId(key[0] as u32), 2))
+            let tablet_id = TabletId(
+                ShardId(BigEndian::read_u32(&key[0..4])),
+                BigEndian::read_u64(&key[4..12]),
+            );
+            return Ok(tablet_id);
         }
     }
 
@@ -581,28 +574,31 @@ mod test {
 
             {
                 let mut m = tablets.m.lock().unwrap();
-                m.insert(TabletId(ShardId(1), 2), Arc::new(tablet1));
-                m.insert(TabletId(ShardId(2), 2), Arc::new(tablet2));
+                m.insert(TabletId(ShardId(1), 1), Arc::new(tablet1));
+                m.insert(TabletId(ShardId(2), 1), Arc::new(tablet2));
             }
 
             let obs = Obsidian::new(Box::new(CheeseRouter {}), Box::new(tablets));
+
+            let key1 = vec![0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1];
+            let key2 = vec![0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 2];
 
             let write_ts = obs
                 .write(
                     vec![],
                     BTreeMap::from([
-                        ((keyspace_id, vec![1, 1]), Mutation::Put(vec![1, 2, 3])),
-                        ((keyspace_id, vec![2, 2]), Mutation::Put(vec![4, 5, 6])),
+                        ((keyspace_id, key1.clone()), Mutation::Put(vec![1, 2, 3])),
+                        ((keyspace_id, key2.clone()), Mutation::Put(vec![4, 5, 6])),
                     ]),
                 )
                 .await?;
 
             assert_eq!(
-                obs.get(write_ts, keyspace_id, vec![1, 1]).await?,
+                obs.get(write_ts, keyspace_id, key1).await?,
                 Some(vec![1, 2, 3])
             );
             assert_eq!(
-                obs.get(write_ts, keyspace_id, vec![2, 2]).await?,
+                obs.get(write_ts, keyspace_id, key2).await?,
                 Some(vec![4, 5, 6])
             );
 
