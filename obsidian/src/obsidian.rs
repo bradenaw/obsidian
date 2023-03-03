@@ -256,7 +256,7 @@ impl Obsidian {
 }
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
-pub(crate) struct TabletId(ShardId, u64);
+pub(crate) struct TabletId(pub ShardId, pub u64);
 
 impl TabletId {
     const META: Self = TabletId(ShardId(1), 1);

@@ -10,7 +10,9 @@ use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use anyhow::anyhow;
 use async_trait::async_trait;
+use byteorder::BigEndian;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use futures::future;
@@ -25,10 +27,12 @@ use crate::obsidian::CommitError;
 use crate::obsidian::InternalWriteError;
 use crate::obsidian::ReadError;
 use crate::obsidian::Router;
+use crate::obsidian::TabletId;
 use crate::obsidian::Tablets;
 use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
 use crate::range::Range;
+use crate::range::RangeSet;
 use crate::sequencer::Sequencer;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
@@ -36,6 +40,7 @@ use crate::types::HistoryRange;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
+use crate::types::ShardId;
 use crate::types::Timestamp;
 use crate::types::Value;
 use crate::util::longest_shared_prefix_len;
@@ -209,7 +214,9 @@ impl Tablet for LsmTablet {
 
 impl LsmTablet {
     pub async fn new(
+        tablet_id: TabletId,
         lsm: Lsm,
+        owned_ranges: HashMap<KeyspaceId, RangeSet<Vec<u8>>>,
         tablets: Box<dyn Tablets + Sync + Send>,
         router: Box<dyn Router + Sync + Send>,
     ) -> anyhow::Result<Self> {
@@ -219,7 +226,9 @@ impl LsmTablet {
         lsm.create_keyspace(KeyspaceId::TX_OUTCOMES).await?;
 
         let inner = Arc::new(LsmTabletInner::new(
+            tablet_id,
             lsm,
+            owned_ranges,
             tablets,
             router,
             prepare_sender,
@@ -273,7 +282,9 @@ impl Drop for LsmTablet {
 }
 
 struct LsmTabletInner {
+    tablet_id: TabletId,
     lsm: Lsm,
+    owned_ranges: HashMap<KeyspaceId, RangeSet<Vec<u8>>>,
     tablets: Box<dyn Tablets + Sync + Send>,
     router: Box<dyn Router + Sync + Send>,
     sequencer: Sequencer,
@@ -299,7 +310,9 @@ struct LsmTabletInner {
 
 impl LsmTabletInner {
     fn new(
+        tablet_id: TabletId,
         lsm: Lsm,
+        owned_ranges: HashMap<KeyspaceId, RangeSet<Vec<u8>>>,
         tablets: Box<dyn Tablets + Sync + Send>,
         router: Box<dyn Router + Sync + Send>,
         prepare_sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
@@ -311,7 +324,9 @@ impl LsmTabletInner {
         )>,
     ) -> Self {
         Self {
+            tablet_id,
             lsm,
+            owned_ranges,
             tablets,
             router,
             prepare_sender,
@@ -328,6 +343,7 @@ impl LsmTabletInner {
         keyspace_id: KeyspaceId,
         key: Vec<u8>,
     ) -> Result<Option<Vec<u8>>, ReadError> {
+        self.check_key(keyspace_id, &key)?;
         self.sequencer.wait_for_safe_read(ts).await?;
 
         let (maybe_record, maybe_pending_value) = future::try_join(
@@ -370,7 +386,7 @@ impl LsmTabletInner {
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
     ) -> Result<Timestamp, InternalWriteError> {
-        let _guard = self.acquire_write_locks(&preconds, &muts).await;
+        let _guard = self.acquire_write_locks(&preconds, &muts).await?;
 
         if let Some(conflict_txid) = self.check_write_conflicts(&preconds, &muts).await? {
             return Err(InternalWriteError::Conflict(conflict_txid));
@@ -392,7 +408,7 @@ impl LsmTabletInner {
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
     ) -> Result<Timestamp, InternalWriteError> {
-        let _guard = self.acquire_write_locks(&preconds, &muts).await;
+        let _guard = self.acquire_write_locks(&preconds, &muts).await?;
 
         if let Some(conflict_txid) = self.check_write_conflicts(&preconds, &muts).await? {
             return Err(InternalWriteError::Conflict(conflict_txid));
@@ -546,13 +562,20 @@ impl LsmTabletInner {
         &'a self,
         preconds: &Vec<Precondition>,
         muts: &BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
-    ) -> Guard<'a> {
-        self.lock_mgr
+    ) -> anyhow::Result<Guard<'a>> {
+        for precond in preconds {
+            self.check_key(precond.keyspace_id(), precond.key())?;
+        }
+        for (keyspace_id, key) in muts.keys() {
+            self.check_key(*keyspace_id, &key)?;
+        }
+        Ok(self
+            .lock_mgr
             .lock_all(
                 preconds.iter().map(|precond| precond.key()),
                 muts.keys().map(|(_, k)| &k[..]),
             )
-            .await
+            .await)
     }
 
     // TODO: make this take a lockmgr guard that proves the lock is held
@@ -825,6 +848,40 @@ impl LsmTabletInner {
             },
         )
         .await;
+    }
+
+    fn check_key(&self, keyspace_id: KeyspaceId, key: &[u8]) -> anyhow::Result<()> {
+        if keyspace_id.0 == ColoGroupId::META {
+            if key.len() < 12 {
+                return Err(anyhow!("key {:?} too short for ColoGroupId::META", key));
+            }
+            let tablet_id = TabletId(
+                ShardId(BigEndian::read_u32(&key[0..4])),
+                BigEndian::read_u64(&key[4..12]),
+            );
+            if self.tablet_id == tablet_id {
+                return Ok(());
+            }
+        }
+        if let Some(userland_keyspace_id) = keyspace_id.userland() {
+            if self
+                .owned_ranges
+                .get(&userland_keyspace_id)
+                .ok_or_else(|| anyhow!("no ranges owned from {:?}", userland_keyspace_id))?
+                .contains(&key.to_vec())
+            {
+                return Ok(());
+            }
+        }
+        if self
+            .owned_ranges
+            .get(&keyspace_id)
+            .ok_or_else(|| anyhow!("no ranges owned from {:?}", keyspace_id))?
+            .contains(&key.to_vec())
+        {
+            return Ok(());
+        }
+        Err(anyhow!("{:?}:{:?} not owned", keyspace_id, key).into())
     }
 }
 
