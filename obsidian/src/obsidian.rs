@@ -401,6 +401,7 @@ mod test {
 
     use crate::lsm::LsmBuilder;
     use crate::range::Range;
+    use crate::range::RangeSet;
     use crate::storage::MemStorage;
     use crate::tablet::LsmTablet;
     use crate::tablet::Tablet;
@@ -558,14 +559,28 @@ mod test {
             let storage = Arc::new(MemStorage::new());
             let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
             let tablet1 = LsmTablet::new(
+                TabletId(ShardId(1), 1),
                 LsmBuilder::new().storage(storage.clone()).build().await?,
+                vec![(
+                    keyspace_id,
+                    RangeSet::from(Range::prefix(vec![0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1])),
+                )]
+                .into_iter()
+                .collect(),
                 Box::new(tablets.clone()),
                 Box::new(CheeseRouter {}),
             )
             .await?;
             tablet1.create_keyspace(keyspace_id).await?;
             let tablet2 = LsmTablet::new(
+                TabletId(ShardId(2), 1),
                 LsmBuilder::new().storage(storage.clone()).build().await?,
+                vec![(
+                    keyspace_id,
+                    RangeSet::from(Range::prefix(vec![0u8, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1])),
+                )]
+                .into_iter()
+                .collect(),
                 Box::new(tablets.clone()),
                 Box::new(CheeseRouter {}),
             )

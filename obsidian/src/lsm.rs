@@ -931,10 +931,7 @@ impl LsmInnerInner {
             }) = page.last()
             {
                 if last_key == &record.key {
-                    match direction {
-                        Direction::Asc => assert!(*last_ts > record.ts),
-                        Direction::Desc => assert!(*last_ts < record.ts),
-                    }
+                    assert!(*last_ts > record.ts);
                     continue;
                 }
             }
