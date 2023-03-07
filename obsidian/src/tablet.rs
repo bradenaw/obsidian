@@ -772,7 +772,7 @@ impl LsmTabletInner {
         let mut by_tablet = HashMap::new();
 
         for (keyspace_id, key) in precond_keys {
-            let tablet_id = self.router.tablet_id_for_key(keyspace_id, &key)?;
+            let tablet_id = self.router.tablet_id_for_key(keyspace_id.0, &key)?;
             by_tablet
                 .entry(tablet_id)
                 .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()))
@@ -780,7 +780,7 @@ impl LsmTabletInner {
                 .insert((keyspace_id, key));
         }
         for (keyspace_id, key) in mut_keys {
-            let tablet_id = self.router.tablet_id_for_key(keyspace_id, &key)?;
+            let tablet_id = self.router.tablet_id_for_key(keyspace_id.0, &key)?;
             by_tablet
                 .entry(tablet_id)
                 .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()))

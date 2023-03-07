@@ -59,18 +59,36 @@ impl Display for Timestamp {
     }
 }
 
-#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ColoGroupId(pub u32);
 
 impl ColoGroupId {
     pub(crate) const META: Self = ColoGroupId(0xFFFFFFFF);
+    pub(crate) const TABLET_META: Self = ColoGroupId(0xFFFFFFFE);
+}
+
+impl Display for ColoGroupId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            ColoGroupId::META => write!(f, "meta"),
+            ColoGroupId::TABLET_META => write!(f, "tablet_meta"),
+            _ => write!(f, "{}", self.0),
+        }
+    }
+}
+
+impl Debug for ColoGroupId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "colo:")?;
+        Display::fmt(&self, f)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct KeyspaceId(pub ColoGroupId, pub u32);
 
 impl KeyspaceId {
-    pub(crate) const TX_OUTCOMES: Self = Self(ColoGroupId::META, 0xFE000001);
+    pub(crate) const TX_OUTCOMES: Self = Self(ColoGroupId::TABLET_META, 0xFE000001);
 
     pub(crate) fn userland(&self) -> Option<KeyspaceId> {
         if !self.is_pending() && !self.is_precond() {

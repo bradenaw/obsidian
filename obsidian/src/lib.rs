@@ -12,6 +12,7 @@ mod lsm_util;
 mod memtable;
 mod obsidian;
 mod range;
+mod router;
 mod sequencer;
 mod storage;
 mod tablet;

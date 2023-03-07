@@ -16,6 +16,7 @@ use rand::Rng;
 use thiserror::Error;
 
 use crate::tablet::Tablet;
+use crate::types::ColoGroupId;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
@@ -44,7 +45,7 @@ impl Obsidian {
         keyspace_id: KeyspaceId,
         key: Vec<u8>,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        let tablet_id = self.router.tablet_id_for_key(keyspace_id, &key)?;
+        let tablet_id = self.router.tablet_id_for_key(keyspace_id.0, &key)?;
         let tablet = self.tablets.tablet(tablet_id)?;
         let txid = Txid::new(tablet_id);
         let already_seen_conflicts = RefCell::new(HashSet::new());
@@ -234,7 +235,7 @@ impl Obsidian {
         for precond in preconds {
             let tablet_id = self
                 .router
-                .tablet_id_for_key(precond.keyspace_id(), precond.key())?;
+                .tablet_id_for_key(precond.keyspace_id().0, precond.key())?;
 
             result
                 .entry(tablet_id)
@@ -243,7 +244,7 @@ impl Obsidian {
                 .push(precond);
         }
         for ((keyspace_id, key), m) in muts {
-            let tablet_id = self.router.tablet_id_for_key(keyspace_id, &key)?;
+            let tablet_id = self.router.tablet_id_for_key(keyspace_id.0, &key)?;
             result
                 .entry(tablet_id)
                 .or_insert_with(|| (vec![], BTreeMap::new()))
@@ -269,7 +270,8 @@ impl std::fmt::Display for TabletId {
 }
 
 pub(crate) trait Router {
-    fn tablet_id_for_key(&self, keyspace_id: KeyspaceId, key: &[u8]) -> anyhow::Result<TabletId>;
+    fn tablet_id_for_key(&self, colo_group_id: ColoGroupId, key: &[u8])
+        -> anyhow::Result<TabletId>;
 }
 
 pub(crate) trait Tablets {
@@ -396,12 +398,12 @@ mod test {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
-    use byteorder::BigEndian;
-    use byteorder::ByteOrder;
 
     use crate::lsm::LsmBuilder;
+    use crate::range::Bound;
     use crate::range::Range;
     use crate::range::RangeSet;
+    use crate::router::StaticRouter;
     use crate::storage::MemStorage;
     use crate::tablet::LsmTablet;
     use crate::tablet::Tablet;
@@ -424,22 +426,13 @@ mod test {
     use super::TxOutcome;
     use super::Txid;
 
-    struct CheeseRouter {}
-
-    impl Router for CheeseRouter {
+    impl<T: Router> Router for Arc<T> {
         fn tablet_id_for_key(
             &self,
-            _keyspace_id: KeyspaceId,
+            colo_group_id: ColoGroupId,
             key: &[u8],
         ) -> anyhow::Result<TabletId> {
-            if key.len() < 12 {
-                anyhow::bail!("cheese-routed key not long enough");
-            }
-            let tablet_id = TabletId(
-                ShardId(BigEndian::read_u32(&key[0..4])),
-                BigEndian::read_u64(&key[4..12]),
-            );
-            return Ok(tablet_id);
+            T::tablet_id_for_key(&self, colo_group_id, key)
         }
     }
 
@@ -556,33 +549,53 @@ mod test {
                 m: Mutex::new(HashMap::new()),
             });
 
+            let colo_group_id = ColoGroupId(1);
+            let keyspace_id = KeyspaceId(colo_group_id, 1);
+
+            let tablet_id1 = TabletId(ShardId(1), 1);
+            let tablet_id2 = TabletId(ShardId(2), 1);
+
+            let router = Arc::new(StaticRouter::new(
+                vec![(
+                    colo_group_id,
+                    (vec![Bound::Before(vec![1])], vec![tablet_id1, tablet_id2]),
+                )]
+                .into_iter()
+                .collect(),
+            ));
+
             let storage = Arc::new(MemStorage::new());
-            let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
             let tablet1 = LsmTablet::new(
-                TabletId(ShardId(1), 1),
+                tablet_id1,
                 LsmBuilder::new().storage(storage.clone()).build().await?,
                 vec![(
                     keyspace_id,
-                    RangeSet::from(Range::prefix(vec![0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1])),
+                    RangeSet::from(Range {
+                        lower: Bound::BeforeAll,
+                        upper: Bound::Before(vec![1]),
+                    }),
                 )]
                 .into_iter()
                 .collect(),
                 Box::new(tablets.clone()),
-                Box::new(CheeseRouter {}),
+                Box::new(router.clone()),
             )
             .await?;
             tablet1.create_keyspace(keyspace_id).await?;
             let tablet2 = LsmTablet::new(
-                TabletId(ShardId(2), 1),
+                tablet_id2,
                 LsmBuilder::new().storage(storage.clone()).build().await?,
                 vec![(
                     keyspace_id,
-                    RangeSet::from(Range::prefix(vec![0u8, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1])),
+                    RangeSet::from(Range {
+                        lower: Bound::Before(vec![1]),
+                        upper: Bound::AfterAll,
+                    }),
                 )]
                 .into_iter()
                 .collect(),
                 Box::new(tablets.clone()),
-                Box::new(CheeseRouter {}),
+                Box::new(router.clone()),
             )
             .await?;
             tablet2.create_keyspace(keyspace_id).await?;
@@ -593,7 +606,7 @@ mod test {
                 m.insert(TabletId(ShardId(2), 1), Arc::new(tablet2));
             }
 
-            let obs = Obsidian::new(Box::new(CheeseRouter {}), Box::new(tablets));
+            let obs = Obsidian::new(Box::new(router.clone()), Box::new(tablets));
 
             let key1 = vec![0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1];
             let key2 = vec![0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 2];
