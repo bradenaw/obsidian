@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::util::hexlify;
 
-#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
+#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy)]
 pub struct Timestamp(pub(crate) u64);
 
 impl Timestamp {
@@ -56,6 +56,13 @@ impl Timestamp {
 impl Display for Timestamp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl Debug for Timestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ts:")?;
+        Display::fmt(self, f)
     }
 }
 
