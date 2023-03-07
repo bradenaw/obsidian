@@ -84,7 +84,7 @@ impl Debug for ColoGroupId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct KeyspaceId(pub ColoGroupId, pub u32);
 
 impl KeyspaceId {
@@ -121,6 +121,37 @@ impl KeyspaceId {
 
     pub(crate) fn is_precond(&self) -> bool {
         self.1 & 0xFF000000 == 0x02000000
+    }
+}
+
+impl Display for KeyspaceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/", self.0)?;
+        if *self == KeyspaceId::TX_OUTCOMES {
+            f.write_str("tx_outcomes")?;
+        }
+        match self.userland() {
+            Some(userland_keyspace_id) => {
+                if self.is_precond() {
+                    write!(f, "precond({})", userland_keyspace_id)?;
+                } else if self.is_pending() {
+                    write!(f, "pending({})", userland_keyspace_id)?;
+                } else {
+                    write!(f, "{}", self.1)?;
+                }
+            }
+            None => {
+                write!(f, "{}", self.1)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Debug for KeyspaceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ksp:")?;
+        Display::fmt(&self, f)
     }
 }
 
