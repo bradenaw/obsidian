@@ -608,8 +608,8 @@ mod test {
 
             let obs = Obsidian::new(Box::new(router.clone()), Box::new(tablets));
 
-            let key1 = vec![0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1];
-            let key2 = vec![0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 2];
+            let key1 = vec![0];
+            let key2 = vec![1];
 
             let write_ts = obs
                 .write(
