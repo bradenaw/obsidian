@@ -348,13 +348,15 @@ impl LsmTabletInner {
 
         let (maybe_record, maybe_pending_value) = future::try_join(
             self.lsm.get(ts, keyspace_id, &key),
-            self.unsafe_get_latest_record(
-                keyspace_id
-                    .pending()
-                    .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?,
-                &key,
-            )
-            .map(|result| result.map_err(|e| e.into())),
+            self.lsm
+                .get(
+                    ts,
+                    keyspace_id
+                        .pending()
+                        .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?,
+                    &key,
+                )
+                .map(|result| result.map_err(|e| e.into())),
         )
         .await?;
 
