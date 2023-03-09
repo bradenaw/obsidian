@@ -16,7 +16,6 @@ use byteorder::BigEndian;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use futures::future;
-use futures::FutureExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -348,15 +347,13 @@ impl LsmTabletInner {
 
         let (maybe_record, maybe_pending_value) = future::try_join(
             self.lsm.get(ts, keyspace_id, &key),
-            self.lsm
-                .get(
-                    ts,
-                    keyspace_id
-                        .pending()
-                        .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?,
-                    &key,
-                )
-                .map(|result| result.map_err(|e| e.into())),
+            self.lsm.get(
+                ts,
+                keyspace_id
+                    .pending()
+                    .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?,
+                &key,
+            ),
         )
         .await?;
 
@@ -376,10 +373,38 @@ impl LsmTabletInner {
 
     async fn get_latest(
         &self,
-        _keyspace_id: KeyspaceId,
-        _key: &[u8],
+        keyspace_id: KeyspaceId,
+        key: &[u8],
     ) -> Result<(Timestamp, Option<Vec<u8>>), ReadError> {
-        todo!();
+        self.check_key(keyspace_id, &key)?;
+
+        let _guard = self.lock_mgr.read_lock(key).await;
+
+        let safe_read_ts = self.sequencer.safe_read_ts();
+
+        let (maybe_record, maybe_pending_value) = future::try_join(
+            self.unsafe_get_latest_record(keyspace_id, &key),
+            self.unsafe_get_latest_record(
+                keyspace_id
+                    .pending()
+                    .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?,
+                &key,
+            ),
+        )
+        .await?;
+
+        if let Some((_, Value::Regular(bytes))) = maybe_pending_value {
+            let pending_mut = PendingMutation::decode(&bytes)?;
+            return Err(ReadError::Conflict(pending_mut.txid));
+        }
+
+        Ok(match maybe_record {
+            Some((ts, value)) => match value {
+                Value::Regular(v) => (ts, Some(v)),
+                Value::Tombstone => (ts, None),
+            },
+            None => (safe_read_ts, None),
+        })
     }
 
     async fn write(
