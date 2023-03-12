@@ -430,14 +430,25 @@ impl LsmTabletInner {
             Direction::Asc => intersecting_range_set.first(),
             Direction::Desc => intersecting_range_set.last(),
         }
-        .ok_or_else(|| anyhow!(""))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "misroute: {:?} owns no ranges overlapping with {:?}",
+                self.tablet_id,
+                range
+            )
+        })?;
 
         let ok = match direction {
             Direction::Asc => scan_range.lower.borrow() == range.lower,
             Direction::Desc => scan_range.upper.borrow() == range.upper,
         };
         if !ok {
-            return Err(anyhow!("").into());
+            return Err(anyhow!(
+                "misroute: {:?} not the next tablet for {:?}",
+                self.tablet_id,
+                range
+            )
+            .into());
         }
 
         self.sequencer.wait_for_safe_read(ts).await?;
