@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::fmt::Debug;
+use std::future::Future;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -16,6 +17,7 @@ use rand::Rng;
 use thiserror::Error;
 
 use crate::range::Bound;
+use crate::range::Range;
 use crate::tablet::Tablet;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
@@ -47,35 +49,40 @@ impl Obsidian {
         keyspace_id: KeyspaceId,
         key: Vec<u8>,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        let tablet_id = self.router.tablet_id_for_key(keyspace_id.0, &key)?;
-        let tablet = self.tablets.tablet(tablet_id)?;
-        let txid = Txid::new(tablet_id);
-        let already_seen_conflicts = RefCell::new(HashSet::new());
+        self.read_retries(|| {
+            let key = key.clone();
+            async move {
+                let tablet_id = self.router.tablet_id_for_key(keyspace_id.0, &key)?;
+                let tablet = self.tablets.tablet(tablet_id)?;
+                tablet.get(ts, keyspace_id, key.clone()).await
+            }
+        })
+        .await
+    }
 
-        Retry::new()
-            .n_attempts(MAX_CONFLICT_RETRIES + 1)
-            .with_retry(|| async {
-                let mut already_seen_conflicts = already_seen_conflicts.borrow_mut();
-                match tablet.get(ts, keyspace_id, key.clone()).await {
-                    Ok(v) => return Ok(v),
-                    Err(ReadError::Conflict(other_txid)) => {
-                        if already_seen_conflicts.contains(&other_txid) {
-                            return Err(ReadError::Conflict(other_txid));
-                        }
-                        let other_txid_owner_tablet = self.tablets.tablet(other_txid.owner)?;
-                        if txid.can_preempt(&other_txid) {
-                            other_txid_owner_tablet.try_abort(other_txid).await?;
-                        } else {
-                            other_txid_owner_tablet.wait(other_txid).await?;
-                        }
-                        already_seen_conflicts.insert(other_txid);
-                        Err(ReadError::Conflict(other_txid))
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            })
-            .await
-            .context("too much contention")
+    pub async fn scan_page(
+        &self,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        range: Range<&[u8]>,
+        direction: Direction,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)> {
+        self.read_retries(|| async move {
+            let start_bound = match direction {
+                Direction::Asc => range.lower,
+                Direction::Desc => range.upper,
+            };
+            let tablet_id =
+                self.router
+                    .tablet_id_for_bound(keyspace_id.0, start_bound, direction)?;
+
+            let tablet = self.tablets.tablet(tablet_id)?;
+            tablet
+                .scan_page(ts, keyspace_id, range, direction, limit)
+                .await
+        })
+        .await
     }
 
     pub async fn write(
@@ -255,6 +262,49 @@ impl Obsidian {
         }
 
         Ok(result)
+    }
+
+    async fn read_retries<F, Fut, T>(&self, f: F) -> anyhow::Result<T>
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = Result<T, ReadError>>,
+    {
+        // Read transaction IDs can have an arbitrary tablet ID in them because they never commit
+        // and never surface to any other transaction as a conflict.
+        let txid = Txid::new(TabletId(ShardId(0), 0));
+
+        let already_seen_conflicts = RefCell::new(HashSet::new());
+
+        Retry::new()
+            .n_attempts(MAX_CONFLICT_RETRIES + 1)
+            .with_retry(|| async {
+                let mut already_seen_conflicts = already_seen_conflicts.borrow_mut();
+
+                match f().await {
+                    Ok(v) => return Ok(v),
+                    Err(ReadError::Conflict(other_txid)) => {
+                        // If we've already seen this txid as a conflict that means we already
+                        // wait/aborted it and we're still just waiting for it to get cleaned up,
+                        // so just take another turn around the retry loop.
+                        if already_seen_conflicts.contains(&other_txid) {
+                            return Err(ReadError::Conflict(other_txid));
+                        }
+
+                        let other_txid_owner_tablet = self.tablets.tablet(other_txid.owner)?;
+                        if txid.can_preempt(&other_txid) {
+                            other_txid_owner_tablet.try_abort(other_txid).await?;
+                        } else {
+                            other_txid_owner_tablet.wait(other_txid).await?;
+                        }
+
+                        already_seen_conflicts.insert(other_txid);
+                        Err(ReadError::Conflict(other_txid))
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            })
+            .await
+            .context("too much contention")
     }
 }
 
@@ -487,7 +537,8 @@ mod test {
             range: Range<&[u8]>,
             direction: Direction,
             limit: usize,
-        ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)> {
+        ) -> Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>), ReadError>
+        {
             T::scan_page(self, ts, keyspace_id, range, direction, limit).await
         }
 

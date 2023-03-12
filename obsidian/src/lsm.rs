@@ -840,24 +840,16 @@ impl LsmInnerInner {
 
         let manifest = self.manifest.load();
 
-        let l0_active_guards: Vec<_> = manifest
-            .l0_active
-            .iter()
-            .map(|(_, memtable)| memtable.read().unwrap())
-            .collect();
-
         let mut streams = Vec::with_capacity(
             manifest.l0_active.len() + manifest.l0_sealed.len() + manifest.levels.len(),
         );
-        for l0_run in &l0_active_guards {
-            streams.push(
-                futures::stream::iter(
-                    l0_run
-                        .scan(ts, range.clone(), direction)
-                        .map(|record| Ok(record)),
-                )
-                .boxed(),
-            );
+        for l0_active in &manifest.l0_active {
+            let l0_run = l0_active.1.read().unwrap();
+            let records: Vec<_> = l0_run
+                .scan(ts, range.clone(), direction)
+                .map(|record| Ok(record))
+                .collect();
+            streams.push(futures::stream::iter(records.into_iter()).boxed());
         }
         for l0_run in &manifest.l0_sealed {
             streams.push(
@@ -895,7 +887,7 @@ impl LsmInnerInner {
             );
         }
         let mut merged = match direction {
-            Direction::Asc => merge_sorted_streams(streams).peekable().boxed_local(),
+            Direction::Asc => merge_sorted_streams(streams).peekable().boxed(),
             Direction::Desc => merge_sorted_streams(
                 streams
                     .into_iter()
@@ -919,7 +911,7 @@ impl LsmInnerInner {
                 })
             })
             .peekable()
-            .boxed_local(),
+            .boxed(),
         };
 
         let mut page = vec![];

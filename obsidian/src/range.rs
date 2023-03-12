@@ -355,6 +355,27 @@ impl<K: Ord + HasPrefix + Clone> RangeSet<K> {
         }
     }
 
+    pub fn split(self, bound: Bound<K>) -> (RangeSet<K>, RangeSet<K>) {
+        let mut below = vec![];
+        let mut above = vec![];
+        for range in self.into_iter() {
+            if bound >= range.upper {
+                below.push(range);
+            } else if bound <= range.lower {
+                above.push(range);
+            } else if bound > range.lower && bound < range.upper {
+                let (range_lower, range_upper) = range.split(&bound);
+                below.push(range_lower);
+                above.push(range_upper);
+            }
+        }
+
+        (
+            RangeSet::from_iter(below.into_iter()),
+            RangeSet::from_iter(above.into_iter()),
+        )
+    }
+
     pub fn intersects(&self, other: &RangeSet<K>) -> bool {
         self.intersections(other).next().is_some()
     }
@@ -393,6 +414,14 @@ impl<K: Ord + HasPrefix + Clone> RangeSet<K> {
 
     pub fn into_iter(self) -> impl Iterator<Item = Range<K>> {
         self.ranges.into_iter().map(|range| range.into())
+    }
+
+    pub fn first(&self) -> Option<&Range<K>> {
+        self.ranges.first().map(|range| &range.0)
+    }
+
+    pub fn last(&self) -> Option<&Range<K>> {
+        self.ranges.last().map(|range| &range.0)
     }
 
     fn intersections<'a>(&'a self, other: &'a RangeSet<K>) -> impl Iterator<Item = Range<K>> + 'a {

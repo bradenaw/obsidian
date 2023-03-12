@@ -71,7 +71,7 @@ pub(crate) trait Tablet {
         range: Range<&[u8]>,
         direction: Direction,
         limit: usize,
-    ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)>;
+    ) -> Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>), ReadError>;
 
     async fn history_page(
         &self,
@@ -143,13 +143,15 @@ impl Tablet for LsmTablet {
 
     async fn scan_page(
         &self,
-        _ts: Timestamp,
-        _keyspace_id: KeyspaceId,
-        _range: Range<&[u8]>,
-        _direction: Direction,
-        _limit: usize,
-    ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)> {
-        todo!();
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        range: Range<&[u8]>,
+        direction: Direction,
+        limit: usize,
+    ) -> Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>), ReadError> {
+        self.inner
+            .scan_page(ts, keyspace_id, range, direction, limit)
+            .await
     }
 
     async fn history_page(
@@ -378,6 +380,93 @@ impl LsmTabletInner {
         _key: &[u8],
     ) -> Result<(Timestamp, Option<Vec<u8>>), ReadError> {
         todo!();
+    }
+
+    async fn scan_page(
+        &self,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        range: Range<&[u8]>,
+        direction: Direction,
+        limit: usize,
+    ) -> Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>), ReadError> {
+        let owned_range_set = self
+            .owned_ranges
+            .get(&keyspace_id)
+            .ok_or_else(|| anyhow!("no ranges owned from {:?}", keyspace_id))?;
+
+        let intersecting_range_set = owned_range_set
+            .intersection(&RangeSet::from(range.to_vec()))
+            .clone();
+
+        let scan_range = match direction {
+            Direction::Asc => intersecting_range_set.first(),
+            Direction::Desc => intersecting_range_set.last(),
+        }
+        .ok_or_else(|| anyhow!(""))?;
+
+        let ok = match direction {
+            Direction::Asc => scan_range.lower.borrow() == range.lower,
+            Direction::Desc => scan_range.upper.borrow() == range.upper,
+        };
+        if !ok {
+            return Err(anyhow!("").into());
+        }
+
+        self.sequencer.wait_for_safe_read(ts).await?;
+
+        let (page, continue_cursor) = self
+            .lsm
+            .scan_page(ts, keyspace_id, scan_range.borrow(), direction, limit)
+            .await?;
+
+        if let Some(pending_keyspace_id) = keyspace_id.pending() {
+            let scanned_range = match continue_cursor {
+                Some(ref continue_cursor) => match direction {
+                    Direction::Asc => Range {
+                        lower: scan_range.lower.clone(),
+                        upper: continue_cursor.lower.clone(),
+                    },
+                    Direction::Desc => Range {
+                        lower: continue_cursor.upper.clone(),
+                        upper: scan_range.upper.clone(),
+                    },
+                },
+                None => scan_range.clone(),
+            };
+
+            let mut maybe_cursor = Some(scanned_range);
+            while let Some(cursor) = maybe_cursor {
+                let (conflict_page, conflict_continue_cursor) = self
+                    .lsm
+                    .scan_page(
+                        ts,
+                        pending_keyspace_id,
+                        cursor.borrow(),
+                        Direction::Asc,
+                        1000,
+                    )
+                    .await?;
+
+                for record in conflict_page {
+                    if let Value::Regular(bytes) = record.value {
+                        let pending_mut = PendingMutation::decode(&bytes)?;
+                        return Err(ReadError::Conflict(pending_mut.txid));
+                    }
+                }
+                maybe_cursor = conflict_continue_cursor;
+            }
+        }
+
+        Ok((
+            page.into_iter()
+                .filter_map(|record| match record.value {
+                    Value::Regular(v) => Some((record.key, record.ts, v)),
+                    Value::Tombstone => None,
+                })
+                .collect(),
+            continue_cursor,
+        ))
     }
 
     async fn write(
