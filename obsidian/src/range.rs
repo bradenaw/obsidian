@@ -56,6 +56,12 @@ impl<K> Bound<Vec<K>> {
     }
 }
 
+impl<K: Clone> Bound<&[K]> {
+    pub fn to_vec(&self) -> Bound<Vec<K>> {
+        self.clone().map(Vec::from)
+    }
+}
+
 impl<K: Ord + HasPrefix> Bound<K> {
     pub fn cmp_key(&self, other: &K) -> Ordering {
         match self {
@@ -261,8 +267,8 @@ impl<K: Ord + HasPrefix + Clone> Range<K> {
 impl<K: Clone> Range<&[K]> {
     pub fn to_vec(&self) -> Range<Vec<K>> {
         Range {
-            lower: self.lower.clone().map(Vec::from),
-            upper: self.upper.clone().map(Vec::from),
+            lower: self.lower.to_vec(),
+            upper: self.upper.to_vec(),
         }
     }
 }

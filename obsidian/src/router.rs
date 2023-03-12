@@ -9,6 +9,7 @@ use crate::obsidian::TabletId;
 use crate::range::Bound;
 use crate::range::KeyOrBound;
 use crate::types::ColoGroupId;
+use crate::types::Direction;
 use crate::types::ShardId;
 use crate::util::hexlify;
 
@@ -18,6 +19,10 @@ pub(crate) struct StaticRouter {
 
 impl StaticRouter {
     pub fn new(m: HashMap<ColoGroupId, (Vec<Bound<Vec<u8>>>, Vec<TabletId>)>) -> Self {
+        for (bounds, tablet_ids) in m.values() {
+            assert!(bounds.is_sorted());
+            assert_eq!(bounds.len() + 1, tablet_ids.len());
+        }
         Self { map: m }
     }
 }
@@ -29,7 +34,7 @@ impl Router for StaticRouter {
         key: &[u8],
     ) -> anyhow::Result<TabletId> {
         if colo_group_id == ColoGroupId::META {
-            return Ok(TabletId(ShardId(1), 1));
+            return Ok(TabletId::META);
         }
         if colo_group_id == ColoGroupId::TABLET_META {
             if key.len() < 12 {
@@ -56,5 +61,210 @@ impl Router for StaticRouter {
             .unwrap_or_else(core::convert::identity);
 
         Ok(tablet_ids[idx])
+    }
+
+    fn tablet_id_for_bound(
+        &self,
+        colo_group_id: ColoGroupId,
+        bound: Bound<&[u8]>,
+        direction: Direction,
+    ) -> anyhow::Result<TabletId> {
+        if colo_group_id == ColoGroupId::META {
+            return Ok(TabletId::META);
+        }
+        if colo_group_id == ColoGroupId::TABLET_META {
+            let key = match bound {
+                Bound::BeforeAll | Bound::AfterAll => {
+                    return Err(anyhow!("{}/{:?} not routeable", colo_group_id, bound))
+                }
+                Bound::Before(key) => {
+                    // key.len() == 12 means this is a tablet boundary, so can't scan off the edge
+                    // of it
+                    if direction == Direction::Desc && key.len() == 12 {
+                        return Err(anyhow!("{}/{:?} not routeable", colo_group_id, bound));
+                    }
+                    key
+                }
+                Bound::After(key) => key,
+                Bound::AfterPrefix(key) => {
+                    // key.len() == 12 means this is a tablet boundary, so can't scan off the edge
+                    // of it
+                    if direction == Direction::Asc && key.len() == 12 {
+                        return Err(anyhow!("{}/{:?} not routeable", colo_group_id, bound));
+                    }
+                    key
+                }
+            };
+
+            if key.len() < 12 {
+                anyhow::bail!(
+                    "TABLET_META key must be 12 bytes or longer: {}",
+                    hexlify(key)
+                );
+            }
+            return Ok(TabletId(
+                ShardId(BigEndian::read_u32(&key[0..4])),
+                BigEndian::read_u64(&key[4..12]),
+            ));
+        }
+
+        let (splits, tablet_ids) = self
+            .map
+            .get(&colo_group_id)
+            .ok_or_else(|| anyhow!("{:?} has no routing", colo_group_id))?;
+
+        let idx = match splits.binary_search(&bound.to_vec()) {
+            Ok(idx) => match direction {
+                Direction::Asc => idx + 1,
+                Direction::Desc => idx,
+            },
+            Err(idx) => idx,
+        };
+
+        Ok(tablet_ids[idx])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches::assert_matches;
+
+    use crate::obsidian::Router;
+    use crate::obsidian::TabletId;
+    use crate::range::Bound;
+    use crate::types::ColoGroupId;
+    use crate::types::Direction;
+    use crate::types::ShardId;
+
+    use super::StaticRouter;
+
+    #[test]
+    fn test_tablet_id_for_bound() -> anyhow::Result<()> {
+        let router = StaticRouter::new(
+            vec![
+                (
+                    ColoGroupId(1),
+                    (
+                        vec![Bound::Before(vec![1])],
+                        vec![TabletId(ShardId(1), 1), TabletId(ShardId(2), 2)],
+                    ),
+                ),
+                (
+                    ColoGroupId(2),
+                    (
+                        vec![Bound::Before(vec![1]), Bound::After(vec![5, 0])],
+                        vec![
+                            TabletId(ShardId(8), 1),
+                            TabletId(ShardId(9), 5),
+                            TabletId(ShardId(10), 3),
+                        ],
+                    ),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        assert_eq!(
+            router.tablet_id_for_bound(ColoGroupId::META, Bound::Before(&[0]), Direction::Asc)?,
+            TabletId(ShardId(1), 1)
+        );
+
+        assert_eq!(
+            router.tablet_id_for_bound(
+                ColoGroupId::TABLET_META,
+                Bound::Before(&[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 5]),
+                Direction::Asc,
+            )?,
+            TabletId(ShardId(1), 5),
+        );
+
+        assert_matches!(
+            router.tablet_id_for_bound(
+                ColoGroupId::TABLET_META,
+                Bound::Before(&[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 5]),
+                Direction::Desc,
+            ),
+            Err(_)
+        );
+
+        assert_eq!(
+            router.tablet_id_for_bound(
+                ColoGroupId::TABLET_META,
+                Bound::Before(&[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 5, 10]),
+                Direction::Desc,
+            )?,
+            TabletId(ShardId(1), 5),
+        );
+
+        assert_eq!(
+            router.tablet_id_for_bound(
+                ColoGroupId::TABLET_META,
+                Bound::AfterPrefix(&[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 5]),
+                Direction::Desc,
+            )?,
+            TabletId(ShardId(1), 5),
+        );
+
+        assert_matches!(
+            router.tablet_id_for_bound(
+                ColoGroupId::TABLET_META,
+                Bound::AfterPrefix(&[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 5]),
+                Direction::Asc,
+            ),
+            Err(_)
+        );
+
+        assert_eq!(
+            router.tablet_id_for_bound(ColoGroupId(1), Bound::Before(&[0]), Direction::Asc)?,
+            TabletId(ShardId(1), 1),
+        );
+        assert_eq!(
+            router.tablet_id_for_bound(ColoGroupId(1), Bound::Before(&[1]), Direction::Desc)?,
+            TabletId(ShardId(1), 1),
+        );
+        assert_eq!(
+            router.tablet_id_for_bound(ColoGroupId(1), Bound::Before(&[1]), Direction::Asc)?,
+            TabletId(ShardId(2), 2),
+        );
+        assert_eq!(
+            router.tablet_id_for_bound(ColoGroupId(1), Bound::Before(&[1, 1]), Direction::Desc)?,
+            TabletId(ShardId(2), 2),
+        );
+
+        assert_eq!(
+            router.tablet_id_for_bound(ColoGroupId(2), Bound::Before(&[0]), Direction::Asc)?,
+            TabletId(ShardId(8), 1),
+        );
+        assert_eq!(
+            router.tablet_id_for_bound(ColoGroupId(2), Bound::Before(&[1]), Direction::Desc)?,
+            TabletId(ShardId(8), 1),
+        );
+        assert_eq!(
+            router.tablet_id_for_bound(ColoGroupId(2), Bound::Before(&[1]), Direction::Asc)?,
+            TabletId(ShardId(9), 5),
+        );
+        assert_eq!(
+            router.tablet_id_for_bound(ColoGroupId(2), Bound::Before(&[1, 5]), Direction::Asc)?,
+            TabletId(ShardId(9), 5),
+        );
+        assert_eq!(
+            router.tablet_id_for_bound(ColoGroupId(2), Bound::After(&[5, 0]), Direction::Desc)?,
+            TabletId(ShardId(9), 5),
+        );
+        assert_eq!(
+            router.tablet_id_for_bound(ColoGroupId(2), Bound::After(&[5, 0]), Direction::Asc)?,
+            TabletId(ShardId(10), 3),
+        );
+        assert_eq!(
+            router.tablet_id_for_bound(
+                ColoGroupId(2),
+                Bound::AfterPrefix(&[5, 0]),
+                Direction::Desc,
+            )?,
+            TabletId(ShardId(10), 3),
+        );
+
+        Ok(())
     }
 }
