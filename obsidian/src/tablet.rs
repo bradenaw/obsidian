@@ -215,7 +215,7 @@ impl LsmTablet {
     pub async fn new(
         tablet_id: TabletId,
         lsm: Lsm,
-        owned_ranges: HashMap<KeyspaceId, RangeSet<Vec<u8>>>,
+        owned_ranges: HashMap<ColoGroupId, RangeSet<Vec<u8>>>,
         tablets: Box<dyn Tablets + Sync + Send>,
         router: Box<dyn Router + Sync + Send>,
     ) -> anyhow::Result<Self> {
@@ -283,7 +283,7 @@ impl Drop for LsmTablet {
 struct LsmTabletInner {
     tablet_id: TabletId,
     lsm: Lsm,
-    owned_ranges: HashMap<KeyspaceId, RangeSet<Vec<u8>>>,
+    owned_ranges: HashMap<ColoGroupId, RangeSet<Vec<u8>>>,
     tablets: Box<dyn Tablets + Sync + Send>,
     router: Box<dyn Router + Sync + Send>,
     sequencer: Sequencer,
@@ -311,7 +311,7 @@ impl LsmTabletInner {
     fn new(
         tablet_id: TabletId,
         lsm: Lsm,
-        owned_ranges: HashMap<KeyspaceId, RangeSet<Vec<u8>>>,
+        owned_ranges: HashMap<ColoGroupId, RangeSet<Vec<u8>>>,
         tablets: Box<dyn Tablets + Sync + Send>,
         router: Box<dyn Router + Sync + Send>,
         prepare_sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
@@ -342,7 +342,7 @@ impl LsmTabletInner {
         keyspace_id: KeyspaceId,
         key: Vec<u8>,
     ) -> Result<Option<Vec<u8>>, ReadError> {
-        self.check_key(keyspace_id, &key)?;
+        self.check_key(keyspace_id.0, &key)?;
         self.sequencer.wait_for_safe_read(ts).await?;
 
         let (maybe_record, maybe_pending_value) = future::try_join(
@@ -376,7 +376,7 @@ impl LsmTabletInner {
         keyspace_id: KeyspaceId,
         key: &[u8],
     ) -> Result<(Timestamp, Option<Vec<u8>>), ReadError> {
-        self.check_key(keyspace_id, &key)?;
+        self.check_key(keyspace_id.0, &key)?;
 
         let _guard = self.lock_mgr.read_lock(key).await;
 
@@ -591,10 +591,10 @@ impl LsmTabletInner {
         muts: &BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
     ) -> anyhow::Result<Guard<'a>> {
         for precond in preconds {
-            self.check_key(precond.keyspace_id(), precond.key())?;
+            self.check_key(precond.keyspace_id().0, precond.key())?;
         }
         for (keyspace_id, key) in muts.keys() {
-            self.check_key(*keyspace_id, &key)?;
+            self.check_key(keyspace_id.0, &key)?;
         }
         Ok(self
             .lock_mgr
@@ -877,8 +877,8 @@ impl LsmTabletInner {
         .await;
     }
 
-    fn check_key(&self, keyspace_id: KeyspaceId, key: &[u8]) -> anyhow::Result<()> {
-        if keyspace_id.0 == ColoGroupId::META {
+    fn check_key(&self, colo_group_id: ColoGroupId, key: &[u8]) -> anyhow::Result<()> {
+        if colo_group_id == ColoGroupId::META {
             if key.len() < 12 {
                 return Err(anyhow!("key {:?} too short for ColoGroupId::META", key));
             }
@@ -890,25 +890,15 @@ impl LsmTabletInner {
                 return Ok(());
             }
         }
-        if let Some(userland_keyspace_id) = keyspace_id.userland() {
-            if self
-                .owned_ranges
-                .get(&userland_keyspace_id)
-                .ok_or_else(|| anyhow!("no ranges owned from {:?}", userland_keyspace_id))?
-                .contains(&key.to_vec())
-            {
-                return Ok(());
-            }
-        }
         if self
             .owned_ranges
-            .get(&keyspace_id)
-            .ok_or_else(|| anyhow!("no ranges owned from {:?}", keyspace_id))?
+            .get(&colo_group_id)
+            .ok_or_else(|| anyhow!("no ranges owned from {:?}", colo_group_id))?
             .contains(&key.to_vec())
         {
             return Ok(());
         }
-        Err(anyhow!("{:?}:{:?} not owned", keyspace_id, key).into())
+        Err(anyhow!("{:?}/{:?} not owned", colo_group_id, key).into())
     }
 }
 
