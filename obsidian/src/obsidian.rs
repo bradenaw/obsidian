@@ -645,7 +645,7 @@ mod test {
                 tablet_id1,
                 LsmBuilder::new().storage(storage.clone()).build().await?,
                 vec![(
-                    keyspace_id,
+                    colo_group_id,
                     RangeSet::from(Range {
                         lower: Bound::BeforeAll,
                         upper: Bound::Before(vec![1]),
@@ -662,7 +662,7 @@ mod test {
                 tablet_id2,
                 LsmBuilder::new().storage(storage.clone()).build().await?,
                 vec![(
-                    keyspace_id,
+                    colo_group_id,
                     RangeSet::from(Range {
                         lower: Bound::Before(vec![1]),
                         upper: Bound::AfterAll,
