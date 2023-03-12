@@ -15,8 +15,10 @@ use futures::future;
 use rand::Rng;
 use thiserror::Error;
 
+use crate::range::Bound;
 use crate::tablet::Tablet;
 use crate::types::ColoGroupId;
+use crate::types::Direction;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
@@ -260,18 +262,32 @@ impl Obsidian {
 pub(crate) struct TabletId(pub ShardId, pub u64);
 
 impl TabletId {
-    const META: Self = TabletId(ShardId(1), 1);
+    pub(crate) const META: Self = TabletId(ShardId(1), 1);
 }
 
 impl std::fmt::Display for TabletId {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        write!(f, "tablet:{}/{}", self.0 .0, self.1)
+        write!(f, "{}/{}", self.0 .0, self.1)
+    }
+}
+
+impl std::fmt::Debug for TabletId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        f.write_str("tablet:")?;
+        std::fmt::Display::fmt(self, f)
     }
 }
 
 pub(crate) trait Router {
     fn tablet_id_for_key(&self, colo_group_id: ColoGroupId, key: &[u8])
         -> anyhow::Result<TabletId>;
+
+    fn tablet_id_for_bound(
+        &self,
+        colo_group_id: ColoGroupId,
+        bound: Bound<&[u8]>,
+        direction: Direction,
+    ) -> anyhow::Result<TabletId>;
 }
 
 pub(crate) trait Tablets {
@@ -433,6 +449,15 @@ mod test {
             key: &[u8],
         ) -> anyhow::Result<TabletId> {
             T::tablet_id_for_key(&self, colo_group_id, key)
+        }
+
+        fn tablet_id_for_bound(
+            &self,
+            colo_group_id: ColoGroupId,
+            bound: Bound<&[u8]>,
+            direction: Direction,
+        ) -> anyhow::Result<TabletId> {
+            T::tablet_id_for_bound(&self, colo_group_id, bound, direction)
         }
     }
 
