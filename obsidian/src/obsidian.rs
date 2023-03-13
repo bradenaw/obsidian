@@ -618,100 +618,203 @@ mod test {
         }
     }
 
+    async fn new_with_single_byte_routing(n_tablets: usize) -> anyhow::Result<Obsidian> {
+        let tablets = Arc::new(StaticTablets {
+            m: Mutex::new(HashMap::new()),
+        });
+
+        let colo_group_id = ColoGroupId(1);
+        let keyspace_id = KeyspaceId(colo_group_id, 1);
+
+        // META gets everything up to the first split.
+        let mut tablet_ids = vec![TabletId::META];
+        let mut splits = vec![];
+        for i in 0..n_tablets {
+            let shard_id = ShardId(((i % 2) + 1) as u32);
+            tablet_ids.push(TabletId(shard_id, (i + 1) as u64));
+            splits.push(Bound::Before(vec![(i + 1) as u8]));
+        }
+
+        let router = Arc::new(StaticRouter::new(
+            vec![(colo_group_id, (splits.clone(), tablet_ids.clone()))]
+                .into_iter()
+                .collect(),
+        ));
+
+        let storage = Arc::new(MemStorage::new());
+
+        for (i, tablet_id) in tablet_ids.iter().enumerate() {
+            let range = Range {
+                lower: if i == 0 {
+                    Bound::BeforeAll
+                } else {
+                    splits[i - 1].clone()
+                },
+                upper: if i == tablet_ids.len() - 1 {
+                    Bound::AfterAll
+                } else {
+                    splits[i].clone()
+                },
+            };
+            let tablet = LsmTablet::new(
+                *tablet_id,
+                LsmBuilder::new().storage(storage.clone()).build().await?,
+                vec![(colo_group_id, RangeSet::from(range))]
+                    .into_iter()
+                    .collect(),
+                Box::new(tablets.clone()),
+                Box::new(router.clone()),
+            )
+            .await?;
+            tablet.create_keyspace(keyspace_id).await?;
+            let mut m = tablets.m.lock().unwrap();
+            m.insert(*tablet_id, Arc::new(tablet));
+        }
+
+        Ok(Obsidian::new(Box::new(router.clone()), Box::new(tablets)))
+    }
+
     #[tokio::test]
-    async fn test_2pc() {
+    async fn test_2pc() -> anyhow::Result<()> {
+        let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
+        let obs = new_with_single_byte_routing(2).await?;
+
+        let key1 = vec![1];
+        let key2 = vec![2];
+
+        let write_ts = obs
+            .write(
+                vec![],
+                BTreeMap::from([
+                    ((keyspace_id, key1.clone()), Mutation::Put(vec![1, 2, 3])),
+                    ((keyspace_id, key2.clone()), Mutation::Put(vec![4, 5, 6])),
+                ]),
+            )
+            .await?;
+
+        assert_eq!(
+            obs.get(write_ts, keyspace_id, key1).await?,
+            Some(vec![1, 2, 3])
+        );
+        assert_eq!(
+            obs.get(write_ts, keyspace_id, key2).await?,
+            Some(vec![4, 5, 6])
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scan_page() {
         async fn inner() -> anyhow::Result<()> {
-            let tablets = Arc::new(StaticTablets {
-                m: Mutex::new(HashMap::new()),
-            });
+            let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
+            let obs = new_with_single_byte_routing(3).await?;
 
-            let colo_group_id = ColoGroupId(1);
-            let keyspace_id = KeyspaceId(colo_group_id, 1);
+            let writes: [(Vec<u8>, _); 12] = [
+                //          ts=0123456789
+                (vec![1, 0], b" o  o    o"),
+                (vec![1, 1], b"   o     o"),
+                (vec![1, 2], b"   o x    "),
+                (vec![1, 3], b"   oxo    "),
+                (vec![2, 0], b"    o   o "),
+                (vec![2, 1], b"     o  o "),
+                (vec![2, 2], b" o x  o  o"),
+                (vec![3, 0], b"  o oxo  o"),
+                (vec![3, 1], b"  o  oo o "),
+                (vec![3, 2], b" xoxoxoxox"),
+                (vec![3, 3], b"        o "),
+                (vec![3, 4], b" ooooooooo"),
+            ];
 
-            let tablet_id1 = TabletId(ShardId(1), 1);
-            let tablet_id2 = TabletId(ShardId(2), 1);
+            let mut timestamps = vec![];
+            for ts_idx in 1..writes[0].1.len() {
+                let mut mutations = BTreeMap::new();
+                for (key, versions) in &writes {
+                    let mutation = match versions[ts_idx] {
+                        b'o' => Mutation::Put(format!("{:?} {}", key, ts_idx).into()),
+                        b'x' => Mutation::Delete,
+                        _ => continue,
+                    };
 
-            let router = Arc::new(StaticRouter::new(
-                vec![(
-                    colo_group_id,
-                    (vec![Bound::Before(vec![1])], vec![tablet_id1, tablet_id2]),
-                )]
-                .into_iter()
-                .collect(),
-            ));
+                    mutations.insert((keyspace_id, key.clone()), mutation);
+                }
 
-            let storage = Arc::new(MemStorage::new());
-            let tablet1 = LsmTablet::new(
-                tablet_id1,
-                LsmBuilder::new().storage(storage.clone()).build().await?,
-                vec![(
-                    colo_group_id,
-                    RangeSet::from(Range {
-                        lower: Bound::BeforeAll,
-                        upper: Bound::Before(vec![1]),
-                    }),
-                )]
-                .into_iter()
-                .collect(),
-                Box::new(tablets.clone()),
-                Box::new(router.clone()),
-            )
-            .await?;
-            tablet1.create_keyspace(keyspace_id).await?;
-            let tablet2 = LsmTablet::new(
-                tablet_id2,
-                LsmBuilder::new().storage(storage.clone()).build().await?,
-                vec![(
-                    colo_group_id,
-                    RangeSet::from(Range {
-                        lower: Bound::Before(vec![1]),
-                        upper: Bound::AfterAll,
-                    }),
-                )]
-                .into_iter()
-                .collect(),
-                Box::new(tablets.clone()),
-                Box::new(router.clone()),
-            )
-            .await?;
-            tablet2.create_keyspace(keyspace_id).await?;
+                if mutations.is_empty() {
+                    timestamps.push(timestamps.last().cloned().unwrap_or(Timestamp(0)));
+                    continue;
+                }
 
-            {
-                let mut m = tablets.m.lock().unwrap();
-                m.insert(TabletId(ShardId(1), 1), Arc::new(tablet1));
-                m.insert(TabletId(ShardId(2), 1), Arc::new(tablet2));
+                let ts = obs.write(vec![], mutations).await?;
+                timestamps.push(ts);
             }
 
-            let obs = Obsidian::new(Box::new(router.clone()), Box::new(tablets));
+            async fn check(
+                obs: &Obsidian,
+                ts: Timestamp,
+                range: Range<&[u8]>,
+                expected: Vec<(Vec<u8>, Timestamp)>,
+            ) -> anyhow::Result<()> {
+                let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
+                for page_size in 1..=expected.len() {
+                    for direction in [Direction::Asc, Direction::Desc] {
+                        let mut maybe_cursor = Some(range.to_vec());
+                        let mut results = vec![];
+                        while let Some(cursor) = maybe_cursor {
+                            let (page, continue_cursor) = obs
+                                .scan_page(ts, keyspace_id, cursor.borrow(), direction, page_size)
+                                .await?;
 
-            let key1 = vec![0];
-            let key2 = vec![1];
+                            assert!(page.len() <= page_size);
+                            results.extend(page);
+                            maybe_cursor = continue_cursor;
+                        }
 
-            let write_ts = obs
-                .write(
-                    vec![],
-                    BTreeMap::from([
-                        ((keyspace_id, key1.clone()), Mutation::Put(vec![1, 2, 3])),
-                        ((keyspace_id, key2.clone()), Mutation::Put(vec![4, 5, 6])),
-                    ]),
-                )
-                .await?;
+                        if direction == Direction::Desc {
+                            results.reverse();
+                        }
 
-            assert_eq!(
-                obs.get(write_ts, keyspace_id, key1).await?,
-                Some(vec![1, 2, 3])
-            );
-            assert_eq!(
-                obs.get(write_ts, keyspace_id, key2).await?,
-                Some(vec![4, 5, 6])
-            );
+                        assert_eq!(
+                        results,
+                        expected
+                            .clone()
+                            .into_iter()
+                            .map(|(key, ts)| (
+                                key.clone(),
+                                ts,
+                                format!("{:?} {}", key, ts).into(),
+                            ))
+                            .collect::<Vec<_>>(),
+                        "scan_page(ts={:?}, /*keyspace_id*/, /*cursor*/, direction={:?}, page_size={})",
+                        ts,
+                        direction,
+                        page_size,
+                    );
+                    }
+                }
+
+                Ok(())
+            }
+
+            check(
+                &obs,
+                timestamps[5],
+                Range {
+                    lower: Bound::Before(&[1, 1]),
+                    upper: Bound::After(&[2, 0]),
+                },
+                vec![
+                    (vec![1, 1], timestamps[5]),
+                    (vec![1, 3], timestamps[5]),
+                    (vec![2, 0], timestamps[4]),
+                ],
+            )
+            .await?;
 
             Ok(())
         }
 
         if let Err(e) = inner().await {
-            println!("{:?}", e);
-            assert!(false);
+            panic!("{:?}", e);
         }
     }
 }
