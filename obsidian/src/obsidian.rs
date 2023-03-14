@@ -58,9 +58,9 @@ impl Obsidian {
                 let mut already_seen_conflicts = already_seen_conflicts.borrow_mut();
                 match tablet.get(ts, keyspace_id, key.clone()).await {
                     Ok(v) => return Ok(v),
-                    Err(ReadError::Conflict(other_txid)) => {
+                    Err(InternalError::Conflict(other_txid)) => {
                         if already_seen_conflicts.contains(&other_txid) {
-                            return Err(ReadError::Conflict(other_txid));
+                            return Err(InternalError::Conflict(other_txid));
                         }
                         let other_txid_owner_tablet = self.tablets.tablet(other_txid.owner)?;
                         if txid.can_preempt(&other_txid) {
@@ -69,7 +69,7 @@ impl Obsidian {
                             other_txid_owner_tablet.wait(other_txid).await?;
                         }
                         already_seen_conflicts.insert(other_txid);
-                        Err(ReadError::Conflict(other_txid))
+                        Err(InternalError::Conflict(other_txid))
                     }
                     Err(e) => return Err(e.into()),
                 }
@@ -102,7 +102,7 @@ impl Obsidian {
                 .write(txid, preconds, muts)
                 .await
                 .map_err(|e| match e {
-                    InternalWriteError::PreconditionFailed => WriteError::PreconditionFailed,
+                    InternalError::PreconditionFailed => WriteError::PreconditionFailed,
                     e => WriteError::Other(e.into()),
                 });
         }
@@ -154,7 +154,7 @@ impl Obsidian {
                             pending_tablets.remove(&tablet_id);
                             max_prepare_ts = cmp::max(max_prepare_ts, prepare_ts);
                         }
-                        Err(InternalWriteError::Conflict(other_txid)) => {
+                        Err(InternalError::Conflict(other_txid)) => {
                             if already_seen_conflicts.contains(&other_txid) {
                                 saw_an_already_seen = true;
                             } else if txid.can_preempt(&other_txid) {
@@ -378,29 +378,15 @@ impl Debug for Txid {
 }
 
 #[derive(Error, Debug)]
-pub(crate) enum CommitError {
+pub(crate) enum InternalError {
+    #[error("conflict")]
+    Conflict(Txid),
     #[error("already committed")]
     AlreadyCommitted,
     #[error("already aborted")]
     AlreadyAborted,
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
-}
-
-#[derive(Error, Debug)]
-pub(crate) enum InternalWriteError {
     #[error("precondition failed")]
     PreconditionFailed,
-    #[error("conflict")]
-    Conflict(Txid),
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
-}
-
-#[derive(Error, Debug)]
-pub(crate) enum ReadError {
-    #[error("conflict")]
-    Conflict(Txid),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -433,9 +419,8 @@ mod test {
     use crate::types::Timestamp;
     use crate::types::Value;
 
-    use super::InternalWriteError;
+    use super::InternalError;
     use super::Obsidian;
-    use super::ReadError;
     use super::Router;
     use super::TabletId;
     use super::Tablets;
@@ -468,7 +453,7 @@ mod test {
             ts: Timestamp,
             keyspace_id: KeyspaceId,
             key: Vec<u8>,
-        ) -> Result<Option<Vec<u8>>, ReadError> {
+        ) -> Result<Option<Vec<u8>>, InternalError> {
             T::get(self, ts, keyspace_id, key).await
         }
 
@@ -476,7 +461,7 @@ mod test {
             &self,
             keyspace_id: KeyspaceId,
             key: &[u8],
-        ) -> Result<(Timestamp, Option<Vec<u8>>), ReadError> {
+        ) -> Result<(Timestamp, Option<Vec<u8>>), InternalError> {
             T::get_latest(self, keyspace_id, key).await
         }
 
@@ -508,7 +493,7 @@ mod test {
             txid: Txid,
             preconds: Vec<Precondition>,
             muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
-        ) -> Result<Timestamp, InternalWriteError> {
+        ) -> Result<Timestamp, InternalError> {
             T::write(self, txid, preconds, muts).await
         }
 
@@ -517,7 +502,7 @@ mod test {
             txid: Txid,
             preconds: Vec<Precondition>,
             muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
-        ) -> Result<Timestamp, InternalWriteError> {
+        ) -> Result<Timestamp, InternalError> {
             T::prepare(self, txid, preconds, muts).await
         }
 

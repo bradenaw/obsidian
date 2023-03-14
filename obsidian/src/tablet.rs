@@ -22,9 +22,7 @@ use tokio::task::JoinHandle;
 use crate::lock_mgr::Guard;
 use crate::lock_mgr::LockMgr;
 use crate::lsm::Lsm;
-use crate::obsidian::CommitError;
-use crate::obsidian::InternalWriteError;
-use crate::obsidian::ReadError;
+use crate::obsidian::InternalError;
 use crate::obsidian::Router;
 use crate::obsidian::TabletId;
 use crate::obsidian::Tablets;
@@ -55,13 +53,13 @@ pub(crate) trait Tablet {
         ts: Timestamp,
         keyspace_id: KeyspaceId,
         key: Vec<u8>,
-    ) -> Result<Option<Vec<u8>>, ReadError>;
+    ) -> Result<Option<Vec<u8>>, InternalError>;
 
     async fn get_latest(
         &self,
         keyspace_id: KeyspaceId,
         key: &[u8],
-    ) -> Result<(Timestamp, Option<Vec<u8>>), ReadError>;
+    ) -> Result<(Timestamp, Option<Vec<u8>>), InternalError>;
 
     async fn scan_page(
         &self,
@@ -87,14 +85,14 @@ pub(crate) trait Tablet {
         txid: Txid,
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
-    ) -> Result<Timestamp, InternalWriteError>;
+    ) -> Result<Timestamp, InternalError>;
 
     async fn prepare(
         &self,
         txid: Txid,
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
-    ) -> Result<Timestamp, InternalWriteError>;
+    ) -> Result<Timestamp, InternalError>;
 
     async fn try_commit(
         &self,
@@ -128,7 +126,7 @@ impl Tablet for LsmTablet {
         ts: Timestamp,
         keyspace_id: KeyspaceId,
         key: Vec<u8>,
-    ) -> Result<Option<Vec<u8>>, ReadError> {
+    ) -> Result<Option<Vec<u8>>, InternalError> {
         self.inner.get(ts, keyspace_id, key).await
     }
 
@@ -136,7 +134,7 @@ impl Tablet for LsmTablet {
         &self,
         keyspace_id: KeyspaceId,
         key: &[u8],
-    ) -> Result<(Timestamp, Option<Vec<u8>>), ReadError> {
+    ) -> Result<(Timestamp, Option<Vec<u8>>), InternalError> {
         self.inner.get_latest(keyspace_id, key).await
     }
 
@@ -168,7 +166,7 @@ impl Tablet for LsmTablet {
         txid: Txid,
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
-    ) -> Result<Timestamp, InternalWriteError> {
+    ) -> Result<Timestamp, InternalError> {
         self.inner.write(txid, preconds, muts).await
     }
 
@@ -177,7 +175,7 @@ impl Tablet for LsmTablet {
         txid: Txid,
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
-    ) -> Result<Timestamp, InternalWriteError> {
+    ) -> Result<Timestamp, InternalError> {
         self.inner.prepare(txid, preconds, muts).await
     }
 
@@ -341,7 +339,7 @@ impl LsmTabletInner {
         ts: Timestamp,
         keyspace_id: KeyspaceId,
         key: Vec<u8>,
-    ) -> Result<Option<Vec<u8>>, ReadError> {
+    ) -> Result<Option<Vec<u8>>, InternalError> {
         self.check_key(keyspace_id.0, &key)?;
         self.sequencer.wait_for_safe_read(ts).await?;
 
@@ -359,7 +357,7 @@ impl LsmTabletInner {
 
         if let Some((_, Value::Regular(bytes))) = maybe_pending_value {
             let pending_mut = PendingMutation::decode(&bytes)?;
-            return Err(ReadError::Conflict(pending_mut.txid));
+            return Err(InternalError::Conflict(pending_mut.txid));
         }
 
         Ok(match maybe_record {
@@ -375,7 +373,7 @@ impl LsmTabletInner {
         &self,
         keyspace_id: KeyspaceId,
         key: &[u8],
-    ) -> Result<(Timestamp, Option<Vec<u8>>), ReadError> {
+    ) -> Result<(Timestamp, Option<Vec<u8>>), InternalError> {
         self.check_key(keyspace_id.0, &key)?;
 
         let _guard = self.lock_mgr.read_lock(key).await;
@@ -395,7 +393,7 @@ impl LsmTabletInner {
 
         if let Some((_, Value::Regular(bytes))) = maybe_pending_value {
             let pending_mut = PendingMutation::decode(&bytes)?;
-            return Err(ReadError::Conflict(pending_mut.txid));
+            return Err(InternalError::Conflict(pending_mut.txid));
         }
 
         Ok(match maybe_record {
@@ -412,11 +410,11 @@ impl LsmTabletInner {
         _txid: Txid,
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
-    ) -> Result<Timestamp, InternalWriteError> {
+    ) -> Result<Timestamp, InternalError> {
         let _guard = self.acquire_write_locks(&preconds, &muts).await?;
 
         if let Some(conflict_txid) = self.check_write_conflicts(&preconds, &muts).await? {
-            return Err(InternalWriteError::Conflict(conflict_txid));
+            return Err(InternalError::Conflict(conflict_txid));
         }
 
         let ts = self.sequencer.start_write();
@@ -424,7 +422,7 @@ impl LsmTabletInner {
         self.lsm
             .write(*ts, preconds, muts)
             .await
-            .map_err(|e| InternalWriteError::Other(e.into()))?;
+            .map_err(|e| InternalError::Other(e.into()))?;
 
         Ok(*ts)
     }
@@ -434,11 +432,11 @@ impl LsmTabletInner {
         txid: Txid,
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
-    ) -> Result<Timestamp, InternalWriteError> {
+    ) -> Result<Timestamp, InternalError> {
         let _guard = self.acquire_write_locks(&preconds, &muts).await?;
 
         if let Some(conflict_txid) = self.check_write_conflicts(&preconds, &muts).await? {
-            return Err(InternalWriteError::Conflict(conflict_txid));
+            return Err(InternalError::Conflict(conflict_txid));
         }
 
         let ts = self.sequencer.start_write();
@@ -453,7 +451,7 @@ impl LsmTabletInner {
             let mut value = self
                 .unsafe_get_latest_record(keyspace_id, precond.key())
                 .await
-                .map_err(|e| InternalWriteError::Other(e.into()))?
+                .map_err(|e| InternalError::Other(e.into()))?
                 .map(|(_, v)| match v {
                     Value::Regular(v) => v,
                     Value::Tombstone => vec![],
@@ -462,9 +460,7 @@ impl LsmTabletInner {
             value.extend_from_slice(&txid.to_bytes()[..]);
 
             if value.len() > MAX_PRECOND_VALUE_LEN {
-                return Err(InternalWriteError::Other(anyhow::anyhow!(
-                    "too much contention"
-                )));
+                return Err(InternalError::Other(anyhow::anyhow!("too much contention")));
             }
 
             actual_muts.insert((keyspace_id, precond.key().to_vec()), Mutation::Put(value));
@@ -486,7 +482,7 @@ impl LsmTabletInner {
         self.lsm
             .write(*ts, preconds.clone(), actual_muts)
             .await
-            .map_err(|e| InternalWriteError::Other(e.into()))?;
+            .map_err(|e| InternalError::Other(e.into()))?;
 
         for precond in preconds {
             _ = self
@@ -659,7 +655,7 @@ impl LsmTabletInner {
                     )]),
                 )
                 .await
-                .map_err(|e| CommitError::Other(e.into()))?;
+                .map_err(|e| InternalError::Other(e.into()))?;
         }
         let tx_outcome = tx_outcome_record.tx_outcome();
         if let TxOutcomeRecord::Committed {
@@ -843,7 +839,7 @@ impl LsmTabletInner {
                 )]),
             )
             .await
-            .map_err(|e| CommitError::Other(e.into()))?;
+            .map_err(|e| InternalError::Other(e.into()))?;
         Ok(())
     }
 
