@@ -73,18 +73,28 @@ impl Obsidian {
             .unwrap();
         let mut txid = Txid::new(*owner_tablet_id);
 
-        // TODO: move into loop, since need to resolve conflicts
         if write_by_tablet.len() == 1 {
             let (tablet_id, (preconds, muts)) = write_by_tablet.into_iter().next().unwrap();
-
             return self
-                .tablets
-                .tablet(tablet_id)?
-                .write(txid, preconds, muts)
+                .with_resolve_conflicts(|| {
+                    let preconds = preconds.clone();
+                    let muts = muts.clone();
+                    async move {
+                        self.tablets
+                            .tablet(tablet_id)?
+                            .write(txid, preconds, muts)
+                            .await
+                    }
+                })
                 .await
-                .map_err(|e| match e {
-                    InternalError::PreconditionFailed => WriteError::PreconditionFailed,
-                    e => WriteError::Other(e.into()),
+                .map_err(|e| {
+                    match e.downcast_ref::<InternalError>() {
+                        Some(InternalError::PreconditionFailed) => {
+                            return WriteError::PreconditionFailed;
+                        }
+                        _ => {}
+                    }
+                    e.into()
                 });
         }
 
@@ -243,8 +253,9 @@ impl Obsidian {
         F: Fn() -> Fut,
         Fut: Future<Output = Result<T, InternalError>>,
     {
-        // Read transaction IDs can have an arbitrary tablet ID in them because they never commit
-        // and never surface to any other transaction as a conflict.
+        // We can use an 'arbitrary' txid here even with a nonexistent tablet because this
+        // never surfaces anywhere else, we just use it to decide if we can preempt other
+        // transactions.
         let txid = Txid::new(TabletId(ShardId(0), 0));
 
         let already_seen_conflicts = RefCell::new(HashSet::new());
