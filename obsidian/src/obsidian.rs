@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::fmt::Debug;
+use std::future::Future;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -47,35 +48,15 @@ impl Obsidian {
         keyspace_id: KeyspaceId,
         key: Vec<u8>,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        let tablet_id = self.router.tablet_id_for_key(keyspace_id.0, &key)?;
-        let tablet = self.tablets.tablet(tablet_id)?;
-        let txid = Txid::new(tablet_id);
-        let already_seen_conflicts = RefCell::new(HashSet::new());
-
-        Retry::new()
-            .n_attempts(MAX_CONFLICT_RETRIES + 1)
-            .with_retry(|| async {
-                let mut already_seen_conflicts = already_seen_conflicts.borrow_mut();
-                match tablet.get(ts, keyspace_id, key.clone()).await {
-                    Ok(v) => return Ok(v),
-                    Err(InternalError::Conflict(other_txid)) => {
-                        if already_seen_conflicts.contains(&other_txid) {
-                            return Err(InternalError::Conflict(other_txid));
-                        }
-                        let other_txid_owner_tablet = self.tablets.tablet(other_txid.owner)?;
-                        if txid.can_preempt(&other_txid) {
-                            other_txid_owner_tablet.try_abort(other_txid).await?;
-                        } else {
-                            other_txid_owner_tablet.wait(other_txid).await?;
-                        }
-                        already_seen_conflicts.insert(other_txid);
-                        Err(InternalError::Conflict(other_txid))
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            })
-            .await
-            .context("too much contention")
+        self.with_resolve_conflicts(|| {
+            let key = key.clone();
+            async move {
+                let tablet_id = self.router.tablet_id_for_key(keyspace_id.0, &key)?;
+                let tablet = self.tablets.tablet(tablet_id)?;
+                tablet.get(ts, keyspace_id, key.clone()).await
+            }
+        })
+        .await
     }
 
     pub async fn write(
@@ -255,6 +236,49 @@ impl Obsidian {
         }
 
         Ok(result)
+    }
+
+    async fn with_resolve_conflicts<F, Fut, T>(&self, f: F) -> anyhow::Result<T>
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = Result<T, InternalError>>,
+    {
+        // Read transaction IDs can have an arbitrary tablet ID in them because they never commit
+        // and never surface to any other transaction as a conflict.
+        let txid = Txid::new(TabletId(ShardId(0), 0));
+
+        let already_seen_conflicts = RefCell::new(HashSet::new());
+
+        Retry::new()
+            .n_attempts(MAX_CONFLICT_RETRIES + 1)
+            .with_retry(|| async {
+                let mut already_seen_conflicts = already_seen_conflicts.borrow_mut();
+
+                match f().await {
+                    Ok(v) => return Ok(v),
+                    Err(InternalError::Conflict(other_txid)) => {
+                        // If we've already seen this txid as a conflict that means we already
+                        // wait/aborted it and we're still just waiting for it to get cleaned up,
+                        // so just take another turn around the retry loop.
+                        if already_seen_conflicts.contains(&other_txid) {
+                            return Err(InternalError::Conflict(other_txid));
+                        }
+
+                        let other_txid_owner_tablet = self.tablets.tablet(other_txid.owner)?;
+                        if txid.can_preempt(&other_txid) {
+                            other_txid_owner_tablet.try_abort(other_txid).await?;
+                        } else {
+                            other_txid_owner_tablet.wait(other_txid).await?;
+                        }
+
+                        already_seen_conflicts.insert(other_txid);
+                        Err(InternalError::Conflict(other_txid))
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            })
+            .await
+            .context("too much contention")
     }
 }
 
