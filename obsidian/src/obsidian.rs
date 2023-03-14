@@ -49,7 +49,7 @@ impl Obsidian {
         keyspace_id: KeyspaceId,
         key: Vec<u8>,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        self.read_retries(|| {
+        self.with_resolve_conflicts(|| {
             let key = key.clone();
             async move {
                 let tablet_id = self.router.tablet_id_for_key(keyspace_id.0, &key)?;
@@ -68,7 +68,7 @@ impl Obsidian {
         direction: Direction,
         limit: usize,
     ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)> {
-        self.read_retries(|| async move {
+        self.with_resolve_conflicts(|| async move {
             let start_bound = match direction {
                 Direction::Asc => range.lower,
                 Direction::Desc => range.upper,
@@ -99,18 +99,28 @@ impl Obsidian {
             .unwrap();
         let mut txid = Txid::new(*owner_tablet_id);
 
-        // TODO: move into loop, since need to resolve conflicts
         if write_by_tablet.len() == 1 {
             let (tablet_id, (preconds, muts)) = write_by_tablet.into_iter().next().unwrap();
-
             return self
-                .tablets
-                .tablet(tablet_id)?
-                .write(txid, preconds, muts)
+                .with_resolve_conflicts(|| {
+                    let preconds = preconds.clone();
+                    let muts = muts.clone();
+                    async move {
+                        self.tablets
+                            .tablet(tablet_id)?
+                            .write(txid, preconds, muts)
+                            .await
+                    }
+                })
                 .await
-                .map_err(|e| match e {
-                    InternalWriteError::PreconditionFailed => WriteError::PreconditionFailed,
-                    e => WriteError::Other(e.into()),
+                .map_err(|e| {
+                    match e.downcast_ref::<InternalError>() {
+                        Some(InternalError::PreconditionFailed) => {
+                            return WriteError::PreconditionFailed;
+                        }
+                        _ => {}
+                    }
+                    e.into()
                 });
         }
 
@@ -161,7 +171,7 @@ impl Obsidian {
                             pending_tablets.remove(&tablet_id);
                             max_prepare_ts = cmp::max(max_prepare_ts, prepare_ts);
                         }
-                        Err(InternalWriteError::Conflict(other_txid)) => {
+                        Err(InternalError::Conflict(other_txid)) => {
                             if already_seen_conflicts.contains(&other_txid) {
                                 saw_an_already_seen = true;
                             } else if txid.can_preempt(&other_txid) {
@@ -264,13 +274,14 @@ impl Obsidian {
         Ok(result)
     }
 
-    async fn read_retries<F, Fut, T>(&self, f: F) -> anyhow::Result<T>
+    async fn with_resolve_conflicts<F, Fut, T>(&self, f: F) -> anyhow::Result<T>
     where
         F: Fn() -> Fut,
-        Fut: Future<Output = Result<T, ReadError>>,
+        Fut: Future<Output = Result<T, InternalError>>,
     {
-        // Read transaction IDs can have an arbitrary tablet ID in them because they never commit
-        // and never surface to any other transaction as a conflict.
+        // We can use an 'arbitrary' txid here even with a nonexistent tablet because this
+        // never surfaces anywhere else, we just use it to decide if we can preempt other
+        // transactions.
         let txid = Txid::new(TabletId(ShardId(0), 0));
 
         let already_seen_conflicts = RefCell::new(HashSet::new());
@@ -282,12 +293,12 @@ impl Obsidian {
 
                 match f().await {
                     Ok(v) => return Ok(v),
-                    Err(ReadError::Conflict(other_txid)) => {
+                    Err(InternalError::Conflict(other_txid)) => {
                         // If we've already seen this txid as a conflict that means we already
                         // wait/aborted it and we're still just waiting for it to get cleaned up,
                         // so just take another turn around the retry loop.
                         if already_seen_conflicts.contains(&other_txid) {
-                            return Err(ReadError::Conflict(other_txid));
+                            return Err(InternalError::Conflict(other_txid));
                         }
 
                         let other_txid_owner_tablet = self.tablets.tablet(other_txid.owner)?;
@@ -298,7 +309,7 @@ impl Obsidian {
                         }
 
                         already_seen_conflicts.insert(other_txid);
-                        Err(ReadError::Conflict(other_txid))
+                        Err(InternalError::Conflict(other_txid))
                     }
                     Err(e) => return Err(e.into()),
                 }
@@ -428,29 +439,15 @@ impl Debug for Txid {
 }
 
 #[derive(Error, Debug)]
-pub(crate) enum CommitError {
+pub(crate) enum InternalError {
+    #[error("conflict")]
+    Conflict(Txid),
     #[error("already committed")]
     AlreadyCommitted,
     #[error("already aborted")]
     AlreadyAborted,
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
-}
-
-#[derive(Error, Debug)]
-pub(crate) enum InternalWriteError {
     #[error("precondition failed")]
     PreconditionFailed,
-    #[error("conflict")]
-    Conflict(Txid),
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
-}
-
-#[derive(Error, Debug)]
-pub(crate) enum ReadError {
-    #[error("conflict")]
-    Conflict(Txid),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -483,9 +480,8 @@ mod test {
     use crate::types::Timestamp;
     use crate::types::Value;
 
-    use super::InternalWriteError;
+    use super::InternalError;
     use super::Obsidian;
-    use super::ReadError;
     use super::Router;
     use super::TabletId;
     use super::Tablets;
@@ -518,7 +514,7 @@ mod test {
             ts: Timestamp,
             keyspace_id: KeyspaceId,
             key: Vec<u8>,
-        ) -> Result<Option<Vec<u8>>, ReadError> {
+        ) -> Result<Option<Vec<u8>>, InternalError> {
             T::get(self, ts, keyspace_id, key).await
         }
 
@@ -526,7 +522,7 @@ mod test {
             &self,
             keyspace_id: KeyspaceId,
             key: &[u8],
-        ) -> Result<(Timestamp, Option<Vec<u8>>), ReadError> {
+        ) -> Result<(Timestamp, Option<Vec<u8>>), InternalError> {
             T::get_latest(self, keyspace_id, key).await
         }
 
@@ -537,7 +533,7 @@ mod test {
             range: Range<&[u8]>,
             direction: Direction,
             limit: usize,
-        ) -> Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>), ReadError>
+        ) -> Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>), InternalError>
         {
             T::scan_page(self, ts, keyspace_id, range, direction, limit).await
         }
@@ -559,7 +555,7 @@ mod test {
             txid: Txid,
             preconds: Vec<Precondition>,
             muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
-        ) -> Result<Timestamp, InternalWriteError> {
+        ) -> Result<Timestamp, InternalError> {
             T::write(self, txid, preconds, muts).await
         }
 
@@ -568,7 +564,7 @@ mod test {
             txid: Txid,
             preconds: Vec<Precondition>,
             muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
-        ) -> Result<Timestamp, InternalWriteError> {
+        ) -> Result<Timestamp, InternalError> {
             T::prepare(self, txid, preconds, muts).await
         }
 
