@@ -1043,6 +1043,7 @@ impl PendingMutation {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
 enum TxOutcomeRecord {
     Committed {
         ts: Timestamp,
@@ -1099,7 +1100,8 @@ impl TxOutcomeRecord {
                     };
 
                     write_varint_to(&mut out, n_shared as u64).unwrap();
-                    write_varint_to(&mut out, (key.len() - n_shared) as u64).unwrap();
+                    let n_more = key.len() - n_shared;
+                    write_varint_to(&mut out, n_more as u64).unwrap();
                     out.write(&key[n_shared..]).unwrap();
                     write_varint_to(&mut out, keyspace_ids.len() as u64).unwrap();
 
@@ -1138,7 +1140,7 @@ impl TxOutcomeRecord {
                 let mut c = Cursor::new(&b[9..]);
 
                 let n_keys = read_varint_from(&mut c)?.0;
-                let prev_key = vec![];
+                let mut prev_key = vec![];
                 for _ in 0..n_keys {
                     let n_shared = read_varint_from(&mut c)?.0 as usize;
                     if n_shared > prev_key.len() {
@@ -1146,7 +1148,7 @@ impl TxOutcomeRecord {
                     }
                     let n_more = read_varint_from(&mut c)?.0 as usize;
                     let mut key = vec![0u8; n_shared + n_more];
-                    key.extend_from_slice(&prev_key[..n_shared]);
+                    (key[..n_shared]).copy_from_slice(&prev_key[..n_shared]);
                     c.read_exact(&mut key[n_shared..])?;
                     let n_keyspace_ids = read_varint_from(&mut c)?.0 as usize;
                     for _ in 0..n_keyspace_ids {
@@ -1163,6 +1165,7 @@ impl TxOutcomeRecord {
                             mut_keys.insert((keyspace_id, key.clone()));
                         }
                     }
+                    prev_key = key;
                 }
 
                 Ok(TxOutcomeRecord::Committed {
@@ -1173,5 +1176,75 @@ impl TxOutcomeRecord {
             }
             _ => anyhow::bail!("invalid tx outcome: tag not 0 or 1"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use crate::tablet::TxOutcomeRecord;
+    use crate::types::ColoGroupId;
+    use crate::types::KeyspaceId;
+    use crate::types::Timestamp;
+
+    #[test]
+    fn test_tx_outcome_record_encoding() -> anyhow::Result<()> {
+        fn check(record: TxOutcomeRecord) -> anyhow::Result<()> {
+            let encoded = record.encode();
+            let decoded = TxOutcomeRecord::decode(&encoded)?;
+            assert_eq!(record, decoded);
+            Ok(())
+        }
+
+        check(TxOutcomeRecord::Aborted)?;
+
+        check(TxOutcomeRecord::Committed {
+            ts: Timestamp(5),
+            precond_keys: BTreeSet::new(),
+            mut_keys: BTreeSet::new(),
+        })?;
+
+        check(TxOutcomeRecord::Committed {
+            ts: Timestamp(5),
+            precond_keys: BTreeSet::new(),
+            mut_keys: BTreeSet::from([(KeyspaceId(ColoGroupId(5), 8), vec![1, 2, 3])]),
+        })?;
+
+        check(TxOutcomeRecord::Committed {
+            ts: Timestamp(5),
+            precond_keys: BTreeSet::from([(KeyspaceId(ColoGroupId(3), 4), vec![4, 5, 6])]),
+            mut_keys: BTreeSet::from([(KeyspaceId(ColoGroupId(5), 8), vec![1, 2, 3])]),
+        })?;
+
+        check(TxOutcomeRecord::Committed {
+            ts: Timestamp(5),
+            precond_keys: BTreeSet::new(),
+            mut_keys: BTreeSet::from([
+                (KeyspaceId(ColoGroupId(5), 8), vec![1, 2, 3]),
+                (KeyspaceId(ColoGroupId(3), 4), vec![4, 5, 6]),
+            ]),
+        })?;
+
+        check(TxOutcomeRecord::Committed {
+            ts: Timestamp(5),
+            precond_keys: BTreeSet::new(),
+            mut_keys: BTreeSet::from([
+                (KeyspaceId(ColoGroupId(5), 8), vec![1, 2, 3]),
+                (KeyspaceId(ColoGroupId(5), 8), vec![1, 2, 5]),
+            ]),
+        })?;
+
+        check(TxOutcomeRecord::Committed {
+            ts: Timestamp(5),
+            precond_keys: BTreeSet::new(),
+            mut_keys: BTreeSet::from([
+                (KeyspaceId(ColoGroupId(5), 8), vec![1, 2, 3]),
+                (KeyspaceId(ColoGroupId(5), 8), vec![1, 2, 5]),
+                (KeyspaceId(ColoGroupId(5), 8), vec![1, 2, 5, 8]),
+            ]),
+        })?;
+
+        Ok(())
     }
 }
