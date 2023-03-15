@@ -1,3 +1,4 @@
+use std::cmp;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -415,6 +416,11 @@ impl LsmTabletInner {
         direction: Direction,
         limit: usize,
     ) -> Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>), InternalError> {
+        if limit == 0 {
+            return Err(anyhow!("scan_page limit=0").into());
+        }
+        let limit = cmp::min(limit, 1000);
+
         let owned_range_set = self
             .owned_ranges
             .get(&keyspace_id.0)
