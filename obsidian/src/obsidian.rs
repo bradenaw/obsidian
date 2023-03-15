@@ -627,7 +627,7 @@ mod test {
         let mut splits = vec![];
         for i in 0..n_tablets {
             let shard_id = ShardId(((i % 2) + 1) as u32);
-            tablet_ids.push(TabletId(shard_id, (i + 1) as u64));
+            tablet_ids.push(TabletId(shard_id, (i + 2) as u64));
             splits.push(Bound::Before(vec![(i + 1) as u8]));
         }
 
@@ -652,6 +652,7 @@ mod test {
                     splits[i].clone()
                 },
             };
+            println!("{:?} owns {:?}", tablet_id, range);
             let tablet = LsmTablet::new(
                 *tablet_id,
                 LsmBuilder::new().storage(storage.clone()).build().await?,
@@ -722,7 +723,7 @@ mod test {
                 (vec![3, 4], b" ooooooooo"),
             ];
 
-            let mut timestamps = vec![];
+            let mut timestamps = vec![Timestamp(0)];
             for ts_idx in 1..writes[0].1.len() {
                 let mut mutations = BTreeMap::new();
                 for (key, versions) in &writes {
@@ -746,22 +747,30 @@ mod test {
 
             async fn check(
                 obs: &Obsidian,
-                ts: Timestamp,
+                timestamps: &[Timestamp],
+                ts_idx: usize,
                 range: Range<&[u8]>,
-                expected: Vec<(Vec<u8>, Timestamp)>,
+                expected: Vec<(Vec<u8>, usize)>,
             ) -> anyhow::Result<()> {
                 let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-                for page_size in 1..=expected.len() {
-                    for direction in [Direction::Asc, Direction::Desc] {
+                for direction in [Direction::Asc, Direction::Desc] {
+                    for page_size in 1..=expected.len() {
                         let mut maybe_cursor = Some(range.to_vec());
                         let mut results = vec![];
                         while let Some(cursor) = maybe_cursor {
                             let (page, continue_cursor) = obs
-                                .scan_page(ts, keyspace_id, cursor.borrow(), direction, page_size)
+                                .scan_page(
+                                    timestamps[ts_idx],
+                                    keyspace_id,
+                                    cursor.borrow(),
+                                    direction,
+                                    page_size,
+                                )
                                 .await?;
 
                             assert!(page.len() <= page_size);
                             results.extend(page);
+                            assert_ne!(continue_cursor, Some(cursor));
                             maybe_cursor = continue_cursor;
                         }
 
@@ -770,21 +779,21 @@ mod test {
                         }
 
                         assert_eq!(
-                        results,
-                        expected
-                            .clone()
-                            .into_iter()
-                            .map(|(key, ts)| (
-                                key.clone(),
-                                ts,
-                                format!("{:?} {}", key, ts).into(),
-                            ))
-                            .collect::<Vec<_>>(),
-                        "scan_page(ts={:?}, /*keyspace_id*/, /*cursor*/, direction={:?}, page_size={})",
-                        ts,
-                        direction,
-                        page_size,
-                    );
+                            results,
+                            expected
+                                .clone()
+                                .into_iter()
+                                .map(|(key, ts_idx)| (
+                                    key.clone(),
+                                    timestamps[ts_idx],
+                                    format!("{:?} {}", key, ts_idx).into(),
+                                ))
+                                .collect::<Vec<_>>(),
+                            "scan_page(ts={:?}, /*keyspace_id*/, /*cursor*/, direction={:?}, page_size={})",
+                            timestamps[ts_idx],
+                            direction,
+                            page_size,
+                        );
                     }
                 }
 
@@ -793,15 +802,34 @@ mod test {
 
             check(
                 &obs,
-                timestamps[5],
+                &timestamps,
+                5,
                 Range {
                     lower: Bound::Before(&[1, 1]),
                     upper: Bound::After(&[2, 0]),
                 },
+                vec![(vec![1, 1], 3), (vec![1, 3], 5), (vec![2, 0], 4)],
+            )
+            .await?;
+
+            check(
+                &obs,
+                &timestamps,
+                4,
+                Range::all(),
                 vec![
-                    (vec![1, 1], timestamps[5]),
-                    (vec![1, 3], timestamps[5]),
-                    (vec![2, 0], timestamps[4]),
+                    (vec![1, 0], 4),
+                    (vec![1, 1], 3),
+                    (vec![1, 2], 3),
+                    // [1,3] got deleted at 4
+                    (vec![2, 0], 4),
+                    // [2,1] doesn't exist yet
+                    // [2,2] got deleted at 3
+                    (vec![3, 0], 4),
+                    (vec![3, 1], 2),
+                    (vec![3, 2], 4),
+                    // [3,3] doesn't exist yet
+                    (vec![3, 4], 4),
                 ],
             )
             .await?;

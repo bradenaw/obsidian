@@ -436,6 +436,12 @@ impl LsmTabletInner {
             )
         })?;
 
+        // range                          |-----------|
+        // owned_range_set          |---------|    |--------|
+        // intersecting_range_set         |---|    |--|
+        // scan_range                     |---|
+
+        // Make sure scan_range is actually the next range to look at for `range`.
         let ok = match direction {
             Direction::Asc => scan_range.lower.borrow() == range.lower,
             Direction::Desc => scan_range.upper.borrow() == range.upper,
@@ -451,27 +457,39 @@ impl LsmTabletInner {
 
         self.sequencer.wait_for_safe_read(ts).await?;
 
-        let (page, continue_cursor) = self
+        // Ask the LSM for the page. Note that the returned continuation is in terms of the
+        // constrained range that we asked it for, not the entire range from the request.
+        let (page, intersecting_continue_cursor) = self
             .lsm
             .scan_page(ts, keyspace_id, scan_range.borrow(), direction, limit)
             .await?;
-
-        if let Some(pending_keyspace_id) = keyspace_id.pending() {
-            let scanned_range = match continue_cursor {
-                Some(ref continue_cursor) => match direction {
-                    Direction::Asc => Range {
-                        lower: scan_range.lower.clone(),
-                        upper: continue_cursor.lower.clone(),
-                    },
-                    Direction::Desc => Range {
-                        lower: continue_cursor.upper.clone(),
-                        upper: scan_range.upper.clone(),
-                    },
+        let scanned_range = match intersecting_continue_cursor {
+            Some(ref intersecting_continue_cursor) => match direction {
+                Direction::Asc => Range {
+                    lower: scan_range.lower.clone(),
+                    upper: intersecting_continue_cursor.lower.clone(),
                 },
-                None => scan_range.clone(),
-            };
+                Direction::Desc => Range {
+                    lower: intersecting_continue_cursor.upper.clone(),
+                    upper: scan_range.upper.clone(),
+                },
+            },
+            None => scan_range.clone(),
+        };
+        let continue_cursor = match direction {
+            Direction::Asc => Range {
+                lower: scanned_range.upper.clone(),
+                upper: range.upper.to_vec(),
+            },
+            Direction::Desc => Range {
+                lower: range.lower.to_vec(),
+                upper: scanned_range.lower.clone(),
+            },
+        };
 
-            let mut maybe_cursor = Some(scanned_range);
+        // If we're looking at a userland keyspace, then we have to look for conflicts too.
+        if let Some(pending_keyspace_id) = keyspace_id.pending() {
+            let mut maybe_cursor = Some(scanned_range.clone());
             while let Some(cursor) = maybe_cursor {
                 let (conflict_page, conflict_continue_cursor) = self
                     .lsm
@@ -484,6 +502,9 @@ impl LsmTabletInner {
                     )
                     .await?;
 
+                // TODO: If we have more than x% of a page by the time we see a conflict, might be
+                // better just to return it and hope that the conflict gets cleaned up by the time
+                // the caller asks for the next page.
                 for record in conflict_page {
                     if let Value::Regular(bytes) = record.value {
                         let pending_mut = PendingMutation::decode(&bytes)?;
@@ -494,6 +515,12 @@ impl LsmTabletInner {
             }
         }
 
+        let maybe_continue_cursor = if continue_cursor.is_empty() {
+            None
+        } else {
+            Some(continue_cursor)
+        };
+
         Ok((
             page.into_iter()
                 .filter_map(|record| match record.value {
@@ -501,7 +528,7 @@ impl LsmTabletInner {
                     Value::Tombstone => None,
                 })
                 .collect(),
-            continue_cursor,
+            maybe_continue_cursor,
         ))
     }
 
