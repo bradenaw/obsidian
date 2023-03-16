@@ -18,7 +18,6 @@ use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use futures::future;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
 use crate::lock_mgr::Guard;
 use crate::lock_mgr::LockMgr;
@@ -44,6 +43,7 @@ use crate::types::Value;
 use crate::util::longest_shared_prefix_len;
 use crate::util::read_varint_from;
 use crate::util::write_varint_to;
+use crate::util::Background;
 use crate::util::Retry;
 
 const MAX_PRECOND_VALUE_LEN: usize = 256;
@@ -117,8 +117,7 @@ pub(crate) trait Tablet {
 pub(crate) struct LsmTablet {
     inner: Arc<LsmTabletInner>,
 
-    bg_cleanup_committed_outcomes: JoinHandle<()>,
-    bg_resolve_pending: JoinHandle<()>,
+    bg: Background,
 }
 
 #[async_trait]
@@ -236,26 +235,25 @@ impl LsmTablet {
             commit_sender,
         ));
 
+        let bg = Background::new();
+
         // TODO: also read already-committed outcomes into commit_sender
 
-        let inner_ = inner.clone();
-        let bg_cleanup_committed_outcomes = tokio::spawn(async move {
-            inner_
-                .clone()
-                .cleanup_committed_outcomes(commit_receiver)
-                .await;
+        bg.spawn({
+            let inner = inner.clone();
+            async move {
+                inner.cleanup_committed_outcomes(commit_receiver).await;
+            }
         });
 
-        let inner_ = inner.clone();
-        let bg_resolve_pending = tokio::spawn(async move {
-            inner_.clone().resolve_prepared(prepare_receiver).await;
+        bg.spawn({
+            let inner = inner.clone();
+            async move {
+                inner.resolve_prepared(prepare_receiver).await;
+            }
         });
 
-        Ok(Self {
-            inner,
-            bg_cleanup_committed_outcomes,
-            bg_resolve_pending,
-        })
+        Ok(Self { inner, bg })
     }
 
     pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
@@ -272,13 +270,6 @@ impl LsmTablet {
         }
 
         Ok(())
-    }
-}
-
-impl Drop for LsmTablet {
-    fn drop(&mut self) {
-        self.bg_cleanup_committed_outcomes.abort();
-        self.bg_resolve_pending.abort();
     }
 }
 
