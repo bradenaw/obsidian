@@ -44,6 +44,7 @@ use crate::types::Value;
 use crate::util::longest_shared_prefix_len;
 use crate::util::read_varint_from;
 use crate::util::write_varint_to;
+use crate::util::Retry;
 
 const MAX_PRECOND_VALUE_LEN: usize = 256;
 
@@ -912,9 +913,17 @@ impl LsmTabletInner {
         )>,
     ) {
         while let Some((txid, ts, precond_keys, mut_keys)) = r.recv().await {
-            self.cleanup_one_committed_outcome(txid, ts, precond_keys, mut_keys)
-                .await
-                .unwrap();
+            Retry::new()
+                .indefinitely(|| {
+                    let mut_keys = mut_keys.clone();
+                    let precond_keys = precond_keys.clone();
+                    async move {
+                        self.cleanup_one_committed_outcome(txid, ts, precond_keys, mut_keys)
+                            .await?;
+                        Ok::<_, anyhow::Error>(())
+                    }
+                })
+                .await;
         }
     }
 

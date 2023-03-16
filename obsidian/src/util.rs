@@ -6,6 +6,7 @@ use std::fs::File;
 use std::future::Future;
 use std::io::Read;
 use std::io::Write;
+use std::ops::Deref;
 use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -359,7 +360,7 @@ impl Retry {
         F: Fn() -> Fut,
         Fut: Future<Output = Result<T, E>>,
         T,
-        E: std::error::Error + Send + Sync + 'static,
+        E: Deref<Target = dyn std::error::Error + Send + Sync + 'static>,
     >(
         self,
         f: F,
