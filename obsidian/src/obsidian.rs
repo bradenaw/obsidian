@@ -391,11 +391,13 @@ impl Txid {
     }
 
     pub fn to_bytes(&self) -> [u8; Self::ENCODED_LEN] {
+        // Encode with tablet ID first so that they're routed properly as a part of TABLET_META
+        // when used as a key.
         let mut out = [0u8; Self::ENCODED_LEN];
-        BigEndian::write_u64(&mut out[0..8], self.ts);
-        out[8..24].copy_from_slice(&self.rand[..]);
-        BigEndian::write_u32(&mut out[24..28], self.owner.0 .0);
-        BigEndian::write_u64(&mut out[28..36], self.owner.1);
+        BigEndian::write_u32(&mut out[0..4], self.owner.0 .0);
+        BigEndian::write_u64(&mut out[4..12], self.owner.1);
+        BigEndian::write_u64(&mut out[12..20], self.ts);
+        out[20..36].copy_from_slice(&self.rand[..]);
         out
     }
 }
@@ -407,13 +409,13 @@ impl TryFrom<&[u8]> for Txid {
         if value.len() != Txid::ENCODED_LEN {
             anyhow::bail!("txid not {} bytes", Txid::ENCODED_LEN);
         }
-        let ts = BigEndian::read_u64(&value[0..8]);
-        let mut rand = [0u8; 16];
-        rand.copy_from_slice(&value[8..24]);
         let owner = TabletId(
-            ShardId(BigEndian::read_u32(&value[24..28])),
-            BigEndian::read_u64(&value[28..36]),
+            ShardId(BigEndian::read_u32(&value[0..4])),
+            BigEndian::read_u64(&value[4..12]),
         );
+        let ts = BigEndian::read_u64(&value[12..20]);
+        let mut rand = [0u8; 16];
+        rand.copy_from_slice(&value[20..36]);
 
         Ok(Self { ts, rand, owner })
     }
