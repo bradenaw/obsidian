@@ -289,15 +289,7 @@ struct LsmTabletInner {
         BTreeSet<(KeyspaceId, Vec<u8>)>,
         BTreeSet<(KeyspaceId, Vec<u8>)>,
     )>,
-    waiters: Mutex<
-        HashMap<
-            Txid,
-            (
-                tokio::sync::watch::Sender<()>,
-                tokio::sync::watch::Receiver<()>,
-            ),
-        >,
-    >,
+    waiters: Waiters,
 }
 
 impl LsmTabletInner {
@@ -325,7 +317,7 @@ impl LsmTabletInner {
             commit_sender,
             sequencer: Sequencer::new(),
             lock_mgr: LockMgr::new(16384),
-            waiters: Mutex::new(HashMap::new()),
+            waiters: Waiters::new(),
         }
     }
 
@@ -655,8 +647,8 @@ impl LsmTabletInner {
 
     async fn wait(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
         loop {
-            let mut rx = {
-                let tx_outcome_key = txid.to_bytes();
+            let tx_outcome_key = txid.to_bytes();
+            {
                 let _guard = self.lock_mgr.read_lock(&tx_outcome_key[..]).await;
 
                 if let Some((_, Value::Regular(tx_outcome_bytes))) = self
@@ -666,14 +658,9 @@ impl LsmTabletInner {
                     let tx_outcome_record = TxOutcomeRecord::decode(&tx_outcome_bytes[..])?;
                     return Ok(tx_outcome_record.tx_outcome());
                 }
+            }
 
-                let mut waiters = self.waiters.lock().unwrap();
-                let (_, rx) = waiters
-                    .entry(txid)
-                    .or_insert_with(|| tokio::sync::watch::channel(()));
-                rx.clone()
-            };
-            _ = rx.changed().await;
+            self.waiters.wait(txid).await;
         }
     }
 
@@ -794,10 +781,7 @@ impl LsmTabletInner {
                 .send((txid, ts, precond_keys, mut_keys))
                 .await;
         }
-        let mut waiters = self.waiters.lock().unwrap();
-        if let Some((tx, _)) = waiters.remove(&txid) {
-            _ = tx.send(());
-        }
+        self.waiters.notify(txid);
         Ok(tx_outcome)
     }
 
@@ -1209,6 +1193,49 @@ impl TxOutcomeRecord {
             }
             _ => anyhow::bail!("invalid tx outcome: tag not 0 or 1"),
         }
+    }
+}
+
+struct Waiters {
+    inner: Mutex<WaitersInner>,
+}
+
+struct WaitersInner {
+    by_txid: HashMap<
+        Txid,
+        (
+            tokio::sync::watch::Sender<()>,
+            tokio::sync::watch::Receiver<()>,
+        ),
+    >,
+}
+
+impl Waiters {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(WaitersInner {
+                by_txid: HashMap::new(),
+            }),
+        }
+    }
+
+    fn notify(&self, txid: Txid) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some((tx, _)) = inner.by_txid.remove(&txid) {
+            _ = tx.send(());
+        }
+    }
+
+    async fn wait(&self, txid: Txid) {
+        let mut rx = {
+            let mut inner = self.inner.lock().unwrap();
+            let (_, rx) = inner
+                .by_txid
+                .entry(txid)
+                .or_insert_with(|| tokio::sync::watch::channel(()));
+            rx.clone()
+        };
+        _ = rx.changed().await;
     }
 }
 
