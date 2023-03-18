@@ -447,3 +447,38 @@ impl Drop for Background {
         }
     }
 }
+
+pub(crate) trait Encode {
+    fn encoded_size_estimate(&self) -> Option<usize>;
+    fn encode(&self, w: &mut Vec<u8>);
+}
+
+pub(crate) trait EncodeFixed<const N: usize> {
+    fn encode_fixed(&self) -> [u8; N];
+}
+
+impl<T: EncodeFixed<36>> Encode for T {
+    fn encoded_size_estimate(&self) -> Option<usize> {
+        Some(36)
+    }
+
+    fn encode(&self, w: &mut Vec<u8>) {
+        let self_encoded = self.encode_fixed();
+        w.extend_from_slice(&self_encoded[..]);
+    }
+}
+
+pub(crate) trait Decode: Sized {
+    fn decode(b: &[u8]) -> anyhow::Result<Self>;
+}
+
+pub(crate) fn encode<E: Encode>(e: &E) -> Vec<u8> {
+    let mut v = if let Some(n) = e.encoded_size_estimate() {
+        Vec::with_capacity(n)
+    } else {
+        vec![]
+    };
+
+    e.encode(&mut v);
+    v
+}

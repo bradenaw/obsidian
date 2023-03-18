@@ -3,7 +3,6 @@ use std::cmp;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
-use std::convert::TryFrom;
 use std::fmt::Debug;
 use std::future::Future;
 use std::time::Duration;
@@ -29,6 +28,8 @@ use crate::types::Timestamp;
 use crate::types::WriteError;
 use crate::util::hexlify;
 use crate::util::sleep_for_retry;
+use crate::util::Decode;
+use crate::util::EncodeFixed;
 use crate::util::Retry;
 
 struct Obsidian {
@@ -389,8 +390,10 @@ impl Txid {
     pub fn owner(&self) -> TabletId {
         self.owner
     }
+}
 
-    pub fn to_bytes(&self) -> [u8; Self::ENCODED_LEN] {
+impl EncodeFixed<36> for Txid {
+    fn encode_fixed(&self) -> [u8; 36] {
         // Encode with tablet ID first so that they're routed properly as a part of TABLET_META
         // when used as a key.
         let mut out = [0u8; Self::ENCODED_LEN];
@@ -402,10 +405,8 @@ impl Txid {
     }
 }
 
-impl TryFrom<&[u8]> for Txid {
-    type Error = anyhow::Error;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+impl Decode for Txid {
+    fn decode(value: &[u8]) -> anyhow::Result<Self> {
         if value.len() != Txid::ENCODED_LEN {
             anyhow::bail!("txid not {} bytes", Txid::ENCODED_LEN);
         }

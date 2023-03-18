@@ -2,7 +2,6 @@ use std::cmp;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::convert::TryFrom;
 use std::future::Future;
 use std::io::Cursor;
 use std::io::Read;
@@ -45,10 +44,14 @@ use crate::types::Precondition;
 use crate::types::ShardId;
 use crate::types::Timestamp;
 use crate::types::Value;
+use crate::util::encode;
 use crate::util::longest_shared_prefix_len;
 use crate::util::read_varint_from;
 use crate::util::write_varint_to;
 use crate::util::Background;
+use crate::util::Decode;
+use crate::util::Encode;
+use crate::util::EncodeFixed;
 use crate::util::Retry;
 
 const MAX_PRECOND_VALUE_LEN: usize = 256;
@@ -604,7 +607,7 @@ impl LsmTabletInner {
 
             let mut precond_locks = PrecondLocks::decode(&value)?;
             precond_locks.txids.insert(txid);
-            let new_value = precond_locks.encode();
+            let new_value = encode(&precond_locks);
 
             if new_value.len() > MAX_PRECOND_VALUE_LEN {
                 return Err(InternalError::Other(anyhow::anyhow!("too much contention")));
@@ -616,7 +619,7 @@ impl LsmTabletInner {
             );
         }
         for ((keyspace_id, key), m) in &muts {
-            let value = PendingMutation { txid, m: m.clone() }.encode();
+            let value = encode(&PendingMutation { txid, m: m.clone() });
 
             actual_muts.insert(
                 (
@@ -680,7 +683,7 @@ impl LsmTabletInner {
 
     async fn wait(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
         loop {
-            let tx_outcome_key = txid.to_bytes();
+            let tx_outcome_key = txid.encode_fixed();
             {
                 let _guard = self.lock_mgr.read_lock(&tx_outcome_key[..]).await;
 
@@ -768,7 +771,7 @@ impl LsmTabletInner {
                 )
                 .await?
             {
-                let other_txid = Txid::try_from(&value[..Txid::ENCODED_LEN])?;
+                let other_txid = Txid::decode(&value[..Txid::ENCODED_LEN])?;
                 return Ok(Some(other_txid));
             }
         }
@@ -780,7 +783,7 @@ impl LsmTabletInner {
         txid: Txid,
         tx_outcome_record: TxOutcomeRecord,
     ) -> anyhow::Result<TxOutcome> {
-        let tx_outcome_key = txid.to_bytes();
+        let tx_outcome_key = txid.encode_fixed();
         {
             let _guard = self.lock_mgr.write_lock(&tx_outcome_key[..]).await;
             if let Some((_, Value::Regular(tx_outcome_bytes))) = self
@@ -796,7 +799,7 @@ impl LsmTabletInner {
                     vec![],
                     BTreeMap::from([(
                         (KeyspaceId::TX_OUTCOMES, tx_outcome_key.to_vec()),
-                        Mutation::Put(tx_outcome_record.encode()),
+                        Mutation::Put(encode(&tx_outcome_record)),
                     )]),
                 )
                 .await
@@ -883,7 +886,7 @@ impl LsmTabletInner {
                 let m = if precond_locks.txids.is_empty() {
                     Mutation::Delete
                 } else {
-                    Mutation::Put(precond_locks.encode())
+                    Mutation::Put(encode(&precond_locks))
                 };
 
                 (prepare_ts.plus_one(), m)
@@ -965,7 +968,7 @@ impl LsmTabletInner {
         future::try_join_all(futures).await?;
 
         // TODO: mutual exclusion
-        let tx_outcome_key = txid.to_bytes();
+        let tx_outcome_key = txid.encode_fixed();
         self.lsm
             .write(
                 Timestamp::ZERO.plus_one(),
@@ -1103,7 +1106,7 @@ impl LsmTabletInner {
                         )
                         .boxed();
                     while let Some((key, _, value)) = s.try_next().await? {
-                        let txid = Txid::try_from(&key[..])?;
+                        let txid = Txid::decode(&key[..])?;
                         let tx_outcome_record = TxOutcomeRecord::decode(&value)?;
                         if let TxOutcomeRecord::Committed {
                             ts: commit_ts,
@@ -1205,30 +1208,30 @@ struct PendingMutation {
     m: Mutation,
 }
 
-impl PendingMutation {
-    fn encode(&self) -> Vec<u8> {
-        let txid_bytes = self.txid.to_bytes();
-
-        let mut value = Vec::with_capacity(txid_bytes.len() + 1 + self.m.len());
-
-        value.extend_from_slice(&txid_bytes[..]);
-        match &self.m {
-            Mutation::Put(v) => {
-                value.push(1);
-                value.extend_from_slice(&v[..]);
-            }
-            Mutation::Delete => value.push(0),
-        }
-
-        value
+impl Encode for PendingMutation {
+    fn encoded_size_estimate(&self) -> Option<usize> {
+        Some(Txid::ENCODED_LEN + 1 + self.m.len())
     }
 
+    fn encode(&self, w: &mut Vec<u8>) {
+        self.txid.encode(w);
+        match &self.m {
+            Mutation::Put(v) => {
+                w.push(1);
+                w.extend_from_slice(&v[..]);
+            }
+            Mutation::Delete => w.push(0),
+        }
+    }
+}
+
+impl Decode for PendingMutation {
     fn decode(b: &[u8]) -> anyhow::Result<Self> {
         if b.len() < Txid::ENCODED_LEN + 1 {
             anyhow::bail!("invalid pending mutation: too short");
         }
 
-        let txid = Txid::try_from(&b[..Txid::ENCODED_LEN])?;
+        let txid = Txid::decode(&b[..Txid::ENCODED_LEN])?;
 
         let m = match b[Txid::ENCODED_LEN] {
             0 => Mutation::Delete,
@@ -1244,16 +1247,19 @@ struct PrecondLocks {
     txids: BTreeSet<Txid>,
 }
 
-impl PrecondLocks {
-    fn encode(&self) -> Vec<u8> {
-        let mut result = Vec::with_capacity(Txid::ENCODED_LEN * self.txids.len());
-        for txid in &self.txids {
-            let txid_bytes = txid.to_bytes();
-            result.extend_from_slice(&txid_bytes[..]);
-        }
-        result
+impl Encode for PrecondLocks {
+    fn encoded_size_estimate(&self) -> Option<usize> {
+        Some(Txid::ENCODED_LEN * self.txids.len())
     }
 
+    fn encode(&self, w: &mut Vec<u8>) {
+        for txid in &self.txids {
+            txid.encode(w);
+        }
+    }
+}
+
+impl Decode for PrecondLocks {
     fn decode(b: &[u8]) -> anyhow::Result<Self> {
         if b.len() % Txid::ENCODED_LEN != 0 {
             return Err(anyhow!(
@@ -1265,7 +1271,7 @@ impl PrecondLocks {
 
         let txids = b
             .chunks(Txid::ENCODED_LEN)
-            .map(Txid::try_from)
+            .map(Txid::decode)
             .collect::<anyhow::Result<BTreeSet<_>>>()?;
 
         Ok(Self { txids })
@@ -1289,10 +1295,23 @@ impl TxOutcomeRecord {
             TxOutcomeRecord::Committed { ts, .. } => TxOutcome::Committed(*ts),
         }
     }
+}
 
-    fn encode(&self) -> Vec<u8> {
+impl Encode for TxOutcomeRecord {
+    fn encoded_size_estimate(&self) -> Option<usize> {
         match self {
-            TxOutcomeRecord::Aborted => vec![0],
+            TxOutcomeRecord::Aborted => Some(1),
+            TxOutcomeRecord::Committed {
+                ts: _,
+                precond_keys: _,
+                mut_keys: _,
+            } => None,
+        }
+    }
+
+    fn encode(&self, w: &mut Vec<u8>) {
+        match self {
+            TxOutcomeRecord::Aborted => w.push(0),
             TxOutcomeRecord::Committed {
                 ts,
                 precond_keys,
@@ -1316,10 +1335,11 @@ impl TxOutcomeRecord {
 
                 let mut maybe_prev_key = None;
 
-                let mut out = vec![0; 9];
-                out[0] = 1;
-                LittleEndian::write_u64(&mut out[1..], ts.as_nanos());
-                let mut out = Cursor::new(out);
+                w.push(1);
+                w.extend_from_slice(&[0u8; 8]);
+                assert_eq!(w.len(), 9);
+                LittleEndian::write_u64(&mut w[1..], ts.as_nanos());
+                let mut out = Cursor::new(w);
                 out.seek(SeekFrom::End(0)).unwrap();
                 write_varint_to(&mut out, m.len() as u64).unwrap();
                 for (key, keyspace_ids) in m {
@@ -1341,12 +1361,13 @@ impl TxOutcomeRecord {
 
                     maybe_prev_key = Some(key);
                 }
-                out.into_inner()
             }
         }
     }
+}
 
-    pub fn decode(b: &[u8]) -> anyhow::Result<Self> {
+impl Decode for TxOutcomeRecord {
+    fn decode(b: &[u8]) -> anyhow::Result<Self> {
         if b.len() == 0 {
             anyhow::bail!("invalid tx outcome: empty");
         }
@@ -1456,40 +1477,34 @@ mod tests {
     use std::collections::BTreeSet;
 
     use crate::tablet::TxOutcomeRecord;
+    use crate::test::assert_roundtrip;
     use crate::types::ColoGroupId;
     use crate::types::KeyspaceId;
     use crate::types::Timestamp;
 
     #[test]
     fn test_tx_outcome_record_encoding() -> anyhow::Result<()> {
-        fn check(record: TxOutcomeRecord) -> anyhow::Result<()> {
-            let encoded = record.encode();
-            let decoded = TxOutcomeRecord::decode(&encoded)?;
-            assert_eq!(record, decoded);
-            Ok(())
-        }
+        assert_roundtrip(&TxOutcomeRecord::Aborted)?;
 
-        check(TxOutcomeRecord::Aborted)?;
-
-        check(TxOutcomeRecord::Committed {
+        assert_roundtrip(&TxOutcomeRecord::Committed {
             ts: Timestamp(5),
             precond_keys: BTreeSet::new(),
             mut_keys: BTreeSet::new(),
         })?;
 
-        check(TxOutcomeRecord::Committed {
+        assert_roundtrip(&TxOutcomeRecord::Committed {
             ts: Timestamp(5),
             precond_keys: BTreeSet::new(),
             mut_keys: BTreeSet::from([(KeyspaceId(ColoGroupId(5), 8), vec![1, 2, 3])]),
         })?;
 
-        check(TxOutcomeRecord::Committed {
+        assert_roundtrip(&TxOutcomeRecord::Committed {
             ts: Timestamp(5),
             precond_keys: BTreeSet::from([(KeyspaceId(ColoGroupId(3), 4), vec![4, 5, 6])]),
             mut_keys: BTreeSet::from([(KeyspaceId(ColoGroupId(5), 8), vec![1, 2, 3])]),
         })?;
 
-        check(TxOutcomeRecord::Committed {
+        assert_roundtrip(&TxOutcomeRecord::Committed {
             ts: Timestamp(5),
             precond_keys: BTreeSet::new(),
             mut_keys: BTreeSet::from([
@@ -1498,7 +1513,7 @@ mod tests {
             ]),
         })?;
 
-        check(TxOutcomeRecord::Committed {
+        assert_roundtrip(&TxOutcomeRecord::Committed {
             ts: Timestamp(5),
             precond_keys: BTreeSet::new(),
             mut_keys: BTreeSet::from([
@@ -1507,7 +1522,7 @@ mod tests {
             ]),
         })?;
 
-        check(TxOutcomeRecord::Committed {
+        assert_roundtrip(&TxOutcomeRecord::Committed {
             ts: Timestamp(5),
             precond_keys: BTreeSet::new(),
             mut_keys: BTreeSet::from([

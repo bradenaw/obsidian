@@ -20,3 +20,6 @@ mod tablet;
 mod types;
 mod util;
 mod wal;
+
+#[cfg(test)]
+mod test;
