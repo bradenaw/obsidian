@@ -1337,7 +1337,6 @@ impl Encode for TxOutcomeRecord {
 
                 w.push(1);
                 w.extend_from_slice(&[0u8; 8]);
-                assert_eq!(w.len(), 9);
                 LittleEndian::write_u64(&mut w[1..], ts.as_nanos());
                 let mut out = Cursor::new(w);
                 out.seek(SeekFrom::End(0)).unwrap();
