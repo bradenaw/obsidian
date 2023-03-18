@@ -307,6 +307,12 @@ impl Lsm {
         .await;
     }
 
+    // TODO: move up a layer to tablet, since we can store the keyspaces that exist in a known
+    // keyspace for the tablet
+    pub fn keyspaces(&self) -> Vec<KeyspaceId> {
+        self.inner.load().keys().copied().collect()
+    }
+
     async fn recovery(
         wal: &wal::Wal<WalEntry>,
         storage: &MemStorage,

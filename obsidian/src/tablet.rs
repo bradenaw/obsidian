@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::convert::TryFrom;
+use std::future::Future;
 use std::io::Cursor;
 use std::io::Read;
 use std::io::Seek;
@@ -12,11 +13,15 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use anyhow::anyhow;
+use async_stream::try_stream;
 use async_trait::async_trait;
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use futures::future;
+use futures::Stream;
+use futures::StreamExt;
+use futures::TryStreamExt;
 use tokio::sync::mpsc;
 
 use crate::lock_mgr::Guard;
@@ -231,8 +236,8 @@ impl LsmTablet {
             owned_ranges,
             tablets,
             router,
-            prepare_sender,
-            commit_sender,
+            prepare_sender.clone(),
+            commit_sender.clone(),
         ));
 
         let bg = Background::new();
@@ -250,6 +255,28 @@ impl LsmTablet {
             let inner = inner.clone();
             async move {
                 inner.resolve_prepared(prepare_receiver).await;
+            }
+        });
+
+        bg.spawn({
+            let inner = inner.clone();
+            let prepare_sender = prepare_sender.clone();
+            async move {
+                inner.scan_for_pending_mutations(prepare_sender).await;
+            }
+        });
+
+        bg.spawn({
+            let inner = inner.clone();
+            async move {
+                inner.scan_for_precond_locks(prepare_sender).await;
+            }
+        });
+
+        bg.spawn({
+            let inner = inner.clone();
+            async move {
+                inner.scan_for_committed_outcomes(commit_sender).await;
             }
         });
 
@@ -565,7 +592,7 @@ impl LsmTabletInner {
                 .keyspace_id()
                 .precond()
                 .ok_or_else(|| anyhow::anyhow!("non-userland keyspace"))?;
-            let mut value = self
+            let value = self
                 .unsafe_get_latest_record(keyspace_id, precond.key())
                 .await
                 .map_err(|e| InternalError::Other(e.into()))?
@@ -574,13 +601,19 @@ impl LsmTabletInner {
                     Value::Tombstone => vec![],
                 })
                 .unwrap_or(vec![]);
-            value.extend_from_slice(&txid.to_bytes()[..]);
 
-            if value.len() > MAX_PRECOND_VALUE_LEN {
+            let mut precond_locks = PrecondLocks::decode(&value)?;
+            precond_locks.txids.insert(txid);
+            let new_value = precond_locks.encode();
+
+            if new_value.len() > MAX_PRECOND_VALUE_LEN {
                 return Err(InternalError::Other(anyhow::anyhow!("too much contention")));
             }
 
-            actual_muts.insert((keyspace_id, precond.key().to_vec()), Mutation::Put(value));
+            actual_muts.insert(
+                (keyspace_id, precond.key().to_vec()),
+                Mutation::Put(new_value),
+            );
         }
         for ((keyspace_id, key), m) in &muts {
             let value = PendingMutation { txid, m: m.clone() }.encode();
@@ -845,31 +878,18 @@ impl LsmTabletInner {
             .unsafe_get_latest_record(precond_keyspace_id, &key)
             .await?
         {
-            let n = bytes.len();
-            let new_value_bytes = bytes
-                .chunks(Txid::ENCODED_LEN)
-                .filter_map(|txid_bytes| match Txid::try_from(txid_bytes) {
-                    Ok(other_txid) => {
-                        if other_txid == txid {
-                            None
-                        } else {
-                            Some(Ok(txid_bytes))
-                        }
-                    }
-                    Err(e) => Some(Err(e)),
-                })
-                .try_fold(Vec::with_capacity(n), |mut acc, elem| {
-                    acc.extend_from_slice(elem?);
-                    Ok::<Vec<u8>, anyhow::Error>(acc)
-                })?;
+            let mut precond_locks = PrecondLocks::decode(&bytes)?;
+            if precond_locks.txids.remove(&txid) {
+                let m = if precond_locks.txids.is_empty() {
+                    Mutation::Delete
+                } else {
+                    Mutation::Put(precond_locks.encode())
+                };
 
-            let m = if new_value_bytes.is_empty() {
-                Mutation::Delete
+                (prepare_ts.plus_one(), m)
             } else {
-                Mutation::Put(new_value_bytes)
-            };
-
-            (prepare_ts.plus_one(), m)
+                return Ok(());
+            }
         } else {
             return Ok(());
         };
@@ -990,6 +1010,136 @@ impl LsmTabletInner {
         .await;
     }
 
+    // Scans for pending mutations that exist on disk already and delivers them to `sender`.
+    async fn scan_for_pending_mutations(
+        &self,
+        sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
+    ) {
+        for keyspace_id in self.lsm.keyspaces() {
+            Retry::new()
+                .indefinitely(|| {
+                    let sender = sender.clone();
+                    async move {
+                        let mut s = self
+                            .scan_all(
+                                self.sequencer.safe_read_ts(),
+                                keyspace_id,
+                                Range::all(),
+                                Direction::Asc,
+                            )
+                            .boxed();
+                        while let Some((key, _, value)) = s.try_next().await? {
+                            let pending = PendingMutation::decode(&value)?;
+
+                            let _ = sender
+                                .send((pending.txid, keyspace_id, key, PrepareType::Mutation))
+                                .await;
+                        }
+                        Ok::<_, anyhow::Error>(())
+                    }
+                })
+                .await;
+        }
+    }
+
+    // Scans for precond locks that exist on disk already and delivers them to `sender`.
+    async fn scan_for_precond_locks(
+        &self,
+        sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
+    ) {
+        for keyspace_id in self.lsm.keyspaces() {
+            Retry::new()
+                .indefinitely(|| {
+                    let sender = sender.clone();
+                    async move {
+                        let mut s = self
+                            .scan_all(
+                                self.sequencer.safe_read_ts(),
+                                keyspace_id,
+                                Range::all(),
+                                Direction::Asc,
+                            )
+                            .boxed();
+                        while let Some((key, _, value)) = s.try_next().await? {
+                            let precond_locks = PrecondLocks::decode(&value)?;
+                            for txid in precond_locks.txids {
+                                let _ = sender
+                                    .send((
+                                        txid,
+                                        keyspace_id,
+                                        key.clone(),
+                                        PrepareType::Precondition,
+                                    ))
+                                    .await;
+                            }
+                        }
+                        Ok::<_, anyhow::Error>(())
+                    }
+                })
+                .await;
+        }
+    }
+
+    // Scans for committed outcomes that exist on disk already and delivers them to `sender`.
+    async fn scan_for_committed_outcomes(
+        &self,
+        sender: mpsc::Sender<(
+            Txid,
+            Timestamp,
+            BTreeSet<(KeyspaceId, Vec<u8>)>,
+            BTreeSet<(KeyspaceId, Vec<u8>)>,
+        )>,
+    ) {
+        Retry::new()
+            .indefinitely(|| {
+                let sender = sender.clone();
+                async move {
+                    let mut s = self
+                        .scan_all(
+                            self.sequencer.safe_read_ts(),
+                            KeyspaceId::TX_OUTCOMES,
+                            Range::all(),
+                            Direction::Asc,
+                        )
+                        .boxed();
+                    while let Some((key, _, value)) = s.try_next().await? {
+                        let txid = Txid::try_from(&key[..])?;
+                        let tx_outcome_record = TxOutcomeRecord::decode(&value)?;
+                        if let TxOutcomeRecord::Committed {
+                            ts: commit_ts,
+                            precond_keys,
+                            mut_keys,
+                        } = tx_outcome_record
+                        {
+                            let _ = sender.send((txid, commit_ts, precond_keys, mut_keys)).await;
+                        }
+                    }
+                    Ok::<_, anyhow::Error>(())
+                }
+            })
+            .await
+    }
+
+    // Scans the entirety of `range` by calling scan_page repeatedly.
+    fn scan_all(
+        &self,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        range: Range<Vec<u8>>,
+        direction: Direction,
+    ) -> impl Stream<Item = anyhow::Result<(Vec<u8>, Timestamp, Vec<u8>)>> + '_ {
+        scan_all(
+            move |ts, keyspace_id, range, direction| async move {
+                self.scan_page(ts, keyspace_id, range.borrow(), direction, 1000)
+                    .await
+            },
+            ts,
+            keyspace_id,
+            range,
+            direction,
+        )
+    }
+
     fn check_key(&self, colo_group_id: ColoGroupId, key: &[u8]) -> anyhow::Result<()> {
         if colo_group_id == ColoGroupId::META {
             if key.len() < 12 {
@@ -1012,6 +1162,36 @@ impl LsmTabletInner {
             return Ok(());
         }
         Err(anyhow!("{:?}/{:?} not owned", colo_group_id, key).into())
+    }
+}
+
+fn scan_all<F, Fut>(
+    f: F,
+    ts: Timestamp,
+    keyspace_id: KeyspaceId,
+    range: Range<Vec<u8>>,
+    direction: Direction,
+) -> impl Stream<Item = anyhow::Result<(Vec<u8>, Timestamp, Vec<u8>)>>
+where
+    F: Fn(Timestamp, KeyspaceId, Range<Vec<u8>>, Direction) -> Fut,
+    Fut: Future<
+        Output = Result<
+            (Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>),
+            InternalError,
+        >,
+    >,
+{
+    try_stream! {
+        let mut maybe_cursor = Some(range);
+        while let Some(cursor) = maybe_cursor {
+            let (page, continue_cursor) = f(ts, keyspace_id, cursor, direction).await?;
+
+            for (key, ts, value) in page {
+                yield (key, ts, value);
+            }
+
+            maybe_cursor = continue_cursor;
+        }
     }
 }
 
@@ -1057,6 +1237,38 @@ impl PendingMutation {
         };
 
         Ok(Self { txid, m })
+    }
+}
+
+struct PrecondLocks {
+    txids: BTreeSet<Txid>,
+}
+
+impl PrecondLocks {
+    fn encode(&self) -> Vec<u8> {
+        let mut result = Vec::with_capacity(Txid::ENCODED_LEN * self.txids.len());
+        for txid in &self.txids {
+            let txid_bytes = txid.to_bytes();
+            result.extend_from_slice(&txid_bytes[..]);
+        }
+        result
+    }
+
+    fn decode(b: &[u8]) -> anyhow::Result<Self> {
+        if b.len() % Txid::ENCODED_LEN != 0 {
+            return Err(anyhow!(
+                "wrong length for precond value {}: must be a multiple of {}",
+                b.len(),
+                Txid::ENCODED_LEN
+            ));
+        }
+
+        let txids = b
+            .chunks(Txid::ENCODED_LEN)
+            .map(Txid::try_from)
+            .collect::<anyhow::Result<BTreeSet<_>>>()?;
+
+        Ok(Self { txids })
     }
 }
 
