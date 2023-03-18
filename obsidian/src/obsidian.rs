@@ -8,6 +8,7 @@ use std::future::Future;
 use std::time::Duration;
 use std::time::SystemTime;
 
+use anyhow::anyhow;
 use anyhow::Context;
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
@@ -29,7 +30,7 @@ use crate::types::WriteError;
 use crate::util::hexlify;
 use crate::util::sleep_for_retry;
 use crate::util::Decode;
-use crate::util::EncodeFixed;
+use crate::util::Encode;
 use crate::util::Retry;
 
 struct Obsidian {
@@ -324,7 +325,43 @@ impl Obsidian {
 pub(crate) struct TabletId(pub ShardId, pub u64);
 
 impl TabletId {
+    pub(crate) const ENCODED_LEN: usize = 12;
     pub(crate) const META: Self = TabletId(ShardId(1), 1);
+}
+
+impl TabletId {
+    pub(crate) fn encode_fixed(&self) -> [u8; 12] {
+        let mut out = [0u8; 12];
+        BigEndian::write_u32(&mut out[..4], self.0 .0);
+        BigEndian::write_u64(&mut out[4..], self.1);
+        out
+    }
+}
+
+impl Encode for TabletId {
+    fn encoded_size_estimate(&self) -> usize {
+        Self::ENCODED_LEN
+    }
+
+    fn encode(&self, w: &mut Vec<u8>) {
+        w.extend_from_slice(&self.encode_fixed()[..]);
+    }
+}
+
+impl Decode for TabletId {
+    fn decode(b: &[u8]) -> anyhow::Result<Self> {
+        if b.len() != 12 {
+            return Err(anyhow!(
+                "tablet ID must be 12 bytes, got {}: {}",
+                b.len(),
+                hexlify(b)
+            ));
+        }
+        return Ok(TabletId(
+            ShardId(BigEndian::read_u32(&b[0..4])),
+            BigEndian::read_u64(&b[4..12]),
+        ));
+    }
 }
 
 impl std::fmt::Display for TabletId {
@@ -390,10 +427,8 @@ impl Txid {
     pub fn owner(&self) -> TabletId {
         self.owner
     }
-}
 
-impl EncodeFixed<36> for Txid {
-    fn encode_fixed(&self) -> [u8; 36] {
+    pub(crate) fn encode_fixed(&self) -> [u8; Self::ENCODED_LEN] {
         // Encode with tablet ID first so that they're routed properly as a part of TABLET_META
         // when used as a key.
         let mut out = [0u8; Self::ENCODED_LEN];
@@ -402,6 +437,16 @@ impl EncodeFixed<36> for Txid {
         BigEndian::write_u64(&mut out[12..20], self.ts);
         out[20..36].copy_from_slice(&self.rand[..]);
         out
+    }
+}
+
+impl Encode for Txid {
+    fn encoded_size_estimate(&self) -> usize {
+        Self::ENCODED_LEN
+    }
+
+    fn encode(&self, w: &mut Vec<u8>) {
+        w.extend_from_slice(&self.encode_fixed()[..]);
     }
 }
 

@@ -12,6 +12,7 @@ use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::ShardId;
 use crate::util::hexlify;
+use crate::util::Decode;
 
 pub(crate) struct StaticRouter {
     map: HashMap<ColoGroupId, (Vec<Bound<Vec<u8>>>, Vec<TabletId>)>,
@@ -102,10 +103,7 @@ impl Router for StaticRouter {
                     hexlify(key)
                 );
             }
-            return Ok(TabletId(
-                ShardId(BigEndian::read_u32(&key[0..4])),
-                BigEndian::read_u64(&key[4..12]),
-            ));
+            return TabletId::decode(&key[..12]);
         }
 
         let (splits, tablet_ids) = self
@@ -135,6 +133,7 @@ mod tests {
     use crate::types::ColoGroupId;
     use crate::types::Direction;
     use crate::types::ShardId;
+    use crate::util::encode;
 
     use super::StaticRouter;
 
@@ -173,7 +172,7 @@ mod tests {
         assert_eq!(
             router.tablet_id_for_bound(
                 ColoGroupId::TABLET_META,
-                Bound::Before(&[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 5]),
+                Bound::Before(&encode(&TabletId(ShardId(1), 5))),
                 Direction::Asc,
             )?,
             TabletId(ShardId(1), 5),

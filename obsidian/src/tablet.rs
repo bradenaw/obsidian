@@ -51,7 +51,6 @@ use crate::util::write_varint_to;
 use crate::util::Background;
 use crate::util::Decode;
 use crate::util::Encode;
-use crate::util::EncodeFixed;
 use crate::util::Retry;
 
 const MAX_PRECOND_VALUE_LEN: usize = 256;
@@ -1209,8 +1208,8 @@ struct PendingMutation {
 }
 
 impl Encode for PendingMutation {
-    fn encoded_size_estimate(&self) -> Option<usize> {
-        Some(Txid::ENCODED_LEN + 1 + self.m.len())
+    fn encoded_size_estimate(&self) -> usize {
+        Txid::ENCODED_LEN + 1 + self.m.len()
     }
 
     fn encode(&self, w: &mut Vec<u8>) {
@@ -1248,8 +1247,8 @@ struct PrecondLocks {
 }
 
 impl Encode for PrecondLocks {
-    fn encoded_size_estimate(&self) -> Option<usize> {
-        Some(Txid::ENCODED_LEN * self.txids.len())
+    fn encoded_size_estimate(&self) -> usize {
+        Txid::ENCODED_LEN * self.txids.len()
     }
 
     fn encode(&self, w: &mut Vec<u8>) {
@@ -1298,14 +1297,14 @@ impl TxOutcomeRecord {
 }
 
 impl Encode for TxOutcomeRecord {
-    fn encoded_size_estimate(&self) -> Option<usize> {
+    fn encoded_size_estimate(&self) -> usize {
         match self {
-            TxOutcomeRecord::Aborted => Some(1),
+            TxOutcomeRecord::Aborted => 1,
             TxOutcomeRecord::Committed {
                 ts: _,
                 precond_keys: _,
                 mut_keys: _,
-            } => None,
+            } => 9,
         }
     }
 
