@@ -70,6 +70,11 @@ pub(crate) trait Tablet {
         key: &[u8],
     ) -> Result<(Timestamp, Option<Vec<u8>>), InternalError>;
 
+    async fn latest_snapshot(
+        &self,
+        keys: BTreeSet<(KeyspaceId, &[u8])>,
+    ) -> Result<Timestamp, InternalError>;
+
     async fn scan_page(
         &self,
         ts: Timestamp,
@@ -144,6 +149,13 @@ impl Tablet for LsmTablet {
         key: &[u8],
     ) -> Result<(Timestamp, Option<Vec<u8>>), InternalError> {
         self.inner.get_latest(keyspace_id, key).await
+    }
+
+    async fn latest_snapshot(
+        &self,
+        keys: BTreeSet<(KeyspaceId, &[u8])>,
+    ) -> Result<Timestamp, InternalError> {
+        self.inner.latest_snapshot(keys).await
     }
 
     async fn scan_page(
@@ -419,6 +431,18 @@ impl LsmTabletInner {
             },
             None => (safe_read_ts, None),
         })
+    }
+
+    async fn latest_snapshot(
+        &self,
+        keys: BTreeSet<(KeyspaceId, &[u8])>,
+    ) -> Result<Timestamp, InternalError> {
+        let mut result = Timestamp::ZERO;
+        for (keyspace_id, key) in keys {
+            let (ts, _) = self.get_latest(keyspace_id, key).await?;
+            result = cmp::max(result, ts);
+        }
+        Ok(result)
     }
 
     async fn scan_page(

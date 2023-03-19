@@ -13,6 +13,8 @@ use anyhow::Context;
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
 use futures::future;
+use futures::stream::FuturesUnordered;
+use futures::TryStreamExt;
 use rand::Rng;
 use thiserror::Error;
 
@@ -60,6 +62,36 @@ impl Obsidian {
             }
         })
         .await
+    }
+
+    pub async fn latest_snapshot(
+        &self,
+        keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+    ) -> anyhow::Result<Timestamp> {
+        let mut by_tablet = BTreeMap::new();
+        for (keyspace_id, key) in &keys {
+            let tablet_id = self.router.tablet_id_for_key(keyspace_id.0, &key)?;
+            by_tablet
+                .entry(tablet_id)
+                .or_insert_with(BTreeSet::new)
+                .insert((*keyspace_id, &key[..]));
+        }
+        let mut futures = FuturesUnordered::new();
+        for (tablet_id, keys) in by_tablet.into_iter() {
+            // TODO: with a little more information, we could get away with at most *one* round of
+            // conflict resolution.
+            futures.push(self.with_resolve_conflicts(move || {
+                let tablet = self.tablets.tablet(tablet_id);
+                let keys = keys.clone();
+                async move { tablet?.latest_snapshot(keys).await }
+            }));
+        }
+        let mut result = Timestamp::ZERO;
+        while let Some(ts) = futures.try_next().await? {
+            result = cmp::max(ts, result);
+        }
+
+        Ok(result)
     }
 
     pub async fn scan_page(
@@ -572,6 +604,13 @@ mod test {
             key: &[u8],
         ) -> Result<(Timestamp, Option<Vec<u8>>), InternalError> {
             T::get_latest(self, keyspace_id, key).await
+        }
+
+        async fn latest_snapshot(
+            &self,
+            keys: BTreeSet<(KeyspaceId, &[u8])>,
+        ) -> Result<Timestamp, InternalError> {
+            T::latest_snapshot(self, keys).await
         }
 
         async fn scan_page(
