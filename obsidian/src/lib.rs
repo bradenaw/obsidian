@@ -14,6 +14,7 @@ mod memtable;
 mod obsidian;
 mod range;
 mod router;
+mod rtest;
 mod sequencer;
 mod storage;
 mod tablet;

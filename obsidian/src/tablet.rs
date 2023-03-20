@@ -1191,7 +1191,7 @@ impl LsmTabletInner {
     }
 }
 
-fn scan_all<F, Fut>(
+pub fn scan_all<F, Fut>(
     f: F,
     ts: Timestamp,
     keyspace_id: KeyspaceId,

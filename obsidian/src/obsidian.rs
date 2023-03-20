@@ -10,10 +10,12 @@ use std::time::SystemTime;
 
 use anyhow::anyhow;
 use anyhow::Context;
+use async_stream::try_stream;
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
 use futures::future;
 use futures::stream::FuturesUnordered;
+use futures::Stream;
 use futures::TryStreamExt;
 use rand::Rng;
 use thiserror::Error;
@@ -35,7 +37,7 @@ use crate::util::Decode;
 use crate::util::Encode;
 use crate::util::Retry;
 
-struct Obsidian {
+pub struct Obsidian {
     router: Box<dyn Router>,
     tablets: Box<dyn Tablets>,
 }
@@ -117,6 +119,33 @@ impl Obsidian {
                 .await
         })
         .await
+    }
+
+    pub(crate) fn scan(
+        &self,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        range: Range<Vec<u8>>,
+        direction: Direction,
+    ) -> impl Stream<Item = anyhow::Result<(Vec<u8>, Timestamp, Vec<u8>)>> + '_ {
+        try_stream! {
+            let mut maybe_cursor = Some(range);
+            while let Some(cursor) = maybe_cursor {
+                let (page, continue_cursor) = self.scan_page(
+                    ts,
+                    keyspace_id,
+                    cursor.borrow(),
+                    direction,
+                    1000, // page_size
+                ).await?;
+
+                for (key, ts, value) in page {
+                    yield (key, ts, value);
+                }
+
+                maybe_cursor = continue_cursor;
+            }
+        }
     }
 
     pub async fn write(
