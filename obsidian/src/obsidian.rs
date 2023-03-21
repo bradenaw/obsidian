@@ -1,15 +1,16 @@
-use std::cell::RefCell;
 use std::cmp;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::future::Future;
+use std::sync::Mutex;
 use std::time::Duration;
 use std::time::SystemTime;
 
 use anyhow::anyhow;
 use anyhow::Context;
+use async_trait::async_trait;
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
 use futures::future;
@@ -35,19 +36,46 @@ use crate::util::Decode;
 use crate::util::Encode;
 use crate::util::Retry;
 
-struct Obsidian {
-    router: Box<dyn Router>,
-    tablets: Box<dyn Tablets>,
+#[async_trait]
+trait Obsidian {
+    async fn get(
+        &self,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        key: Vec<u8>,
+    ) -> anyhow::Result<Option<Vec<u8>>>;
+
+    async fn scan_page(
+        &self,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        range: Range<&[u8]>,
+        direction: Direction,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)>;
+
+    async fn latest_snapshot(
+        &self,
+        keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+    ) -> anyhow::Result<Timestamp>;
+
+    async fn write(
+        &self,
+        preconds: Vec<Precondition>,
+        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+    ) -> Result<Timestamp, WriteError>;
+}
+
+struct Frontend {
+    router: Box<dyn Router + Send + Sync>,
+    tablets: Box<dyn Tablets + Send + Sync>,
 }
 
 const MAX_CONFLICT_RETRIES: usize = 10;
 
-impl Obsidian {
-    fn new(router: Box<dyn Router>, tablets: Box<dyn Tablets>) -> Self {
-        Self { router, tablets }
-    }
-
-    pub async fn get(
+#[async_trait]
+impl Obsidian for Frontend {
+    async fn get(
         &self,
         ts: Timestamp,
         keyspace_id: KeyspaceId,
@@ -64,7 +92,32 @@ impl Obsidian {
         .await
     }
 
-    pub async fn latest_snapshot(
+    async fn scan_page(
+        &self,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        range: Range<&[u8]>,
+        direction: Direction,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)> {
+        self.with_resolve_conflicts(|| async move {
+            let start_bound = match direction {
+                Direction::Asc => range.lower,
+                Direction::Desc => range.upper,
+            };
+            let tablet_id =
+                self.router
+                    .tablet_id_for_bound(keyspace_id.0, start_bound, direction)?;
+
+            let tablet = self.tablets.tablet(tablet_id)?;
+            tablet
+                .scan_page(ts, keyspace_id, range, direction, limit)
+                .await
+        })
+        .await
+    }
+
+    async fn latest_snapshot(
         &self,
         keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
     ) -> anyhow::Result<Timestamp> {
@@ -94,32 +147,7 @@ impl Obsidian {
         Ok(result)
     }
 
-    pub async fn scan_page(
-        &self,
-        ts: Timestamp,
-        keyspace_id: KeyspaceId,
-        range: Range<&[u8]>,
-        direction: Direction,
-        limit: usize,
-    ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)> {
-        self.with_resolve_conflicts(|| async move {
-            let start_bound = match direction {
-                Direction::Asc => range.lower,
-                Direction::Desc => range.upper,
-            };
-            let tablet_id =
-                self.router
-                    .tablet_id_for_bound(keyspace_id.0, start_bound, direction)?;
-
-            let tablet = self.tablets.tablet(tablet_id)?;
-            tablet
-                .scan_page(ts, keyspace_id, range, direction, limit)
-                .await
-        })
-        .await
-    }
-
-    pub async fn write(
+    async fn write(
         &self,
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
@@ -275,6 +303,12 @@ impl Obsidian {
         }
         Err(WriteError::Other(anyhow::anyhow!("too much contention")))
     }
+}
+
+impl Frontend {
+    fn new(router: Box<dyn Router + Send + Sync>, tablets: Box<dyn Tablets + Send + Sync>) -> Self {
+        Self { router, tablets }
+    }
 
     fn split_write(
         &self,
@@ -318,20 +352,18 @@ impl Obsidian {
         // transactions.
         let txid = Txid::new(TabletId(ShardId(0), 0));
 
-        let already_seen_conflicts = RefCell::new(HashSet::new());
+        let already_seen_conflicts = Mutex::new(HashSet::new());
 
         Retry::new()
             .n_attempts(MAX_CONFLICT_RETRIES + 1)
             .with_retry(|| async {
-                let mut already_seen_conflicts = already_seen_conflicts.borrow_mut();
-
                 match f().await {
                     Ok(v) => return Ok(v),
                     Err(InternalError::Conflict(other_txid)) => {
                         // If we've already seen this txid as a conflict that means we already
                         // wait/aborted it and we're still just waiting for it to get cleaned up,
                         // so just take another turn around the retry loop.
-                        if already_seen_conflicts.contains(&other_txid) {
+                        if already_seen_conflicts.lock().unwrap().contains(&other_txid) {
                             return Err(InternalError::Conflict(other_txid));
                         }
 
@@ -342,7 +374,7 @@ impl Obsidian {
                             other_txid_owner_tablet.wait(other_txid).await?;
                         }
 
-                        already_seen_conflicts.insert(other_txid);
+                        already_seen_conflicts.lock().unwrap().insert(other_txid);
                         Err(InternalError::Conflict(other_txid))
                     }
                     Err(e) => return Err(e.into()),
@@ -560,6 +592,7 @@ mod test {
     use crate::types::Timestamp;
     use crate::types::Value;
 
+    use super::Frontend;
     use super::InternalError;
     use super::Obsidian;
     use super::Router;
@@ -701,7 +734,7 @@ mod test {
         }
     }
 
-    async fn new_with_single_byte_routing(n_tablets: usize) -> anyhow::Result<Obsidian> {
+    async fn new_with_single_byte_routing(n_tablets: usize) -> anyhow::Result<Frontend> {
         let tablets = Arc::new(StaticTablets {
             m: Mutex::new(HashMap::new()),
         });
@@ -755,7 +788,7 @@ mod test {
             m.insert(*tablet_id, Arc::new(tablet));
         }
 
-        Ok(Obsidian::new(Box::new(router.clone()), Box::new(tablets)))
+        Ok(Frontend::new(Box::new(router.clone()), Box::new(tablets)))
     }
 
     #[tokio::test]
@@ -833,7 +866,7 @@ mod test {
             }
 
             async fn check(
-                obs: &Obsidian,
+                obs: &Frontend,
                 timestamps: &[Timestamp],
                 ts_idx: usize,
                 range: Range<&[u8]>,
