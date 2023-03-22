@@ -1,21 +1,23 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+use futures::pin_mut;
 use futures::StreamExt;
 use futures::TryStreamExt;
 
 use crate::obsidian::Obsidian;
+use crate::obsidian::ObsidianExt;
 use crate::range::Range;
 use crate::types::Direction;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
 
-struct WorkloadAppend {
-    obsidian: Obsidian,
+struct WorkloadAppend<O> {
+    obsidian: O,
 }
 
-impl WorkloadAppend {
+impl<O: Obsidian + Sync> WorkloadAppend<O> {
     async fn write(&self) -> anyhow::Result<()> {
         let list_id = self.choose_list();
         let (list_keyspace_id, list_key) = list_id.to_key();
@@ -54,17 +56,18 @@ impl WorkloadAppend {
             .latest_snapshot(BTreeSet::from([(list_keyspace_id, list_key.clone())]))
             .await?;
 
-        let s = self
-            .obsidian
-            .scan(
-                read_ts,
-                list_keyspace_id,
-                Range::prefix(list_key),
-                Direction::Asc,
-            )
-            .boxed();
+        let s = self.obsidian.scan(
+            read_ts,
+            list_keyspace_id,
+            Range::prefix(list_key),
+            Direction::Asc,
+        );
 
-        while let Some(record) = s.try_next().await? {}
+        pin_mut!(s);
+
+        while let Some(record) = s.try_next().await? {
+            println!("{:?}", record);
+        }
 
         Ok(())
     }
