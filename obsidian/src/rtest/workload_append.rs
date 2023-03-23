@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use futures::pin_mut;
-use futures::StreamExt;
 use futures::TryStreamExt;
 
 use crate::obsidian::Obsidian;
@@ -56,13 +55,12 @@ impl<O: Obsidian + Sync> WorkloadAppend<O> {
             .latest_snapshot(BTreeSet::from([(list_keyspace_id, list_key.clone())]))
             .await?;
 
-        let s = self.obsidian.scan(
+        let s = Box::into_pin(self.obsidian.scan(
             read_ts,
             list_keyspace_id,
             Range::prefix(list_key),
             Direction::Asc,
-        );
-
+        ));
         pin_mut!(s);
 
         while let Some(record) = s.try_next().await? {
