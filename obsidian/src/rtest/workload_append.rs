@@ -17,6 +17,7 @@ use crate::types::Direction;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
+use crate::types::Timestamp;
 use crate::util::encode;
 use crate::util::Decode;
 use crate::util::Encode;
@@ -34,6 +35,7 @@ impl<O: Obsidian + Sync> WorkloadAppend<O> {
             let txid = self.new_txid();
 
             if let Some(prev_txid) = maybe_prev_txid {
+                // sequential dependency
                 self.edges.insert(txid, prev_txid);
             }
 
@@ -106,9 +108,19 @@ impl<O: Obsidian + Sync> WorkloadAppend<O> {
         ));
         pin_mut!(s);
 
+        let mut maybe_prev_txid = None;
         while let Some((_, _, value)) = s.try_next().await? {
             let observed_txid = Txid::decode(&value)?;
-            self.edges.insert(txid, observed_txid);
+
+            if let Some(prev_txid) = maybe_prev_txid {
+                // ww dependency
+                self.edges.insert(observed_txid, prev_txid);
+            }
+            maybe_prev_txid = Some(observed_txid);
+        }
+        if let Some(prev_txid) = maybe_prev_txid {
+            // wr dependency
+            self.edges.insert(txid, prev_txid);
         }
 
         Ok(())
@@ -127,6 +139,57 @@ impl<O: Obsidian + Sync> WorkloadAppend<O> {
     }
 }
 
+fn analyze(histories: Vec<Vec<(Seq, HistoryItem)>>) {
+    let mut edges = HashMap::new();
+
+    let mut longests = HashMap::new();
+    for history in histories {
+        let mut maybe_prev_txid = None;
+
+        for (_, item) in history {
+            match item {
+                HistoryItem::StartRead(txid) | HistoryItem::StartAppend(txid, _, _) => {
+                    if let Some(prev_txid) = maybe_prev_txid {
+                        edges.insert(txid, (prev_txid, EdgeType::Sequential));
+                    }
+                    maybe_prev_txid = Some(txid);
+                }
+                HistoryItem::FinishRead(_, _, list_id, txids) => {
+                    if txids.len() > longests.get(&list_id).map(Vec::len).unwrap_or(0) {
+                        longests.insert(list_id, txids);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+enum HistoryItem {
+    StartRead(Txid),
+    FinishRead(Txid, Timestamp, ListId, Vec<Txid>),
+    StartAppend(Txid, Timestamp, ListId),
+    Abort,
+    Commit(Timestamp),
+}
+
+// Dependency edges between two transactions T1 and T2.
+enum EdgeType {
+    // T1 finished before T2 started in the same thread.
+    Sequential,
+    // T1 finished before T2 started.
+    Temporal,
+    // T1 executed at some timestamp and T2 executed at a higher timestamp.
+    Timestamp,
+    // T1 wrote a version and T2 wrote the next version.
+    WriteWrite,
+    // T1 wrote a version and T2 read that version.
+    WriteRead,
+    // T1 read a version and T2 installed a later version.
+    ReadWrite,
+}
+
+#[derive(Eq, PartialEq, Ord, PartialOrd, Hash)]
 struct ListId(u64);
 impl ListId {
     fn to_key(&self) -> (KeyspaceId, Vec<u8>) {
@@ -143,6 +206,8 @@ impl ListItem {
 
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
 struct Txid(u64);
+
+struct Seq(u64);
 
 impl Encode for Txid {
     fn encoded_size_estimate(&self) -> usize {
