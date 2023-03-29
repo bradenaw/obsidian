@@ -19,8 +19,10 @@ use crate::types::Mutation;
 use crate::types::Precondition;
 use crate::types::Timestamp;
 use crate::util::encode;
+use crate::util::merge_sorted;
 use crate::util::Decode;
 use crate::util::Encode;
+use crate::util::OrdEqByFirst;
 
 struct WorkloadAppend<O> {
     obsidian: O,
@@ -139,21 +141,17 @@ impl<O: Obsidian + Sync> WorkloadAppend<O> {
     }
 }
 
-fn analyze(histories: Vec<Vec<(Seq, HistoryItem)>>) {
+fn gen_graph(histories: Vec<Vec<(Seq, HistoryItem)>>) -> anyhow::Result<()> {
     let mut edges = HashMap::new();
 
     let mut longests = HashMap::new();
-    for history in histories {
-        let mut maybe_prev_txid = None;
+    let mut possible_txids = HashSet::new();
 
+    for history in histories {
         for (_, item) in history {
             match item {
-                HistoryItem::StartRead(txid) | HistoryItem::StartAppend(txid, _, _) => {
-                    if let Some(prev_txid) = maybe_prev_txid {
-                        edges.insert(txid, (prev_txid, EdgeType::Sequential));
-                    }
-                    maybe_prev_txid = Some(txid);
-                }
+                HistoryItem::StartAppend(txid, _, _) => possible_txids.insert(txid),
+                HistoryItem::Abort(txid) => possible_txids.remove(txid),
                 HistoryItem::FinishRead(_, _, list_id, txids) => {
                     if txids.len() > longests.get(&list_id).map(Vec::len).unwrap_or(0) {
                         longests.insert(list_id, txids);
@@ -163,22 +161,109 @@ fn analyze(histories: Vec<Vec<(Seq, HistoryItem)>>) {
             }
         }
     }
+
+    for longest in longests.values() {
+        let mut prev_txid = None;
+        for txid in longest {
+            if let Some(prev_txid) = prev_txid {
+                edges
+                    .entry(txid)
+                    .or_insert_with(HashMap::new)
+                    .insert(other_txid, EdgeType::WriteWrite);
+            }
+
+            if !possible_txids.contains(txid) {
+                return Err(anyhow!("garbage read"));
+            }
+
+            prev_txid = Some(txid);
+        }
+    }
+
+    let histories_with_thread_ids = histories
+        .iter()
+        .enumerate()
+        .map(|(thread_id, history)| {
+            history
+                .iter()
+                .map(|(seq, item)| OrdEqByFirst(seq, (thread_id, item)))
+        })
+        .collect();
+    let merged_history = merge_sorted(histories_with_thread_ids);
+
+    let mut most_recent_txid = HashMap::new();
+    let mut highest_timestamp = HashMap::new();
+    for OrdEqByFirst(seq, (thread_id, item)) in merged_history {
+        match item {
+            HistoryItem::StartRead(txid) | HistoryItem::StartAppend(txid, _, _) => {
+                for other_txid in most_recent_txid.values() {
+                    edges
+                        .entry(txid)
+                        .or_insert_with(HashMap::new)
+                        .insert(other_txid, EdgeType::RealTime);
+                }
+            }
+            HistoryItem::Commit(txid, ts) => {
+                if let Some((other_ts, other_txid)) = highest_timestamp.get(list_id) {
+                    if ts > other_ts {
+                        edges
+                            .entry(txid)
+                            .or_insert_with(HashMap::new)
+                            .insert(other_txid, EdgeType::Timestamp);
+                        highest_timestamp.insert(list_id, (ts, txid));
+                    }
+                } else {
+                    highest_timestamp.insert(list_id, (ts, txid));
+                }
+            }
+            HistoryItem::FinishRead(txid, _, list_id, txids) => {
+                if let Some(last_txid) = txids.last() {
+                    edges
+                        .entry(txid)
+                        .or_insert_with(HashMap::new)
+                        .insert(last_txid, EdgeType::WriteRead);
+                }
+
+                let longest = longests.get(&list_id).unwrap();
+                if !longest.starts_with(&txids) {
+                    return Err(anyhow!("lost or duplicate write?"));
+                }
+
+                if longest.len() > txids.len() {
+                    edges
+                        .entry(txid)
+                        .or_insert_with(HashMap::new)
+                        .insert(&longest[txids.len()], EdgeType::ReadWrite);
+                }
+            }
+            _ => {}
+        }
+
+        match item {
+            HistoryItem::FinishRead(txid, _, _, _)
+            | HistoryItem::Commit(txid)
+            | HistoryItem::Abort(txid) => {
+                most_recent_txid.insert(thread_id, txid);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
 }
 
 enum HistoryItem {
     StartRead(Txid),
     FinishRead(Txid, Timestamp, ListId, Vec<Txid>),
     StartAppend(Txid, Timestamp, ListId),
-    Abort,
-    Commit(Timestamp),
+    Abort(Txid),
+    Commit(Txid, Timestamp),
 }
 
 // Dependency edges between two transactions T1 and T2.
 enum EdgeType {
-    // T1 finished before T2 started in the same thread.
-    Sequential,
     // T1 finished before T2 started.
-    Temporal,
+    RealTime,
     // T1 executed at some timestamp and T2 executed at a higher timestamp.
     Timestamp,
     // T1 wrote a version and T2 wrote the next version.
