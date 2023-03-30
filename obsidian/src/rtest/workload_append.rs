@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use anyhow::anyhow;
 use byteorder::BigEndian;
@@ -147,14 +148,18 @@ fn gen_graph(histories: Vec<Vec<(Seq, HistoryItem)>>) -> anyhow::Result<()> {
     let mut longests = HashMap::new();
     let mut possible_txids = HashSet::new();
 
-    for history in histories {
+    for history in &histories {
         for (_, item) in history {
             match item {
-                HistoryItem::StartAppend(txid, _, _) => possible_txids.insert(txid),
-                HistoryItem::Abort(txid) => possible_txids.remove(txid),
+                HistoryItem::StartAppend(txid, _, _) => {
+                    possible_txids.insert(txid);
+                }
+                HistoryItem::Abort(txid) => {
+                    possible_txids.remove(&txid);
+                }
                 HistoryItem::FinishRead(_, _, list_id, txids) => {
                     if txids.len() > longests.get(&list_id).map(Vec::len).unwrap_or(0) {
-                        longests.insert(list_id, txids);
+                        longests.insert(list_id, txids.clone());
                     }
                 }
                 _ => {}
@@ -163,20 +168,20 @@ fn gen_graph(histories: Vec<Vec<(Seq, HistoryItem)>>) -> anyhow::Result<()> {
     }
 
     for longest in longests.values() {
-        let mut prev_txid = None;
+        let mut prev_txid: Option<Txid> = None;
         for txid in longest {
             if let Some(prev_txid) = prev_txid {
                 edges
-                    .entry(txid)
+                    .entry(*txid)
                     .or_insert_with(HashMap::new)
-                    .insert(other_txid, EdgeType::WriteWrite);
+                    .insert(prev_txid, EdgeType::WriteWrite);
             }
 
             if !possible_txids.contains(txid) {
                 return Err(anyhow!("garbage read"));
             }
 
-            prev_txid = Some(txid);
+            prev_txid = Some(*txid);
         }
     }
 
@@ -186,42 +191,42 @@ fn gen_graph(histories: Vec<Vec<(Seq, HistoryItem)>>) -> anyhow::Result<()> {
         .map(|(thread_id, history)| {
             history
                 .iter()
-                .map(|(seq, item)| OrdEqByFirst(seq, (thread_id, item)))
+                .map(move |(seq, item)| OrdEqByFirst(seq, (thread_id, item)))
         })
         .collect();
     let merged_history = merge_sorted(histories_with_thread_ids);
 
     let mut most_recent_txid = HashMap::new();
-    let mut highest_timestamp = HashMap::new();
+    let mut highest_timestamp: HashMap<ListId, (Timestamp, Txid)> = HashMap::new();
     for OrdEqByFirst(seq, (thread_id, item)) in merged_history {
         match item {
             HistoryItem::StartRead(txid) | HistoryItem::StartAppend(txid, _, _) => {
                 for other_txid in most_recent_txid.values() {
                     edges
-                        .entry(txid)
+                        .entry(*txid)
                         .or_insert_with(HashMap::new)
-                        .insert(other_txid, EdgeType::RealTime);
+                        .insert(*other_txid, EdgeType::RealTime);
                 }
             }
-            HistoryItem::Commit(txid, ts) => {
+            HistoryItem::Commit(txid, ts, list_id) => {
                 if let Some((other_ts, other_txid)) = highest_timestamp.get(list_id) {
                     if ts > other_ts {
                         edges
-                            .entry(txid)
+                            .entry(*txid)
                             .or_insert_with(HashMap::new)
-                            .insert(other_txid, EdgeType::Timestamp);
-                        highest_timestamp.insert(list_id, (ts, txid));
+                            .insert(*other_txid, EdgeType::Timestamp);
+                        highest_timestamp.insert(*list_id, (*ts, *txid));
                     }
                 } else {
-                    highest_timestamp.insert(list_id, (ts, txid));
+                    highest_timestamp.insert(*list_id, (*ts, *txid));
                 }
             }
             HistoryItem::FinishRead(txid, _, list_id, txids) => {
                 if let Some(last_txid) = txids.last() {
                     edges
-                        .entry(txid)
+                        .entry(*txid)
                         .or_insert_with(HashMap::new)
-                        .insert(last_txid, EdgeType::WriteRead);
+                        .insert(*last_txid, EdgeType::WriteRead);
                 }
 
                 let longest = longests.get(&list_id).unwrap();
@@ -231,9 +236,9 @@ fn gen_graph(histories: Vec<Vec<(Seq, HistoryItem)>>) -> anyhow::Result<()> {
 
                 if longest.len() > txids.len() {
                     edges
-                        .entry(txid)
+                        .entry(*txid)
                         .or_insert_with(HashMap::new)
-                        .insert(&longest[txids.len()], EdgeType::ReadWrite);
+                        .insert(longest[txids.len()], EdgeType::ReadWrite);
                 }
             }
             _ => {}
@@ -241,9 +246,9 @@ fn gen_graph(histories: Vec<Vec<(Seq, HistoryItem)>>) -> anyhow::Result<()> {
 
         match item {
             HistoryItem::FinishRead(txid, _, _, _)
-            | HistoryItem::Commit(txid)
+            | HistoryItem::Commit(txid, _, _)
             | HistoryItem::Abort(txid) => {
-                most_recent_txid.insert(thread_id, txid);
+                most_recent_txid.insert(thread_id, *txid);
             }
             _ => {}
         }
@@ -257,7 +262,7 @@ enum HistoryItem {
     FinishRead(Txid, Timestamp, ListId, Vec<Txid>),
     StartAppend(Txid, Timestamp, ListId),
     Abort(Txid),
-    Commit(Txid, Timestamp),
+    Commit(Txid, Timestamp, ListId),
 }
 
 // Dependency edges between two transactions T1 and T2.
@@ -274,7 +279,7 @@ enum EdgeType {
     ReadWrite,
 }
 
-#[derive(Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Eq, PartialEq, Ord, PartialOrd, Hash, Clone, Copy)]
 struct ListId(u64);
 impl ListId {
     fn to_key(&self) -> (KeyspaceId, Vec<u8>) {
@@ -292,6 +297,7 @@ impl ListItem {
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
 struct Txid(u64);
 
+#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy)]
 struct Seq(u64);
 
 impl Encode for Txid {
