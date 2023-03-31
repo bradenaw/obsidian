@@ -198,7 +198,7 @@ fn gen_graph(histories: Vec<Vec<(Seq, HistoryItem)>>) -> anyhow::Result<()> {
 
     let mut most_recent_txid = HashMap::new();
     let mut highest_timestamp: HashMap<ListId, (Timestamp, Txid)> = HashMap::new();
-    for OrdEqByFirst(seq, (thread_id, item)) in merged_history {
+    for OrdEqByFirst(_, (thread_id, item)) in merged_history {
         match item {
             HistoryItem::StartRead(txid) | HistoryItem::StartAppend(txid, _, _) => {
                 for other_txid in most_recent_txid.values() {
