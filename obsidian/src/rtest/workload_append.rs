@@ -1,13 +1,18 @@
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use anyhow::anyhow;
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
 use futures::pin_mut;
+use futures::stream::FuturesUnordered;
 use futures::TryStreamExt;
+use priority_queue::PriorityQueue;
 use rand::thread_rng;
 use rand::Rng;
 
@@ -28,31 +33,61 @@ use crate::util::OrdEqByFirst;
 struct WorkloadAppend<O> {
     obsidian: O,
 
-    edges: HashMap<Txid, Txid>,
+    list_item_keyspace_id: KeyspaceId,
+
+    seq_gen: AtomicUsize,
 }
 
-impl<O: Obsidian + Sync> WorkloadAppend<O> {
-    async fn thread(&mut self) -> anyhow::Result<()> {
-        let mut maybe_prev_txid = None;
+impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
+    async fn run(&self) {
+        let futures = FuturesUnordered::new();
+        for _ in 0..32 {
+            futures.push(self.thread());
+        }
+        futures.try_next().await?;
+    }
+
+    async fn thread(&self) -> Vec<(Seq, HistoryItem)> {
+        let mut history = vec![];
         loop {
             let txid = self.new_txid();
 
-            if let Some(prev_txid) = maybe_prev_txid {
-                // sequential dependency
-                self.edges.insert(txid, prev_txid);
-            }
-
-            match thread_rng().gen_bool(0.1) {
-                true => self.write(txid).await?,
-                false => self.read(txid).await?,
+            let choice = thread_rng().gen_bool(0.1);
+            match choice {
+                true => {
+                    let list_id = self.choose_list();
+                    history.push((self.next_seq(), HistoryItem::StartAppend(txid, list_id)));
+                    match self.append(txid, list_id).await {
+                        Ok(ts) => {
+                            history.push((self.next_seq(), HistoryItem::Commit(txid, ts, list_id)));
+                        }
+                        // TODO: classify some errors as aborts and continue instead of ending
+                        Err(_) => {
+                            return history;
+                        }
+                    };
+                }
+                false => {
+                    let list_id = self.choose_list();
+                    history.push((self.next_seq(), HistoryItem::StartRead(txid)));
+                    match self.read(list_id).await {
+                        Ok((ts, list)) => {
+                            history.push((
+                                self.next_seq(),
+                                HistoryItem::FinishRead(txid, ts, list_id, list),
+                            ));
+                        }
+                        Err(_) => {
+                            history.push((self.next_seq(), HistoryItem::Abort(txid)));
+                        }
+                    }
+                }
             };
-
-            maybe_prev_txid = Some(txid);
         }
+        history
     }
 
-    async fn write(&self, txid: Txid) -> anyhow::Result<()> {
-        let list_id = self.choose_list();
+    async fn append(&self, txid: Txid, list_id: ListId) -> anyhow::Result<Timestamp> {
         let (list_keyspace_id, list_key) = list_id.to_key();
 
         let read_ts = self
@@ -74,7 +109,8 @@ impl<O: Obsidian + Sync> WorkloadAppend<O> {
 
         let txid_value = encode(&txid);
 
-        self.obsidian
+        let ts = self
+            .obsidian
             .write(
                 vec![Precondition::NotChangedSince(
                     list_keyspace_id,
@@ -91,13 +127,10 @@ impl<O: Obsidian + Sync> WorkloadAppend<O> {
             )
             .await?;
 
-        Ok(())
+        Ok(ts)
     }
 
-    async fn read(&self, txid: Txid) -> anyhow::Result<()> {
-        let list_id = self.choose_list();
-        let list_item_keyspace_id = todo!();
-
+    async fn read(&self, list_id: ListId) -> anyhow::Result<(Timestamp, Vec<Txid>)> {
         let read_ts = self
             .obsidian
             .latest_snapshot(BTreeSet::from([list_id.to_key().clone()]))
@@ -105,28 +138,19 @@ impl<O: Obsidian + Sync> WorkloadAppend<O> {
 
         let s = Box::into_pin(self.obsidian.scan(
             read_ts,
-            list_item_keyspace_id,
+            self.list_item_keyspace_id,
             Range::prefix(list_id.to_key().1),
             Direction::Asc,
         ));
         pin_mut!(s);
 
-        let mut maybe_prev_txid = None;
+        let mut result = vec![];
         while let Some((_, _, value)) = s.try_next().await? {
             let observed_txid = Txid::decode(&value)?;
-
-            if let Some(prev_txid) = maybe_prev_txid {
-                // ww dependency
-                self.edges.insert(observed_txid, prev_txid);
-            }
-            maybe_prev_txid = Some(observed_txid);
-        }
-        if let Some(prev_txid) = maybe_prev_txid {
-            // wr dependency
-            self.edges.insert(txid, prev_txid);
+            result.push(observed_txid);
         }
 
-        Ok(())
+        Ok((read_ts, result))
     }
 
     fn new_txid(&self) -> Txid {
@@ -140,6 +164,10 @@ impl<O: Obsidian + Sync> WorkloadAppend<O> {
     fn new_list_item(&self, _list_id: ListId) -> ListItem {
         todo!();
     }
+
+    fn next_seq(&self) -> Seq {
+        Seq(self.seq_gen.fetch_add(1, Ordering::SeqCst) as u64)
+    }
 }
 
 fn gen_graph(histories: Vec<Vec<(Seq, HistoryItem)>>) -> anyhow::Result<()> {
@@ -151,7 +179,7 @@ fn gen_graph(histories: Vec<Vec<(Seq, HistoryItem)>>) -> anyhow::Result<()> {
     for history in &histories {
         for (_, item) in history {
             match item {
-                HistoryItem::StartAppend(txid, _, _) => {
+                HistoryItem::StartAppend(txid, _) => {
                     possible_txids.insert(txid);
                 }
                 HistoryItem::Abort(txid) => {
@@ -200,7 +228,7 @@ fn gen_graph(histories: Vec<Vec<(Seq, HistoryItem)>>) -> anyhow::Result<()> {
     let mut highest_timestamp: HashMap<ListId, (Timestamp, Txid)> = HashMap::new();
     for OrdEqByFirst(_, (thread_id, item)) in merged_history {
         match item {
-            HistoryItem::StartRead(txid) | HistoryItem::StartAppend(txid, _, _) => {
+            HistoryItem::StartRead(txid) | HistoryItem::StartAppend(txid, _) => {
                 for other_txid in most_recent_txid.values() {
                     edges
                         .entry(*txid)
@@ -214,7 +242,7 @@ fn gen_graph(histories: Vec<Vec<(Seq, HistoryItem)>>) -> anyhow::Result<()> {
                         edges
                             .entry(*txid)
                             .or_insert_with(HashMap::new)
-                            .insert(*other_txid, EdgeType::Timestamp);
+                            .insert(*other_txid, EdgeType::SameKeyTimestamp);
                         highest_timestamp.insert(*list_id, (*ts, *txid));
                     }
                 } else {
@@ -257,10 +285,39 @@ fn gen_graph(histories: Vec<Vec<(Seq, HistoryItem)>>) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn find_cycle(edges: HashMap<Txid, HashMap<Txid, EdgeType>>) -> anyhow::Result<()> {
+    let mut in_edges = HashMap::new();
+
+    for (_, dsts) in &edges {
+        for (dst, _) in dsts {
+            in_edges.insert(*dst, in_edges.get(&dst).unwrap_or(&0) + 1usize);
+        }
+    }
+
+    let mut pq: PriorityQueue<Txid, Reverse<usize>> = PriorityQueue::from(
+        in_edges
+            .into_iter()
+            .map(|(txid, n_in_edges)| (txid, Reverse(n_in_edges)))
+            .collect::<Vec<(Txid, Reverse<usize>)>>(),
+    );
+
+    while let Some((txid, remaining_in_edges)) = pq.pop() {
+        if remaining_in_edges.0 > 0 {
+            return Err(anyhow!("cycle detected"));
+        }
+
+        for (dst, _) in edges.get(&txid).unwrap() {
+            pq.change_priority_by(dst, |p| p.0 = p.0 - 1);
+        }
+    }
+
+    Ok(())
+}
+
 enum HistoryItem {
     StartRead(Txid),
     FinishRead(Txid, Timestamp, ListId, Vec<Txid>),
-    StartAppend(Txid, Timestamp, ListId),
+    StartAppend(Txid, ListId),
     Abort(Txid),
     Commit(Txid, Timestamp, ListId),
 }
@@ -269,8 +326,8 @@ enum HistoryItem {
 enum EdgeType {
     // T1 finished before T2 started.
     RealTime,
-    // T1 executed at some timestamp and T2 executed at a higher timestamp.
-    Timestamp,
+    // T1 executed at some timestamp and T2 executed at a higher timestamp on the same key.
+    SameKeyTimestamp,
     // T1 wrote a version and T2 wrote the next version.
     WriteWrite,
     // T1 wrote a version and T2 read that version.
