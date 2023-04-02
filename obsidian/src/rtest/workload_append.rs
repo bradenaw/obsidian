@@ -5,12 +5,15 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::anyhow;
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
 use futures::pin_mut;
 use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 use futures::TryStreamExt;
 use priority_queue::PriorityQueue;
 use rand::thread_rng;
@@ -33,23 +36,36 @@ use crate::util::OrdEqByFirst;
 struct WorkloadAppend<O> {
     obsidian: O,
 
+    list_keyspace_id: KeyspaceId,
     list_item_keyspace_id: KeyspaceId,
 
     seq_gen: AtomicUsize,
 }
 
 impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
-    async fn run(&self) {
-        let futures = FuturesUnordered::new();
+    async fn run(&self) -> anyhow::Result<()> {
+        let mut futures = FuturesUnordered::new();
+        let start = Instant::now();
         for _ in 0..32 {
             futures.push(self.thread());
         }
-        futures.try_next().await?;
+        let mut histories = vec![];
+        while let Some(thread_history) = futures.next().await {
+            histories.push(thread_history);
+            if start.elapsed() < Duration::from_millis(4_800) {
+                futures.push(self.thread());
+            }
+        }
+
+        let edges = gen_graph(histories)?;
+        find_cycle(edges)?;
+        Ok(())
     }
 
     async fn thread(&self) -> Vec<(Seq, HistoryItem)> {
         let mut history = vec![];
-        loop {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(5_000) {
             let txid = self.new_txid();
 
             let choice = thread_rng().gen_bool(0.1);
@@ -170,7 +186,9 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
     }
 }
 
-fn gen_graph(histories: Vec<Vec<(Seq, HistoryItem)>>) -> anyhow::Result<()> {
+fn gen_graph(
+    histories: Vec<Vec<(Seq, HistoryItem)>>,
+) -> anyhow::Result<HashMap<Txid, HashMap<Txid, EdgeType>>> {
     let mut edges = HashMap::new();
 
     let mut longests = HashMap::new();
@@ -282,7 +300,7 @@ fn gen_graph(histories: Vec<Vec<(Seq, HistoryItem)>>) -> anyhow::Result<()> {
         }
     }
 
-    Ok(())
+    Ok(edges)
 }
 
 fn find_cycle(edges: HashMap<Txid, HashMap<Txid, EdgeType>>) -> anyhow::Result<()> {
