@@ -278,7 +278,7 @@ fn gen_graph(
                     return Err(anyhow!("lost or duplicate write?"));
                 }
 
-                if longest.len() > txids.len() {
+                if longest.len() >= txids.len() {
                     edges
                         .entry(*txid)
                         .or_insert_with(HashMap::new)
