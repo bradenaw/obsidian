@@ -40,6 +40,7 @@ struct WorkloadAppend<O> {
     list_item_keyspace_id: KeyspaceId,
 
     seq_gen: AtomicUsize,
+    txid_gen: AtomicUsize,
 }
 
 impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
@@ -104,16 +105,14 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
     }
 
     async fn append(&self, txid: Txid, list_id: ListId) -> anyhow::Result<Timestamp> {
-        let (list_keyspace_id, list_key) = list_id.to_key();
-
         let read_ts = self
             .obsidian
-            .latest_snapshot(BTreeSet::from([(list_keyspace_id, list_key.clone())]))
+            .latest_snapshot(BTreeSet::from([(self.list_keyspace_id, list_id.to_key())]))
             .await?;
 
         let list_value = self
             .obsidian
-            .get(read_ts, list_keyspace_id, list_key.clone())
+            .get(read_ts, self.list_keyspace_id, list_id.to_key())
             .await?
             .unwrap_or(vec![0u8; 8]);
         let new_len = BigEndian::read_u64(&list_value[..]) + 1;
@@ -121,7 +120,6 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
         BigEndian::write_u64(&mut new_len_value, new_len);
 
         let list_item = ListItem(list_id, new_len);
-        let (list_item_keyspace_id, list_item_key) = list_item.to_key();
 
         let txid_value = encode(&txid);
 
@@ -129,14 +127,17 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
             .obsidian
             .write(
                 vec![Precondition::NotChangedSince(
-                    list_keyspace_id,
-                    list_key.clone(),
+                    self.list_keyspace_id,
+                    list_id.to_key(),
                     read_ts,
                 )],
                 BTreeMap::from([
-                    ((list_keyspace_id, list_key), Mutation::Put(new_len_value)),
                     (
-                        (list_item_keyspace_id, list_item_key),
+                        (self.list_keyspace_id, list_id.to_key()),
+                        Mutation::Put(new_len_value),
+                    ),
+                    (
+                        (self.list_item_keyspace_id, list_item.to_key()),
                         Mutation::Put(txid_value),
                     ),
                 ]),
@@ -149,13 +150,13 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
     async fn read(&self, list_id: ListId) -> anyhow::Result<(Timestamp, Vec<Txid>)> {
         let read_ts = self
             .obsidian
-            .latest_snapshot(BTreeSet::from([list_id.to_key().clone()]))
+            .latest_snapshot(BTreeSet::from([(self.list_keyspace_id, list_id.to_key())]))
             .await?;
 
         let s = Box::into_pin(self.obsidian.scan(
             read_ts,
             self.list_item_keyspace_id,
-            Range::prefix(list_id.to_key().1),
+            Range::prefix(list_id.to_key()),
             Direction::Asc,
         ));
         pin_mut!(s);
@@ -169,16 +170,12 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
         Ok((read_ts, result))
     }
 
-    fn new_txid(&self) -> Txid {
-        todo!()
-    }
-
     fn choose_list(&self) -> ListId {
-        todo!()
+        ListId(thread_rng().gen_range(0..100))
     }
 
-    fn new_list_item(&self, _list_id: ListId) -> ListItem {
-        todo!();
+    fn new_txid(&self) -> Txid {
+        Txid(self.seq_gen.fetch_add(1, Ordering::SeqCst) as u64)
     }
 
     fn next_seq(&self) -> Seq {
@@ -357,15 +354,20 @@ enum EdgeType {
 #[derive(Eq, PartialEq, Ord, PartialOrd, Hash, Clone, Copy)]
 struct ListId(u64);
 impl ListId {
-    fn to_key(&self) -> (KeyspaceId, Vec<u8>) {
-        todo!();
+    fn to_key(&self) -> Vec<u8> {
+        let mut key = vec![0u8; 8];
+        BigEndian::write_u64(&mut key, self.0);
+        key
     }
 }
 
 struct ListItem(ListId, u64);
 impl ListItem {
-    fn to_key(&self) -> (KeyspaceId, Vec<u8>) {
-        todo!();
+    fn to_key(&self) -> Vec<u8> {
+        let mut key = vec![0u8; 16];
+        BigEndian::write_u64(&mut key, self.0 .0);
+        BigEndian::write_u64(&mut key, self.1);
+        key
     }
 }
 
