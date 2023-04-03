@@ -11,6 +11,7 @@ use std::time::Instant;
 use anyhow::anyhow;
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
+use byteorder::LittleEndian;
 use futures::pin_mut;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -356,7 +357,7 @@ struct ListId(u64);
 impl ListId {
     fn to_key(&self) -> Vec<u8> {
         let mut key = vec![0u8; 8];
-        BigEndian::write_u64(&mut key, self.0);
+        LittleEndian::write_u64(&mut key, self.0);
         key
     }
 }
@@ -365,7 +366,7 @@ struct ListItem(ListId, u64);
 impl ListItem {
     fn to_key(&self) -> Vec<u8> {
         let mut key = vec![0u8; 16];
-        BigEndian::write_u64(&mut key, self.0 .0);
+        LittleEndian::write_u64(&mut key, self.0 .0 + 1000);
         BigEndian::write_u64(&mut key, self.1);
         key
     }
