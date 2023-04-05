@@ -1,8 +1,230 @@
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::fmt::Debug;
+use std::sync::Arc;
+use std::sync::Mutex;
 
+use async_trait::async_trait;
+
+use crate::lsm::LsmBuilder;
+use crate::obsidian::Frontend;
+use crate::obsidian::InternalError;
+use crate::obsidian::Router;
+use crate::obsidian::TabletId;
+use crate::obsidian::Tablets;
+use crate::obsidian::TxOutcome;
+use crate::obsidian::Txid;
+use crate::range::Bound;
+use crate::range::Range;
+use crate::range::RangeSet;
+use crate::router::StaticRouter;
+use crate::storage::MemStorage;
+use crate::tablet::LsmTablet;
+use crate::tablet::Tablet;
+use crate::types::ColoGroupId;
+use crate::types::Direction;
+use crate::types::HistoryRange;
+use crate::types::KeyspaceId;
+use crate::types::Mutation;
+use crate::types::Precondition;
+use crate::types::ShardId;
+use crate::types::Timestamp;
+use crate::types::Value;
 use crate::util::encode;
 use crate::util::Decode;
 use crate::util::Encode;
+
+impl<T: Router> Router for Arc<T> {
+    fn tablet_id_for_key(
+        &self,
+        colo_group_id: ColoGroupId,
+        key: &[u8],
+    ) -> anyhow::Result<TabletId> {
+        T::tablet_id_for_key(&self, colo_group_id, key)
+    }
+
+    fn tablet_id_for_bound(
+        &self,
+        colo_group_id: ColoGroupId,
+        bound: Bound<&[u8]>,
+        direction: Direction,
+    ) -> anyhow::Result<TabletId> {
+        T::tablet_id_for_bound(&self, colo_group_id, bound, direction)
+    }
+}
+
+#[async_trait]
+impl<T: Tablet + Send + Sync> Tablet for Arc<T> {
+    async fn get(
+        &self,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        key: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, InternalError> {
+        T::get(self, ts, keyspace_id, key).await
+    }
+
+    async fn get_latest(
+        &self,
+        keyspace_id: KeyspaceId,
+        key: &[u8],
+    ) -> Result<(Timestamp, Option<Vec<u8>>), InternalError> {
+        T::get_latest(self, keyspace_id, key).await
+    }
+
+    async fn latest_snapshot(
+        &self,
+        keys: BTreeSet<(KeyspaceId, &[u8])>,
+    ) -> Result<Timestamp, InternalError> {
+        T::latest_snapshot(self, keys).await
+    }
+
+    async fn scan_page(
+        &self,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        range: Range<&[u8]>,
+        direction: Direction,
+        limit: usize,
+    ) -> Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>), InternalError> {
+        T::scan_page(self, ts, keyspace_id, range, direction, limit).await
+    }
+
+    async fn history_page(
+        &self,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        key: &[u8],
+        range: HistoryRange,
+        direction: Direction,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>)> {
+        T::history_page(self, ts, keyspace_id, key, range, direction, limit).await
+    }
+
+    async fn write(
+        &self,
+        txid: Txid,
+        preconds: Vec<Precondition>,
+        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+    ) -> Result<Timestamp, InternalError> {
+        T::write(self, txid, preconds, muts).await
+    }
+
+    async fn prepare(
+        &self,
+        txid: Txid,
+        preconds: Vec<Precondition>,
+        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+    ) -> Result<Timestamp, InternalError> {
+        T::prepare(self, txid, preconds, muts).await
+    }
+
+    async fn try_commit(
+        &self,
+        txid: Txid,
+        ts: Timestamp,
+        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+    ) -> anyhow::Result<TxOutcome> {
+        T::try_commit(self, txid, ts, precond_keys, mut_keys).await
+    }
+
+    async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
+        T::try_abort(self, txid).await
+    }
+
+    async fn wait(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
+        T::wait(self, txid).await
+    }
+
+    async fn cleanup_committed(
+        &self,
+        txid: Txid,
+        ts: Timestamp,
+        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+    ) -> anyhow::Result<()> {
+        T::cleanup_committed(self, txid, ts, precond_keys, mut_keys).await
+    }
+}
+
+struct StaticTablets {
+    m: Mutex<HashMap<TabletId, Arc<LsmTablet>>>,
+}
+
+impl Tablets for Arc<StaticTablets> {
+    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Box<dyn Tablet + Send + Sync>> {
+        Ok(Box::new(
+            self.m
+                .lock()
+                .unwrap()
+                .get(&tablet_id)
+                .ok_or_else(|| anyhow::anyhow!("no tablet for {}", tablet_id))?
+                .clone(),
+        ))
+    }
+}
+
+pub(crate) async fn new_with_single_byte_routing(n_tablets: usize) -> anyhow::Result<Frontend> {
+    let tablets = Arc::new(StaticTablets {
+        m: Mutex::new(HashMap::new()),
+    });
+
+    let colo_group_id = ColoGroupId(1);
+    let keyspace_ids = [KeyspaceId(colo_group_id, 1), KeyspaceId(colo_group_id, 2)];
+
+    // META gets everything up to the first split.
+    let mut tablet_ids = vec![TabletId::META];
+    let mut splits = vec![];
+    for i in 0..n_tablets {
+        let shard_id = ShardId(((i % 2) + 1) as u32);
+        tablet_ids.push(TabletId(shard_id, (i + 2) as u64));
+        splits.push(Bound::Before(vec![(i + 1) as u8]));
+    }
+
+    let router = Arc::new(StaticRouter::new(
+        vec![(colo_group_id, (splits.clone(), tablet_ids.clone()))]
+            .into_iter()
+            .collect(),
+    ));
+
+    let storage = Arc::new(MemStorage::new());
+
+    for (i, tablet_id) in tablet_ids.iter().enumerate() {
+        let range = Range {
+            lower: if i == 0 {
+                Bound::BeforeAll
+            } else {
+                splits[i - 1].clone()
+            },
+            upper: if i == tablet_ids.len() - 1 {
+                Bound::AfterAll
+            } else {
+                splits[i].clone()
+            },
+        };
+        println!("{:?} owns {:?}", tablet_id, range);
+        let tablet = LsmTablet::new(
+            *tablet_id,
+            LsmBuilder::new().storage(storage.clone()).build().await?,
+            vec![(colo_group_id, RangeSet::from(range))]
+                .into_iter()
+                .collect(),
+            Box::new(tablets.clone()),
+            Box::new(router.clone()),
+        )
+        .await?;
+        for keyspace_id in keyspace_ids {
+            tablet.create_keyspace(keyspace_id).await?;
+        }
+        let mut m = tablets.m.lock().unwrap();
+        m.insert(*tablet_id, Arc::new(tablet));
+    }
+
+    Ok(Frontend::new(Box::new(router.clone()), Box::new(tablets)))
+}
 
 pub(crate) fn assert_roundtrip<E: Encode + Decode + Debug + Eq>(e: &E) -> anyhow::Result<()> {
     let encoded = encode(e);

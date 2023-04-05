@@ -23,6 +23,7 @@ use rand::Rng;
 use crate::obsidian::Obsidian;
 use crate::obsidian::ObsidianExt;
 use crate::range::Range;
+use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
@@ -45,6 +46,17 @@ struct WorkloadAppend<O> {
 }
 
 impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
+    fn new(obsidian: O) -> Self {
+        Self {
+            obsidian,
+
+            list_keyspace_id: KeyspaceId(ColoGroupId(1), 1),
+            list_item_keyspace_id: KeyspaceId(ColoGroupId(1), 2),
+            seq_gen: AtomicUsize::new(0),
+            txid_gen: AtomicUsize::new(0),
+        }
+    }
+
     async fn run(&self) -> anyhow::Result<()> {
         let mut futures = FuturesUnordered::new();
         let start = Instant::now();
@@ -59,7 +71,16 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
             }
         }
 
+        println!("ran {} threads", histories.len());
+        println!(
+            "history has {} events",
+            histories.iter().map(Vec::len).sum::<usize>(),
+        );
+
         let edges = gen_graph(histories)?;
+
+        println!("graph has {} edges", edges.len());
+
         find_cycle(edges)?;
         Ok(())
     }
@@ -80,7 +101,8 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
                             history.push((self.next_seq(), HistoryItem::Commit(txid, ts, list_id)));
                         }
                         // TODO: classify some errors as aborts and continue instead of ending
-                        Err(_) => {
+                        Err(e) => {
+                            println!("write transaction failed {:?}", e);
                             return history;
                         }
                     };
@@ -95,7 +117,8 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
                                 HistoryItem::FinishRead(txid, ts, list_id, list),
                             ));
                         }
-                        Err(_) => {
+                        Err(e) => {
+                            println!("read failed {:?}", e);
                             history.push((self.next_seq(), HistoryItem::Abort(txid)));
                         }
                     }
@@ -330,6 +353,7 @@ fn find_cycle(edges: HashMap<Txid, HashMap<Txid, EdgeType>>) -> anyhow::Result<(
     Ok(())
 }
 
+#[derive(Clone)]
 enum HistoryItem {
     StartRead(Txid),
     FinishRead(Txid, Timestamp, ListId, Vec<Txid>),
@@ -396,5 +420,21 @@ impl Decode for Txid {
             return Err(anyhow!("wrong length {}, expected 8", b.len()));
         }
         Ok(Self(BigEndian::read_u64(&b[..8])))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WorkloadAppend;
+
+    #[tokio::test]
+    async fn test_workload_append() -> anyhow::Result<()> {
+        let fe = crate::test::new_with_single_byte_routing(2).await?;
+
+        let wl = WorkloadAppend::new(fe);
+
+        wl.run().await?;
+
+        Ok(())
     }
 }
