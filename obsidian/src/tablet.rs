@@ -707,19 +707,24 @@ impl LsmTabletInner {
     async fn wait(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
         loop {
             let tx_outcome_key = txid.encode_fixed();
-            {
+            let wait = {
                 let _guard = self.lock_mgr.read_lock(&tx_outcome_key[..]).await;
 
-                if let Some((_, Value::Regular(tx_outcome_bytes))) = self
+                match self
                     .unsafe_get_latest_record(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
                     .await?
                 {
-                    let tx_outcome_record = TxOutcomeRecord::decode(&tx_outcome_bytes[..])?;
-                    return Ok(tx_outcome_record.tx_outcome());
+                    Some((_, Value::Regular(tx_outcome_bytes))) => {
+                        let tx_outcome_record = TxOutcomeRecord::decode(&tx_outcome_bytes[..])?;
+                        return Ok(tx_outcome_record.tx_outcome());
+                    }
+                    // Must be done with _guard still active.
+                    None => self.waiters.wait(txid),
+                    _ => return Err(anyhow!("{:?} already deleted", txid)),
                 }
-            }
+            };
 
-            self.waiters.wait(txid).await;
+            wait.await;
         }
     }
 
