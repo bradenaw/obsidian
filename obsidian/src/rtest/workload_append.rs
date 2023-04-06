@@ -225,7 +225,7 @@ fn gen_graph(
                     possible_txids.remove(&txid);
                 }
                 HistoryItem::FinishRead(_, _, list_id, txids) => {
-                    if txids.len() > longests.get(&list_id).map(Vec::len).unwrap_or(0) {
+                    if txids.len() >= longests.get(&list_id).map(Vec::len).unwrap_or(0) {
                         longests.insert(list_id, txids.clone());
                     }
                 }
@@ -301,7 +301,7 @@ fn gen_graph(
                     return Err(anyhow!("lost or duplicate write?"));
                 }
 
-                if longest.len() >= txids.len() {
+                if !longest.is_empty() && longest.len() >= txids.len() {
                     edges
                         .entry(*txid)
                         .or_insert_with(HashMap::new)
