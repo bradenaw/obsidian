@@ -353,6 +353,68 @@ fn find_cycle(edges: HashMap<Txid, HashMap<Txid, EdgeType>>) -> anyhow::Result<(
     Ok(())
 }
 
+fn strongly_connected_components(
+    edges: &HashMap<Txid, HashMap<Txid, EdgeType>>,
+) -> Vec<HashSet<Txid>> {
+    // This is Tarjan's algorithm for finding strongly connected components, which is O(V+E).
+
+    let mut low_links: HashMap<Txid, Txid> = HashMap::new();
+    let mut stack = vec![];
+    let mut set = HashSet::new();
+
+    fn visit(
+        txid: Txid,
+        edges: &HashMap<Txid, HashMap<Txid, EdgeType>>,
+        stack: &mut Vec<Txid>,
+        set: &mut HashSet<Txid>,
+        low_links: &mut HashMap<Txid, Txid>,
+    ) {
+        low_links.insert(txid, txid);
+        stack.push(txid);
+        set.insert(txid);
+
+        for out in edges.get(&txid).unwrap().keys() {
+            if low_links.contains_key(out) {
+                continue;
+            }
+
+            visit(*out, edges, stack, set, low_links);
+
+            if set.contains(out) && low_links.get(out) < low_links.get(&txid) {
+                low_links.insert(txid, *(low_links.get(out).unwrap()));
+            }
+        }
+
+        if low_links.get(&txid) == Some(&txid) {
+            while let Some(other_txid) = stack.pop() {
+                set.remove(&other_txid);
+                if txid == other_txid {
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(txid) = edges.keys().next() {
+        visit(*txid, edges, &mut stack, &mut set, &mut low_links);
+    }
+
+    let mut sccs = HashMap::new();
+    for (txid, low_link) in low_links {
+        sccs.entry(low_link)
+            .or_insert_with(HashSet::new)
+            .insert(txid);
+    }
+
+    let mut result = vec![];
+    for (_, scc) in sccs.into_iter() {
+        if scc.len() > 1 {
+            result.push(scc);
+        }
+    }
+    result
+}
+
 #[derive(Clone)]
 enum HistoryItem {
     StartRead(Txid),
@@ -396,7 +458,7 @@ impl ListItem {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 struct Txid(u64);
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy)]
