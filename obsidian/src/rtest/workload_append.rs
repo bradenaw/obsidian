@@ -58,29 +58,35 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
 
     async fn run(&self) -> anyhow::Result<()> {
         let mut futures = FuturesUnordered::new();
-        let start = Instant::now();
+        let workload_start = Instant::now();
         for _ in 0..32 {
             futures.push(self.thread());
         }
         let mut histories = vec![];
         while let Some(thread_history) = futures.next().await {
             histories.push(thread_history);
-            if start.elapsed() < Duration::from_millis(4_800) {
+            if workload_start.elapsed() < Duration::from_millis(4_800) {
                 futures.push(self.thread());
             }
         }
 
+        println!("workload took {:?}", workload_start.elapsed());
         println!("ran {} threads", histories.len());
         println!(
             "history has {} events",
             histories.iter().map(Vec::len).sum::<usize>(),
         );
 
+        let gen_graph_start = Instant::now();
         let edges = gen_graph(histories)?;
 
         println!("graph has {} edges", edges.len());
+        println!("gen_graph took {:?}", gen_graph_start.elapsed());
 
-        if let Some(_) = find_cycle(&edges) {
+        let find_cycle_start = Instant::now();
+        let maybe_cycle = find_cycle(&edges);
+        println!("find_cycle took {:?}", find_cycle_start.elapsed());
+        if let Some(_) = maybe_cycle {
             return Err(anyhow!("cycle found"));
         }
 
@@ -90,6 +96,7 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
     async fn thread(&self) -> Vec<(Seq, HistoryItem)> {
         let mut history = vec![];
         let start = Instant::now();
+        let workload_deadline = start + Duration::from_millis(6_000);
         while start.elapsed() < Duration::from_millis(5_000) {
             let txid = self.new_txid();
 
@@ -98,13 +105,21 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
                 true => {
                     let list_id = self.choose_list();
                     history.push((self.next_seq(), HistoryItem::StartAppend(txid, list_id)));
-                    match self.append(txid, list_id).await {
-                        Ok(ts) => {
+                    match tokio::time::timeout_at(
+                        tokio::time::Instant::from_std(workload_deadline),
+                        self.append(txid, list_id),
+                    )
+                    .await
+                    {
+                        Ok(Ok(ts)) => {
                             history.push((self.next_seq(), HistoryItem::Commit(txid, ts, list_id)));
                         }
                         // TODO: classify some errors as aborts and continue instead of ending
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             println!("write transaction failed {:?}", e);
+                            return history;
+                        }
+                        Err(_) => {
                             return history;
                         }
                     };
@@ -112,16 +127,24 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
                 false => {
                     let list_id = self.choose_list();
                     history.push((self.next_seq(), HistoryItem::StartRead(txid)));
-                    match self.read(list_id).await {
-                        Ok((ts, list)) => {
+                    match tokio::time::timeout_at(
+                        tokio::time::Instant::from_std(workload_deadline),
+                        self.read(list_id),
+                    )
+                    .await
+                    {
+                        Ok(Ok((ts, list))) => {
                             history.push((
                                 self.next_seq(),
                                 HistoryItem::FinishRead(txid, ts, list_id, list),
                             ));
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             println!("read failed {:?}", e);
                             history.push((self.next_seq(), HistoryItem::Abort(txid)));
+                        }
+                        Err(_) => {
+                            return history;
                         }
                     }
                 }
@@ -337,6 +360,45 @@ enum WriteResult {
     Unknown,
 }
 
+fn find_results(
+    txids: &HashSet<Txid>,
+    histories: &Vec<Vec<(Seq, HistoryItem)>>,
+) -> HashMap<Txid, TxResult> {
+    let mut result = HashMap::new();
+    for history in histories {
+        for (i, (_, item)) in history.iter().enumerate() {
+            match item {
+                HistoryItem::FinishRead(txid, ts, list_id, list_items) => {
+                    if !txids.contains(txid) {
+                        continue;
+                    }
+                    result.insert(*txid, TxResult::Read(*ts, *list_id, list_items.clone()));
+                }
+                HistoryItem::StartAppend(txid, list_id) => {
+                    if !txids.contains(txid) {
+                        continue;
+                    }
+                    if i == history.len() - 1 {
+                        result.insert(
+                            *txid,
+                            TxResult::Append(*txid, *list_id, WriteResult::Unknown),
+                        );
+                    } else {
+                        let write_result = match history[i + 1].1 {
+                            HistoryItem::Commit(_, ts, _) => WriteResult::Commit(ts),
+                            HistoryItem::Abort(_) => WriteResult::Abort,
+                            _ => panic!("write not followed by commit/abort"),
+                        };
+                        result.insert(*txid, TxResult::Append(*txid, *list_id, write_result));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    result
+}
+
 fn find_cycle(edges: &HashMap<Txid, HashMap<Txid, EdgeType>>) -> Option<Vec<(Txid, EdgeType)>> {
     let sccs = strongly_connected_components(edges);
     let smallest_scc = sccs.iter().min_by_key(|scc| scc.len())?;
@@ -375,15 +437,17 @@ fn strongly_connected_components(
         stack.push(txid);
         set.insert(txid);
 
-        for out in edges.get(&txid).unwrap().keys() {
-            if low_links.contains_key(out) {
-                continue;
-            }
+        if let Some(out_edges) = edges.get(&txid) {
+            for out in out_edges.keys() {
+                if low_links.contains_key(out) {
+                    continue;
+                }
 
-            visit(*out, edges, stack, set, low_links);
+                visit(*out, edges, stack, set, low_links);
 
-            if set.contains(out) && low_links.get(out) < low_links.get(&txid) {
-                low_links.insert(txid, *(low_links.get(out).unwrap()));
+                if set.contains(out) && low_links.get(out) < low_links.get(&txid) {
+                    low_links.insert(txid, *(low_links.get(out).unwrap()));
+                }
             }
         }
 
