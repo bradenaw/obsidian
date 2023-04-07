@@ -81,7 +81,7 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
         );
 
         let gen_graph_start = Instant::now();
-        let edges = gen_graph(histories)?;
+        let edges = gen_graph(&histories)?;
 
         println!("graph has {} edges", edges.len());
         println!("gen_graph took {:?}", gen_graph_start.elapsed());
@@ -89,7 +89,36 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
         let find_cycle_start = Instant::now();
         let maybe_cycle = find_cycle(&edges);
         println!("find_cycle took {:?}", find_cycle_start.elapsed());
-        if let Some(_) = maybe_cycle {
+        if let Some(cycle) = maybe_cycle {
+            let tx_results = find_results(
+                &(cycle.iter().map(|(txid, _)| *txid).collect::<HashSet<_>>()),
+                &histories,
+            );
+
+            println!(" ┌────┐");
+            println!(" │    v");
+            for (i, (txid, next_edge)) in cycle.iter().enumerate() {
+                let edge_expl = match next_edge {
+                    EdgeType::RealTime => "[rt] which happened before",
+                    EdgeType::SameKeyTimestamp => {
+                        "[ts] which observed a lower timestamp of the same key as"
+                    }
+                    EdgeType::WriteWrite => "[ww] which wrote the version later overwritten by",
+                    EdgeType::WriteRead => "[wr] which wrote the version seen by",
+                    EdgeType::ReadWrite => "[rw] saw the version before the one written by",
+                };
+
+                println!(" │   {:?}", tx_results.get(&txid).unwrap());
+                println!(" │    |");
+                if i == cycle.len() - 1 {
+                    println!(" │    │");
+                    println!(" └────┘ ...but {:?}...", edge_expl);
+                    println!("           a contradiction!");
+                } else {
+                    println!(" │    | {:?}...", edge_expl);
+                    println!(" │    v");
+                }
+            }
             return Err(anyhow!("cycle found"));
         }
 
@@ -234,14 +263,14 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
 }
 
 fn gen_graph(
-    histories: Vec<Vec<(Seq, HistoryItem)>>,
+    histories: &Vec<Vec<(Seq, HistoryItem)>>,
 ) -> anyhow::Result<BTreeMap<Txid, BTreeMap<Txid, EdgeType>>> {
     let mut edges = BTreeMap::new();
 
     let mut longests = BTreeMap::new();
     let mut possible_txids = HashSet::new();
 
-    for history in &histories {
+    for history in histories {
         for (_, item) in history {
             match item {
                 HistoryItem::StartAppend(txid, _) => {
@@ -355,10 +384,36 @@ enum TxResult {
     Append(Txid, ListId, WriteResult),
 }
 
+impl Debug for TxResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TxResult::Read(ts, list_id, list_items) => {
+                write!(f, "read({}, {:?}) -> {:?}", ts, list_id, list_items)?;
+            }
+            TxResult::Append(txid, list_id, write_result) => {
+                write!(f, "append({:?}, {:?}), ", list_id, txid)?;
+                Debug::fmt(write_result, f)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 enum WriteResult {
     Commit(Timestamp),
     Abort,
     Unknown,
+}
+
+impl Debug for WriteResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WriteResult::Commit(ts) => write!(f, "commit({})", ts)?,
+            WriteResult::Abort => write!(f, "abort")?,
+            WriteResult::Unknown => write!(f, "unknown")?,
+        }
+        Ok(())
+    }
 }
 
 fn find_results(
@@ -550,7 +605,7 @@ enum EdgeType {
     ReadWrite,
 }
 
-#[derive(Eq, PartialEq, Ord, PartialOrd, Hash, Clone, Copy)]
+#[derive(Eq, PartialEq, Ord, PartialOrd, Hash, Clone, Copy, Debug)]
 struct ListId(u64);
 impl ListId {
     fn to_key(&self) -> Vec<u8> {
