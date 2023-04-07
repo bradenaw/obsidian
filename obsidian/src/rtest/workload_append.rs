@@ -1,8 +1,8 @@
-use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -16,7 +16,6 @@ use futures::pin_mut;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use futures::TryStreamExt;
-use priority_queue::PriorityQueue;
 use rand::thread_rng;
 use rand::Rng;
 
@@ -81,7 +80,10 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
 
         println!("graph has {} edges", edges.len());
 
-        find_cycle(edges)?;
+        if let Some(_) = find_cycle(&edges) {
+            return Err(anyhow!("cycle found"));
+        }
+
         Ok(())
     }
 
@@ -324,33 +326,33 @@ fn gen_graph(
     Ok(edges)
 }
 
-fn find_cycle(edges: HashMap<Txid, HashMap<Txid, EdgeType>>) -> anyhow::Result<()> {
-    let mut in_edges = HashMap::new();
+enum TxResult {
+    Read(Timestamp, ListId, Vec<Txid>),
+    Append(Txid, ListId, WriteResult),
+}
 
-    for (_, dsts) in &edges {
-        for (dst, _) in dsts {
-            in_edges.insert(*dst, in_edges.get(&dst).unwrap_or(&0) + 1usize);
-        }
+enum WriteResult {
+    Commit(Timestamp),
+    Abort,
+    Unknown,
+}
+
+fn find_cycle(edges: &HashMap<Txid, HashMap<Txid, EdgeType>>) -> Option<Vec<(Txid, EdgeType)>> {
+    let sccs = strongly_connected_components(edges);
+    let smallest_scc = sccs.iter().min_by_key(|scc| scc.len())?;
+
+    let cycle_txids = small_cycle(smallest_scc, edges);
+
+    let mut result = vec![];
+    for i in 0..cycle_txids.len() - 1 {
+        let a = cycle_txids[i];
+        let b = cycle_txids[i + 1];
+
+        let edge_type = *(edges.get(&a).unwrap().get(&b).unwrap());
+
+        result.push((a, edge_type));
     }
-
-    let mut pq: PriorityQueue<Txid, Reverse<usize>> = PriorityQueue::from(
-        in_edges
-            .into_iter()
-            .map(|(txid, n_in_edges)| (txid, Reverse(n_in_edges)))
-            .collect::<Vec<(Txid, Reverse<usize>)>>(),
-    );
-
-    while let Some((txid, remaining_in_edges)) = pq.pop() {
-        if remaining_in_edges.0 > 0 {
-            return Err(anyhow!("cycle detected"));
-        }
-
-        for (dst, _) in edges.get(&txid).unwrap() {
-            pq.change_priority_by(dst, |p| p.0 = p.0 - 1);
-        }
-    }
-
-    Ok(())
+    return Some(result);
 }
 
 fn strongly_connected_components(
@@ -415,6 +417,46 @@ fn strongly_connected_components(
     result
 }
 
+fn small_cycle(
+    component: &HashSet<Txid>,
+    edges: &HashMap<Txid, HashMap<Txid, EdgeType>>,
+) -> Vec<Txid> {
+    // Keys are each vertex visited.
+    // Values are the previous vertex.
+    let mut visited = HashMap::new();
+
+    // This is a breadth-first-search to find the shortest cycle we can.
+    //
+    // component is already a strongly-connected-component discovered by Tarjan's algorithm, which
+    // means that it's both guaranteed to contain a cycle and every vertex is reachable from every
+    // other, so starting from any random vertex will work.
+    let mut queue = VecDeque::new();
+    if let Some(txid) = component.iter().next() {
+        queue.push_back(*txid);
+    }
+
+    while let Some(txid) = queue.pop_front() {
+        for other_txid in edges.get(&txid).unwrap().keys() {
+            if visited.contains_key(other_txid) {
+                let mut result = vec![];
+                let mut curr = *other_txid;
+                loop {
+                    result.push(curr);
+                    curr = *(visited.get(&curr).unwrap());
+                    if curr == *other_txid {
+                        break;
+                    }
+                }
+                result.reverse();
+                return result;
+            }
+            visited.insert(txid, *other_txid);
+            queue.push_back(*other_txid);
+        }
+    }
+    return vec![];
+}
+
 #[derive(Clone)]
 enum HistoryItem {
     StartRead(Txid),
@@ -425,6 +467,7 @@ enum HistoryItem {
 }
 
 // Dependency edges between two transactions T1 and T2.
+#[derive(Clone, Copy)]
 enum EdgeType {
     // T1 finished before T2 started.
     RealTime,
