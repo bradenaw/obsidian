@@ -23,6 +23,7 @@ use rand::Rng;
 
 use crate::obsidian::Obsidian;
 use crate::obsidian::ObsidianExt;
+use crate::range::Bound;
 use crate::range::Range;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
@@ -61,8 +62,8 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
     async fn run(&self) -> anyhow::Result<()> {
         let mut futures = FuturesUnordered::new();
         let workload_start = Instant::now();
-        let workload_deadline = workload_start + Duration::from_millis(15_000);
-        for _ in 0..64 {
+        let workload_deadline = workload_start + Duration::from_millis(500);
+        for _ in 0..4 {
             futures.push(self.thread(workload_deadline));
         }
         let mut histories = vec![];
@@ -89,14 +90,15 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
         let find_cycle_start = Instant::now();
         let maybe_cycle = find_cycle(&edges);
         println!("find_cycle took {:?}", find_cycle_start.elapsed());
+
         if let Some(cycle) = maybe_cycle {
             let tx_results = find_results(
                 &(cycle.iter().map(|(txid, _)| *txid).collect::<HashSet<_>>()),
                 &histories,
             );
 
-            println!(" ┌────┐");
-            println!(" │    v");
+            println!("");
+            println!("arrows show the observed chronology");
             for (i, (txid, next_edge)) in cycle.iter().enumerate() {
                 let edge_expl = match next_edge {
                     EdgeType::RealTime => "[rt] which happened before",
@@ -108,17 +110,20 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
                     EdgeType::ReadWrite => "[rw] saw the version before the one written by",
                 };
 
-                println!(" │   {:?}", tx_results.get(&txid).unwrap());
-                println!(" │    |");
-                if i == cycle.len() - 1 {
-                    println!(" │    │");
-                    println!(" └────┘ ...but {:?}...", edge_expl);
-                    println!("           a contradiction!");
+                if i == 0 {
+                    println!("  ┌──> {:?}", tx_results.get(&txid).unwrap());
                 } else {
-                    println!(" │    | {:?}...", edge_expl);
-                    println!(" │    v");
+                    println!("  │    {:?}", tx_results.get(&txid).unwrap());
+                }
+                println!("  │     │");
+                println!("  │     │ {}...", edge_expl);
+                if i == cycle.len() - 1 {
+                    println!("  └─────┘");
+                } else {
+                    println!("  │     v");
                 }
             }
+            println!("a contradiction! these events appear to have happened both before and after one another");
             return Err(anyhow!("cycle found"));
         }
 
@@ -142,6 +147,7 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
                     .await
                     {
                         Ok(Ok(ts)) => {
+                            println!("append({:?}, {:?})", list_id, txid);
                             history.push((self.next_seq(), HistoryItem::Commit(txid, ts, list_id)));
                         }
                         // TODO: classify some errors as aborts and continue instead of ending
@@ -232,10 +238,14 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
             .latest_snapshot(BTreeSet::from([(self.list_keyspace_id, list_id.to_key())]))
             .await?;
 
+        let range = Range {
+            lower: Bound::Before(ListItem(list_id, 0).to_key()),
+            upper: Bound::After(ListItem(list_id, u64::MAX).to_key()),
+        };
         let s = Box::into_pin(self.obsidian.scan(
             read_ts,
             self.list_item_keyspace_id,
-            Range::prefix(list_id.to_key()),
+            range.clone(),
             Direction::Asc,
         ));
         pin_mut!(s);
@@ -250,7 +260,7 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
     }
 
     fn choose_list(&self) -> ListId {
-        ListId(thread_rng().gen_range(0..100))
+        ListId(thread_rng().gen_range(0..10))
     }
 
     fn new_txid(&self) -> Txid {
@@ -268,13 +278,13 @@ fn gen_graph(
     let mut edges = BTreeMap::new();
 
     let mut longests = BTreeMap::new();
-    let mut possible_txids = HashSet::new();
+    let mut possible_txids = HashMap::new();
 
     for history in histories {
         for (_, item) in history {
             match item {
-                HistoryItem::StartAppend(txid, _) => {
-                    possible_txids.insert(txid);
+                HistoryItem::StartAppend(txid, list_id) => {
+                    possible_txids.insert(txid, list_id);
                 }
                 HistoryItem::Abort(txid) => {
                     possible_txids.remove(&txid);
@@ -289,7 +299,7 @@ fn gen_graph(
         }
     }
 
-    for longest in longests.values() {
+    for (list_id, longest) in &longests {
         let mut prev_txid: Option<Txid> = None;
         for txid in longest {
             if let Some(prev_txid) = prev_txid {
@@ -299,8 +309,22 @@ fn gen_graph(
                     .insert(prev_txid, EdgeType::WriteWrite);
             }
 
-            if !possible_txids.contains(txid) {
-                return Err(anyhow!("garbage read"));
+            match possible_txids.get(&txid) {
+                Some(intended_list_id) if list_id != intended_list_id => {
+                    return Err(anyhow!(
+                        "garbage read - observed {:?} in list {:?}, but it actually wrote to list {:?}",
+                        txid,
+                        list_id,
+                        intended_list_id,
+                    ));
+                }
+                None => {
+                    return Err(anyhow!(
+                        "garbage read - observed aborted or nonexistent transaction {:?}",
+                        txid,
+                    ));
+                }
+                _ => {}
             }
 
             prev_txid = Some(*txid);
@@ -320,7 +344,8 @@ fn gen_graph(
 
     let mut most_recent_txid = HashMap::new();
     let mut highest_timestamp: HashMap<ListId, (Timestamp, Txid)> = HashMap::new();
-    for OrdEqByFirst(_, (thread_id, item)) in merged_history {
+    for OrdEqByFirst(seq, (thread_id, item)) in merged_history {
+        println!("{}: thread {}: {:?}", seq.0, thread_id, item);
         match item {
             HistoryItem::StartRead(txid) | HistoryItem::StartAppend(txid, _) => {
                 for other_txid in most_recent_txid.values() {
@@ -353,10 +378,15 @@ fn gen_graph(
 
                 let longest = longests.get(&list_id).unwrap();
                 if !longest.starts_with(&txids) {
-                    return Err(anyhow!("lost or duplicate write?"));
+                    return Err(anyhow!(
+                        "divergent histories for {:?}:\n\t{:?}\n\t{:?}",
+                        list_id,
+                        txids,
+                        longest
+                    ));
                 }
 
-                if !longest.is_empty() && longest.len() >= txids.len() {
+                if !longest.is_empty() && longest.len() > txids.len() {
                     edges
                         .entry(*txid)
                         .or_insert_with(BTreeMap::new)
@@ -547,41 +577,48 @@ fn small_cycle(
 ) -> Vec<Txid> {
     // Keys are each vertex visited.
     // Values are the previous vertex.
-    let mut visited = HashMap::new();
+    let mut path = HashMap::new();
+    let mut queue = VecDeque::new();
 
-    // This is a breadth-first-search to find the shortest cycle we can.
-    //
     // component is already a strongly-connected-component discovered by Tarjan's algorithm, which
     // means that it's both guaranteed to contain a cycle and every vertex is reachable from every
     // other, so starting from any random vertex will work.
-    let mut queue = VecDeque::new();
-    if let Some(txid) = component.iter().next() {
-        queue.push_back(*txid);
-    }
+    //
+    // We do a breadth-first-search to find the shortest path back to where we started.
+    if let Some(start) = component.iter().next() {
+        queue.push_back(*start);
 
-    while let Some(txid) = queue.pop_front() {
-        for other_txid in edges.get(&txid).unwrap().keys() {
-            if visited.contains_key(other_txid) {
-                let mut result = vec![];
-                let mut curr = *other_txid;
-                loop {
-                    result.push(curr);
-                    curr = *(visited.get(&curr).unwrap());
-                    if curr == *other_txid {
-                        break;
-                    }
+        while let Some(txid) = queue.pop_front() {
+            for other_txid in edges.get(&txid).unwrap().keys() {
+                if !component.contains(other_txid) {
+                    continue;
                 }
-                result.reverse();
-                return result;
+
+                if other_txid == start {
+                    let mut result = vec![*start];
+                    let mut curr = txid;
+                    loop {
+                        result.push(curr);
+                        curr = *(path.get(&curr).unwrap());
+                        if curr == *start {
+                            break;
+                        }
+                    }
+                    result.reverse();
+                    return result;
+                }
+
+                if !path.contains_key(other_txid) {
+                    path.insert(*other_txid, txid);
+                    queue.push_back(*other_txid);
+                }
             }
-            visited.insert(txid, *other_txid);
-            queue.push_back(*other_txid);
         }
     }
-    return vec![];
+    panic!("didn't find our way back to the start, so is this not a cycle?");
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum HistoryItem {
     StartRead(Txid),
     FinishRead(Txid, Timestamp, ListId, Vec<Txid>),
@@ -591,7 +628,7 @@ enum HistoryItem {
 }
 
 // Dependency edges between two transactions T1 and T2.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum EdgeType {
     // T1 finished before T2 started.
     RealTime,
@@ -620,7 +657,7 @@ impl ListItem {
     fn to_key(&self) -> Vec<u8> {
         let mut key = vec![0u8; 16];
         LittleEndian::write_u64(&mut key, self.0 .0 + 1000);
-        BigEndian::write_u64(&mut key, self.1);
+        BigEndian::write_u64(&mut key[8..], self.1);
         key
     }
 }
