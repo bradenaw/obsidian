@@ -3,6 +3,8 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::fmt::Debug;
+use std::fmt::Display;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -233,10 +235,10 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
 
 fn gen_graph(
     histories: Vec<Vec<(Seq, HistoryItem)>>,
-) -> anyhow::Result<HashMap<Txid, HashMap<Txid, EdgeType>>> {
-    let mut edges = HashMap::new();
+) -> anyhow::Result<BTreeMap<Txid, BTreeMap<Txid, EdgeType>>> {
+    let mut edges = BTreeMap::new();
 
-    let mut longests = HashMap::new();
+    let mut longests = BTreeMap::new();
     let mut possible_txids = HashSet::new();
 
     for history in &histories {
@@ -264,7 +266,7 @@ fn gen_graph(
             if let Some(prev_txid) = prev_txid {
                 edges
                     .entry(*txid)
-                    .or_insert_with(HashMap::new)
+                    .or_insert_with(BTreeMap::new)
                     .insert(prev_txid, EdgeType::WriteWrite);
             }
 
@@ -295,7 +297,7 @@ fn gen_graph(
                 for other_txid in most_recent_txid.values() {
                     edges
                         .entry(*txid)
-                        .or_insert_with(HashMap::new)
+                        .or_insert_with(BTreeMap::new)
                         .insert(*other_txid, EdgeType::RealTime);
                 }
             }
@@ -304,7 +306,7 @@ fn gen_graph(
                     if ts > other_ts {
                         edges
                             .entry(*txid)
-                            .or_insert_with(HashMap::new)
+                            .or_insert_with(BTreeMap::new)
                             .insert(*other_txid, EdgeType::SameKeyTimestamp);
                         highest_timestamp.insert(*list_id, (*ts, *txid));
                     }
@@ -316,7 +318,7 @@ fn gen_graph(
                 if let Some(last_txid) = txids.last() {
                     edges
                         .entry(*txid)
-                        .or_insert_with(HashMap::new)
+                        .or_insert_with(BTreeMap::new)
                         .insert(*last_txid, EdgeType::WriteRead);
                 }
 
@@ -328,7 +330,7 @@ fn gen_graph(
                 if !longest.is_empty() && longest.len() >= txids.len() {
                     edges
                         .entry(*txid)
-                        .or_insert_with(HashMap::new)
+                        .or_insert_with(BTreeMap::new)
                         .insert(longest[txids.len()], EdgeType::ReadWrite);
                 }
             }
@@ -398,7 +400,7 @@ fn find_results(
     result
 }
 
-fn find_cycle(edges: &HashMap<Txid, HashMap<Txid, EdgeType>>) -> Option<Vec<(Txid, EdgeType)>> {
+fn find_cycle(edges: &BTreeMap<Txid, BTreeMap<Txid, EdgeType>>) -> Option<Vec<(Txid, EdgeType)>> {
     let sccs = strongly_connected_components(edges);
     let smallest_scc = sccs.iter().min_by_key(|scc| scc.len())?;
 
@@ -417,7 +419,7 @@ fn find_cycle(edges: &HashMap<Txid, HashMap<Txid, EdgeType>>) -> Option<Vec<(Txi
 }
 
 fn strongly_connected_components(
-    edges: &HashMap<Txid, HashMap<Txid, EdgeType>>,
+    edges: &BTreeMap<Txid, BTreeMap<Txid, EdgeType>>,
 ) -> Vec<HashSet<Txid>> {
     // This is Tarjan's algorithm for finding strongly connected components, which is O(V+E).
 
@@ -427,22 +429,25 @@ fn strongly_connected_components(
 
     fn visit(
         txid: Txid,
-        edges: &HashMap<Txid, HashMap<Txid, EdgeType>>,
+        edges: &BTreeMap<Txid, BTreeMap<Txid, EdgeType>>,
         stack: &mut Vec<Txid>,
         set: &mut HashSet<Txid>,
         low_links: &mut HashMap<Txid, Txid>,
+        indent: String,
     ) {
         low_links.insert(txid, txid);
         stack.push(txid);
         set.insert(txid);
 
+        println!("{}visit {:?}", indent, txid);
+        println!("{}low_links {:?}", indent, low_links);
+        println!("{}stack {:?}", indent, set);
+
         if let Some(out_edges) = edges.get(&txid) {
             for out in out_edges.keys() {
-                if low_links.contains_key(out) {
-                    continue;
+                if !low_links.contains_key(&out) {
+                    visit(*out, edges, stack, set, low_links, indent.clone() + "  ");
                 }
-
-                visit(*out, edges, stack, set, low_links);
 
                 if set.contains(out) && low_links.get(out) < low_links.get(&txid) {
                     low_links.insert(txid, *(low_links.get(out).unwrap()));
@@ -451,17 +456,32 @@ fn strongly_connected_components(
         }
 
         if low_links.get(&txid) == Some(&txid) {
+            println!("{}{:?} started a component", indent, txid);
             while let Some(other_txid) = stack.pop() {
                 set.remove(&other_txid);
                 if txid == other_txid {
                     break;
                 }
             }
+            println!("{}stack now {:?}", indent, set);
         }
     }
 
-    if let Some(txid) = edges.keys().next() {
-        visit(*txid, edges, &mut stack, &mut set, &mut low_links);
+    let mut txids_sorted = edges.keys().collect::<Vec<_>>();
+    txids_sorted.sort();
+
+    for txid in txids_sorted {
+        if low_links.contains_key(txid) {
+            continue;
+        }
+        visit(
+            *txid,
+            edges,
+            &mut stack,
+            &mut set,
+            &mut low_links,
+            "".to_string(),
+        );
     }
 
     let mut sccs = HashMap::new();
@@ -482,7 +502,7 @@ fn strongly_connected_components(
 
 fn small_cycle(
     component: &HashSet<Txid>,
-    edges: &HashMap<Txid, HashMap<Txid, EdgeType>>,
+    edges: &BTreeMap<Txid, BTreeMap<Txid, EdgeType>>,
 ) -> Vec<Txid> {
     // Keys are each vertex visited.
     // Values are the previous vertex.
@@ -567,6 +587,12 @@ impl ListItem {
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 struct Txid(u64);
 
+impl Debug for Txid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self.0, f)
+    }
+}
+
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy)]
 struct Seq(u64);
 
@@ -593,6 +619,11 @@ impl Decode for Txid {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use super::strongly_connected_components;
+    use super::EdgeType;
+    use super::Txid;
     use super::WorkloadAppend;
 
     #[tokio::test]
@@ -604,5 +635,59 @@ mod tests {
         wl.run().await?;
 
         Ok(())
+    }
+
+    #[test]
+    fn test_strongly_connected_components() {
+        // ┌─────┐     ┌─────┐     ┌─────┐             //
+        // │     │     │     │     │     ├─────────┐   //
+        // │  0  ├────>│  1  ├────>│  4  │<──────┐ v   //
+        // │     │     │     │     │     │     ┌─┴───┐ //
+        // └─────┘     └─┬─┬─┘     └─────┘     │     │ //
+        //   ^ ┌─────────┘ │          ^        │  5  │ //
+        //   │ v           v          │        │     │ //
+        // ┌─────┐     ┌─────┐     ┌──┴──┐     └─────┘ //
+        // │     │     │     ├────>│     │        ^    //
+        // │  6  ├────>│  2  │     │  3  ├────────┘    //
+        // │     │     │     │<────┤     │             //
+        // └─────┘     └─────┘     └─────┘             //
+        //                                             //
+
+        let edges_simple = vec![
+            (0, 1),
+            (1, 2),
+            (1, 4),
+            (1, 6),
+            (2, 3),
+            (3, 2),
+            (3, 4),
+            (3, 5),
+            (4, 5),
+            (5, 4),
+            (6, 0),
+            (6, 2),
+        ];
+
+        let mut edges = BTreeMap::new();
+        for (src, dst) in edges_simple {
+            edges
+                .entry(Txid(src))
+                .or_insert_with(BTreeMap::new)
+                .insert(Txid(dst), EdgeType::ReadWrite);
+        }
+
+        let sccs = strongly_connected_components(&edges);
+
+        let mut sccs_vecs = sccs
+            .iter()
+            .map(|scc| {
+                let mut scc_vec = scc.iter().map(|txid| txid.0 as usize).collect::<Vec<_>>();
+                scc_vec.sort();
+                scc_vec
+            })
+            .collect::<Vec<_>>();
+        sccs_vecs.sort();
+
+        assert_eq!(sccs_vecs, vec![vec![0, 1, 6], vec![2, 3], vec![4, 5]]);
     }
 }
