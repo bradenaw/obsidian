@@ -545,10 +545,7 @@ fn strongly_connected_components(
         }
     }
 
-    let mut txids_sorted = edges.keys().collect::<Vec<_>>();
-    txids_sorted.sort();
-
-    for txid in txids_sorted {
+    for txid in edges.keys() {
         if low_links.contains_key(txid) {
             continue;
         }
@@ -576,7 +573,7 @@ fn small_cycle(
     edges: &BTreeMap<Txid, BTreeMap<Txid, EdgeType>>,
 ) -> Vec<Txid> {
     // Keys are each vertex visited.
-    // Values are the previous vertex.
+    // Values are the previous vertex along the shortest path from start to here.
     let mut path = HashMap::new();
     let mut queue = VecDeque::new();
 
@@ -588,19 +585,19 @@ fn small_cycle(
     if let Some(start) = component.iter().next() {
         queue.push_back(*start);
 
-        while let Some(txid) = queue.pop_front() {
-            for other_txid in edges.get(&txid).unwrap().keys() {
-                if !component.contains(other_txid) {
+        while let Some(curr) = queue.pop_front() {
+            for next in edges.get(&curr).unwrap().keys() {
+                if !component.contains(next) {
                     continue;
                 }
 
-                if other_txid == start {
+                if next == start {
                     let mut result = vec![*start];
-                    let mut curr = txid;
+                    let mut curr2 = curr;
                     loop {
-                        result.push(curr);
-                        curr = *(path.get(&curr).unwrap());
-                        if curr == *start {
+                        result.push(curr2);
+                        curr2 = *(path.get(&curr2).unwrap());
+                        if curr2 == *start {
                             break;
                         }
                     }
@@ -608,12 +605,26 @@ fn small_cycle(
                     return result;
                 }
 
-                if !path.contains_key(other_txid) {
-                    path.insert(*other_txid, txid);
-                    queue.push_back(*other_txid);
+                if !path.contains_key(next) {
+                    path.insert(*next, curr);
+                    queue.push_back(*next);
                 }
             }
         }
+    }
+
+    println!("component: {:?}", component);
+    for curr in component {
+        println!(
+            "{:?} -> {:?}",
+            curr,
+            edges
+                .get(&curr)
+                .unwrap()
+                .keys()
+                .filter(|x| component.contains(x))
+                .collect::<Vec<_>>(),
+        );
     }
     panic!("didn't find our way back to the start, so is this not a cycle?");
 }
