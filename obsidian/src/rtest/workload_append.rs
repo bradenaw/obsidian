@@ -433,20 +433,15 @@ fn strongly_connected_components(
         stack: &mut Vec<Txid>,
         set: &mut HashSet<Txid>,
         low_links: &mut HashMap<Txid, Txid>,
-        indent: String,
     ) {
         low_links.insert(txid, txid);
         stack.push(txid);
         set.insert(txid);
 
-        println!("{}visit {:?}", indent, txid);
-        println!("{}low_links {:?}", indent, low_links);
-        println!("{}stack {:?}", indent, set);
-
         if let Some(out_edges) = edges.get(&txid) {
             for out in out_edges.keys() {
                 if !low_links.contains_key(&out) {
-                    visit(*out, edges, stack, set, low_links, indent.clone() + "  ");
+                    visit(*out, edges, stack, set, low_links);
                 }
 
                 if set.contains(out) && low_links.get(out) < low_links.get(&txid) {
@@ -456,14 +451,12 @@ fn strongly_connected_components(
         }
 
         if low_links.get(&txid) == Some(&txid) {
-            println!("{}{:?} started a component", indent, txid);
             while let Some(other_txid) = stack.pop() {
                 set.remove(&other_txid);
                 if txid == other_txid {
                     break;
                 }
             }
-            println!("{}stack now {:?}", indent, set);
         }
     }
 
@@ -474,14 +467,7 @@ fn strongly_connected_components(
         if low_links.contains_key(txid) {
             continue;
         }
-        visit(
-            *txid,
-            edges,
-            &mut stack,
-            &mut set,
-            &mut low_links,
-            "".to_string(),
-        );
+        visit(*txid, edges, &mut stack, &mut set, &mut low_links);
     }
 
     let mut sccs = HashMap::new();
