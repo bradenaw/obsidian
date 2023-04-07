@@ -59,14 +59,15 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
     async fn run(&self) -> anyhow::Result<()> {
         let mut futures = FuturesUnordered::new();
         let workload_start = Instant::now();
-        for _ in 0..32 {
-            futures.push(self.thread());
+        let workload_deadline = workload_start + Duration::from_millis(15_000);
+        for _ in 0..64 {
+            futures.push(self.thread(workload_deadline));
         }
         let mut histories = vec![];
         while let Some(thread_history) = futures.next().await {
             histories.push(thread_history);
-            if workload_start.elapsed() < Duration::from_millis(4_800) {
-                futures.push(self.thread());
+            if Instant::now() < workload_deadline {
+                futures.push(self.thread(workload_deadline));
             }
         }
 
@@ -93,11 +94,9 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
         Ok(())
     }
 
-    async fn thread(&self) -> Vec<(Seq, HistoryItem)> {
+    async fn thread(&self, deadline: Instant) -> Vec<(Seq, HistoryItem)> {
         let mut history = vec![];
-        let start = Instant::now();
-        let workload_deadline = start + Duration::from_millis(6_000);
-        while start.elapsed() < Duration::from_millis(5_000) {
+        while Instant::now() < deadline {
             let txid = self.new_txid();
 
             let choice = thread_rng().gen_bool(0.1);
@@ -106,7 +105,7 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
                     let list_id = self.choose_list();
                     history.push((self.next_seq(), HistoryItem::StartAppend(txid, list_id)));
                     match tokio::time::timeout_at(
-                        tokio::time::Instant::from_std(workload_deadline),
+                        tokio::time::Instant::from_std(deadline),
                         self.append(txid, list_id),
                     )
                     .await
@@ -128,7 +127,7 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
                     let list_id = self.choose_list();
                     history.push((self.next_seq(), HistoryItem::StartRead(txid)));
                     match tokio::time::timeout_at(
-                        tokio::time::Instant::from_std(workload_deadline),
+                        tokio::time::Instant::from_std(deadline),
                         self.read(list_id),
                     )
                     .await
