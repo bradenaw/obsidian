@@ -1,3 +1,4 @@
+use std::cmp;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -512,6 +513,7 @@ fn strongly_connected_components(
     let mut ids: HashMap<Txid, usize> = HashMap::new();
     let mut stack = vec![];
     let mut set = HashSet::new();
+    let mut sccs = vec![];
 
     fn visit(
         txid: Txid,
@@ -520,6 +522,7 @@ fn strongly_connected_components(
         set: &mut HashSet<Txid>,
         low_links: &mut HashMap<Txid, usize>,
         ids: &mut HashMap<Txid, usize>,
+        sccs: &mut Vec<HashSet<Txid>>,
     ) {
         let id = ids.len();
         ids.insert(txid, id);
@@ -528,23 +531,36 @@ fn strongly_connected_components(
         set.insert(txid);
 
         if let Some(out_edges) = edges.get(&txid) {
-            for out in out_edges.keys() {
-                if !low_links.contains_key(&out) {
-                    visit(*out, edges, stack, set, low_links, ids);
-                }
-
-                if set.contains(out) && low_links.get(out) < low_links.get(&txid) {
-                    low_links.insert(txid, *(low_links.get(out).unwrap()));
+            for next in out_edges.keys() {
+                if !low_links.contains_key(&next) {
+                    visit(*next, edges, stack, set, low_links, ids, sccs);
+                    low_links.insert(
+                        txid,
+                        cmp::min(
+                            *(low_links.get(&txid).unwrap()),
+                            *(low_links.get(next).unwrap()),
+                        ),
+                    );
+                } else if set.contains(next) {
+                    low_links.insert(
+                        txid,
+                        cmp::min(*(low_links.get(&txid).unwrap()), *(ids.get(next).unwrap())),
+                    );
                 }
             }
         }
 
         if low_links.get(&txid) == Some(&id) {
+            let mut scc = HashSet::new();
             while let Some(other_txid) = stack.pop() {
                 set.remove(&other_txid);
+                scc.insert(other_txid);
                 if txid == other_txid {
                     break;
                 }
+            }
+            if scc.len() > 1 {
+                sccs.push(scc);
             }
         }
     }
@@ -553,23 +569,18 @@ fn strongly_connected_components(
         if low_links.contains_key(txid) {
             continue;
         }
-        visit(*txid, edges, &mut stack, &mut set, &mut low_links, &mut ids);
+        visit(
+            *txid,
+            edges,
+            &mut stack,
+            &mut set,
+            &mut low_links,
+            &mut ids,
+            &mut sccs,
+        );
     }
 
-    let mut sccs = HashMap::new();
-    for (txid, low_link) in low_links {
-        sccs.entry(low_link)
-            .or_insert_with(HashSet::new)
-            .insert(txid);
-    }
-
-    let mut result = vec![];
-    for (_, scc) in sccs.into_iter() {
-        if scc.len() > 1 {
-            result.push(scc);
-        }
-    }
-    result
+    sccs
 }
 
 fn small_cycle(
