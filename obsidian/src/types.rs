@@ -298,6 +298,11 @@ impl HistoryRange {
         }
     }
 
+    pub(crate) fn contains(&self, ts: Timestamp) -> bool {
+        let (min, max) = self.as_min_max();
+        min <= ts && ts <= max
+    }
+
     pub(crate) fn intersects(&self, min: Timestamp, max: Timestamp) -> bool {
         let (self_min, self_max) = self.as_min_max();
         !(self_max < min || self_min > max)

@@ -96,7 +96,7 @@ pub(crate) trait Tablet {
         range: HistoryRange,
         direction: Direction,
         limit: usize,
-    ) -> anyhow::Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>)>;
+    ) -> Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>), InternalError>;
 
     async fn write(
         &self,
@@ -177,14 +177,16 @@ impl Tablet for LsmTablet {
 
     async fn history_page(
         &self,
-        _ts: Timestamp,
-        _keyspace_id: KeyspaceId,
-        _key: &[u8],
-        _range: HistoryRange,
-        _direction: Direction,
-        _limit: usize,
-    ) -> anyhow::Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>)> {
-        todo!();
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        key: &[u8],
+        range: HistoryRange,
+        direction: Direction,
+        limit: usize,
+    ) -> Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>), InternalError> {
+        self.inner
+            .history_page(ts, keyspace_id, key, range, direction, limit)
+            .await
     }
 
     async fn write(
@@ -582,6 +584,52 @@ impl LsmTabletInner {
                 .collect(),
             maybe_continue_cursor,
         ))
+    }
+
+    async fn history_page(
+        &self,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        key: &[u8],
+        range: HistoryRange,
+        direction: Direction,
+        limit: usize,
+    ) -> Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>), InternalError> {
+        let limit = cmp::min(limit, 1000);
+
+        let _guard = self.lock_mgr.read_lock(key).await;
+
+        self.sequencer
+            .wait_for_safe_read(range.as_min_max().1)
+            .await?;
+
+        let (page, continue_cursor) = self
+            .lsm
+            .history_page(keyspace_id, key, range, direction, limit)
+            .await?;
+
+        let maybe_pending = self
+            .lsm
+            .get(
+                ts,
+                keyspace_id
+                    .pending()
+                    .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?,
+                &key,
+            )
+            .await?;
+
+        if let Some((ts, Value::Regular(v))) = maybe_pending {
+            if range.contains(ts) {
+                // TODO: we can constrain this a lot more - really we only need to surface a
+                // conflict if the page actually could have seen it, and we should be linearizing
+                // an unbounded upper just once on the first page
+                let pending_mut = PendingMutation::decode(&v)?;
+                return Err(InternalError::Conflict(pending_mut.txid));
+            }
+        }
+
+        Ok((page, continue_cursor))
     }
 
     async fn write(

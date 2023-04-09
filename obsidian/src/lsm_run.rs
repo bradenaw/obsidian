@@ -203,7 +203,7 @@ impl<R: AsyncReadExactAt> Run<R> {
         k: &[u8],
         range: HistoryRange,
         direction: Direction,
-    ) -> impl Stream<Item = anyhow::Result<Record>> + 'a {
+    ) -> impl Stream<Item = anyhow::Result<(Timestamp, Value)>> + 'a {
         let k_owned = k.to_vec();
         try_stream! {
             if !range.intersects(self.min_ts, self.max_ts) {

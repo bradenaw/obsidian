@@ -151,7 +151,7 @@ impl Memtable {
         key: &[u8],
         range: HistoryRange,
         direction: Direction,
-    ) -> impl Iterator<Item = Record> + Send + '_ {
+    ) -> impl Iterator<Item = (Timestamp, Value)> + Send + '_ {
         let versions = match self.kvs.get(key) {
             Some(versions) => versions,
             None => return IteratorEither::Right(std::iter::empty()),
@@ -159,12 +159,9 @@ impl Memtable {
 
         let (min, max) = range.as_min_max();
 
-        let key_owned = key.to_vec();
-        let in_range = versions.range(min..=max).map(move |(ts, value)| Record {
-            key: key_owned.clone(),
-            ts: *ts,
-            value: value.clone(),
-        });
+        let in_range = versions
+            .range(min..=max)
+            .map(|(ts, value)| (*ts, value.clone()));
         match direction {
             Direction::Asc => IteratorEither::Left(IteratorEither::Left(in_range)),
             Direction::Desc => IteratorEither::Left(IteratorEither::Right(in_range.rev())),

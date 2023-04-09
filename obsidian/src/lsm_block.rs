@@ -335,7 +335,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         k: &[u8],
         range: HistoryRange,
         direction: Direction,
-    ) -> impl Stream<Item = anyhow::Result<Record>> + 'b {
+    ) -> impl Stream<Item = anyhow::Result<(Timestamp, Value)>> + 'b {
         let k_owned = k.to_vec();
         try_stream! {
             let key_idx = match self.index.search(&k_owned) {
@@ -373,11 +373,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
                 assert!(min <= record_ts, "{:?} <= {:?}", min, record_ts);
                 assert!(max >= record_ts, "{:?} >= {:?}", max, record_ts);
 
-                yield Record {
-                    key: k_owned.clone(),
-                    ts: record_ts,
-                    value,
-                };
+                yield (record_ts, value);
             }
         }
     }
@@ -792,19 +788,11 @@ mod test {
                     HistoryRange::Between(Timestamp(4), Timestamp(7)),
                     Direction::Asc,
                 )
-                .try_collect::<Vec<Record>>()
+                .try_collect::<Vec<_>>()
                 .await?,
             vec![
-                Record {
-                    key: b"b".to_vec(),
-                    ts: Timestamp(4),
-                    value: Value::Tombstone
-                },
-                Record {
-                    key: b"b".to_vec(),
-                    ts: Timestamp(7),
-                    value: Value::Regular(b"b seven".to_vec())
-                },
+                (Timestamp(4), Value::Tombstone),
+                (Timestamp(7), Value::Regular(b"b seven".to_vec())),
             ],
         );
 
@@ -815,19 +803,11 @@ mod test {
                     HistoryRange::Between(Timestamp(3), Timestamp(8)),
                     Direction::Asc,
                 )
-                .try_collect::<Vec<Record>>()
+                .try_collect::<Vec<_>>()
                 .await?,
             vec![
-                Record {
-                    key: b"b".to_vec(),
-                    ts: Timestamp(4),
-                    value: Value::Tombstone
-                },
-                Record {
-                    key: b"b".to_vec(),
-                    ts: Timestamp(7),
-                    value: Value::Regular(b"b seven".to_vec())
-                },
+                (Timestamp(4), Value::Tombstone),
+                (Timestamp(7), Value::Regular(b"b seven".to_vec())),
             ],
         );
 

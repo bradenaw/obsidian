@@ -210,7 +210,7 @@ impl Lsm {
         range: HistoryRange,
         direction: Direction,
         limit: usize,
-    ) -> anyhow::Result<(Vec<Record>, Option<HistoryRange>)> {
+    ) -> anyhow::Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>)> {
         self.inner
             .load()
             .get(&keyspace_id)
@@ -493,7 +493,7 @@ impl LsmInner {
         range: HistoryRange,
         direction: Direction,
         limit: usize,
-    ) -> anyhow::Result<(Vec<Record>, Option<HistoryRange>)> {
+    ) -> anyhow::Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>)> {
         self.inner.history_page(key, range, direction, limit).await
     }
 
@@ -970,27 +970,19 @@ impl LsmInnerInner {
         range: HistoryRange,
         direction: Direction,
         limit: usize,
-    ) -> anyhow::Result<(Vec<Record>, Option<HistoryRange>)> {
+    ) -> anyhow::Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>)> {
         let manifest = self.manifest.load();
-
-        let l0_active_guards: Vec<_> = manifest
-            .l0_active
-            .iter()
-            .map(|(_, memtable)| memtable.read().unwrap())
-            .collect();
 
         let mut streams = Vec::with_capacity(manifest.levels.len());
         let mut l0_streams =
             Vec::with_capacity(manifest.l0_active.len() + manifest.l0_sealed.len());
-        for l0_run in &l0_active_guards {
-            l0_streams.push(
-                futures::stream::iter(
-                    l0_run
-                        .history(key, range, direction)
-                        .map(|record| Ok(record)),
-                )
-                .boxed(),
-            );
+        for l0_active in &manifest.l0_active {
+            let l0_run = l0_active.1.read().unwrap();
+            let records: Vec<_> = l0_run
+                .history(key, range, direction)
+                .map(|record| Ok(record))
+                .collect();
+            l0_streams.push(futures::stream::iter(records.into_iter()).boxed());
         }
         for l0_run in &manifest.l0_sealed {
             l0_streams.push(
@@ -1007,16 +999,21 @@ impl LsmInnerInner {
             Direction::Asc => merge_sorted_streams(
                 l0_streams
                     .into_iter()
+                    .map(|s| s.map(|result| result.map(|(ts, value)| OrdEqByFirst(ts, value))))
+                    .collect(),
+            )
+            .map(|result| result.map(|OrdEqByFirst(ts, value)| (ts, value)))
+            .boxed(),
+            Direction::Desc => merge_sorted_streams(
+                l0_streams
+                    .into_iter()
                     .map(|s| {
-                        s.map(|result| {
-                            result.map(|record| OrdEqByFirst((record.key, record.ts), record.value))
-                        })
+                        s.map(|result| result.map(|(ts, value)| OrdEqByFirst(Reverse(ts), value)))
                     })
                     .collect(),
             )
-            .map(|result| result.map(|OrdEqByFirst((key, ts), value)| Record { key, ts, value }))
+            .map(|result| result.map(|OrdEqByFirst(Reverse(ts), value)| (ts, value)))
             .boxed(),
-            Direction::Desc => merge_sorted_streams(l0_streams).boxed(),
         });
 
         for level in &manifest.levels[1..] {
@@ -1041,10 +1038,10 @@ impl LsmInnerInner {
 
         let continue_cursor = match page.last() {
             None => None,
-            Some(last_record) => match direction {
+            Some((last_ts, _)) => match direction {
                 Direction::Asc => match range {
                     HistoryRange::Until(max) | HistoryRange::Between(_, max) => {
-                        let min = last_record.ts.plus_one();
+                        let min = last_ts.plus_one();
                         if min > max {
                             None
                         } else {
@@ -1052,15 +1049,15 @@ impl LsmInnerInner {
                         }
                     }
                     HistoryRange::All | HistoryRange::Since(_) => {
-                        Some(HistoryRange::Since(last_record.ts.plus_one()))
+                        Some(HistoryRange::Since(last_ts.plus_one()))
                     }
                 },
                 Direction::Desc => match range {
                     HistoryRange::All | HistoryRange::Until(_) => {
-                        Some(HistoryRange::Until(last_record.ts.minus_one()))
+                        Some(HistoryRange::Until(last_ts.minus_one()))
                     }
                     HistoryRange::Between(min, _) | HistoryRange::Since(min) => {
-                        let max = last_record.ts.minus_one();
+                        let max = last_ts.minus_one();
                         if min > max {
                             None
                         } else {
@@ -1883,8 +1880,11 @@ mod test {
                         expected
                             .clone()
                             .into_iter()
-                            .map(|(ts, is_tombstone)| lsm_diagram_record(key, *ts, *is_tombstone))
-                            .collect::<Vec<Record>>(),
+                            .map(|(ts, is_tombstone)| {
+                                let record = lsm_diagram_record(key, *ts, *is_tombstone);
+                                (record.ts, record.value)
+                            })
+                            .collect::<Vec<_>>(),
                         "history_page(key = {:?}, range = {:?}, direction={:?}, page_size={})",
                         key,
                         range,

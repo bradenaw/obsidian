@@ -99,7 +99,7 @@ impl<T: Tablet + Send + Sync> Tablet for Arc<T> {
         range: HistoryRange,
         direction: Direction,
         limit: usize,
-    ) -> anyhow::Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>)> {
+    ) -> Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>), InternalError> {
         T::history_page(self, ts, keyspace_id, key, range, direction, limit).await
     }
 
