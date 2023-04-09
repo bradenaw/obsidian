@@ -47,6 +47,10 @@ struct WorkloadAppend<O> {
     txid_gen: AtomicUsize,
 }
 
+// This is an implementation (more or less) of the techniques described in Elle, slightly
+// customized for Obsidian.
+//
+// https://github.com/jepsen-io/elle/raw/master/paper/elle.pdf
 impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
     fn new(obsidian: O) -> Self {
         Self {
@@ -62,8 +66,8 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
     async fn run(&self) -> anyhow::Result<()> {
         let mut futures = FuturesUnordered::new();
         let workload_start = Instant::now();
-        let workload_deadline = workload_start + Duration::from_millis(100);
-        for _ in 0..2 {
+        let workload_deadline = workload_start + Duration::from_millis(5_000);
+        for _ in 0..32 {
             futures.push(self.thread(workload_deadline));
         }
         let mut histories = vec![];
@@ -614,24 +618,6 @@ fn small_cycle(
     let mut path = HashMap::new();
     let mut queue = VecDeque::new();
 
-    println!("component {:?}", component);
-    println!(
-        "edges in component {:?}",
-        component
-            .iter()
-            .map(|txid| (
-                txid,
-                edges
-                    .get(&txid)
-                    .unwrap()
-                    .iter()
-                    .map(|(txid, _)| txid)
-                    .filter(|txid| component.contains(txid))
-                    .collect::<Vec<_>>()
-            ))
-            .collect::<Vec<_>>()
-    );
-
     // component is already a strongly-connected-component discovered by Tarjan's algorithm, which
     // means that it's both guaranteed to contain a cycle and every vertex is reachable from every
     // other, so starting from any random vertex will work.
@@ -668,20 +654,7 @@ fn small_cycle(
         }
     }
 
-    println!("component: {:?}", component);
-    for curr in component {
-        println!(
-            "{:?} -> {:?}",
-            curr,
-            edges
-                .get(&curr)
-                .unwrap()
-                .keys()
-                .filter(|x| component.contains(x))
-                .collect::<Vec<_>>(),
-        );
-    }
-    panic!("didn't find our way back to the start, so is this not a cycle?");
+    panic!("didn't find our way back to the start, this is not a cycle");
 }
 
 #[derive(Clone, Debug)]
@@ -790,6 +763,8 @@ mod tests {
         // │     │     │     │<────┤     │             //
         // └─────┘     └─────┘     └─────┘             //
         //                                             //
+        //
+        // Diagram lifted from https://www.youtube.com/watch?v=wUgWX0nc4NY
 
         let edges_simple = vec![
             (0, 1),
