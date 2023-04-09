@@ -62,8 +62,8 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
     async fn run(&self) -> anyhow::Result<()> {
         let mut futures = FuturesUnordered::new();
         let workload_start = Instant::now();
-        let workload_deadline = workload_start + Duration::from_millis(500);
-        for _ in 0..4 {
+        let workload_deadline = workload_start + Duration::from_millis(100);
+        for _ in 0..2 {
             futures.push(self.thread(workload_deadline));
         }
         let mut histories = vec![];
@@ -92,6 +92,21 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
         println!("find_cycle took {:?}", find_cycle_start.elapsed());
 
         if let Some(cycle) = maybe_cycle {
+            println!("expected cycle {:?}", cycle);
+            for i in 0..cycle.len() {
+                let curr = cycle[i].0;
+                let next = if i == cycle.len() - 1 {
+                    cycle[0].0
+                } else {
+                    cycle[i + 1].0
+                };
+
+                println!("cycle i {}", i);
+                let curr_out_edges = edges.get(&curr).unwrap();
+                let expected_edge_type = curr_out_edges.get(&next).unwrap();
+                assert_eq!(*expected_edge_type, cycle[i].1);
+            }
+
             let tx_results = find_results(
                 &(cycle.iter().map(|(txid, _)| *txid).collect::<HashSet<_>>()),
                 &histories,
@@ -111,9 +126,9 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
                 };
 
                 if i == 0 {
-                    println!("  ┌──> {:?}", tx_results.get(&txid).unwrap());
+                    println!("  ┌──> {:?}: {:?}", txid, tx_results.get(&txid).unwrap());
                 } else {
-                    println!("  │    {:?}", tx_results.get(&txid).unwrap());
+                    println!("  │    {:?}: {:?}", txid, tx_results.get(&txid).unwrap());
                 }
                 println!("  │     │");
                 println!("  │     │ {}...", edge_expl);
@@ -301,8 +316,10 @@ fn gen_graph(
 
     for (list_id, longest) in &longests {
         let mut prev_txid: Option<Txid> = None;
+        println!("{:?} longest {:?}", list_id, longest);
         for txid in longest {
             if let Some(prev_txid) = prev_txid {
+                println!("  {:?} WriteWrite dep on {:?}", txid, prev_txid);
                 edges
                     .entry(*txid)
                     .or_insert_with(BTreeMap::new)
@@ -349,6 +366,7 @@ fn gen_graph(
         match item {
             HistoryItem::StartRead(txid) | HistoryItem::StartAppend(txid, _) => {
                 for other_txid in most_recent_txid.values() {
+                    println!("  RealTime dep on {:?}", *other_txid);
                     edges
                         .entry(*txid)
                         .or_insert_with(BTreeMap::new)
@@ -358,6 +376,7 @@ fn gen_graph(
             HistoryItem::Commit(txid, ts, list_id) => {
                 if let Some((other_ts, other_txid)) = highest_timestamp.get(list_id) {
                     if ts > other_ts {
+                        println!("  SameKeyTimestamp dep on {:?}", other_txid);
                         edges
                             .entry(*txid)
                             .or_insert_with(BTreeMap::new)
@@ -370,6 +389,7 @@ fn gen_graph(
             }
             HistoryItem::FinishRead(txid, _, list_id, txids) => {
                 if let Some(last_txid) = txids.last() {
+                    println!("  WriteRead dep on {:?}", last_txid);
                     edges
                         .entry(*txid)
                         .or_insert_with(BTreeMap::new)
@@ -387,6 +407,7 @@ fn gen_graph(
                 }
 
                 if !longest.is_empty() && longest.len() > txids.len() {
+                    println!("  ReadWrite dep on {:?}", longest[txids.len()]);
                     edges
                         .entry(*txid)
                         .or_insert_with(BTreeMap::new)
@@ -580,6 +601,24 @@ fn small_cycle(
     let mut path = HashMap::new();
     let mut queue = VecDeque::new();
 
+    println!("component {:?}", component);
+    println!(
+        "edges in component {:?}",
+        component
+            .iter()
+            .map(|txid| (
+                txid,
+                edges
+                    .get(&txid)
+                    .unwrap()
+                    .iter()
+                    .map(|(txid, _)| txid)
+                    .filter(|txid| component.contains(txid))
+                    .collect::<Vec<_>>()
+            ))
+            .collect::<Vec<_>>()
+    );
+
     // component is already a strongly-connected-component discovered by Tarjan's algorithm, which
     // means that it's both guaranteed to contain a cycle and every vertex is reachable from every
     // other, so starting from any random vertex will work.
@@ -615,6 +654,7 @@ fn small_cycle(
             }
         }
     }
+
     panic!("didn't find our way back to the start, so is this not a cycle?");
 }
 
@@ -628,7 +668,7 @@ enum HistoryItem {
 }
 
 // Dependency edges between two transactions T1 and T2.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EdgeType {
     // T1 finished before T2 started.
     RealTime,
