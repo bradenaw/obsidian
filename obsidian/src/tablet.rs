@@ -177,14 +177,16 @@ impl Tablet for LsmTablet {
 
     async fn history_page(
         &self,
-        _ts: Timestamp,
-        _keyspace_id: KeyspaceId,
-        _key: &[u8],
-        _range: HistoryRange,
-        _direction: Direction,
-        _limit: usize,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        key: &[u8],
+        range: HistoryRange,
+        direction: Direction,
+        limit: usize,
     ) -> anyhow::Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>)> {
-        todo!();
+        self.inner
+            .history_page(ts, keyspace_id, key, range, direction, limit)
+            .await
     }
 
     async fn write(
@@ -582,6 +584,40 @@ impl LsmTabletInner {
                 .collect(),
             maybe_continue_cursor,
         ))
+    }
+
+    async fn history_page(
+        &self,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        key: &[u8],
+        range: HistoryRange,
+        direction: Direction,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>)> {
+        let limit = cmp::min(limit, 1000);
+
+        let _guard = self.lock_mgr.read_lock(key).await;
+
+        let (min, max) = range.as_min_max();
+        self.sequencer.wait_for_safe_read(min).await;
+        let max = cmp::min(max, self.sequencer.safe_read_ts());
+        if max < min {
+            return Err(anyhow!("timestamp in the future"));
+        }
+
+        // TODO: must make a range with the new max
+
+        let (page, continue_cursor) = self
+            .lsm
+            .history_page(keyspace_id, key, range, direction, limit)
+            .await?;
+
+        // TODO: continue_cursor needs to be in terms of the prev
+
+        if direction == Direction::Asc {}
+
+        todo!();
     }
 
     async fn write(
