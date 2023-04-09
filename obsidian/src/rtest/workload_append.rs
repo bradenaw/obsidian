@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fmt::Debug;
-use std::fmt::Display;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -102,7 +101,6 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
                     cycle[i + 1].0
                 };
 
-                println!("cycle i {}", i);
                 let curr_out_edges = edges.get(&curr).unwrap();
                 let expected_edge_type = curr_out_edges.get(&next).unwrap();
                 assert_eq!(*expected_edge_type, cycle[i].1);
@@ -163,7 +161,6 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
                     .await
                     {
                         Ok(Ok(ts)) => {
-                            println!("append({:?}, {:?})", list_id, txid);
                             history.push((self.next_seq(), HistoryItem::Commit(txid, ts, list_id)));
                         }
                         // TODO: classify some errors as aborts and continue instead of ending
@@ -293,7 +290,7 @@ fn gen_graph(
 ) -> anyhow::Result<HashMap<Txid, HashMap<Txid, EdgeType>>> {
     let mut edges = HashMap::new();
 
-    let mut longests = HashMap::new();
+    let mut longests = BTreeMap::new();
     let mut possible_txids = HashMap::new();
 
     for history in histories {
@@ -320,7 +317,7 @@ fn gen_graph(
         println!("{:?} longest {:?}", list_id, longest);
         for txid in longest {
             if let Some(prev_txid) = prev_txid {
-                println!("  {:?} WriteWrite dep on {:?}", txid, prev_txid);
+                println!("  {:?} -ww-> {:?}", txid, prev_txid);
                 edges
                     .entry(*txid)
                     .or_insert_with(HashMap::new)
@@ -363,11 +360,11 @@ fn gen_graph(
     let mut most_recent_txid = HashMap::new();
     let mut highest_timestamp: HashMap<ListId, (Timestamp, Txid)> = HashMap::new();
     for OrdEqByFirst(seq, (thread_id, item)) in merged_history {
-        println!("{}: thread {}: {:?}", seq.0, thread_id, item);
+        println!("{:?}: thread {}: {:?}", seq, thread_id, item);
         match item {
             HistoryItem::StartRead(txid) | HistoryItem::StartAppend(txid, _) => {
                 for other_txid in most_recent_txid.values() {
-                    println!("  RealTime dep on {:?}", *other_txid);
+                    println!("  {:?} -rt-> {:?}", txid, other_txid);
                     edges
                         .entry(*txid)
                         .or_insert_with(HashMap::new)
@@ -377,7 +374,7 @@ fn gen_graph(
             HistoryItem::Commit(txid, ts, list_id) => {
                 if let Some((other_ts, other_txid)) = highest_timestamp.get(list_id) {
                     if ts > other_ts {
-                        println!("  SameKeyTimestamp dep on {:?}", other_txid);
+                        println!("  {:?} -ts-> {:?}", txid, other_txid);
                         edges
                             .entry(*txid)
                             .or_insert_with(HashMap::new)
@@ -390,7 +387,7 @@ fn gen_graph(
             }
             HistoryItem::FinishRead(txid, _, list_id, txids) => {
                 if let Some(last_txid) = txids.last() {
-                    println!("  WriteRead dep on {:?}", last_txid);
+                    println!("  {:?} -wr-> {:?}", txid, last_txid);
                     edges
                         .entry(*txid)
                         .or_insert_with(HashMap::new)
@@ -408,11 +405,11 @@ fn gen_graph(
                 }
 
                 if !longest.is_empty() && longest.len() > txids.len() {
-                    println!("  ReadWrite dep on {:?}", longest[txids.len()]);
+                    println!("  {:?} -rw-> {:?}", longest[txids.len()], txid);
                     edges
-                        .entry(*txid)
+                        .entry(longest[txids.len()])
                         .or_insert_with(HashMap::new)
-                        .insert(longest[txids.len()], EdgeType::ReadWrite);
+                        .insert(*txid, EdgeType::ReadWrite);
                 }
             }
             _ => {}
@@ -514,9 +511,13 @@ fn find_cycle(edges: &HashMap<Txid, HashMap<Txid, EdgeType>>) -> Option<Vec<(Txi
     let cycle_txids = small_cycle(smallest_scc, edges);
 
     let mut result = vec![];
-    for i in 0..cycle_txids.len() - 1 {
+    for i in 0..cycle_txids.len() {
         let a = cycle_txids[i];
-        let b = cycle_txids[i + 1];
+        let b = if i == cycle_txids.len() - 1 {
+            cycle_txids[0]
+        } else {
+            cycle_txids[i + 1]
+        };
 
         let edge_type = *(edges.get(&a).unwrap().get(&b).unwrap());
 
@@ -727,16 +728,10 @@ impl ListItem {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 struct Txid(u64);
 
-impl Debug for Txid {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self.0, f)
-    }
-}
-
-#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy)]
+#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Debug)]
 struct Seq(u64);
 
 impl Encode for Txid {
