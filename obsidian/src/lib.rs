@@ -11,6 +11,7 @@ mod lsm_block;
 mod lsm_run;
 mod lsm_util;
 mod memtable;
+mod meta;
 mod obsidian;
 mod range;
 mod router;
