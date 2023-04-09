@@ -62,8 +62,8 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
     async fn run(&self) -> anyhow::Result<()> {
         let mut futures = FuturesUnordered::new();
         let workload_start = Instant::now();
-        let workload_deadline = workload_start + Duration::from_millis(500);
-        for _ in 0..4 {
+        let workload_deadline = workload_start + Duration::from_millis(100);
+        for _ in 0..2 {
             futures.push(self.thread(workload_deadline));
         }
         let mut histories = vec![];
@@ -274,10 +274,10 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
 
 fn gen_graph(
     histories: &Vec<Vec<(Seq, HistoryItem)>>,
-) -> anyhow::Result<BTreeMap<Txid, BTreeMap<Txid, EdgeType>>> {
-    let mut edges = BTreeMap::new();
+) -> anyhow::Result<HashMap<Txid, HashMap<Txid, EdgeType>>> {
+    let mut edges = HashMap::new();
 
-    let mut longests = BTreeMap::new();
+    let mut longests = HashMap::new();
     let mut possible_txids = HashMap::new();
 
     for history in histories {
@@ -305,7 +305,7 @@ fn gen_graph(
             if let Some(prev_txid) = prev_txid {
                 edges
                     .entry(*txid)
-                    .or_insert_with(BTreeMap::new)
+                    .or_insert_with(HashMap::new)
                     .insert(prev_txid, EdgeType::WriteWrite);
             }
 
@@ -351,7 +351,7 @@ fn gen_graph(
                 for other_txid in most_recent_txid.values() {
                     edges
                         .entry(*txid)
-                        .or_insert_with(BTreeMap::new)
+                        .or_insert_with(HashMap::new)
                         .insert(*other_txid, EdgeType::RealTime);
                 }
             }
@@ -360,7 +360,7 @@ fn gen_graph(
                     if ts > other_ts {
                         edges
                             .entry(*txid)
-                            .or_insert_with(BTreeMap::new)
+                            .or_insert_with(HashMap::new)
                             .insert(*other_txid, EdgeType::SameKeyTimestamp);
                         highest_timestamp.insert(*list_id, (*ts, *txid));
                     }
@@ -372,7 +372,7 @@ fn gen_graph(
                 if let Some(last_txid) = txids.last() {
                     edges
                         .entry(*txid)
-                        .or_insert_with(BTreeMap::new)
+                        .or_insert_with(HashMap::new)
                         .insert(*last_txid, EdgeType::WriteRead);
                 }
 
@@ -389,7 +389,7 @@ fn gen_graph(
                 if !longest.is_empty() && longest.len() > txids.len() {
                     edges
                         .entry(*txid)
-                        .or_insert_with(BTreeMap::new)
+                        .or_insert_with(HashMap::new)
                         .insert(longest[txids.len()], EdgeType::ReadWrite);
                 }
             }
@@ -485,7 +485,7 @@ fn find_results(
     result
 }
 
-fn find_cycle(edges: &BTreeMap<Txid, BTreeMap<Txid, EdgeType>>) -> Option<Vec<(Txid, EdgeType)>> {
+fn find_cycle(edges: &HashMap<Txid, HashMap<Txid, EdgeType>>) -> Option<Vec<(Txid, EdgeType)>> {
     let sccs = strongly_connected_components(edges);
     let smallest_scc = sccs.iter().min_by_key(|scc| scc.len())?;
 
@@ -504,29 +504,33 @@ fn find_cycle(edges: &BTreeMap<Txid, BTreeMap<Txid, EdgeType>>) -> Option<Vec<(T
 }
 
 fn strongly_connected_components(
-    edges: &BTreeMap<Txid, BTreeMap<Txid, EdgeType>>,
+    edges: &HashMap<Txid, HashMap<Txid, EdgeType>>,
 ) -> Vec<HashSet<Txid>> {
     // This is Tarjan's algorithm for finding strongly connected components, which is O(V+E).
 
-    let mut low_links: HashMap<Txid, Txid> = HashMap::new();
+    let mut low_links: HashMap<Txid, usize> = HashMap::new();
+    let mut ids: HashMap<Txid, usize> = HashMap::new();
     let mut stack = vec![];
     let mut set = HashSet::new();
 
     fn visit(
         txid: Txid,
-        edges: &BTreeMap<Txid, BTreeMap<Txid, EdgeType>>,
+        edges: &HashMap<Txid, HashMap<Txid, EdgeType>>,
         stack: &mut Vec<Txid>,
         set: &mut HashSet<Txid>,
-        low_links: &mut HashMap<Txid, Txid>,
+        low_links: &mut HashMap<Txid, usize>,
+        ids: &mut HashMap<Txid, usize>,
     ) {
-        low_links.insert(txid, txid);
+        let id = ids.len();
+        ids.insert(txid, id);
+        low_links.insert(txid, id);
         stack.push(txid);
         set.insert(txid);
 
         if let Some(out_edges) = edges.get(&txid) {
             for out in out_edges.keys() {
                 if !low_links.contains_key(&out) {
-                    visit(*out, edges, stack, set, low_links);
+                    visit(*out, edges, stack, set, low_links, ids);
                 }
 
                 if set.contains(out) && low_links.get(out) < low_links.get(&txid) {
@@ -535,7 +539,7 @@ fn strongly_connected_components(
             }
         }
 
-        if low_links.get(&txid) == Some(&txid) {
+        if low_links.get(&txid) == Some(&id) {
             while let Some(other_txid) = stack.pop() {
                 set.remove(&other_txid);
                 if txid == other_txid {
@@ -549,7 +553,7 @@ fn strongly_connected_components(
         if low_links.contains_key(txid) {
             continue;
         }
-        visit(*txid, edges, &mut stack, &mut set, &mut low_links);
+        visit(*txid, edges, &mut stack, &mut set, &mut low_links, &mut ids);
     }
 
     let mut sccs = HashMap::new();
@@ -570,7 +574,7 @@ fn strongly_connected_components(
 
 fn small_cycle(
     component: &HashSet<Txid>,
-    edges: &BTreeMap<Txid, BTreeMap<Txid, EdgeType>>,
+    edges: &HashMap<Txid, HashMap<Txid, EdgeType>>,
 ) -> Vec<Txid> {
     // Keys are each vertex visited.
     // Values are the previous vertex along the shortest path from start to here.
@@ -708,7 +712,7 @@ impl Decode for Txid {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::HashMap;
 
     use super::strongly_connected_components;
     use super::EdgeType;
@@ -757,11 +761,11 @@ mod tests {
             (6, 2),
         ];
 
-        let mut edges = BTreeMap::new();
+        let mut edges = HashMap::new();
         for (src, dst) in edges_simple {
             edges
                 .entry(Txid(src))
-                .or_insert_with(BTreeMap::new)
+                .or_insert_with(HashMap::new)
                 .insert(Txid(dst), EdgeType::ReadWrite);
         }
 
