@@ -2,6 +2,7 @@ use std::cmp;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::future::Future;
 use std::io::Cursor;
 use std::io::Read;
@@ -10,6 +11,8 @@ use std::io::SeekFrom;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::anyhow;
 use async_stream::try_stream;
@@ -54,6 +57,7 @@ use crate::util::Encode;
 use crate::util::Retry;
 
 const MAX_PRECOND_VALUE_LEN: usize = 256;
+const WAIT_ABORT_TIMEOUT: Duration = Duration::from_millis(1_000);
 
 #[async_trait]
 pub(crate) trait Tablet {
@@ -256,8 +260,6 @@ impl LsmTablet {
 
         let bg = Background::new();
 
-        // TODO: also read already-committed outcomes into commit_sender
-
         bg.spawn({
             let inner = inner.clone();
             async move {
@@ -291,6 +293,13 @@ impl LsmTablet {
             let inner = inner.clone();
             async move {
                 inner.scan_for_committed_outcomes(commit_sender).await;
+            }
+        });
+
+        bg.spawn({
+            let inner = inner.clone();
+            async move {
+                inner.abort_long_waits().await;
             }
         });
 
@@ -1171,6 +1180,18 @@ impl LsmTabletInner {
         )
     }
 
+    async fn abort_long_waits(&self) {
+        loop {
+            let (instant, txid) = self.waiters.pop_oldest().await;
+            let elapsed = instant.elapsed();
+            let remaining = WAIT_ABORT_TIMEOUT.saturating_sub(elapsed);
+            tokio::time::sleep(remaining).await;
+            Retry::new()
+                .indefinitely(|| async move { self.try_abort(txid).await })
+                .await;
+        }
+    }
+
     fn check_key(&self, colo_group_id: ColoGroupId, key: &[u8]) -> anyhow::Result<()> {
         if colo_group_id == ColoGroupId::META {
             if key.len() < 12 {
@@ -1458,6 +1479,7 @@ impl Decode for TxOutcomeRecord {
 
 struct Waiters {
     inner: Mutex<WaitersInner>,
+    arrival: tokio::sync::Notify,
 }
 
 struct WaitersInner {
@@ -1468,13 +1490,16 @@ struct WaitersInner {
             tokio::sync::watch::Receiver<()>,
         ),
     >,
+    by_oldest_waiter: VecDeque<(Instant, Txid)>,
 }
 
 impl Waiters {
     fn new() -> Self {
         Self {
+            arrival: tokio::sync::Notify::new(),
             inner: Mutex::new(WaitersInner {
                 by_txid: HashMap::new(),
+                by_oldest_waiter: VecDeque::new(),
             }),
         }
     }
@@ -1486,14 +1511,33 @@ impl Waiters {
         }
     }
 
+    async fn pop_oldest(&self) -> (Instant, Txid) {
+        loop {
+            {
+                let mut inner = self.inner.lock().unwrap();
+                if let Some((instant, txid)) = inner.by_oldest_waiter.pop_front() {
+                    return (instant, txid);
+                }
+            }
+            self.arrival.notified().await;
+        }
+    }
+
     async fn wait(&self, txid: Txid) {
         let mut rx = {
             let mut inner = self.inner.lock().unwrap();
-            let (_, rx) = inner
+            let new = !inner.by_txid.contains_key(&txid);
+            let rx = inner
                 .by_txid
                 .entry(txid)
-                .or_insert_with(|| tokio::sync::watch::channel(()));
-            rx.clone()
+                .or_insert_with(|| tokio::sync::watch::channel(()))
+                .1
+                .clone();
+            if new {
+                inner.by_oldest_waiter.push_back((Instant::now(), txid));
+                self.arrival.notify_one();
+            }
+            rx
         };
         _ = rx.changed().await;
     }
