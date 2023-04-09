@@ -374,7 +374,7 @@ fn gen_graph(
                     edges
                         .entry(*txid)
                         .or_insert_with(HashMap::new)
-                        .insert(*last_txid, EdgeType::WriteRead);
+                        .insert(*last_txid, EdgeType::ReadWrite);
                 }
 
                 let longest = longests.get(&list_id).unwrap();
@@ -391,7 +391,7 @@ fn gen_graph(
                     edges
                         .entry(*txid)
                         .or_insert_with(HashMap::new)
-                        .insert(longest[txids.len()], EdgeType::ReadWrite);
+                        .insert(longest[txids.len()], EdgeType::WriteRead);
                 }
             }
             _ => {}
