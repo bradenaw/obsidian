@@ -139,7 +139,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
                 &self.sync_key[..],
                 HistoryRange::Since(ts),
                 Direction::Asc,
-                20,
+                100,
             )
             .await?;
 
