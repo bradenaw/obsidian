@@ -10,11 +10,14 @@ use prost::Message;
 use crate::range::Range;
 use crate::tablet::Tablet;
 use crate::types::ColoGroupId;
+use crate::types::Direction;
+use crate::types::HistoryRange;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
 use crate::types::Record;
 use crate::types::Timestamp;
+use crate::types::Value;
 use crate::util::longest_shared_prefix_len;
 
 // () -> ProtoTx
@@ -83,7 +86,49 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
     }
 
     async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Record>, Timestamp)> {
-        todo!();
+        let empty_key = [];
+        let (page, _) = self
+            .tablet
+            .history_page(
+                KEYSPACE_TX,
+                &empty_key[..],
+                HistoryRange::Since(ts),
+                Direction::Asc,
+                20,
+            )
+            .await?;
+
+        let mut out_page = vec![];
+        let mut new_ts = ts;
+        for (ts, maybe_value) in page {
+            if let Value::Regular(value) = maybe_value {
+                let proto_tx = ProtoTx::decode(&value[..])?;
+                let keys = BTreeSet::try_from(
+                    proto_tx
+                        .keys
+                        .ok_or_else(|| anyhow!("ProtoTx with no keys"))?,
+                )?;
+
+                for (keyspace_id, key) in keys {
+                    let record = Record {
+                        key: key.clone(),
+                        ts,
+                        value: match self.tablet.get(ts, keyspace_id, key).await? {
+                            Some(v) => Value::Regular(v),
+                            None => Value::Tombstone,
+                        },
+                    };
+                    out_page.push(record);
+                }
+            }
+            new_ts = ts;
+
+            if out_page.len() > 1000 {
+                break;
+            }
+        }
+
+        Ok((out_page, new_ts))
     }
 }
 
