@@ -19,6 +19,7 @@ mod rtest;
 mod sequencer;
 mod storage;
 mod tablet;
+mod tuple_encoding;
 mod types;
 mod util;
 mod wal;

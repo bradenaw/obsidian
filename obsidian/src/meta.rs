@@ -92,7 +92,7 @@ impl<T: Tablet> MetaImpl<T> {
         Self { tablet }
     }
 
-    fn write_syncable(
+    async fn write_syncable(
         &self,
         preconds: Vec<Precondition>,
         mut muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
@@ -109,7 +109,8 @@ impl<T: Tablet> MetaImpl<T> {
             ),
         );
 
-        todo!();
+        let ts = self.tablet.write(preconds, muts).await?;
+        Ok(ts)
     }
 }
 
