@@ -1,13 +1,50 @@
-use async_trait::async_trait;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::convert::TryFrom;
 
+use anyhow::anyhow;
+use async_trait::async_trait;
+use prost::Message;
+
+use crate::range::Range;
 use crate::tablet::Tablet;
 use crate::types::ColoGroupId;
 use crate::types::KeyspaceId;
+use crate::types::Mutation;
+use crate::types::Precondition;
+use crate::types::Record;
+use crate::types::Timestamp;
+use crate::util::longest_shared_prefix_len;
+
+// () -> ProtoTx
+const KEYSPACE_TX: KeyspaceId = KeyspaceId(ColoGroupId::META, 1);
+
+// (colo_group_id) -> []
+const KEYSPACE_COLO_GROUPS: KeyspaceId = KeyspaceId(ColoGroupId::META, 2);
+
+// (keyspace_id) -> []
+const KEYSPACE_KEYSPACES: KeyspaceId = KeyspaceId(ColoGroupId::META, 3);
+
+// (colo_group_id, range.lower) -> TabletId
+const KEYSPACE_ROUTING: KeyspaceId = KeyspaceId(ColoGroupId::META, 4);
 
 #[async_trait]
 pub(crate) trait Meta {
-    async fn create_colo_group(&self, splits: Vec<Vec<u8>>) -> anyhow::Result<ColoGroupId>;
-    async fn create_keyspace(&self, colo_group_id: ColoGroupId) -> anyhow::Result<KeyspaceId>;
+    async fn create_colo_group(
+        &self,
+        colo_group_id: ColoGroupId,
+        splits: Vec<Vec<u8>>,
+    ) -> anyhow::Result<()>;
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()>;
+
+    async fn latest_snapshot(&self) -> anyhow::Result<Timestamp>;
+    async fn scan(
+        &self,
+        keyspace_id: KeyspaceId,
+        range: Range<Vec<u8>>,
+    ) -> anyhow::Result<(Vec<Record>, Range<Vec<u8>>)>;
+    async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Record>, Timestamp)>;
 }
 
 struct MetaImpl<T> {
@@ -15,12 +52,37 @@ struct MetaImpl<T> {
 }
 
 #[async_trait]
-impl<T: Tablet + Sync> Meta for MetaImpl<T> {
-    async fn create_colo_group(&self, splits: Vec<Vec<u8>>) -> anyhow::Result<ColoGroupId> {
+impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
+    async fn create_colo_group(
+        &self,
+        colo_group_id: ColoGroupId,
+        splits: Vec<Vec<u8>>,
+    ) -> anyhow::Result<()> {
         todo!();
     }
 
-    async fn create_keyspace(&self, colo_group_id: ColoGroupId) -> anyhow::Result<KeyspaceId> {
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        todo!();
+    }
+
+    async fn latest_snapshot(&self) -> anyhow::Result<Timestamp> {
+        let key = [];
+        let ts = self
+            .tablet
+            .latest_snapshot(BTreeSet::from([(KEYSPACE_TX, &key[..])]))
+            .await?;
+        Ok(ts)
+    }
+
+    async fn scan(
+        &self,
+        keyspace_id: KeyspaceId,
+        range: Range<Vec<u8>>,
+    ) -> anyhow::Result<(Vec<Record>, Range<Vec<u8>>)> {
+        todo!();
+    }
+
+    async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Record>, Timestamp)> {
         todo!();
     }
 }
@@ -28,5 +90,174 @@ impl<T: Tablet + Sync> Meta for MetaImpl<T> {
 impl<T: Tablet> MetaImpl<T> {
     fn new(tablet: T) -> Self {
         Self { tablet }
+    }
+
+    fn write_syncable(
+        &self,
+        preconds: Vec<Precondition>,
+        mut muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+    ) -> anyhow::Result<Timestamp> {
+        muts.insert(
+            (KEYSPACE_TX, vec![]),
+            Mutation::Put(
+                ProtoTx {
+                    keys: Some(ProtoCompressedKeySet::from(
+                        muts.keys().cloned().collect::<BTreeSet<_>>(),
+                    )),
+                }
+                .encode_to_vec(),
+            ),
+        );
+
+        todo!();
+    }
+}
+
+#[derive(prost::Message, Clone, PartialEq)]
+struct ProtoTx {
+    #[prost(message, tag = "1")]
+    keys: Option<ProtoCompressedKeySet>,
+}
+
+#[derive(prost::Message, Clone, PartialEq)]
+struct ProtoKeyspaceId {
+    #[prost(uint32, tag = "1")]
+    colo_group_id: u32,
+    #[prost(uint32, tag = "2")]
+    id: u32,
+}
+
+#[derive(prost::Message, Clone, PartialEq)]
+struct ProtoCompressedKeySet {
+    #[prost(repeated, message, tag = "1")]
+    keyspace_ids: Vec<ProtoKeyspaceId>,
+    #[prost(repeated, bytes, tag = "2")]
+    key_fragments: Vec<Vec<u8>>,
+    #[prost(repeated, uint32, tag = "3")]
+    key_shared_prefixes: Vec<u32>,
+    #[prost(repeated, uint64, tag = "4")]
+    key_keyspaces_counts: Vec<u64>,
+    #[prost(repeated, uint64, tag = "5")]
+    key_keyspaces_refs: Vec<u64>,
+}
+
+impl From<BTreeSet<(KeyspaceId, Vec<u8>)>> for ProtoCompressedKeySet {
+    fn from(set: BTreeSet<(KeyspaceId, Vec<u8>)>) -> Self {
+        let mut keyspace_id_counts = HashMap::new();
+        let mut key_to_keyspace_ids = BTreeMap::new();
+        for (keyspace_id, key) in set {
+            *(keyspace_id_counts.entry(keyspace_id).or_insert(0)) += 1;
+            key_to_keyspace_ids
+                .entry(key)
+                .or_insert_with(Vec::new)
+                .push(keyspace_id);
+        }
+        let mut keyspace_ids_by_pop = keyspace_id_counts.keys().copied().collect::<Vec<_>>();
+        keyspace_ids_by_pop.sort_by_key(|keyspace_id| keyspace_id_counts.get(keyspace_id));
+        let keyspace_id_to_idx = keyspace_ids_by_pop
+            .iter()
+            .enumerate()
+            .map(|(i, keyspace_id)| (*keyspace_id, i))
+            .collect::<HashMap<_, _>>();
+
+        let mut key_fragments = vec![];
+        let mut key_shared_prefixes = vec![];
+        let mut maybe_prev_key = None;
+        for key in key_to_keyspace_ids.keys() {
+            let n_shared = match maybe_prev_key {
+                Some(prev_key) => longest_shared_prefix_len(key, prev_key),
+                None => 0,
+            };
+
+            key_fragments.push(key[n_shared..].to_vec());
+            key_shared_prefixes.push(n_shared as u32);
+
+            maybe_prev_key = Some(key);
+        }
+
+        let mut key_keyspaces_counts = vec![];
+        let mut key_keyspaces_refs = vec![];
+        if keyspace_id_to_idx.len() > 1 {
+            for keyspace_ids in key_to_keyspace_ids.values() {
+                let mut count = 0;
+                for keyspace_id in keyspace_ids {
+                    let idx = *(keyspace_id_to_idx.get(keyspace_id).unwrap());
+                    count += 1;
+                    key_keyspaces_refs.push(idx as u64);
+                }
+                key_keyspaces_counts.push(count);
+            }
+        }
+
+        ProtoCompressedKeySet {
+            keyspace_ids: keyspace_ids_by_pop
+                .iter()
+                .map(|keyspace_id| ProtoKeyspaceId {
+                    colo_group_id: keyspace_id.0 .0,
+                    id: keyspace_id.1,
+                })
+                .collect(),
+            key_fragments,
+            key_shared_prefixes,
+            key_keyspaces_counts,
+            key_keyspaces_refs,
+        }
+    }
+}
+
+impl TryFrom<ProtoCompressedKeySet> for BTreeSet<(KeyspaceId, Vec<u8>)> {
+    type Error = anyhow::Error;
+
+    fn try_from(value: ProtoCompressedKeySet) -> Result<Self, Self::Error> {
+        let keyspace_ids = value
+            .keyspace_ids
+            .iter()
+            .map(|keyspace_id_pb| {
+                KeyspaceId(ColoGroupId(keyspace_id_pb.colo_group_id), keyspace_id_pb.id)
+            })
+            .collect::<Vec<_>>();
+
+        if value.key_fragments.len() != value.key_shared_prefixes.len() {
+            return Err(anyhow!(""));
+        }
+
+        let mut prev_key = vec![];
+        let mut j = 0;
+        let mut out = BTreeSet::new();
+        for (i, key_fragment) in value.key_fragments.iter().enumerate() {
+            let n_shared = value.key_shared_prefixes[i] as usize;
+            let n_more = key_fragment.len();
+
+            if n_shared > prev_key.len() {
+                return Err(anyhow!(""));
+            }
+
+            let mut key = vec![0u8; n_shared + n_more];
+            (key[..n_shared]).copy_from_slice(&prev_key[..n_shared]);
+            (key[n_shared..]).copy_from_slice(&key_fragment);
+
+            if keyspace_ids.len() == 1 {
+                out.insert((keyspace_ids[0], key.clone()));
+            } else {
+                for _ in 0..value.key_keyspaces_counts[i] {
+                    if j >= value.key_keyspaces_refs.len() {
+                        return Err(anyhow!(""));
+                    }
+
+                    let idx = value.key_keyspaces_refs[j] as usize;
+                    if idx >= keyspace_ids.len() {
+                        return Err(anyhow!(""));
+                    }
+
+                    let keyspace_id = keyspace_ids[idx];
+                    out.insert((keyspace_id, key.clone()));
+                    j += 1;
+                }
+            }
+
+            prev_key = key;
+        }
+
+        Ok(out)
     }
 }
