@@ -211,7 +211,7 @@ impl Obsidian for Frontend {
                     async move {
                         self.tablets
                             .tablet(tablet_id)?
-                            .write(txid, preconds, muts)
+                            .write(preconds, muts)
                             .await
                     }
                 })

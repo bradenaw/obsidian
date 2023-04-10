@@ -100,7 +100,6 @@ pub(crate) trait Tablet {
 
     async fn write(
         &self,
-        txid: Txid,
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
     ) -> Result<Timestamp, InternalError>;
@@ -191,11 +190,10 @@ impl Tablet for LsmTablet {
 
     async fn write(
         &self,
-        txid: Txid,
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
     ) -> Result<Timestamp, InternalError> {
-        self.inner.write(txid, preconds, muts).await
+        self.inner.write(preconds, muts).await
     }
 
     async fn prepare(
@@ -634,7 +632,6 @@ impl LsmTabletInner {
 
     async fn write(
         &self,
-        _txid: Txid,
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
     ) -> Result<Timestamp, InternalError> {
