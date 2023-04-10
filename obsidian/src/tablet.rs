@@ -90,7 +90,6 @@ pub(crate) trait Tablet {
 
     async fn history_page(
         &self,
-        ts: Timestamp,
         keyspace_id: KeyspaceId,
         key: &[u8],
         range: HistoryRange,
@@ -176,7 +175,6 @@ impl Tablet for LsmTablet {
 
     async fn history_page(
         &self,
-        ts: Timestamp,
         keyspace_id: KeyspaceId,
         key: &[u8],
         range: HistoryRange,
@@ -184,7 +182,7 @@ impl Tablet for LsmTablet {
         limit: usize,
     ) -> Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>), InternalError> {
         self.inner
-            .history_page(ts, keyspace_id, key, range, direction, limit)
+            .history_page(keyspace_id, key, range, direction, limit)
             .await
     }
 
@@ -586,7 +584,6 @@ impl LsmTabletInner {
 
     async fn history_page(
         &self,
-        ts: Timestamp,
         keyspace_id: KeyspaceId,
         key: &[u8],
         range: HistoryRange,
@@ -607,9 +604,7 @@ impl LsmTabletInner {
             .await?;
 
         let maybe_pending = self
-            .lsm
-            .get(
-                ts,
+            .unsafe_get_latest_record(
                 keyspace_id
                     .pending()
                     .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?,

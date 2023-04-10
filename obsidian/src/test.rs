@@ -93,14 +93,13 @@ impl<T: Tablet + Send + Sync> Tablet for Arc<T> {
 
     async fn history_page(
         &self,
-        ts: Timestamp,
         keyspace_id: KeyspaceId,
         key: &[u8],
         range: HistoryRange,
         direction: Direction,
         limit: usize,
     ) -> Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>), InternalError> {
-        T::history_page(self, ts, keyspace_id, key, range, direction, limit).await
+        T::history_page(self, keyspace_id, key, range, direction, limit).await
     }
 
     async fn write(
