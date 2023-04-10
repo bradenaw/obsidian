@@ -105,11 +105,10 @@ impl<T: Tablet + Send + Sync> Tablet for Arc<T> {
 
     async fn write(
         &self,
-        txid: Txid,
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
     ) -> Result<Timestamp, InternalError> {
-        T::write(self, txid, preconds, muts).await
+        T::write(self, preconds, muts).await
     }
 
     async fn prepare(
