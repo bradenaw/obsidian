@@ -11,7 +11,6 @@ use crate::obsidian::TabletId;
 use crate::range::Range;
 use crate::tablet::Tablet;
 use crate::tuple_encoding::tuple_encode;
-use crate::tuple_encoding::Tuple;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::HistoryRange;
@@ -24,7 +23,6 @@ use crate::types::Timestamp;
 use crate::types::Value;
 use crate::util::encode;
 use crate::util::longest_shared_prefix_len;
-use crate::util::Encode;
 
 // (PFX_SYNC) -> ProtoTx
 const PFX_SYNC: u64 = 1;
@@ -44,7 +42,11 @@ pub(crate) trait Meta {
     async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()>;
 
     async fn latest_snapshot(&self) -> anyhow::Result<Timestamp>;
-    async fn scan(&self, range: Range<Vec<u8>>) -> anyhow::Result<(Vec<Record>, Range<Vec<u8>>)>;
+    async fn scan_page(
+        &self,
+        ts: Timestamp,
+        range: Range<Vec<u8>>,
+    ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)>;
     async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Record>, Timestamp)>;
 }
 
@@ -127,8 +129,16 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
         Ok(ts)
     }
 
-    async fn scan(&self, range: Range<Vec<u8>>) -> anyhow::Result<(Vec<Record>, Range<Vec<u8>>)> {
-        todo!();
+    async fn scan_page(
+        &self,
+        ts: Timestamp,
+        range: Range<Vec<u8>>,
+    ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)> {
+        let (page, continue_cursor) = self
+            .tablet
+            .scan_page(ts, KeyspaceId::META, range.borrow(), Direction::Asc, 1000)
+            .await?;
+        Ok((page, continue_cursor))
     }
 
     async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Record>, Timestamp)> {
