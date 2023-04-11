@@ -95,7 +95,8 @@ impl Debug for ColoGroupId {
 pub struct KeyspaceId(pub ColoGroupId, pub u32);
 
 impl KeyspaceId {
-    pub(crate) const TX_OUTCOMES: Self = Self(ColoGroupId::TABLET_META, 0xFE000001);
+    pub(crate) const META: Self = Self(ColoGroupId::META, 1);
+    pub(crate) const TX_OUTCOMES: Self = Self(ColoGroupId::TABLET_META, 2);
 
     pub(crate) fn userland(&self) -> Option<KeyspaceId> {
         if !self.is_pending() && !self.is_precond() {
@@ -134,8 +135,13 @@ impl KeyspaceId {
 impl Display for KeyspaceId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/", self.0)?;
+        if *self == KeyspaceId::META {
+            f.write_str("meta")?;
+            return Ok(());
+        }
         if *self == KeyspaceId::TX_OUTCOMES {
             f.write_str("tx_outcomes")?;
+            return Ok(());
         }
         match self.userland() {
             Some(userland_keyspace_id) => {

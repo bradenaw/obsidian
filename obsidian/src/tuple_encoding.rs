@@ -215,7 +215,7 @@ impl Element for Vec<u8> {
     }
 }
 
-trait Tuple: Sized {
+pub(crate) trait Tuple: Sized {
     fn encode(&self) -> Vec<u8>;
     fn decode(b: &[u8]) -> anyhow::Result<Self>;
 }
@@ -236,7 +236,7 @@ impl<E: Element> Tuple for (E,) {
     }
 }
 
-impl<E1: Element, E2: Element> Tuple for (E1, E2) {
+impl<E0: Element, E1: Element> Tuple for (E0, E1) {
     fn encode(&self) -> Vec<u8> {
         let size_0 = self.0.encoded_size();
         let size_1 = self.1.encoded_size();
@@ -250,13 +250,47 @@ impl<E1: Element, E2: Element> Tuple for (E1, E2) {
 
     fn decode(b: &[u8]) -> anyhow::Result<Self> {
         let mut i = 0;
-        let (e0, e0_size) = E1::decode(&b[i..])?;
+        let (e0, e0_size) = E0::decode(&b[i..])?;
         i += e0_size;
-        let (e1, e1_size) = E2::decode(&b[i..])?;
+        let (e1, e1_size) = E1::decode(&b[i..])?;
         i += e1_size;
         if i != b.len() {
             return Err(anyhow!("didn't consume full input"));
         }
         Ok((e0, e1))
     }
+}
+
+impl<E0: Element, E1: Element, E2: Element> Tuple for (E0, E1, E2) {
+    fn encode(&self) -> Vec<u8> {
+        let size_0 = self.0.encoded_size();
+        let size_1 = self.1.encoded_size();
+        let size_2 = self.2.encoded_size();
+        let mut out = vec![0u8; size_0 + size_1 + size_2];
+        let mut i = 0;
+        self.0.encode(&mut out[i..]);
+        i += size_0;
+        self.1.encode(&mut out[i..]);
+        i += size_0;
+        self.2.encode(&mut out[i..]);
+        out
+    }
+
+    fn decode(b: &[u8]) -> anyhow::Result<Self> {
+        let mut i = 0;
+        let (e0, e0_size) = E0::decode(&b[i..])?;
+        i += e0_size;
+        let (e1, e1_size) = E1::decode(&b[i..])?;
+        i += e1_size;
+        let (e2, e2_size) = E2::decode(&b[i..])?;
+        i += e2_size;
+        if i != b.len() {
+            return Err(anyhow!("didn't consume full input"));
+        }
+        Ok((e0, e1, e2))
+    }
+}
+
+pub(crate) fn tuple_encode<T: Tuple>(t: &T) -> Vec<u8> {
+    Tuple::encode(t)
 }

@@ -7,8 +7,11 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use prost::Message;
 
+use crate::obsidian::TabletId;
 use crate::range::Range;
 use crate::tablet::Tablet;
+use crate::tuple_encoding::tuple_encode;
+use crate::tuple_encoding::Tuple;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::HistoryRange;
@@ -16,82 +19,124 @@ use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
 use crate::types::Record;
+use crate::types::ShardId;
 use crate::types::Timestamp;
 use crate::types::Value;
+use crate::util::encode;
 use crate::util::longest_shared_prefix_len;
+use crate::util::Encode;
 
-// () -> ProtoTx
-const KEYSPACE_TX: KeyspaceId = KeyspaceId(ColoGroupId::META, 1);
+// (PFX_SYNC) -> ProtoTx
+const PFX_SYNC: u64 = 1;
 
-// (colo_group_id) -> []
-const KEYSPACE_COLO_GROUPS: KeyspaceId = KeyspaceId(ColoGroupId::META, 2);
+// (PFX_COLO_GROUPS, colo_group_id) -> []
+const PFX_COLO_GROUPS: u64 = 2;
 
-// (keyspace_id) -> []
-const KEYSPACE_KEYSPACES: KeyspaceId = KeyspaceId(ColoGroupId::META, 3);
+// (PFX_KEYSPACES, keyspace_id) -> []
+const PFX_KEYSPACES: u64 = 3;
 
-// (colo_group_id, range.lower) -> TabletId
-const KEYSPACE_ROUTING: KeyspaceId = KeyspaceId(ColoGroupId::META, 4);
+// (PFX_ROUTING, colo_group_id, range.lower) -> TabletId
+const PFX_ROUTING: u64 = 4;
 
 #[async_trait]
 pub(crate) trait Meta {
-    async fn create_colo_group(
-        &self,
-        colo_group_id: ColoGroupId,
-        splits: Vec<Vec<u8>>,
-    ) -> anyhow::Result<()>;
+    async fn create_colo_group(&self, colo_group_id: ColoGroupId) -> anyhow::Result<()>;
     async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()>;
 
     async fn latest_snapshot(&self) -> anyhow::Result<Timestamp>;
-    async fn scan(
-        &self,
-        keyspace_id: KeyspaceId,
-        range: Range<Vec<u8>>,
-    ) -> anyhow::Result<(Vec<Record>, Range<Vec<u8>>)>;
+    async fn scan(&self, range: Range<Vec<u8>>) -> anyhow::Result<(Vec<Record>, Range<Vec<u8>>)>;
     async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Record>, Timestamp)>;
 }
 
 struct MetaImpl<T> {
     tablet: T,
+    sync_key: Vec<u8>,
 }
 
 #[async_trait]
 impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
-    async fn create_colo_group(
-        &self,
-        colo_group_id: ColoGroupId,
-        splits: Vec<Vec<u8>>,
-    ) -> anyhow::Result<()> {
-        todo!();
+    async fn create_colo_group(&self, colo_group_id: ColoGroupId) -> anyhow::Result<()> {
+        let ts = self.latest_snapshot().await?;
+
+        let colo_group_key = tuple_encode(&(PFX_COLO_GROUPS, colo_group_id.0 as u64));
+
+        if self
+            .tablet
+            .get(ts, KeyspaceId::META, colo_group_key.clone())
+            .await?
+            .is_some()
+        {
+            return Err(anyhow!("{:?} already exists", colo_group_id));
+        }
+
+        self.write_syncable(
+            vec![Precondition::NotChangedSince(
+                KeyspaceId::META,
+                self.sync_key.clone(),
+                ts,
+            )],
+            BTreeMap::from([
+                ((KeyspaceId::META, colo_group_key), Mutation::Put(vec![])),
+                (
+                    (
+                        KeyspaceId::META,
+                        tuple_encode(&(PFX_ROUTING, colo_group_id.0 as u64, vec![])),
+                    ),
+                    Mutation::Put(encode(&TabletId(ShardId(1), 1))),
+                ),
+            ]),
+        )
+        .await?;
+
+        Ok(())
     }
 
     async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
-        todo!();
+        let ts = self.latest_snapshot().await?;
+
+        let keyspace_key =
+            tuple_encode(&(PFX_KEYSPACES, keyspace_id.0 .0 as u64, keyspace_id.1 as u64));
+
+        if self
+            .tablet
+            .get(ts, KeyspaceId::META, keyspace_key.clone())
+            .await?
+            .is_some()
+        {
+            return Err(anyhow!("{:?} already exists", keyspace_id));
+        }
+
+        self.write_syncable(
+            vec![Precondition::NotChangedSince(
+                KeyspaceId::META,
+                self.sync_key.clone(),
+                ts,
+            )],
+            BTreeMap::from([((KeyspaceId::META, keyspace_key), Mutation::Put(vec![]))]),
+        )
+        .await?;
+
+        Ok(())
     }
 
     async fn latest_snapshot(&self) -> anyhow::Result<Timestamp> {
-        let key = [];
         let ts = self
             .tablet
-            .latest_snapshot(BTreeSet::from([(KEYSPACE_TX, &key[..])]))
+            .latest_snapshot(BTreeSet::from([(KeyspaceId::META, &self.sync_key[..])]))
             .await?;
         Ok(ts)
     }
 
-    async fn scan(
-        &self,
-        keyspace_id: KeyspaceId,
-        range: Range<Vec<u8>>,
-    ) -> anyhow::Result<(Vec<Record>, Range<Vec<u8>>)> {
+    async fn scan(&self, range: Range<Vec<u8>>) -> anyhow::Result<(Vec<Record>, Range<Vec<u8>>)> {
         todo!();
     }
 
     async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Record>, Timestamp)> {
-        let empty_key = [];
         let (page, _) = self
             .tablet
             .history_page(
-                KEYSPACE_TX,
-                &empty_key[..],
+                KeyspaceId::META,
+                &self.sync_key[..],
                 HistoryRange::Since(ts),
                 Direction::Asc,
                 20,
@@ -134,7 +179,10 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
 
 impl<T: Tablet> MetaImpl<T> {
     fn new(tablet: T) -> Self {
-        Self { tablet }
+        Self {
+            tablet,
+            sync_key: tuple_encode(&(PFX_SYNC,)),
+        }
     }
 
     async fn write_syncable(
@@ -143,7 +191,7 @@ impl<T: Tablet> MetaImpl<T> {
         mut muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
     ) -> anyhow::Result<Timestamp> {
         muts.insert(
-            (KEYSPACE_TX, vec![]),
+            (KeyspaceId::META, vec![]),
             Mutation::Put(
                 ProtoTx {
                     keys: Some(ProtoCompressedKeySet::from(
