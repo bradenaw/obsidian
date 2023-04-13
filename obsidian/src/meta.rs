@@ -33,8 +33,11 @@ const PFX_COLO_GROUPS: u64 = 2;
 // (PFX_KEYSPACES, keyspace_id) -> []
 const PFX_KEYSPACES: u64 = 3;
 
+// (PFX_TABLETS, tablet_id) -> []
+const PFX_TABLETS: u64 = 4;
+
 // (PFX_ROUTING, colo_group_id, range.lower) -> TabletId
-const PFX_ROUTING: u64 = 4;
+const PFX_ROUTING: u64 = 5;
 
 #[async_trait]
 pub(crate) trait Meta {

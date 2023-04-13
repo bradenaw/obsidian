@@ -12,6 +12,7 @@ mod lsm_run;
 mod lsm_util;
 mod memtable;
 mod meta;
+mod meta_synced;
 mod obsidian;
 mod range;
 mod router;
