@@ -189,26 +189,17 @@ impl Element for Vec<u8> {
             reg = (reg << 8) | (*b as u32);
             reg_bits += 8;
 
-            println!("push_back(0b{:08b})", *b);
-            println!("  register 0b{:032b}", reg);
-            println!("  reg bits {}", reg_bits);
-
             while reg_bits >= 7 {
-                println!("register 0b{:032b}", reg);
-                println!("reg bits {}", reg_bits);
                 let front7 = reg >> (reg_bits - 7);
-                println!("pop_front7() -> 0b{:08b}", front7);
-                w[out_i] = ((reg >> (reg_bits - 6)) | 1) as u8;
+                w[out_i] = ((front7 << 1) as u8) | 1;
                 reg_bits -= 7;
                 out_i += 1;
-                println!("register 0b{:032b}", reg);
-                println!("reg bits {}", reg_bits);
             }
         }
         if reg_bits > 0 {
             w[out_i] = (reg << (8 - reg_bits)) as u8;
         }
-        w[out_i] &= 0b11111110
+        w[w.len() - 1] &= 0b11111110
     }
 
     fn decode(encoded: &[u8]) -> anyhow::Result<(Self, usize)> {
@@ -266,9 +257,9 @@ impl<E0: Element, E1: Element> Tuple for (E0, E1) {
         let size_1 = self.1.encoded_size();
         let mut out = vec![0u8; size_0 + size_1];
         let mut i = 0;
-        self.0.encode(&mut out[i..]);
+        self.0.encode(&mut out[i..size_0]);
         i += size_0;
-        self.1.encode(&mut out[i..]);
+        self.1.encode(&mut out[i..size_1]);
         out
     }
 
@@ -292,11 +283,11 @@ impl<E0: Element, E1: Element, E2: Element> Tuple for (E0, E1, E2) {
         let size_2 = self.2.encoded_size();
         let mut out = vec![0u8; size_0 + size_1 + size_2];
         let mut i = 0;
-        self.0.encode(&mut out[i..]);
+        self.0.encode(&mut out[i..i + size_0]);
         i += size_0;
-        self.1.encode(&mut out[i..]);
+        self.1.encode(&mut out[i..i + size_1]);
         i += size_0;
-        self.2.encode(&mut out[i..]);
+        self.2.encode(&mut out[i..i + size_2]);
         out
     }
 
