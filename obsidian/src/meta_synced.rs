@@ -2,7 +2,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::meta::Meta;
+use crate::range::Range;
+use crate::types::Timestamp;
+use crate::types::Value;
+use crate::util::AtomicArc;
 use crate::util::Background;
+use crate::util::Retry;
 
 struct MetaSynced<M: Meta> {
     bg: Background,
@@ -11,16 +16,16 @@ struct MetaSynced<M: Meta> {
 
 struct MetaSyncedInner<M: Meta> {
     m: M,
-    kv: BTreeMap<Vec<u8>, Vec<u8>>,
+    kv: AtomicArc<BTreeMap<Vec<u8>, Vec<u8>>>,
 }
 
-impl<M: Meta + Sync + Send> MetaSynced<M> {
+impl<M: Meta + Sync + Send + 'static> MetaSynced<M> {
     fn new(m: M) -> Self {
         let bg = Background::new();
 
         let inner = Arc::new(MetaSyncedInner {
             m,
-            kv: BTreeMap::new(),
+            kv: AtomicArc::new(Arc::new(BTreeMap::new())),
         });
 
         bg.spawn({
@@ -33,5 +38,62 @@ impl<M: Meta + Sync + Send> MetaSynced<M> {
 }
 
 impl<M: Meta> MetaSyncedInner<M> {
-    async fn sync(&self) {}
+    async fn sync(&self) {
+        let mut ts = Retry::new()
+            .indefinitely(|| async move {
+                let ts = self.m.latest_snapshot().await?;
+                Ok::<_, anyhow::Error>(ts)
+            })
+            .await;
+
+        let mut kv = BTreeMap::new();
+        let mut maybe_cursor = Some(Range::all());
+        while let Some(cursor) = maybe_cursor {
+            let (page, continue_cursor) = self.scan_page_with_retries(ts, cursor).await;
+
+            for (key, _, value) in page {
+                kv.insert(key, value);
+            }
+
+            maybe_cursor = continue_cursor;
+        }
+
+        self.kv.store(Arc::new(kv.clone()));
+
+        loop {
+            // TODO: need to make sync a long-poll
+            let (records, new_ts) = Retry::new()
+                .indefinitely(|| async move {
+                    let (records, new_ts) = self.m.sync(ts).await?;
+                    Ok::<_, anyhow::Error>((records, new_ts))
+                })
+                .await;
+
+            for record in records {
+                match record.value {
+                    Value::Regular(v) => { kv.insert(record.key, v); },
+                    Value::Tombstone => { kv.remove(&record.key); },
+                }
+            }
+
+            self.kv.store(Arc::new(kv.clone()));
+            ts = new_ts;
+        }
+    }
+
+    async fn scan_page_with_retries(
+        &self,
+        ts: Timestamp,
+        range: Range<Vec<u8>>,
+    ) -> (Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>) {
+        Retry::new()
+            .indefinitely(|| {
+                let range = range.clone();
+                async move {
+                    let out = self.m.scan_page(ts, range.clone()).await?;
+                    Ok::<_, anyhow::Error>(out)
+                }
+            })
+            .await
+    }
 }
