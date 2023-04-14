@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package obsidian;
+
+import "obsidian.proto";
+
+message MetaTx {
+    CompressedKeySet keys = 1;
+}

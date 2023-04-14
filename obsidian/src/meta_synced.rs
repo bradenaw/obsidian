@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use crate::meta::Meta;
 use crate::range::Range;
-use crate::types::Timestamp;
 use crate::types::Value;
 use crate::util::AtomicArc;
 use crate::util::Background;

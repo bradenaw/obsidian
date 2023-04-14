@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use prost::Message;
 
 use crate::obsidian::TabletId;
+use crate::pb;
 use crate::range::Range;
 use crate::tablet::Tablet;
 use crate::tuple_encoding::tuple_encode;
@@ -162,7 +163,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
         let mut new_ts = ts;
         for (ts, maybe_value) in page {
             if let Value::Regular(value) = maybe_value {
-                let proto_tx = ProtoTx::decode(&value[..])?;
+                let proto_tx = pb::MetaTx::decode(&value[..])?;
                 let keys = BTreeSet::try_from(
                     proto_tx
                         .keys
@@ -211,8 +212,8 @@ impl<T: Tablet> MetaImpl<T> {
         muts.insert(
             (KeyspaceId::META, vec![]),
             Mutation::Put(
-                ProtoTx {
-                    keys: Some(ProtoCompressedKeySet::from(
+                pb::MetaTx {
+                    keys: Some(pb::CompressedKeySet::from(
                         muts.keys().cloned().collect::<BTreeSet<_>>(),
                     )),
                 }
@@ -226,35 +227,7 @@ impl<T: Tablet> MetaImpl<T> {
     }
 }
 
-#[derive(prost::Message, Clone, PartialEq)]
-struct ProtoTx {
-    #[prost(message, tag = "1")]
-    keys: Option<ProtoCompressedKeySet>,
-}
-
-#[derive(prost::Message, Clone, PartialEq)]
-struct ProtoKeyspaceId {
-    #[prost(uint32, tag = "1")]
-    colo_group_id: u32,
-    #[prost(uint32, tag = "2")]
-    id: u32,
-}
-
-#[derive(prost::Message, Clone, PartialEq)]
-struct ProtoCompressedKeySet {
-    #[prost(repeated, message, tag = "1")]
-    keyspace_ids: Vec<ProtoKeyspaceId>,
-    #[prost(repeated, bytes, tag = "2")]
-    key_fragments: Vec<Vec<u8>>,
-    #[prost(repeated, uint32, tag = "3")]
-    key_shared_prefixes: Vec<u32>,
-    #[prost(repeated, uint64, tag = "4")]
-    key_keyspaces_counts: Vec<u64>,
-    #[prost(repeated, uint64, tag = "5")]
-    key_keyspaces_refs: Vec<u64>,
-}
-
-impl From<BTreeSet<(KeyspaceId, Vec<u8>)>> for ProtoCompressedKeySet {
+impl From<BTreeSet<(KeyspaceId, Vec<u8>)>> for pb::CompressedKeySet {
     fn from(set: BTreeSet<(KeyspaceId, Vec<u8>)>) -> Self {
         let mut keyspace_id_counts = HashMap::new();
         let mut key_to_keyspace_ids = BTreeMap::new();
@@ -296,16 +269,16 @@ impl From<BTreeSet<(KeyspaceId, Vec<u8>)>> for ProtoCompressedKeySet {
                 for keyspace_id in keyspace_ids {
                     let idx = *(keyspace_id_to_idx.get(keyspace_id).unwrap());
                     count += 1;
-                    key_keyspaces_refs.push(idx as u64);
+                    key_keyspaces_refs.push(idx as u32);
                 }
                 key_keyspaces_counts.push(count);
             }
         }
 
-        ProtoCompressedKeySet {
+        pb::CompressedKeySet {
             keyspace_ids: keyspace_ids_by_pop
                 .iter()
-                .map(|keyspace_id| ProtoKeyspaceId {
+                .map(|keyspace_id| pb::KeyspaceId {
                     colo_group_id: keyspace_id.0 .0,
                     id: keyspace_id.1,
                 })
@@ -318,10 +291,10 @@ impl From<BTreeSet<(KeyspaceId, Vec<u8>)>> for ProtoCompressedKeySet {
     }
 }
 
-impl TryFrom<ProtoCompressedKeySet> for BTreeSet<(KeyspaceId, Vec<u8>)> {
+impl TryFrom<pb::CompressedKeySet> for BTreeSet<(KeyspaceId, Vec<u8>)> {
     type Error = anyhow::Error;
 
-    fn try_from(value: ProtoCompressedKeySet) -> Result<Self, Self::Error> {
+    fn try_from(value: pb::CompressedKeySet) -> Result<Self, Self::Error> {
         let keyspace_ids = value
             .keyspace_ids
             .iter()
