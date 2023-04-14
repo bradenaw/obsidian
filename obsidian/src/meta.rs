@@ -56,6 +56,8 @@ pub(crate) trait Meta {
 struct MetaImpl<T> {
     tablet: T,
     sync_key: Vec<u8>,
+    ts_send: tokio::sync::watch::Sender<Timestamp>,
+    ts: tokio::sync::watch::Receiver<Timestamp>,
 }
 
 #[async_trait]
@@ -192,9 +194,12 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
 
 impl<T: Tablet> MetaImpl<T> {
     fn new(tablet: T) -> Self {
+        let (ts_send, ts) = tokio::sync::watch::channel(Timestamp::ZERO);
         Self {
             tablet,
             sync_key: tuple_encode(&(PFX_SYNC,)),
+            ts_send,
+            ts,
         }
     }
 
@@ -216,6 +221,7 @@ impl<T: Tablet> MetaImpl<T> {
         );
 
         let ts = self.tablet.write(preconds, muts).await?;
+        _ = self.ts_send.send(ts);
         Ok(ts)
     }
 }
