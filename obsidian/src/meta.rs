@@ -7,7 +7,6 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use prost::Message;
 
-use crate::obsidian::TabletId;
 use crate::pb;
 use crate::range::Range;
 use crate::tablet::Tablet;
@@ -19,13 +18,11 @@ use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
 use crate::types::Record;
-use crate::types::ShardId;
 use crate::types::Timestamp;
 use crate::types::Value;
-use crate::util::encode;
 use crate::util::longest_shared_prefix_len;
 
-// (PFX_SYNC) -> ProtoTx
+// (PFX_SYNC) -> pb::MetaTx
 const PFX_SYNC: u64 = 1;
 
 // (PFX_COLO_GROUPS, colo_group_id) -> []
@@ -34,11 +31,8 @@ const PFX_COLO_GROUPS: u64 = 2;
 // (PFX_KEYSPACES, keyspace_id) -> []
 const PFX_KEYSPACES: u64 = 3;
 
-// (PFX_TABLETS, tablet_id) -> []
+// (PFX_TABLETS, tablet_id) -> pb::MetaTablet
 const PFX_TABLETS: u64 = 4;
-
-// (PFX_ROUTING, colo_group_id, range.lower) -> TabletId
-const PFX_ROUTING: u64 = 5;
 
 #[async_trait]
 pub(crate) trait Meta {
@@ -77,6 +71,28 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
             return Err(anyhow!("{:?} already exists", colo_group_id));
         }
 
+        let tablet_key = tuple_encode(&(PFX_TABLETS, 1u64, 1u64));
+
+        let mut meta_tablet = self
+            .tablet
+            .get(ts, KeyspaceId::META, tablet_key.clone())
+            .await?
+            .map(|v| pb::MetaTablet::decode(&v[..]))
+            .unwrap_or(Ok(pb::MetaTablet {
+                colo_group_ids: vec![],
+                ranges: vec![],
+            }))?;
+
+        meta_tablet.colo_group_ids.push(colo_group_id.0);
+        meta_tablet.ranges.push(pb::Range {
+            lower: Some(pb::Bound {
+                bound_type: Some(pb::bound::BoundType::BeforeAll(())),
+            }),
+            upper: Some(pb::Bound {
+                bound_type: Some(pb::bound::BoundType::AfterAll(())),
+            }),
+        });
+
         self.write_syncable(
             vec![Precondition::NotChangedSince(
                 KeyspaceId::META,
@@ -86,11 +102,8 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
             BTreeMap::from([
                 ((KeyspaceId::META, colo_group_key), Mutation::Put(vec![])),
                 (
-                    (
-                        KeyspaceId::META,
-                        tuple_encode(&(PFX_ROUTING, colo_group_id.0 as u64, vec![])),
-                    ),
-                    Mutation::Put(encode(&TabletId(ShardId(1), 1))),
+                    (KeyspaceId::META, tablet_key),
+                    Mutation::Put(meta_tablet.encode_to_vec()),
                 ),
             ]),
         )

@@ -7,3 +7,8 @@ import "obsidian.proto";
 message MetaTx {
     CompressedKeySet keys = 1;
 }
+
+message MetaTablet {
+    repeated uint32 colo_group_ids = 1;
+    repeated Range ranges = 2;
+}
