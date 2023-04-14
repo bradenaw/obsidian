@@ -68,7 +68,6 @@ impl<M: Meta> MetaSyncedInner<M> {
         self.kv.store(Arc::new(kv.clone()));
 
         loop {
-            // TODO: need to make sync a long-poll
             let (records, new_ts) = Retry::new()
                 .indefinitely(|| async move {
                     let (records, new_ts) = self.m.sync(ts).await?;
@@ -88,6 +87,14 @@ impl<M: Meta> MetaSyncedInner<M> {
             }
 
             self.kv.store(Arc::new(kv.clone()));
+            if new_ts == ts {
+                Retry::new()
+                    .indefinitely(|| async move {
+                        self.m.wait_for_newer(ts).await?;
+                        Ok::<_, anyhow::Error>(())
+                    })
+                    .await;
+            }
             ts = new_ts;
         }
     }

@@ -40,6 +40,7 @@ pub(crate) trait Meta {
     async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()>;
 
     async fn latest_snapshot(&self) -> anyhow::Result<Timestamp>;
+    async fn wait_for_newer(&self, ts: Timestamp) -> anyhow::Result<()>;
     async fn scan_page(
         &self,
         ts: Timestamp,
@@ -148,6 +149,19 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
         Ok(ts)
     }
 
+    async fn wait_for_newer(&self, ts: Timestamp) -> anyhow::Result<()> {
+        let mut ts_watcher = self.ts.clone();
+        loop {
+            {
+                let curr = ts_watcher.borrow_and_update();
+                if *curr > ts {
+                    return Ok(());
+                }
+            }
+            ts_watcher.changed().await?;
+        }
+    }
+
     async fn scan_page(
         &self,
         ts: Timestamp,
@@ -235,6 +249,7 @@ impl<T: Tablet> MetaImpl<T> {
         );
 
         let ts = self.tablet.write(preconds, muts).await?;
+        // TODO: Periodically poll in case we have a success-but-error above.
         _ = self.ts_send.send(ts);
         Ok(ts)
     }
