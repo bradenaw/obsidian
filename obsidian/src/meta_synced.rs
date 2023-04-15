@@ -49,7 +49,15 @@ impl<M: Meta> MetaSyncedInner<M> {
         let mut kv = BTreeMap::new();
         let mut maybe_cursor = Some(Range::all());
         while let Some(cursor) = maybe_cursor {
-            let (page, continue_cursor) = self.scan_page_with_retries(ts, cursor).await;
+            let (page, continue_cursor) = Retry::new()
+                .indefinitely(|| {
+                    let cursor = cursor.clone();
+                    async move {
+                        let out = self.m.scan_page(ts, cursor.clone()).await?;
+                        Ok::<_, anyhow::Error>(out)
+                    }
+                })
+                .await;
 
             for (key, _, value) in page {
                 kv.insert(key, value);
@@ -71,29 +79,17 @@ impl<M: Meta> MetaSyncedInner<M> {
 
             for record in records {
                 match record.value {
-                    Value::Regular(v) => { kv.insert(record.key, v); },
-                    Value::Tombstone => { kv.remove(&record.key); },
+                    Value::Regular(v) => {
+                        kv.insert(record.key, v);
+                    }
+                    Value::Tombstone => {
+                        kv.remove(&record.key);
+                    }
                 }
             }
 
             self.kv.store(Arc::new(kv.clone()));
             ts = new_ts;
         }
-    }
-
-    async fn scan_page_with_retries(
-        &self,
-        ts: Timestamp,
-        range: Range<Vec<u8>>,
-    ) -> (Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>) {
-        Retry::new()
-            .indefinitely(|| {
-                let range = range.clone();
-                async move {
-                    let out = self.m.scan_page(ts, range.clone()).await?;
-                    Ok::<_, anyhow::Error>(out)
-                }
-            })
-            .await
     }
 }
