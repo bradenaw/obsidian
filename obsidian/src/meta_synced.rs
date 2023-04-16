@@ -2,11 +2,16 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::meta::Meta;
+use crate::obsidian::Router;
 use crate::range::Range;
 use crate::types::Value;
+use crate::range::Bound;
 use crate::util::AtomicArc;
 use crate::util::Background;
+use crate::obsidian::TabletId;
 use crate::util::Retry;
+use crate::types::Direction;
+use crate::types::ColoGroupId;
 
 struct MetaSynced<M: Meta> {
     bg: Background,
@@ -33,6 +38,22 @@ impl<M: Meta + Sync + Send + 'static> MetaSynced<M> {
         });
 
         Self { bg, inner }
+    }
+}
+
+impl<M: Meta> Router for MetaSynced<M> {
+    fn tablet_id_for_key(&self, colo_group_id: ColoGroupId, key: &[u8])
+        -> anyhow::Result<TabletId> {
+        todo!()
+    }
+
+    fn tablet_id_for_bound(
+        &self,
+        colo_group_id: ColoGroupId,
+        bound: Bound<&[u8]>,
+        direction: Direction,
+    ) -> anyhow::Result<TabletId> {
+        todo!()
     }
 }
 
