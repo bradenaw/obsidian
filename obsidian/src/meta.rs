@@ -32,7 +32,7 @@ const PFX_COLO_GROUPS: u64 = 2;
 const PFX_KEYSPACES: u64 = 3;
 
 // (PFX_TABLETS, tablet_id) -> pb::MetaTablet
-const PFX_TABLETS: u64 = 4;
+pub(crate) const PFX_TABLETS: u64 = 4;
 
 #[async_trait]
 pub(crate) trait Meta {
