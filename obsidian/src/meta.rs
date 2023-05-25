@@ -49,7 +49,7 @@ pub(crate) trait Meta {
     async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Record>, Timestamp)>;
 }
 
-struct MetaImpl<T> {
+pub(crate) struct MetaImpl<T> {
     tablet: T,
     sync_key: Vec<u8>,
     ts_send: tokio::sync::watch::Sender<Timestamp>,
@@ -221,7 +221,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
 }
 
 impl<T: Tablet> MetaImpl<T> {
-    fn new(tablet: T) -> Self {
+    pub(crate) fn new(tablet: T) -> Self {
         let (ts_send, ts) = tokio::sync::watch::channel(Timestamp::ZERO);
         Self {
             tablet,

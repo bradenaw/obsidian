@@ -1,19 +1,18 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use std::ops::Deref;
 use std::sync::Arc;
 
 use anyhow::anyhow;
 use prost::Message;
 
 use crate::meta::Meta;
+use crate::meta::PFX_TABLETS;
 use crate::obsidian::Router;
 use crate::obsidian::TabletId;
 use crate::pb;
 use crate::range::Bound;
 use crate::range::Range;
-use crate::meta::PFX_TABLETS;
 use crate::router::StaticRouter;
 use crate::tuple_encoding::tuple_decode;
 use crate::tuple_encoding::tuple_encode;
@@ -25,7 +24,7 @@ use crate::util::AtomicArc;
 use crate::util::Background;
 use crate::util::Retry;
 
-struct MetaSynced<M: Meta> {
+pub(crate) struct MetaSynced<M: Meta> {
     bg: Background,
     inner: Arc<MetaSyncedInner<M>>,
 }
@@ -33,17 +32,17 @@ struct MetaSynced<M: Meta> {
 struct MetaSyncedInner<M: Meta> {
     m: M,
     kv: AtomicArc<BTreeMap<Vec<u8>, Vec<u8>>>,
-    router: AtomicArc<Option<StaticRouter>>,
+    router: AtomicArc<StaticRouter>,
 }
 
 impl<M: Meta + Sync + Send + 'static> MetaSynced<M> {
-    fn new(m: M) -> Self {
+    pub(crate) fn new(m: M) -> Self {
         let bg = Background::new();
 
         let inner = Arc::new(MetaSyncedInner {
             m,
             kv: AtomicArc::new(Arc::new(BTreeMap::new())),
-            router: AtomicArc::new(Arc::new(None)),
+            router: AtomicArc::new(Arc::new(StaticRouter::new(HashMap::new()))),
         });
 
         bg.spawn({
@@ -61,11 +60,8 @@ impl<M: Meta> Router for MetaSynced<M> {
         colo_group_id: ColoGroupId,
         key: &[u8],
     ) -> anyhow::Result<TabletId> {
-        let maybe_router = self.inner.router.load();
-        if let Some(router) = maybe_router.deref() {
-            return router.tablet_id_for_key(colo_group_id, key);
-        }
-        Err(anyhow!("routing table not synced yet"))
+        let router = self.inner.router.load();
+        return router.tablet_id_for_key(colo_group_id, key);
     }
 
     fn tablet_id_for_bound(
@@ -74,11 +70,8 @@ impl<M: Meta> Router for MetaSynced<M> {
         bound: Bound<&[u8]>,
         direction: Direction,
     ) -> anyhow::Result<TabletId> {
-        let maybe_router = self.inner.router.load();
-        if let Some(router) = maybe_router.deref() {
-            return router.tablet_id_for_bound(colo_group_id, bound, direction);
-        }
-        Err(anyhow!("routing table not synced yet"))
+        let router = self.inner.router.load();
+        return router.tablet_id_for_bound(colo_group_id, bound, direction);
     }
 }
 
@@ -168,7 +161,10 @@ impl<M: Meta> MetaSyncedInner<M> {
 
                 let range = Range::try_from(range_pb.clone())?;
 
-                ranges_by_colo_group.entry(colo_group_id).or_insert_with(Vec::new).push((range, tablet_id));
+                ranges_by_colo_group
+                    .entry(colo_group_id)
+                    .or_insert_with(Vec::new)
+                    .push((range, tablet_id));
             }
         }
 
@@ -185,7 +181,8 @@ impl<M: Meta> MetaSyncedInner<M> {
             }
             routing_map.insert(*colo_group_id, (bounds, tablet_ids));
         }
-        self.router.store(Arc::new(Some(StaticRouter::new(routing_map))));
+        self.router
+            .store(Arc::new(StaticRouter::new(routing_map)));
         Ok(())
     }
 }
