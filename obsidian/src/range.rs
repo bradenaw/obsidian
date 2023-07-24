@@ -315,7 +315,7 @@ impl TryFrom<pb::Range> for Range<Vec<u8>> {
     fn try_from(value: pb::Range) -> Result<Self, Self::Error> {
         if let (Some(lower_pb), Some(upper_pb)) = (value.lower, value.upper) {
             let lower = Bound::try_from(lower_pb)?;
-            let upper = Bound::try_from(lower_pb)?;
+            let upper = Bound::try_from(upper_pb)?;
             return Ok(Range { lower, upper });
         }
         Err(anyhow!("missing bound"))
