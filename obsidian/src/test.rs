@@ -222,7 +222,7 @@ impl<T: Meta + Send + Sync> Meta for Arc<MetaProxy<T>> {
     }
 }
 
-pub(crate) async fn new_with_single_byte_routing(n_tablets: usize) -> anyhow::Result<Frontend> {
+pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
     let tablets = Arc::new(StaticTablets {
         m: Mutex::new(HashMap::new()),
     });
@@ -244,15 +244,6 @@ pub(crate) async fn new_with_single_byte_routing(n_tablets: usize) -> anyhow::Re
     let meta = MetaImpl::new(meta_tablet);
     meta_proxy.put(meta);
 
-    // META gets everything up to the first split.
-    let mut tablet_ids = vec![TabletId::META];
-    let mut splits = vec![];
-    for i in 0..n_tablets {
-        let shard_id = ShardId(((i % 2) + 1) as u32);
-        tablet_ids.push(TabletId(shard_id, (i + 2) as u64));
-        splits.push(Bound::Before(vec![(i + 1) as u8]));
-    }
-
     for i in 0..n_tablets {
         let meta_synced = MetaSynced::new(meta_proxy.clone());
         let tablet_id = TabletId(ShardId(1), (i+2) as u64);
@@ -269,6 +260,17 @@ pub(crate) async fn new_with_single_byte_routing(n_tablets: usize) -> anyhow::Re
     }
 
     Ok(Frontend::new(Box::new(MetaSynced::new(meta_proxy.clone())), Box::new(tablets)))
+}
+
+pub(crate) fn single_byte_splits(n: usize) -> Vec<Bound<Vec<u8>>> {
+    if n > 255 {
+        panic!("can't do single_byte_splits with n > 255");
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        out.push(Bound::Before(vec![i as u8]));
+    }
+    out
 }
 
 pub(crate) fn assert_roundtrip<E: Encode + Decode + Debug + Eq>(e: &E) -> anyhow::Result<()> {

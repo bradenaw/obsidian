@@ -66,6 +66,12 @@ pub trait Obsidian {
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
     ) -> Result<Timestamp, WriteError>;
+
+    async fn create_colo_group(
+        &self,
+        colo_group_id: ColoGroupId,
+        initial_splits: Vec<Bound<Vec<u8>>>,
+    ) -> anyhow::Result<()>;
 }
 
 pub trait ObsidianExt {
@@ -208,12 +214,7 @@ impl Obsidian for Frontend {
                 .with_resolve_conflicts(|| {
                     let preconds = preconds.clone();
                     let muts = muts.clone();
-                    async move {
-                        self.tablets
-                            .tablet(tablet_id)?
-                            .write(preconds, muts)
-                            .await
-                    }
+                    async move { self.tablets.tablet(tablet_id)?.write(preconds, muts).await }
                 })
                 .await
                 .map_err(|e| {
@@ -343,6 +344,14 @@ impl Obsidian for Frontend {
             }
         }
         Err(WriteError::Other(anyhow::anyhow!("too much contention")))
+    }
+
+    async fn create_colo_group(
+        &self,
+        colo_group_id: ColoGroupId,
+        initial_splits: Vec<Bound<Vec<u8>>>,
+    ) -> anyhow::Result<()> {
+        todo!();
     }
 }
 
@@ -612,22 +621,25 @@ pub(crate) enum InternalError {
 mod test {
     use std::collections::BTreeMap;
 
+    use super::Frontend;
+    use super::Obsidian;
     use crate::range::Bound;
     use crate::range::Range;
-    use crate::test::new_with_single_byte_routing;
+    use crate::test::new_for_test;
     use crate::types::ColoGroupId;
     use crate::types::Direction;
     use crate::types::KeyspaceId;
     use crate::types::Mutation;
     use crate::types::Timestamp;
 
-    use super::Frontend;
-    use super::Obsidian;
-
     #[tokio::test]
     async fn test_2pc() -> anyhow::Result<()> {
-        let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-        let obs = new_with_single_byte_routing(2).await?;
+        let colo_group_id = ColoGroupId(1);
+        let keyspace_id = KeyspaceId(colo_group_id, 1);
+
+        let obs = new_for_test(2).await?;
+        obs.create_colo_group(colo_group_id, vec![Bound::Before(vec![2])])
+            .await?;
 
         let key1 = vec![1];
         let key2 = vec![2];
@@ -657,8 +669,15 @@ mod test {
     #[tokio::test]
     async fn test_scan_page() {
         async fn inner() -> anyhow::Result<()> {
-            let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-            let obs = new_with_single_byte_routing(3).await?;
+            let colo_group_id = ColoGroupId(1);
+            let keyspace_id = KeyspaceId(colo_group_id, 1);
+
+            let obs = new_for_test(3).await?;
+            obs.create_colo_group(
+                colo_group_id,
+                vec![Bound::Before(vec![2]), Bound::Before(vec![3])],
+            )
+            .await?;
 
             let writes: [(Vec<u8>, _); 12] = [
                 //          ts=0123456789

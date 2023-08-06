@@ -736,10 +736,19 @@ mod tests {
     use super::EdgeType;
     use super::Txid;
     use super::WorkloadAppend;
+    use crate::obsidian::Obsidian;
+    use crate::range::Bound;
+    use crate::types::ColoGroupId;
 
     #[tokio::test]
     async fn test_workload_append() -> anyhow::Result<()> {
-        let fe = crate::test::new_with_single_byte_routing(2).await?;
+        let fe = crate::test::new_for_test(2).await?;
+
+        fe.create_colo_group(
+            ColoGroupId(1),
+            vec![Bound::Before(vec![2]), Bound::Before(vec![3])],
+        )
+        .await?;
 
         let wl = WorkloadAppend::new(fe);
 
