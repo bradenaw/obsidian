@@ -244,23 +244,31 @@ pub(crate) async fn new_with_single_byte_routing(n_tablets: usize) -> anyhow::Re
     let meta = MetaImpl::new(meta_tablet);
     meta_proxy.put(meta);
 
+    // META gets everything up to the first split.
+    let mut tablet_ids = vec![TabletId::META];
+    let mut splits = vec![];
     for i in 0..n_tablets {
+        let shard_id = ShardId(((i % 2) + 1) as u32);
+        tablet_ids.push(TabletId(shard_id, (i + 2) as u64));
+        splits.push(Bound::Before(vec![(i + 1) as u8]));
+    }
+
+    for i in 0..n_tablets {
+        let meta_synced = MetaSynced::new(meta_proxy.clone());
         let tablet_id = TabletId(ShardId(1), (i+2) as u64);
         let tablet = LsmTablet::new(
             tablet_id,
             LsmBuilder::new().storage(storage.clone()).build().await?,
+            HashMap::new(), // TODO: owned_ranges
             Box::new(tablets.clone()),
-            Box::new(router.clone()),
+            Box::new(meta_synced),
         )
         .await?;
-        for keyspace_id in keyspace_ids {
-            tablet.create_keyspace(keyspace_id).await?;
-        }
         let mut m = tablets.m.lock().unwrap();
-        m.insert(*tablet_id, Arc::new(tablet));
+        m.insert(tablet_id, Arc::new(tablet));
     }
 
-    Ok(Frontend::new(Box::new(router.clone()), Box::new(tablets)))
+    Ok(Frontend::new(Box::new(MetaSynced::new(meta_proxy.clone())), Box::new(tablets)))
 }
 
 pub(crate) fn assert_roundtrip<E: Encode + Decode + Debug + Eq>(e: &E) -> anyhow::Result<()> {
