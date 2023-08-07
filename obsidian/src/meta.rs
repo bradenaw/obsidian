@@ -7,9 +7,12 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use prost::Message;
 
+use crate::obsidian::TabletId;
 use crate::pb;
+use crate::range::Bound;
 use crate::range::Range;
 use crate::tablet::Tablet;
+use crate::tuple_encoding::tuple_decode;
 use crate::tuple_encoding::tuple_encode;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
@@ -18,6 +21,7 @@ use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
 use crate::types::Record;
+use crate::types::ShardId;
 use crate::types::Timestamp;
 use crate::types::Value;
 use crate::util::longest_shared_prefix_len;
@@ -36,7 +40,11 @@ pub(crate) const PFX_TABLETS: u64 = 4;
 
 #[async_trait]
 pub(crate) trait Meta {
-    async fn create_colo_group(&self, colo_group_id: ColoGroupId) -> anyhow::Result<()>;
+    async fn create_colo_group(
+        &self,
+        colo_group_id: ColoGroupId,
+        initial_splits: Vec<Bound<Vec<u8>>>,
+    ) -> anyhow::Result<()>;
     async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()>;
 
     async fn latest_snapshot(&self) -> anyhow::Result<Timestamp>;
@@ -58,7 +66,13 @@ pub(crate) struct MetaImpl<T> {
 
 #[async_trait]
 impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
-    async fn create_colo_group(&self, colo_group_id: ColoGroupId) -> anyhow::Result<()> {
+    async fn create_colo_group(
+        &self,
+        colo_group_id: ColoGroupId,
+        initial_splits: Vec<Bound<Vec<u8>>>,
+    ) -> anyhow::Result<()> {
+        let ranges = ranges_from_splits(initial_splits)?;
+
         let ts = self.latest_snapshot().await?;
 
         let colo_group_key = tuple_encode(&(PFX_COLO_GROUPS, colo_group_id.0 as u64));
@@ -72,27 +86,42 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
             return Err(anyhow!("{:?} already exists", colo_group_id));
         }
 
-        let tablet_key = tuple_encode(&(PFX_TABLETS, 1u64, 1u64));
+        let tablet_ids = self.tablet_ids(ts).await?;
+        let mut tablet_keys = Vec::with_capacity(tablet_ids.len());
+        let mut meta_tablets = Vec::with_capacity(tablet_ids.len());
+        for tablet_id in &tablet_ids {
+            let tablet_key = tuple_encode(&(PFX_TABLETS, tablet_id.0 .0 as u64, tablet_id.1));
+            let meta_tablet = self
+                .tablet
+                .get(ts, KeyspaceId::META, tablet_key.clone())
+                .await?
+                .map(|v| pb::MetaTablet::decode(&v[..]))
+                .unwrap_or(Ok(pb::MetaTablet {
+                    colo_group_ids: vec![],
+                    ranges: vec![],
+                }))?;
+            tablet_keys.push(tablet_key);
+            meta_tablets.push(meta_tablet);
+        }
 
-        let mut meta_tablet = self
-            .tablet
-            .get(ts, KeyspaceId::META, tablet_key.clone())
-            .await?
-            .map(|v| pb::MetaTablet::decode(&v[..]))
-            .unwrap_or(Ok(pb::MetaTablet {
-                colo_group_ids: vec![],
-                ranges: vec![],
-            }))?;
+        // Round-robin the created ranges among the tablets.
+        for (i, range) in ranges.into_iter().enumerate() {
+            let tablet_i = i % tablet_ids.len();
+            meta_tablets[tablet_i].colo_group_ids.push(colo_group_id.0);
+            meta_tablets[tablet_i].ranges.push(range.into());
+        }
 
-        meta_tablet.colo_group_ids.push(colo_group_id.0);
-        meta_tablet.ranges.push(pb::Range {
-            lower: Some(pb::Bound {
-                bound_type: Some(pb::bound::BoundType::BeforeAll(())),
-            }),
-            upper: Some(pb::Bound {
-                bound_type: Some(pb::bound::BoundType::AfterAll(())),
-            }),
-        });
+        let mut muts =
+            BTreeMap::from([((KeyspaceId::META, colo_group_key), Mutation::Put(vec![]))]);
+
+        for (tablet_key, meta_tablet) in
+            Iterator::zip(tablet_keys.into_iter(), meta_tablets.into_iter())
+        {
+            muts.insert(
+                (KeyspaceId::META, tablet_key),
+                Mutation::Put(meta_tablet.encode_to_vec()),
+            );
+        }
 
         self.write_syncable(
             vec![Precondition::NotChangedSince(
@@ -100,13 +129,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
                 self.sync_key.clone(),
                 ts,
             )],
-            BTreeMap::from([
-                ((KeyspaceId::META, colo_group_key), Mutation::Put(vec![])),
-                (
-                    (KeyspaceId::META, tablet_key),
-                    Mutation::Put(meta_tablet.encode_to_vec()),
-                ),
-            ]),
+            muts,
         )
         .await?;
 
@@ -220,7 +243,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
     }
 }
 
-impl<T: Tablet> MetaImpl<T> {
+impl<T: Tablet + Sync + Send> MetaImpl<T> {
     pub(crate) fn new(tablet: T) -> Self {
         let (ts_send, ts) = tokio::sync::watch::channel(Timestamp::ZERO);
         Self {
@@ -252,6 +275,22 @@ impl<T: Tablet> MetaImpl<T> {
         // TODO: Periodically poll in case we have a success-but-error above.
         _ = self.ts_send.send(ts);
         Ok(ts)
+    }
+
+    async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
+        let mut out = vec![];
+        let mut maybe_cursor = Some(Range::prefix(tuple_encode(&(PFX_TABLETS,))));
+        while let Some(cursor) = maybe_cursor {
+            let (page, continue_cursor) = self.scan_page(ts, cursor).await?;
+            for (key, _, _) in page {
+                let (_, tablet_shard_id, tablet_id_seq): (u64, u64, u64) = tuple_decode(&key)?;
+                let tablet_id = TabletId(ShardId(tablet_shard_id as u32), tablet_id_seq);
+                out.push(tablet_id);
+            }
+            maybe_cursor = continue_cursor;
+        }
+
+        Ok(out)
     }
 }
 
@@ -374,4 +413,44 @@ impl TryFrom<pb::CompressedKeySet> for BTreeSet<(KeyspaceId, Vec<u8>)> {
 
         Ok(out)
     }
+}
+
+fn ranges_from_splits(splits: Vec<Bound<Vec<u8>>>) -> anyhow::Result<Vec<Range<Vec<u8>>>> {
+    if !splits.is_sorted() {
+        return Err(anyhow!("initial splits must be sorted and unique"));
+    }
+    for i in 0..splits.len() - 1 {
+        if splits[i] == splits[i + 1] {
+            return Err(anyhow!("initial splits must be sorted and unique"));
+        }
+    }
+    if splits.is_empty() {
+        return Ok(vec![Range::all()]);
+    }
+    if splits[0] == Bound::BeforeAll {
+        return Err(anyhow!(
+            "cannot split at Bound::BeforeAll because there are no keys before it"
+        ));
+    }
+    if splits[splits.len() - 1] == Bound::AfterAll {
+        return Err(anyhow!(
+            "cannot split at Bound::AfterAll because there are no keys after it"
+        ));
+    }
+
+    let mut out = Vec::with_capacity(splits.len() - 1);
+    let mut prev = Bound::BeforeAll;
+    for split in splits {
+        out.push(Range {
+            lower: prev,
+            upper: split.clone(),
+        });
+        prev = split;
+    }
+    out.push(Range {
+        lower: prev,
+        upper: Bound::AfterAll,
+    });
+
+    Ok(out)
 }

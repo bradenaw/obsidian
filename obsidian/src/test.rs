@@ -189,10 +189,14 @@ impl<T> MetaProxy<T> {
 
 #[async_trait]
 impl<T: Meta + Send + Sync> Meta for Arc<MetaProxy<T>> {
-    async fn create_colo_group(&self, colo_group_id: ColoGroupId) -> anyhow::Result<()> {
+    async fn create_colo_group(
+        &self,
+        colo_group_id: ColoGroupId,
+        initial_splits: Vec<Bound<Vec<u8>>>,
+    ) -> anyhow::Result<()> {
         let inner = self.inner.load();
         if let Some(inner) = inner.deref() {
-            return T::create_colo_group(inner, colo_group_id).await;
+            return T::create_colo_group(inner, colo_group_id, initial_splits).await;
         }
         Err(anyhow!("MetaProxy not filled yet"))
     }
@@ -246,7 +250,7 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
 
     for i in 0..n_tablets {
         let meta_synced = MetaSynced::new(meta_proxy.clone());
-        let tablet_id = TabletId(ShardId(1), (i+2) as u64);
+        let tablet_id = TabletId(ShardId(1), (i + 2) as u64);
         let tablet = LsmTablet::new(
             tablet_id,
             LsmBuilder::new().storage(storage.clone()).build().await?,
@@ -259,7 +263,11 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
         m.insert(tablet_id, Arc::new(tablet));
     }
 
-    Ok(Frontend::new(Box::new(MetaSynced::new(meta_proxy.clone())), Box::new(tablets)))
+    Ok(Frontend::new(
+        Box::new(meta_proxy.clone()),
+        Box::new(MetaSynced::new(meta_proxy.clone())),
+        Box::new(tablets),
+    ))
 }
 
 pub(crate) fn single_byte_splits(n: usize) -> Vec<Bound<Vec<u8>>> {

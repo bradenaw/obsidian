@@ -21,6 +21,7 @@ use futures::TryStreamExt;
 use rand::Rng;
 use thiserror::Error;
 
+use crate::meta::Meta;
 use crate::range::Bound;
 use crate::range::Range;
 use crate::tablet::Tablet;
@@ -114,6 +115,7 @@ impl<T: Obsidian + Sync> ObsidianExt for T {
 }
 
 pub(crate) struct Frontend {
+    meta: Box<dyn Meta + Send + Sync>,
     router: Box<dyn Router + Send + Sync>,
     tablets: Box<dyn Tablets + Send + Sync>,
 }
@@ -351,16 +353,21 @@ impl Obsidian for Frontend {
         colo_group_id: ColoGroupId,
         initial_splits: Vec<Bound<Vec<u8>>>,
     ) -> anyhow::Result<()> {
-        todo!();
+        self.meta.create_colo_group(colo_group_id, initial_splits).await
     }
 }
 
 impl Frontend {
     pub(crate) fn new(
+        meta: Box<dyn Meta + Send + Sync>,
         router: Box<dyn Router + Send + Sync>,
         tablets: Box<dyn Tablets + Send + Sync>,
     ) -> Self {
-        Self { router, tablets }
+        Self {
+            meta,
+            router,
+            tablets,
+        }
     }
 
     fn split_write(

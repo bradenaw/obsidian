@@ -172,6 +172,20 @@ impl<K: Debug> Debug for Bound<K> {
     }
 }
 
+impl Into<pb::Bound> for Bound<Vec<u8>> {
+    fn into(self) -> pb::Bound {
+        pb::Bound {
+            bound_type: Some(match self {
+                Bound::BeforeAll => pb::bound::BoundType::BeforeAll(()),
+                Bound::Before(k) => pb::bound::BoundType::Before(k),
+                Bound::After(k) => pb::bound::BoundType::After(k),
+                Bound::AfterPrefix(k) => pb::bound::BoundType::AfterPrefix(k),
+                Bound::AfterAll => pb::bound::BoundType::AfterAll(()),
+            }),
+        }
+    }
+}
+
 impl TryFrom<pb::Bound> for Bound<Vec<u8>> {
     type Error = anyhow::Error;
 
@@ -306,6 +320,15 @@ impl<K> Range<Vec<K>> {
 impl<K: Debug> Debug for Range<K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "({:?}, {:?})", self.lower, self.upper)
+    }
+}
+
+impl Into<pb::Range> for Range<Vec<u8>> {
+    fn into(self) -> pb::Range {
+        return pb::Range {
+            lower: Some(self.lower.into()),
+            upper: Some(self.upper.into()),
+        };
     }
 }
 
