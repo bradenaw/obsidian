@@ -353,7 +353,7 @@ impl Obsidian for Frontend {
         colo_group_id: ColoGroupId,
         initial_splits: Vec<Bound<Vec<u8>>>,
     ) -> anyhow::Result<()> {
-        self.meta.create_colo_group(colo_group_id, initial_splits).await?;
+        self.meta.create_colo_group(colo_group_id, initial_splits).await
     }
 }
 
