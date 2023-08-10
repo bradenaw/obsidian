@@ -22,7 +22,6 @@ use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
 use crate::range::Bound;
 use crate::range::Range;
-use crate::range::RangeSet;
 use crate::storage::MemStorage;
 use crate::tablet::LsmTablet;
 use crate::tablet::Tablet;
@@ -152,6 +151,10 @@ impl<T: Tablet + Send + Sync> Tablet for Arc<T> {
     ) -> anyhow::Result<()> {
         T::cleanup_committed(self, txid, ts, precond_keys, mut_keys).await
     }
+
+    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
+        T::wait_meta_sync(self, ts).await
+    }
 }
 
 struct StaticTablets {
@@ -237,26 +240,22 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
     let meta_tablet = LsmTablet::new(
         TabletId::META,
         LsmBuilder::new().storage(storage.clone()).build().await?,
-        vec![(ColoGroupId::META, RangeSet::from(Range::all()))]
-            .into_iter()
-            .collect(),
+        Box::new(meta_proxy.clone()),
         Box::new(tablets.clone()),
-        Box::new(MetaSynced::new(meta_proxy.clone())),
     )
     .await?;
+    meta_tablet.create_keyspace(KeyspaceId::META).await?;
 
     let meta = MetaImpl::new(meta_tablet);
     meta_proxy.put(meta);
 
     for i in 0..n_tablets {
-        let meta_synced = MetaSynced::new(meta_proxy.clone());
         let tablet_id = TabletId(ShardId(1), (i + 2) as u64);
         let tablet = LsmTablet::new(
             tablet_id,
             LsmBuilder::new().storage(storage.clone()).build().await?,
-            HashMap::new(), // TODO: owned_ranges
+            Box::new(meta_proxy.clone()),
             Box::new(tablets.clone()),
-            Box::new(meta_synced),
         )
         .await?;
         let mut m = tablets.m.lock().unwrap();

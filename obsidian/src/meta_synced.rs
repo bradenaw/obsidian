@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::sync::Arc;
+use std::sync::RwLock;
 
 use anyhow::anyhow;
 use prost::Message;
@@ -13,55 +14,82 @@ use crate::obsidian::TabletId;
 use crate::pb;
 use crate::range::Bound;
 use crate::range::Range;
+use crate::range::RangeSet;
 use crate::router::StaticRouter;
 use crate::tuple_encoding::tuple_decode;
 use crate::tuple_encoding::tuple_encode;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::ShardId;
+use crate::types::Timestamp;
 use crate::types::Value;
-use crate::util::AtomicArc;
 use crate::util::Background;
 use crate::util::Retry;
+use crate::util::WaitableTimestamp;
 
-pub(crate) struct MetaSynced<M: Meta> {
+pub(crate) struct MetaSynced {
     bg: Background,
-    inner: Arc<MetaSyncedInner<M>>,
+    inner: Arc<RwLock<MetaSyncedInner>>,
 }
 
-struct MetaSyncedInner<M: Meta> {
-    m: M,
-    kv: AtomicArc<BTreeMap<Vec<u8>, Vec<u8>>>,
-    router: AtomicArc<StaticRouter>,
+struct MetaSyncedInner {
+    synced_ts: Arc<WaitableTimestamp>,
+    kv: BTreeMap<Vec<u8>, Vec<u8>>,
+    router: StaticRouter,
+    owned_ranges: HashMap<TabletId, HashMap<ColoGroupId, RangeSet<Vec<u8>>>>,
 }
 
-impl<M: Meta + Sync + Send + 'static> MetaSynced<M> {
-    pub(crate) fn new(m: M) -> Self {
+impl MetaSynced {
+    pub(crate) fn new<M: Meta + Sync + Send + 'static>(m: M) -> Self {
         let bg = Background::new();
 
-        let inner = Arc::new(MetaSyncedInner {
-            m,
-            kv: AtomicArc::new(Arc::new(BTreeMap::new())),
-            router: AtomicArc::new(Arc::new(StaticRouter::new(HashMap::new()))),
-        });
+        let inner = Arc::new(RwLock::new(MetaSyncedInner {
+            synced_ts: Arc::new(WaitableTimestamp::new()),
+            kv: BTreeMap::new(),
+            router: StaticRouter::new(HashMap::new()),
+            owned_ranges: HashMap::new(),
+        }));
 
         bg.spawn({
             let inner = inner.clone();
-            async move { inner.sync().await }
+            async move { MetaSyncedInner::sync(inner, m).await }
         });
 
         Self { bg, inner }
     }
+
+    pub(crate) fn ranges_for_tablet(
+        &self,
+        tablet_id: TabletId,
+        colo_group_id: ColoGroupId,
+    ) -> RangeSet<Vec<u8>> {
+        let inner = self.inner.read().unwrap();
+        if let Some(range_set_by_colo_group_id) = inner.owned_ranges.get(&tablet_id) {
+            if let Some(range_set) = range_set_by_colo_group_id.get(&colo_group_id) {
+                return range_set.clone();
+            }
+        }
+        RangeSet::new()
+    }
+
+    pub(crate) async fn wait(&self, ts: Timestamp) -> anyhow::Result<()> {
+        let synced_ts = {
+            let inner = self.inner.read().unwrap();
+            inner.synced_ts.clone()
+        };
+        synced_ts.wait(ts).await?;
+        Ok(())
+    }
 }
 
-impl<M: Meta> Router for MetaSynced<M> {
+impl Router for MetaSynced {
     fn tablet_id_for_key(
         &self,
         colo_group_id: ColoGroupId,
         key: &[u8],
     ) -> anyhow::Result<TabletId> {
-        let router = self.inner.router.load();
-        return router.tablet_id_for_key(colo_group_id, key);
+        let inner = self.inner.read().unwrap();
+        return inner.router.tablet_id_for_key(colo_group_id, key);
     }
 
     fn tablet_id_for_bound(
@@ -70,16 +98,18 @@ impl<M: Meta> Router for MetaSynced<M> {
         bound: Bound<&[u8]>,
         direction: Direction,
     ) -> anyhow::Result<TabletId> {
-        let router = self.inner.router.load();
-        return router.tablet_id_for_bound(colo_group_id, bound, direction);
+        let inner = self.inner.read().unwrap();
+        return inner
+            .router
+            .tablet_id_for_bound(colo_group_id, bound, direction);
     }
 }
 
-impl<M: Meta> MetaSyncedInner<M> {
-    async fn sync(&self) {
+impl MetaSyncedInner {
+    async fn sync<M: Meta>(inner_lock: Arc<RwLock<Self>>, meta: M) {
         let mut ts = Retry::new()
-            .indefinitely(|| async move {
-                let ts = self.m.latest_snapshot().await?;
+            .indefinitely(|| async {
+                let ts = meta.latest_snapshot().await?;
                 Ok::<_, anyhow::Error>(ts)
             })
             .await;
@@ -90,8 +120,8 @@ impl<M: Meta> MetaSyncedInner<M> {
             let (page, continue_cursor) = Retry::new()
                 .indefinitely(|| {
                     let cursor = cursor.clone();
-                    async move {
-                        let out = self.m.scan_page(ts, cursor.clone()).await?;
+                    async {
+                        let out = meta.scan_page(ts, cursor).await?;
                         Ok::<_, anyhow::Error>(out)
                     }
                 })
@@ -104,13 +134,16 @@ impl<M: Meta> MetaSyncedInner<M> {
             maybe_cursor = continue_cursor;
         }
 
-        self.kv.store(Arc::new(kv.clone()));
-        _ = self.regen_router();
+        {
+            let mut inner = inner_lock.write().unwrap();
+            _ = inner.regen_router(&kv);
+            inner.synced_ts.set(ts);
+        }
 
         loop {
             let (records, new_ts) = Retry::new()
-                .indefinitely(|| async move {
-                    let (records, new_ts) = self.m.sync(ts).await?;
+                .indefinitely(|| async {
+                    let (records, new_ts) = meta.sync(ts).await?;
                     Ok::<_, anyhow::Error>((records, new_ts))
                 })
                 .await;
@@ -126,12 +159,15 @@ impl<M: Meta> MetaSyncedInner<M> {
                 }
             }
 
-            self.kv.store(Arc::new(kv.clone()));
-            _ = self.regen_router();
+            {
+                let mut inner = inner_lock.write().unwrap();
+                _ = inner.regen_router(&kv);
+                inner.synced_ts.set(new_ts);
+            }
             if new_ts == ts {
                 Retry::new()
-                    .indefinitely(|| async move {
-                        self.m.wait_for_newer(ts).await?;
+                    .indefinitely(|| async {
+                        meta.wait_for_newer(ts).await?;
                         Ok::<_, anyhow::Error>(())
                     })
                     .await;
@@ -140,9 +176,10 @@ impl<M: Meta> MetaSyncedInner<M> {
         }
     }
 
-    fn regen_router(&self) -> anyhow::Result<()> {
-        let kv = self.kv.load();
+    fn regen_router(&mut self, kv: &BTreeMap<Vec<u8>, Vec<u8>>) -> anyhow::Result<()> {
         let mut ranges_by_colo_group = HashMap::new();
+        let mut tablet_map = HashMap::new();
+
         let r = kv.range(tuple_encode(&(PFX_TABLETS,))..tuple_encode(&(PFX_TABLETS, u64::MAX)));
         for (k, v) in r {
             let (_, shard_id_raw, tablet_id_id_raw): (u64, u64, u64) = tuple_decode(&k[..])?;
@@ -164,7 +201,13 @@ impl<M: Meta> MetaSyncedInner<M> {
                 ranges_by_colo_group
                     .entry(colo_group_id)
                     .or_insert_with(Vec::new)
-                    .push((range, tablet_id));
+                    .push((range.clone(), tablet_id));
+                tablet_map
+                    .entry(tablet_id)
+                    .or_insert_with(HashMap::new)
+                    .entry(colo_group_id)
+                    .or_insert_with(RangeSet::new)
+                    .add_range(range);
             }
         }
 
@@ -181,8 +224,10 @@ impl<M: Meta> MetaSyncedInner<M> {
             }
             routing_map.insert(*colo_group_id, (bounds, tablet_ids));
         }
-        self.router
-            .store(Arc::new(StaticRouter::new(routing_map)));
+
+        self.router = StaticRouter::new(routing_map);
+        self.owned_ranges = tablet_map;
+
         Ok(())
     }
 }

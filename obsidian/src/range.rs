@@ -540,7 +540,7 @@ impl<K: Ord + HasPrefix + Clone> RangeSet<K> {
         result
     }
 
-    fn add_range(&mut self, mut range: Range<K>) {
+    pub fn add_range(&mut self, mut range: Range<K>) {
         if range.is_empty() {
             return;
         }
@@ -552,7 +552,7 @@ impl<K: Ord + HasPrefix + Clone> RangeSet<K> {
         self.ranges.insert(RangeByLowerBound(range));
     }
 
-    fn subtract_range(&mut self, range: Range<K>) {
+    pub fn subtract_range(&mut self, range: Range<K>) {
         if range.is_empty() {
             return;
         }

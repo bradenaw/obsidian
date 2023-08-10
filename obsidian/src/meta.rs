@@ -77,12 +77,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
 
         let colo_group_key = tuple_encode(&(PFX_COLO_GROUPS, colo_group_id.0 as u64));
 
-        if self
-            .tablet
-            .get(ts, KeyspaceId::META, colo_group_key.clone())
-            .await?
-            .is_some()
-        {
+        if self.colo_group_exists(ts, colo_group_id).await? {
             return Err(anyhow!("{:?} already exists", colo_group_id));
         }
 
@@ -138,6 +133,10 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
 
     async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
         let ts = self.latest_snapshot().await?;
+
+        if !self.colo_group_exists(ts, keyspace_id.0).await? {
+            return Err(anyhow!("{:?} does not exist", keyspace_id.0));
+        }
 
         let keyspace_key =
             tuple_encode(&(PFX_KEYSPACES, keyspace_id.0 .0 as u64, keyspace_id.1 as u64));
@@ -292,6 +291,20 @@ impl<T: Tablet + Sync + Send> MetaImpl<T> {
 
         Ok(out)
     }
+
+    async fn colo_group_exists(
+        &self,
+        ts: Timestamp,
+        colo_group_id: ColoGroupId,
+    ) -> anyhow::Result<bool> {
+        let colo_group_key = tuple_encode(&(PFX_COLO_GROUPS, colo_group_id.0 as u64));
+
+        Ok(self
+            .tablet
+            .get(ts, KeyspaceId::META, colo_group_key.clone())
+            .await?
+            .is_some())
+    }
 }
 
 impl From<BTreeSet<(KeyspaceId, Vec<u8>)>> for pb::CompressedKeySet {
@@ -416,6 +429,10 @@ impl TryFrom<pb::CompressedKeySet> for BTreeSet<(KeyspaceId, Vec<u8>)> {
 }
 
 fn ranges_from_splits(splits: Vec<Bound<Vec<u8>>>) -> anyhow::Result<Vec<Range<Vec<u8>>>> {
+    if splits.is_empty() {
+        return Ok(vec![Range::all()]);
+    }
+
     if !splits.is_sorted() {
         return Err(anyhow!("initial splits must be sorted and unique"));
     }
@@ -423,9 +440,6 @@ fn ranges_from_splits(splits: Vec<Bound<Vec<u8>>>) -> anyhow::Result<Vec<Range<V
         if splits[i] == splits[i + 1] {
             return Err(anyhow!("initial splits must be sorted and unique"));
         }
-    }
-    if splits.is_empty() {
-        return Ok(vec![Range::all()]);
     }
     if splits[0] == Bound::BeforeAll {
         return Err(anyhow!(
@@ -453,4 +467,39 @@ fn ranges_from_splits(splits: Vec<Bound<Vec<u8>>>) -> anyhow::Result<Vec<Range<V
     });
 
     Ok(out)
+}
+
+#[async_trait]
+impl<T: Meta + Sync + Send + ?Sized> Meta for Box<T> {
+    async fn create_colo_group(
+        &self,
+        colo_group_id: ColoGroupId,
+        initial_splits: Vec<Bound<Vec<u8>>>,
+    ) -> anyhow::Result<()> {
+        T::create_colo_group(self, colo_group_id, initial_splits).await
+    }
+
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        T::create_keyspace(self, keyspace_id).await
+    }
+
+    async fn latest_snapshot(&self) -> anyhow::Result<Timestamp> {
+        T::latest_snapshot(self).await
+    }
+
+    async fn wait_for_newer(&self, ts: Timestamp) -> anyhow::Result<()> {
+        T::wait_for_newer(self, ts).await
+    }
+
+    async fn scan_page(
+        &self,
+        ts: Timestamp,
+        range: Range<Vec<u8>>,
+    ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)> {
+        T::scan_page(self, ts, range).await
+    }
+
+    async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Record>, Timestamp)> {
+        T::sync(self, ts).await
+    }
 }

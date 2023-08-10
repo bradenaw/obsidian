@@ -29,6 +29,8 @@ use tokio::sync::mpsc;
 use crate::lock_mgr::Guard;
 use crate::lock_mgr::LockMgr;
 use crate::lsm::Lsm;
+use crate::meta::Meta;
+use crate::meta_synced::MetaSynced;
 use crate::obsidian::InternalError;
 use crate::obsidian::Router;
 use crate::obsidian::TabletId;
@@ -126,6 +128,8 @@ pub(crate) trait Tablet {
         precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
         mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
     ) -> anyhow::Result<()>;
+
+    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()>;
 }
 
 pub(crate) struct LsmTablet {
@@ -231,15 +235,18 @@ impl Tablet for LsmTablet {
             .cleanup_committed(txid, ts, precond_keys, mut_keys)
             .await
     }
+
+    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
+        self.inner.meta_synced.wait(ts).await
+    }
 }
 
 impl LsmTablet {
     pub async fn new(
         tablet_id: TabletId,
         lsm: Lsm,
-        owned_ranges: HashMap<ColoGroupId, RangeSet<Vec<u8>>>,
+        meta: Box<dyn Meta + Sync + Send + 'static>,
         tablets: Box<dyn Tablets + Sync + Send>,
-        router: Box<dyn Router + Sync + Send>,
     ) -> anyhow::Result<Self> {
         let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
         let (commit_sender, commit_receiver) = mpsc::channel(128);
@@ -249,9 +256,8 @@ impl LsmTablet {
         let inner = Arc::new(LsmTabletInner::new(
             tablet_id,
             lsm,
-            owned_ranges,
+            MetaSynced::new(meta),
             tablets,
-            router,
             prepare_sender.clone(),
             commit_sender.clone(),
         ));
@@ -324,9 +330,8 @@ impl LsmTablet {
 struct LsmTabletInner {
     tablet_id: TabletId,
     lsm: Lsm,
-    owned_ranges: HashMap<ColoGroupId, RangeSet<Vec<u8>>>,
+    meta_synced: MetaSynced,
     tablets: Box<dyn Tablets + Sync + Send>,
-    router: Box<dyn Router + Sync + Send>,
     sequencer: Sequencer,
     lock_mgr: LockMgr,
 
@@ -344,9 +349,8 @@ impl LsmTabletInner {
     fn new(
         tablet_id: TabletId,
         lsm: Lsm,
-        owned_ranges: HashMap<ColoGroupId, RangeSet<Vec<u8>>>,
+        meta_synced: MetaSynced,
         tablets: Box<dyn Tablets + Sync + Send>,
-        router: Box<dyn Router + Sync + Send>,
         prepare_sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
         commit_sender: mpsc::Sender<(
             Txid,
@@ -358,9 +362,8 @@ impl LsmTabletInner {
         Self {
             tablet_id,
             lsm,
-            owned_ranges,
+            meta_synced,
             tablets,
-            router,
             prepare_sender,
             commit_sender,
             sequencer: Sequencer::new(),
@@ -466,9 +469,8 @@ impl LsmTabletInner {
         let limit = cmp::min(limit, 1000);
 
         let owned_range_set = self
-            .owned_ranges
-            .get(&keyspace_id.0)
-            .ok_or_else(|| anyhow!("no ranges owned from {:?}", keyspace_id))?;
+            .meta_synced
+            .ranges_for_tablet(self.tablet_id, keyspace_id.0);
 
         let intersecting_range_set = owned_range_set
             .intersection(&RangeSet::from(range.to_vec()))
@@ -1012,7 +1014,7 @@ impl LsmTabletInner {
         let mut by_tablet = HashMap::new();
 
         for (keyspace_id, key) in precond_keys {
-            let tablet_id = self.router.tablet_id_for_key(keyspace_id.0, &key)?;
+            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
             by_tablet
                 .entry(tablet_id)
                 .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()))
@@ -1020,7 +1022,7 @@ impl LsmTabletInner {
                 .insert((keyspace_id, key));
         }
         for (keyspace_id, key) in mut_keys {
-            let tablet_id = self.router.tablet_id_for_key(keyspace_id.0, &key)?;
+            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
             by_tablet
                 .entry(tablet_id)
                 .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()))
@@ -1233,7 +1235,10 @@ impl LsmTabletInner {
     }
 
     fn check_key(&self, colo_group_id: ColoGroupId, key: &[u8]) -> anyhow::Result<()> {
-        if colo_group_id == ColoGroupId::META {
+        if colo_group_id == ColoGroupId::META && self.tablet_id == TabletId::META {
+            return Ok(());
+        }
+        if colo_group_id == ColoGroupId::TABLET_META {
             if key.len() < 12 {
                 return Err(anyhow!("key {:?} too short for ColoGroupId::META", key));
             }
@@ -1245,15 +1250,10 @@ impl LsmTabletInner {
                 return Ok(());
             }
         }
-        if self
-            .owned_ranges
-            .get(&colo_group_id)
-            .ok_or_else(|| anyhow!("no ranges owned from {:?}", colo_group_id))?
-            .contains(&key.to_vec())
-        {
-            return Ok(());
+        if self.meta_synced.tablet_id_for_key(colo_group_id, &key)? != self.tablet_id {
+            return Err(anyhow!("{:?}/{:?} not owned", colo_group_id, key).into());
         }
-        Err(anyhow!("{:?}/{:?} not owned", colo_group_id, key).into())
+        Ok(())
     }
 }
 

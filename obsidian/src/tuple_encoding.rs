@@ -257,9 +257,9 @@ impl<E0: Element, E1: Element> Tuple for (E0, E1) {
         let size_1 = self.1.encoded_size();
         let mut out = vec![0u8; size_0 + size_1];
         let mut i = 0;
-        self.0.encode(&mut out[i..size_0]);
+        self.0.encode(&mut out[i..i + size_0]);
         i += size_0;
-        self.1.encode(&mut out[i..size_1]);
+        self.1.encode(&mut out[i..i + size_1]);
         out
     }
 
@@ -318,7 +318,17 @@ pub(crate) fn tuple_decode<T: Tuple>(b: &[u8]) -> anyhow::Result<T> {
 mod tests {
     use std::fmt::Debug;
 
+    use super::tuple_decode;
+    use super::tuple_encode;
     use super::Element;
+    use super::Tuple;
+
+    fn assert_tuple_roundtrip<T: Tuple + Debug + Eq>(t: T) {
+        let encoded = tuple_encode(&t);
+        let decoded: T = tuple_decode(&encoded).expect("tuple could not be decoded");
+
+        assert_eq!(t, decoded);
+    }
 
     fn assert_element_roundtrip<E: Element + Debug + Eq>(e: E) {
         let mut v = vec![0u8; e.encoded_size()];
@@ -473,5 +483,12 @@ mod tests {
             0x85, 0x52, 0xcf, 0x7f, 0xbe, 0x09, 0xe2, 0xaa, 0xd5, 0x6e, 0xeb, 0x56, 0x97, 0xae,
             0xb7, 0x03,
         ]);
+    }
+
+    #[test]
+    fn test_tuple_roundtrip() {
+        assert_tuple_roundtrip((2u64,));
+
+        assert_tuple_roundtrip((2u64, 1u64));
     }
 }
