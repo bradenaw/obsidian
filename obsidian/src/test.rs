@@ -192,6 +192,10 @@ impl<T> MetaProxy<T> {
 
 #[async_trait]
 impl<T: Meta + Send + Sync> Meta for Arc<MetaProxy<T>> {
+    async fn add_tablet(&self, tablet_id: TabletId) -> anyhow::Result<()> {
+        todo!()
+    }
+
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,
@@ -251,7 +255,6 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
     meta_tablet.create_keyspace(KeyspaceId::META).await?;
 
     let meta = MetaImpl::new(meta_tablet);
-    meta_proxy.put(meta);
 
     for i in 0..n_tablets {
         let tablet_id = TabletId(ShardId(1), (i + 2) as u64);
@@ -264,7 +267,10 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
         .await?;
         let mut m = tablets.m.lock().unwrap();
         m.insert(tablet_id, Arc::new(tablet));
+        meta.add_tablet(tablet_id).await?;
     }
+
+    meta_proxy.put(meta);
 
     Ok(Frontend::new(
         Box::new(meta_proxy.clone()),

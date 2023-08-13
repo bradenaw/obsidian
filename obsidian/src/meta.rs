@@ -40,6 +40,7 @@ pub(crate) const PFX_TABLETS: u64 = 4;
 
 #[async_trait]
 pub(crate) trait Meta {
+    async fn add_tablet(&self, tablet_id: TabletId) -> anyhow::Result<()>;
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,
@@ -68,6 +69,37 @@ pub(crate) struct MetaImpl<T> {
 
 #[async_trait]
 impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
+    async fn add_tablet(&self, tablet_id: TabletId) -> anyhow::Result<()> {
+        let ts = self.latest_snapshot().await?;
+
+        let tablet_key = tuple_encode(&(PFX_TABLETS, tablet_id.0 .0 as u64, tablet_id.1));
+
+        if self
+            .tablet
+            .get(ts, KeyspaceId::META, tablet_key.clone())
+            .await?
+            .is_some()
+        {
+            return Err(anyhow!("{:?} already exists", tablet_id));
+        }
+
+        let starting_meta_tablet_pb = pb::MetaTablet {
+            colo_group_ids: vec![],
+            ranges: vec![],
+        };
+
+        self.write_syncable(
+            ts,
+            vec![],
+            BTreeMap::from([(
+                (KeyspaceId::META, tablet_key),
+                Mutation::Put(starting_meta_tablet_pb.encode_to_vec()),
+            )]),
+        ).await?;
+
+        Ok(())
+    }
+
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,
@@ -120,15 +152,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
             );
         }
 
-        self.write_syncable(
-            vec![Precondition::NotChangedSince(
-                KeyspaceId::META,
-                self.sync_key.clone(),
-                ts,
-            )],
-            muts,
-        )
-        .await?;
+        self.write_syncable(ts, vec![], muts).await?;
 
         Ok(())
     }
@@ -153,11 +177,8 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
         }
 
         self.write_syncable(
-            vec![Precondition::NotChangedSince(
-                KeyspaceId::META,
-                self.sync_key.clone(),
-                ts,
-            )],
+            ts,
+            vec![],
             BTreeMap::from([((KeyspaceId::META, keyspace_key), Mutation::Put(vec![]))]),
         )
         .await?;
@@ -273,11 +294,22 @@ impl<T: Tablet + Sync + Send> MetaImpl<T> {
 
     async fn write_syncable(
         &self,
-        preconds: Vec<Precondition>,
+        read_ts: Timestamp,
+        mut preconds: Vec<Precondition>,
         mut muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
     ) -> anyhow::Result<Timestamp> {
+        preconds.push(Precondition::NotChangedSince(
+            KeyspaceId::META,
+            self.sync_key.clone(),
+            read_ts,
+        ));
+        if muts.contains_key(&(KeyspaceId::META, self.sync_key.clone())) {
+            return Err(anyhow!(
+                "write_syncable contains a mutation to sync_key already"
+            ));
+        }
         muts.insert(
-            (KeyspaceId::META, vec![]),
+            (KeyspaceId::META, self.sync_key.clone()),
             Mutation::Put(
                 pb::MetaTx {
                     keys: Some(pb::CompressedKeySet::from(
@@ -473,6 +505,10 @@ fn ranges_from_splits(splits: Vec<Bound<Vec<u8>>>) -> anyhow::Result<Vec<Range<V
 
 #[async_trait]
 impl<T: Meta + Sync + Send + ?Sized> Meta for Box<T> {
+    async fn add_tablet(&self, tablet_id: TabletId) -> anyhow::Result<()> {
+        T::add_tablet(self, tablet_id).await
+    }
+
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,
