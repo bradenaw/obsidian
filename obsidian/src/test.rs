@@ -213,11 +213,19 @@ impl<T: Meta + Send + Sync> Meta for Arc<MetaProxy<T>> {
     }
 
     async fn latest_snapshot(&self) -> anyhow::Result<Timestamp> {
-        todo!();
+        let inner = self.inner.load();
+        if let Some(inner) = inner.deref() {
+            return T::latest_snapshot(inner).await;
+        }
+        Err(anyhow!("MetaProxy not filled yet"))
     }
 
     async fn wait_for_newer(&self, ts: Timestamp) -> anyhow::Result<()> {
-        todo!();
+        let inner = self.inner.load();
+        if let Some(inner) = inner.deref() {
+            return T::wait_for_newer(inner, ts).await;
+        }
+        Err(anyhow!("MetaProxy not filled yet"))
     }
 
     async fn scan_page(
@@ -225,11 +233,19 @@ impl<T: Meta + Send + Sync> Meta for Arc<MetaProxy<T>> {
         ts: Timestamp,
         range: Range<Vec<u8>>,
     ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)> {
-        todo!();
+        let inner = self.inner.load();
+        if let Some(inner) = inner.deref() {
+            return T::scan_page(inner, ts, range).await;
+        }
+        Err(anyhow!("MetaProxy not filled yet"))
     }
 
     async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Record>, Timestamp)> {
-        todo!();
+        let inner = self.inner.load();
+        if let Some(inner) = inner.deref() {
+            return T::sync(inner, ts).await;
+        }
+        Err(anyhow!("MetaProxy not filled yet"))
     }
 
     async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
