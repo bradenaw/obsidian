@@ -227,6 +227,10 @@ impl<T: Meta + Send + Sync> Meta for Arc<MetaProxy<T>> {
     async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Record>, Timestamp)> {
         todo!();
     }
+
+    async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
+        todo!();
+    }
 }
 
 pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {

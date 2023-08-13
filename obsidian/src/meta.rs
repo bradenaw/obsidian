@@ -55,6 +55,8 @@ pub(crate) trait Meta {
         range: Range<Vec<u8>>,
     ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)>;
     async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Record>, Timestamp)>;
+
+    async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>>;
 }
 
 pub(crate) struct MetaImpl<T> {
@@ -240,6 +242,22 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
 
         Ok((out_page, new_ts))
     }
+
+    async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
+        let mut out = vec![];
+        let mut maybe_cursor = Some(Range::prefix(tuple_encode(&(PFX_TABLETS,))));
+        while let Some(cursor) = maybe_cursor {
+            let (page, continue_cursor) = self.scan_page(ts, cursor).await?;
+            for (key, _, _) in page {
+                let (_, tablet_shard_id, tablet_id_seq): (u64, u64, u64) = tuple_decode(&key)?;
+                let tablet_id = TabletId(ShardId(tablet_shard_id as u32), tablet_id_seq);
+                out.push(tablet_id);
+            }
+            maybe_cursor = continue_cursor;
+        }
+
+        Ok(out)
+    }
 }
 
 impl<T: Tablet + Sync + Send> MetaImpl<T> {
@@ -274,22 +292,6 @@ impl<T: Tablet + Sync + Send> MetaImpl<T> {
         // TODO: Periodically poll in case we have a success-but-error above.
         _ = self.ts_send.send(ts);
         Ok(ts)
-    }
-
-    async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
-        let mut out = vec![];
-        let mut maybe_cursor = Some(Range::prefix(tuple_encode(&(PFX_TABLETS,))));
-        while let Some(cursor) = maybe_cursor {
-            let (page, continue_cursor) = self.scan_page(ts, cursor).await?;
-            for (key, _, _) in page {
-                let (_, tablet_shard_id, tablet_id_seq): (u64, u64, u64) = tuple_decode(&key)?;
-                let tablet_id = TabletId(ShardId(tablet_shard_id as u32), tablet_id_seq);
-                out.push(tablet_id);
-            }
-            maybe_cursor = continue_cursor;
-        }
-
-        Ok(out)
     }
 
     async fn colo_group_exists(
@@ -501,5 +503,9 @@ impl<T: Meta + Sync + Send + ?Sized> Meta for Box<T> {
 
     async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Record>, Timestamp)> {
         T::sync(self, ts).await
+    }
+
+    async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
+        T::tablet_ids(self, ts).await
     }
 }

@@ -17,7 +17,9 @@ use byteorder::ByteOrder;
 use futures::future;
 use futures::stream::FuturesUnordered;
 use futures::Stream;
+use futures::StreamExt;
 use futures::TryStreamExt;
+use rand::seq::SliceRandom;
 use rand::Rng;
 use thiserror::Error;
 
@@ -353,7 +355,17 @@ impl Obsidian for Frontend {
         colo_group_id: ColoGroupId,
         initial_splits: Vec<Bound<Vec<u8>>>,
     ) -> anyhow::Result<()> {
-        self.meta.create_colo_group(colo_group_id, initial_splits).await
+        self.meta
+            .create_colo_group(colo_group_id, initial_splits)
+            .await?;
+
+        // TODO: if the colo group already exists, we want to still sync_meta here, so that the
+        // caller doesn't get an "already exists" and then try to use it and immediately get back a
+        // "doesn't exist" because that node hasn't learned about it yet.
+
+        self.sync_meta().await?;
+
+        Ok(())
     }
 }
 
@@ -442,6 +454,26 @@ impl Frontend {
             })
             .await
             .context("too much contention")
+    }
+
+    async fn sync_meta(&self) -> anyhow::Result<()> {
+        let ts = self.meta.latest_snapshot().await?;
+
+        let tablet_ids = {
+            let mut tablet_ids = self.meta.tablet_ids(ts).await?;
+            tablet_ids.shuffle(&mut rand::thread_rng());
+            tablet_ids
+        };
+
+        futures::stream::iter(tablet_ids.into_iter())
+            .map(|tablet_id| async move {
+                Ok::<_, anyhow::Error>(self.tablets.tablet(tablet_id)?.wait_meta_sync(ts).await?)
+            })
+            .buffer_unordered(64)
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        Ok(())
     }
 }
 
