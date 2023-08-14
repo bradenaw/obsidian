@@ -261,18 +261,25 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
     let meta_proxy = Arc::new(MetaProxy::new());
 
     let storage = Arc::new(MemStorage::new());
-    let meta_tablet = LsmTablet::new(
-        TabletId::META,
-        LsmBuilder::new().storage(storage.clone()).build().await?,
-        Box::new(meta_proxy.clone()),
-        Box::new(tablets.clone()),
-    )
-    .await?;
+    let meta_tablet = Arc::new(
+        LsmTablet::new(
+            TabletId::META,
+            LsmBuilder::new().storage(storage.clone()).build().await?,
+            Box::new(meta_proxy.clone()),
+            Box::new(tablets.clone()),
+        )
+        .await?,
+    );
     meta_tablet.create_keyspace(KeyspaceId::META).await?;
+    let meta = MetaImpl::new(meta_tablet.clone());
 
-    let meta = MetaImpl::new(meta_tablet);
+    {
+        let mut m = tablets.m.lock().unwrap();
+        m.insert(TabletId::META, meta_tablet);
+    }
+    meta.add_tablet(TabletId::META).await?;
 
-    for i in 0..n_tablets {
+    for i in 0..(n_tablets - 1) {
         let tablet_id = TabletId(ShardId(1), (i + 2) as u64);
         let tablet = LsmTablet::new(
             tablet_id,
