@@ -209,7 +209,11 @@ impl<T: Meta + Send + Sync> Meta for Arc<MetaProxy<T>> {
     }
 
     async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
-        todo!();
+        let inner = self.inner.load();
+        if let Some(inner) = inner.deref() {
+            return T::create_keyspace(inner, keyspace_id).await;
+        }
+        Err(anyhow!("MetaProxy not filled yet"))
     }
 
     async fn latest_snapshot(&self) -> anyhow::Result<Timestamp> {

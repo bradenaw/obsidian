@@ -75,6 +75,11 @@ pub trait Obsidian {
         colo_group_id: ColoGroupId,
         initial_splits: Vec<Bound<Vec<u8>>>,
     ) -> anyhow::Result<()>;
+
+    async fn create_keyspace(
+        &self,
+        keyspace_id: KeyspaceId,
+    ) -> anyhow::Result<()>;
 }
 
 pub trait ObsidianExt {
@@ -362,6 +367,17 @@ impl Obsidian for Frontend {
         // TODO: if the colo group already exists, we want to still sync_meta here, so that the
         // caller doesn't get an "already exists" and then try to use it and immediately get back a
         // "doesn't exist" because that node hasn't learned about it yet.
+
+        self.sync_meta().await?;
+
+        Ok(())
+    }
+
+    async fn create_keyspace(
+        &self,
+        keyspace_id: KeyspaceId,
+    ) -> anyhow::Result<()> {
+        self.meta.create_keyspace(keyspace_id).await?;
 
         self.sync_meta().await?;
 
@@ -679,13 +695,14 @@ mod test {
     #[tokio::test]
     async fn test_2pc() -> anyhow::Result<()> {
         pretty_env_logger::init();
-        log::info!("hello world");
+
         let colo_group_id = ColoGroupId(1);
         let keyspace_id = KeyspaceId(colo_group_id, 1);
 
         let obs = new_for_test(2).await?;
         obs.create_colo_group(colo_group_id, vec![Bound::Before(vec![2])])
             .await?;
+        obs.create_keyspace(keyspace_id).await?;
 
         let key1 = vec![1];
         let key2 = vec![2];
