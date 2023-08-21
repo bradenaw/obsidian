@@ -493,7 +493,7 @@ impl WaitableTimestamp {
         inner.ts = ts;
 
         while let Some(OrdEqByFirst(wait_ts, _)) = inner.waiters.peek() {
-            if *wait_ts >= inner.ts {
+            if *wait_ts > inner.ts {
                 break;
             }
             let OrdEqByFirst(_, sender) = inner.waiters.pop().unwrap();

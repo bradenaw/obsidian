@@ -249,7 +249,11 @@ impl<T: Meta + Send + Sync> Meta for Arc<MetaProxy<T>> {
     }
 
     async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
-        todo!();
+        let inner = self.inner.load();
+        if let Some(inner) = inner.deref() {
+            return T::tablet_ids(inner, ts).await;
+        }
+        Err(anyhow!("MetaProxy not filled yet"))
     }
 }
 

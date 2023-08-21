@@ -465,9 +465,14 @@ impl Frontend {
             tablet_ids
         };
 
+        log::info!("sync_meta() to {:?} for {:?} tablets", ts, tablet_ids.len());
+
         futures::stream::iter(tablet_ids.into_iter())
             .map(|tablet_id| async move {
-                Ok::<_, anyhow::Error>(self.tablets.tablet(tablet_id)?.wait_meta_sync(ts).await?)
+                log::info!("wait_meta_sync({:?}) for {:?}", ts, tablet_id);
+                self.tablets.tablet(tablet_id)?.wait_meta_sync(ts).await?;
+                log::info!("wait_meta_sync({:?}) for {:?} -> done", ts, tablet_id);
+                Ok::<_, anyhow::Error>(())
             })
             .buffer_unordered(64)
             .try_collect::<Vec<_>>()
@@ -673,6 +678,8 @@ mod test {
 
     #[tokio::test]
     async fn test_2pc() -> anyhow::Result<()> {
+        pretty_env_logger::init();
+        log::info!("hello world");
         let colo_group_id = ColoGroupId(1);
         let keyspace_id = KeyspaceId(colo_group_id, 1);
 

@@ -152,7 +152,9 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
             );
         }
 
-        self.write_syncable(ts, vec![], muts).await?;
+        let write_ts = self.write_syncable(ts, vec![], muts).await?;
+
+        log::info!("create_colo_group({:?}) -> {:?}", colo_group_id, write_ts);
 
         Ok(())
     }
