@@ -63,8 +63,11 @@ impl MetaSynced {
         tablet_id: TabletId,
         colo_group_id: ColoGroupId,
     ) -> RangeSet<Vec<u8>> {
-        if tablet_id == TabletId::META {
+        if colo_group_id == ColoGroupId::META && tablet_id == TabletId::META {
             return RangeSet::from(Range::all());
+        }
+        if colo_group_id == ColoGroupId::TABLET_META {
+            return RangeSet::from(Range::prefix(tablet_id.encode_fixed().to_vec()));
         }
         let inner = self.inner.read().unwrap();
         if let Some(range_set_by_colo_group_id) = inner.owned_ranges.get(&tablet_id) {

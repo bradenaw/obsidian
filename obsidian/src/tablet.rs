@@ -482,9 +482,11 @@ impl LsmTabletInner {
         }
         .ok_or_else(|| {
             anyhow!(
-                "misroute: {:?} owns no ranges overlapping with {:?}",
+                "misroute: {:?} owns no ranges of {:?} overlapping with {:?}, only owns {:?}",
                 self.tablet_id,
-                range
+                keyspace_id.0,
+                range,
+                owned_range_set,
             )
         })?;
 
@@ -500,9 +502,11 @@ impl LsmTabletInner {
         };
         if !ok {
             return Err(anyhow!(
-                "misroute: {:?} not the next tablet for {:?}",
+                "misroute: {:?} not the next tablet for {:?} {:?}, only owns {:?}",
                 self.tablet_id,
-                range
+                keyspace_id.0,
+                range,
+                owned_range_set,
             )
             .into());
         }
@@ -596,9 +600,29 @@ impl LsmTabletInner {
 
         let _guard = self.lock_mgr.read_lock(key).await;
 
-        self.sequencer
-            .wait_for_safe_read(range.as_min_max().1)
-            .await?;
+        let range = match range {
+            HistoryRange::Until(max) => {
+                self.sequencer
+                    .wait_for_safe_read(max)
+                    .await?;
+                range
+            },
+            HistoryRange::Between(_, max) => {
+                self.sequencer
+                    .wait_for_safe_read(max)
+                    .await?;
+                range
+            },
+            HistoryRange::All => {
+                let max = self.latest_snapshot(BTreeSet::from([(keyspace_id, key)])).await?;
+                HistoryRange::Until(max)
+            },
+            HistoryRange::Since(min) => {
+                let max = self.latest_snapshot(BTreeSet::from([(keyspace_id, key)])).await?;
+                HistoryRange::Between(min, max)
+            },
+        };
+
 
         let (page, continue_cursor) = self
             .lsm
@@ -1180,7 +1204,7 @@ impl LsmTabletInner {
                         .scan_all(
                             self.sequencer.safe_read_ts(),
                             KeyspaceId::TX_OUTCOMES,
-                            Range::all(),
+                            Range::prefix(self.tablet_id.encode_fixed().to_vec()),
                             Direction::Asc,
                         )
                         .boxed();

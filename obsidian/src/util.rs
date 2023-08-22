@@ -369,8 +369,13 @@ impl Retry {
     ) -> T {
         let mut i = 0;
         loop {
-            if let Ok(t) = f().await {
-                return t;
+            match f().await {
+                Ok(t) => {
+                    return t;
+                }
+                Err(e) => {
+                    log::warn!("error during thing {:?}, retrying in a bit", e.deref());
+                }
             }
             sleep_for_retry(i, self.min_delay, self.max_delay).await;
             i = i.saturating_add(1);

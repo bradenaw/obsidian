@@ -106,7 +106,7 @@ impl KeyspaceId {
     }
 
     pub(crate) fn is_userland(&self) -> bool {
-        self.1 & 0xFF000000 == 0
+        self.0 != ColoGroupId::TABLET_META && self.1 & 0xFF000000 == 0
     }
 
     pub(crate) fn pending(&self) -> Option<KeyspaceId> {
@@ -146,9 +146,9 @@ impl Display for KeyspaceId {
         match self.userland() {
             Some(userland_keyspace_id) => {
                 if self.is_precond() {
-                    write!(f, "precond({})", userland_keyspace_id)?;
+                    write!(f, "precond({})", userland_keyspace_id.1)?;
                 } else if self.is_pending() {
-                    write!(f, "pending({})", userland_keyspace_id)?;
+                    write!(f, "pending({})", userland_keyspace_id.1)?;
                 } else {
                     write!(f, "{}", self.1)?;
                 }

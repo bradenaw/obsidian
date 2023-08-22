@@ -24,6 +24,7 @@ use crate::types::Record;
 use crate::types::ShardId;
 use crate::types::Timestamp;
 use crate::types::Value;
+use crate::util::WaitableTimestamp;
 use crate::util::longest_shared_prefix_len;
 
 // (PFX_SYNC) -> pb::MetaTx
@@ -63,8 +64,7 @@ pub(crate) trait Meta {
 pub(crate) struct MetaImpl<T> {
     tablet: T,
     sync_key: Vec<u8>,
-    ts_send: tokio::sync::watch::Sender<Timestamp>,
-    ts: tokio::sync::watch::Receiver<Timestamp>,
+    ts: WaitableTimestamp,
 }
 
 #[async_trait]
@@ -197,16 +197,10 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
     }
 
     async fn wait_for_newer(&self, ts: Timestamp) -> anyhow::Result<()> {
-        let mut ts_watcher = self.ts.clone();
-        loop {
-            {
-                let curr = ts_watcher.borrow_and_update();
-                if *curr > ts {
-                    return Ok(());
-                }
-            }
-            ts_watcher.changed().await?;
-        }
+        log::debug!("Meta::wait_for_newer({:?})", ts);
+        self.ts.wait(ts.plus_one()).await?;
+        log::debug!("Meta::wait_for_newer({:?}) -> done", ts);
+        Ok(())
     }
 
     async fn scan_page(
@@ -285,12 +279,10 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
 
 impl<T: Tablet + Sync + Send> MetaImpl<T> {
     pub(crate) fn new(tablet: T) -> Self {
-        let (ts_send, ts) = tokio::sync::watch::channel(Timestamp::ZERO);
         Self {
             tablet,
             sync_key: tuple_encode(&(PFX_SYNC,)),
-            ts_send,
-            ts,
+            ts: WaitableTimestamp::new(),
         }
     }
 
@@ -324,7 +316,7 @@ impl<T: Tablet + Sync + Send> MetaImpl<T> {
 
         let ts = self.tablet.write(preconds, muts).await?;
         // TODO: Periodically poll in case we have a success-but-error above.
-        _ = self.ts_send.send(ts);
+        _ = self.ts.set(ts);
         Ok(ts)
     }
 
