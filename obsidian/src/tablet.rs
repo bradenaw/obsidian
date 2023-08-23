@@ -278,20 +278,20 @@ impl LsmTablet {
             }
         });
 
-        bg.spawn({
-            let inner = inner.clone();
-            let prepare_sender = prepare_sender.clone();
-            async move {
-                inner.scan_for_pending_mutations(prepare_sender).await;
-            }
-        });
+        //bg.spawn({
+        //    let inner = inner.clone();
+        //    let prepare_sender = prepare_sender.clone();
+        //    async move {
+        //        inner.scan_for_pending_mutations(prepare_sender).await;
+        //    }
+        //});
 
-        bg.spawn({
-            let inner = inner.clone();
-            async move {
-                inner.scan_for_precond_locks(prepare_sender).await;
-            }
-        });
+        //bg.spawn({
+        //    let inner = inner.clone();
+        //    async move {
+        //        inner.scan_for_precond_locks(prepare_sender).await;
+        //    }
+        //});
 
         bg.spawn({
             let inner = inner.clone();
@@ -1130,6 +1130,7 @@ impl LsmTabletInner {
                             .scan_all(
                                 self.sequencer.safe_read_ts(),
                                 keyspace_id,
+                                // XXX: this needs to be the owned range, not all
                                 Range::all(),
                                 Direction::Asc,
                             )
@@ -1162,6 +1163,7 @@ impl LsmTabletInner {
                             .scan_all(
                                 self.sequencer.safe_read_ts(),
                                 keyspace_id,
+                                // TODO: needs to be owned range, not all
                                 Range::all(),
                                 Direction::Asc,
                             )

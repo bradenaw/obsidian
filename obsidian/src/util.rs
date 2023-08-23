@@ -374,10 +374,11 @@ impl Retry {
                     return t;
                 }
                 Err(e) => {
-                    log::warn!("error during thing {:?}, retrying in a bit", e.deref());
+                    let delay = delay_for_retry(i, self.min_delay, self.max_delay);
+                    log::warn!("error, retrying in {:?}: {:?}", delay, e.deref());
+                    tokio::time::sleep(delay).await;
                 }
             }
-            sleep_for_retry(i, self.min_delay, self.max_delay).await;
             i = i.saturating_add(1);
         }
     }
@@ -412,6 +413,7 @@ impl Retry {
                 // last_err can't be None here, if it were we would have already returned.
                 return Err(last_err.unwrap().into());
             }
+            log::warn!("error, retrying in {:?}: {:?}", delay, last_err);
             tokio::time::sleep(delay).await;
         }
         if let Some(e) = last_err {

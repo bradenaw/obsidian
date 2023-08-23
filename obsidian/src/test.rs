@@ -279,6 +279,10 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
         .await?,
     );
     meta_tablet.create_keyspace(KeyspaceId::META).await?;
+    // TODO: remove when keyspace sync from meta works
+    meta_tablet
+        .create_keyspace(KeyspaceId(ColoGroupId(1), 1))
+        .await?;
     let meta = MetaImpl::new(meta_tablet.clone());
 
     {
@@ -296,6 +300,11 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
             Box::new(tablets.clone()),
         )
         .await?;
+        // TODO: remove when keyspace sync from meta works
+        tablet
+            .create_keyspace(KeyspaceId(ColoGroupId(1), 1))
+            .await?;
+
         let mut m = tablets.m.lock().unwrap();
         m.insert(tablet_id, Arc::new(tablet));
         meta.add_tablet(tablet_id).await?;
