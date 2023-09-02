@@ -17,10 +17,13 @@ use byteorder::ByteOrder;
 use futures::future;
 use futures::stream::FuturesUnordered;
 use futures::Stream;
+use futures::StreamExt;
 use futures::TryStreamExt;
+use rand::seq::SliceRandom;
 use rand::Rng;
 use thiserror::Error;
 
+use crate::meta::Meta;
 use crate::range::Bound;
 use crate::range::Range;
 use crate::tablet::Tablet;
@@ -66,6 +69,17 @@ pub trait Obsidian {
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
     ) -> Result<Timestamp, WriteError>;
+
+    async fn create_colo_group(
+        &self,
+        colo_group_id: ColoGroupId,
+        initial_splits: Vec<Bound<Vec<u8>>>,
+    ) -> anyhow::Result<()>;
+
+    async fn create_keyspace(
+        &self,
+        keyspace_id: KeyspaceId,
+    ) -> anyhow::Result<()>;
 }
 
 pub trait ObsidianExt {
@@ -108,6 +122,7 @@ impl<T: Obsidian + Sync> ObsidianExt for T {
 }
 
 pub(crate) struct Frontend {
+    meta: Box<dyn Meta + Send + Sync>,
     router: Box<dyn Router + Send + Sync>,
     tablets: Box<dyn Tablets + Send + Sync>,
 }
@@ -208,12 +223,7 @@ impl Obsidian for Frontend {
                 .with_resolve_conflicts(|| {
                     let preconds = preconds.clone();
                     let muts = muts.clone();
-                    async move {
-                        self.tablets
-                            .tablet(tablet_id)?
-                            .write(preconds, muts)
-                            .await
-                    }
+                    async move { self.tablets.tablet(tablet_id)?.write(preconds, muts).await }
                 })
                 .await
                 .map_err(|e| {
@@ -344,14 +354,48 @@ impl Obsidian for Frontend {
         }
         Err(WriteError::Other(anyhow::anyhow!("too much contention")))
     }
+
+    async fn create_colo_group(
+        &self,
+        colo_group_id: ColoGroupId,
+        initial_splits: Vec<Bound<Vec<u8>>>,
+    ) -> anyhow::Result<()> {
+        self.meta
+            .create_colo_group(colo_group_id, initial_splits)
+            .await?;
+
+        // TODO: if the colo group already exists, we want to still sync_meta here, so that the
+        // caller doesn't get an "already exists" and then try to use it and immediately get back a
+        // "doesn't exist" because that node hasn't learned about it yet.
+
+        self.sync_meta().await?;
+
+        Ok(())
+    }
+
+    async fn create_keyspace(
+        &self,
+        keyspace_id: KeyspaceId,
+    ) -> anyhow::Result<()> {
+        self.meta.create_keyspace(keyspace_id).await?;
+
+        self.sync_meta().await?;
+
+        Ok(())
+    }
 }
 
 impl Frontend {
     pub(crate) fn new(
+        meta: Box<dyn Meta + Send + Sync>,
         router: Box<dyn Router + Send + Sync>,
         tablets: Box<dyn Tablets + Send + Sync>,
     ) -> Self {
-        Self { router, tablets }
+        Self {
+            meta,
+            router,
+            tablets,
+        }
     }
 
     fn split_write(
@@ -426,6 +470,31 @@ impl Frontend {
             })
             .await
             .context("too much contention")
+    }
+
+    async fn sync_meta(&self) -> anyhow::Result<()> {
+        let ts = self.meta.latest_snapshot().await?;
+
+        let tablet_ids = {
+            let mut tablet_ids = self.meta.tablet_ids(ts).await?;
+            tablet_ids.shuffle(&mut rand::thread_rng());
+            tablet_ids
+        };
+
+        log::info!("sync_meta() to {:?} for {:?} tablets", ts, tablet_ids.len());
+
+        futures::stream::iter(tablet_ids.into_iter())
+            .map(|tablet_id| async move {
+                log::info!("wait_meta_sync({:?}) for {:?}", ts, tablet_id);
+                self.tablets.tablet(tablet_id)?.wait_meta_sync(ts).await?;
+                log::info!("wait_meta_sync({:?}) for {:?} -> done", ts, tablet_id);
+                Ok::<_, anyhow::Error>(())
+            })
+            .buffer_unordered(64)
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        Ok(())
     }
 }
 
@@ -612,22 +681,28 @@ pub(crate) enum InternalError {
 mod test {
     use std::collections::BTreeMap;
 
+    use super::Frontend;
+    use super::Obsidian;
     use crate::range::Bound;
     use crate::range::Range;
-    use crate::test::new_with_single_byte_routing;
+    use crate::test::new_for_test;
     use crate::types::ColoGroupId;
     use crate::types::Direction;
     use crate::types::KeyspaceId;
     use crate::types::Mutation;
     use crate::types::Timestamp;
 
-    use super::Frontend;
-    use super::Obsidian;
-
     #[tokio::test]
     async fn test_2pc() -> anyhow::Result<()> {
-        let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-        let obs = new_with_single_byte_routing(2).await?;
+        pretty_env_logger::init();
+
+        let colo_group_id = ColoGroupId(1);
+        let keyspace_id = KeyspaceId(colo_group_id, 1);
+
+        let obs = new_for_test(2).await?;
+        obs.create_colo_group(colo_group_id, vec![Bound::Before(vec![2])])
+            .await?;
+        obs.create_keyspace(keyspace_id).await?;
 
         let key1 = vec![1];
         let key2 = vec![2];
@@ -657,8 +732,15 @@ mod test {
     #[tokio::test]
     async fn test_scan_page() {
         async fn inner() -> anyhow::Result<()> {
-            let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-            let obs = new_with_single_byte_routing(3).await?;
+            let colo_group_id = ColoGroupId(1);
+            let keyspace_id = KeyspaceId(colo_group_id, 1);
+
+            let obs = new_for_test(3).await?;
+            obs.create_colo_group(
+                colo_group_id,
+                vec![Bound::Before(vec![2]), Bound::Before(vec![3])],
+            )
+            .await?;
 
             let writes: [(Vec<u8>, _); 12] = [
                 //          ts=0123456789

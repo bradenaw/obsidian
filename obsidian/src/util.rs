@@ -20,6 +20,8 @@ use futures::stream::Stream;
 use futures::stream::StreamExt;
 use rand::Rng;
 
+use crate::types::Timestamp;
+
 pub(crate) fn merge_sorted<'a, T: Ord + 'a>(
     mut iters: Vec<impl Iterator<Item = T> + 'a>,
 ) -> impl Iterator<Item = T> + 'a {
@@ -367,10 +369,16 @@ impl Retry {
     ) -> T {
         let mut i = 0;
         loop {
-            if let Ok(t) = f().await {
-                return t;
+            match f().await {
+                Ok(t) => {
+                    return t;
+                }
+                Err(e) => {
+                    let delay = delay_for_retry(i, self.min_delay, self.max_delay);
+                    log::warn!("error, retrying in {:?}: {:?}", delay, e.deref());
+                    tokio::time::sleep(delay).await;
+                }
             }
-            sleep_for_retry(i, self.min_delay, self.max_delay).await;
             i = i.saturating_add(1);
         }
     }
@@ -405,6 +413,7 @@ impl Retry {
                 // last_err can't be None here, if it were we would have already returned.
                 return Err(last_err.unwrap().into());
             }
+            log::warn!("error, retrying in {:?}: {:?}", delay, last_err);
             tokio::time::sleep(delay).await;
         }
         if let Some(e) = last_err {
@@ -461,4 +470,61 @@ pub(crate) fn encode<E: Encode>(e: &E) -> Vec<u8> {
     let mut v = Vec::with_capacity(e.encoded_size_estimate());
     e.encode(&mut v);
     v
+}
+
+pub(crate) struct WaitableTimestamp {
+    inner: RwLock<WaitableTimestampInner>,
+}
+
+struct WaitableTimestampInner {
+    ts: Timestamp,
+    waiters: BinaryHeap<OrdEqByFirst<Timestamp, tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl WaitableTimestamp {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: RwLock::new(WaitableTimestampInner {
+                ts: Timestamp::ZERO,
+                waiters: BinaryHeap::new(),
+            }),
+        }
+    }
+
+    pub(crate) fn set(&self, ts: Timestamp) {
+        let mut inner = self.inner.write().unwrap();
+
+        if inner.ts >= ts {
+            return;
+        }
+        inner.ts = ts;
+
+        while let Some(OrdEqByFirst(wait_ts, _)) = inner.waiters.peek() {
+            if *wait_ts > inner.ts {
+                break;
+            }
+            let OrdEqByFirst(_, sender) = inner.waiters.pop().unwrap();
+            let _ = sender.send(());
+        }
+    }
+
+    pub(crate) async fn wait(&self, ts: Timestamp) -> anyhow::Result<()> {
+        {
+            let inner = self.inner.read().unwrap();
+            if inner.ts >= ts {
+                return Ok(());
+            }
+        }
+        let receiver = {
+            let mut inner = self.inner.write().unwrap();
+            if inner.ts >= ts {
+                return Ok(());
+            }
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            inner.waiters.push(OrdEqByFirst(ts, sender));
+            receiver
+        };
+        receiver.await?;
+        Ok(())
+    }
 }

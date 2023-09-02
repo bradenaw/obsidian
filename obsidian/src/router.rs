@@ -127,6 +127,7 @@ impl Router for StaticRouter {
 mod tests {
     use std::assert_matches::assert_matches;
 
+    use super::StaticRouter;
     use crate::obsidian::Router;
     use crate::obsidian::TabletId;
     use crate::range::Bound;
@@ -134,8 +135,6 @@ mod tests {
     use crate::types::Direction;
     use crate::types::ShardId;
     use crate::util::encode;
-
-    use super::StaticRouter;
 
     #[test]
     fn test_tablet_id_for_bound() -> anyhow::Result<()> {

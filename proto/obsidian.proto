@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package obsidian;
+
+import "google/protobuf/empty.proto";
+
+message Range {
+    Bound lower = 1;
+    Bound upper = 2;
+}
+
+message Bound {
+    oneof bound_type {
+        google.protobuf.Empty before_all = 1;
+        bytes before = 2;
+        bytes after = 3;
+        bytes after_prefix = 4;
+        google.protobuf.Empty after_all = 5;
+    }
+}
+
+message KeyspaceId {
+    uint32 colo_group_id = 1;
+    uint32 id = 2;
+}
+
+message CompressedKeySet {
+    repeated KeyspaceId keyspace_ids = 1;
+    repeated bytes key_fragments = 2;
+    repeated uint32 key_shared_prefixes = 3;
+    repeated uint32 key_keyspaces_counts = 4;
+    repeated uint32 key_keyspaces_refs = 5;
+}

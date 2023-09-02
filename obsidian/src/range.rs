@@ -1,10 +1,14 @@
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
+use std::convert::TryFrom;
 use std::fmt::Debug;
 use std::iter::FromIterator;
 use std::iter::IntoIterator;
 
+use anyhow::anyhow;
+
+use crate::pb;
 use crate::util::binary_search_by_idx;
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -168,6 +172,37 @@ impl<K: Debug> Debug for Bound<K> {
     }
 }
 
+impl Into<pb::Bound> for Bound<Vec<u8>> {
+    fn into(self) -> pb::Bound {
+        pb::Bound {
+            bound_type: Some(match self {
+                Bound::BeforeAll => pb::bound::BoundType::BeforeAll(()),
+                Bound::Before(k) => pb::bound::BoundType::Before(k),
+                Bound::After(k) => pb::bound::BoundType::After(k),
+                Bound::AfterPrefix(k) => pb::bound::BoundType::AfterPrefix(k),
+                Bound::AfterAll => pb::bound::BoundType::AfterAll(()),
+            }),
+        }
+    }
+}
+
+impl TryFrom<pb::Bound> for Bound<Vec<u8>> {
+    type Error = anyhow::Error;
+
+    fn try_from(bound_pb: pb::Bound) -> Result<Self, Self::Error> {
+        if let Some(bound_type_pb) = bound_pb.bound_type {
+            return Ok(match bound_type_pb {
+                pb::bound::BoundType::BeforeAll(()) => Bound::BeforeAll,
+                pb::bound::BoundType::Before(k) => Bound::Before(k),
+                pb::bound::BoundType::After(k) => Bound::After(k),
+                pb::bound::BoundType::AfterPrefix(k) => Bound::AfterPrefix(k),
+                pb::bound::BoundType::AfterAll(()) => Bound::AfterAll,
+            });
+        }
+        Err(anyhow!("missing bound_type"))
+    }
+}
+
 #[derive(Eq, PartialEq, Clone, Debug)]
 pub enum KeyOrBound<K> {
     Key(K),
@@ -285,6 +320,28 @@ impl<K> Range<Vec<K>> {
 impl<K: Debug> Debug for Range<K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "({:?}, {:?})", self.lower, self.upper)
+    }
+}
+
+impl Into<pb::Range> for Range<Vec<u8>> {
+    fn into(self) -> pb::Range {
+        return pb::Range {
+            lower: Some(self.lower.into()),
+            upper: Some(self.upper.into()),
+        };
+    }
+}
+
+impl TryFrom<pb::Range> for Range<Vec<u8>> {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::Range) -> Result<Self, Self::Error> {
+        if let (Some(lower_pb), Some(upper_pb)) = (value.lower, value.upper) {
+            let lower = Bound::try_from(lower_pb)?;
+            let upper = Bound::try_from(upper_pb)?;
+            return Ok(Range { lower, upper });
+        }
+        Err(anyhow!("missing bound"))
     }
 }
 
@@ -483,7 +540,7 @@ impl<K: Ord + HasPrefix + Clone> RangeSet<K> {
         result
     }
 
-    fn add_range(&mut self, mut range: Range<K>) {
+    pub fn add_range(&mut self, mut range: Range<K>) {
         if range.is_empty() {
             return;
         }
@@ -495,7 +552,7 @@ impl<K: Ord + HasPrefix + Clone> RangeSet<K> {
         self.ranges.insert(RangeByLowerBound(range));
     }
 
-    fn subtract_range(&mut self, range: Range<K>) {
+    pub fn subtract_range(&mut self, range: Range<K>) {
         if range.is_empty() {
             return;
         }

@@ -2,12 +2,17 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use anyhow::anyhow;
 use async_trait::async_trait;
 
 use crate::lsm::LsmBuilder;
+use crate::meta::Meta;
+use crate::meta::MetaImpl;
+use crate::meta_synced::MetaSynced;
 use crate::obsidian::Frontend;
 use crate::obsidian::InternalError;
 use crate::obsidian::Router;
@@ -17,8 +22,6 @@ use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
 use crate::range::Bound;
 use crate::range::Range;
-use crate::range::RangeSet;
-use crate::router::StaticRouter;
 use crate::storage::MemStorage;
 use crate::tablet::LsmTablet;
 use crate::tablet::Tablet;
@@ -28,10 +31,12 @@ use crate::types::HistoryRange;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
+use crate::types::Record;
 use crate::types::ShardId;
 use crate::types::Timestamp;
 use crate::types::Value;
 use crate::util::encode;
+use crate::util::AtomicArc;
 use crate::util::Decode;
 use crate::util::Encode;
 
@@ -146,6 +151,10 @@ impl<T: Tablet + Send + Sync> Tablet for Arc<T> {
     ) -> anyhow::Result<()> {
         T::cleanup_committed(self, txid, ts, precond_keys, mut_keys).await
     }
+
+    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
+        T::wait_meta_sync(self, ts).await
+    }
 }
 
 struct StaticTablets {
@@ -165,63 +174,160 @@ impl Tablets for Arc<StaticTablets> {
     }
 }
 
-pub(crate) async fn new_with_single_byte_routing(n_tablets: usize) -> anyhow::Result<Frontend> {
+struct MetaProxy<T> {
+    inner: AtomicArc<Option<T>>,
+}
+
+impl<T> MetaProxy<T> {
+    fn new() -> Self {
+        Self {
+            inner: AtomicArc::new(Arc::new(None)),
+        }
+    }
+
+    fn put(&self, t: T) {
+        self.inner.store(Arc::new(Some(t)))
+    }
+}
+
+#[async_trait]
+impl<T: Meta + Send + Sync> Meta for Arc<MetaProxy<T>> {
+    async fn add_tablet(&self, _tablet_id: TabletId) -> anyhow::Result<()> {
+        todo!()
+    }
+
+    async fn create_colo_group(
+        &self,
+        colo_group_id: ColoGroupId,
+        initial_splits: Vec<Bound<Vec<u8>>>,
+    ) -> anyhow::Result<()> {
+        let inner = self.inner.load();
+        if let Some(inner) = inner.deref() {
+            return T::create_colo_group(inner, colo_group_id, initial_splits).await;
+        }
+        Err(anyhow!("MetaProxy not filled yet"))
+    }
+
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        let inner = self.inner.load();
+        if let Some(inner) = inner.deref() {
+            return T::create_keyspace(inner, keyspace_id).await;
+        }
+        Err(anyhow!("MetaProxy not filled yet"))
+    }
+
+    async fn latest_snapshot(&self) -> anyhow::Result<Timestamp> {
+        let inner = self.inner.load();
+        if let Some(inner) = inner.deref() {
+            return T::latest_snapshot(inner).await;
+        }
+        Err(anyhow!("MetaProxy not filled yet"))
+    }
+
+    async fn wait_for_newer(&self, ts: Timestamp) -> anyhow::Result<()> {
+        let inner = self.inner.load();
+        if let Some(inner) = inner.deref() {
+            return T::wait_for_newer(inner, ts).await;
+        }
+        Err(anyhow!("MetaProxy not filled yet"))
+    }
+
+    async fn scan_page(
+        &self,
+        ts: Timestamp,
+        range: Range<Vec<u8>>,
+    ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)> {
+        let inner = self.inner.load();
+        if let Some(inner) = inner.deref() {
+            return T::scan_page(inner, ts, range).await;
+        }
+        Err(anyhow!("MetaProxy not filled yet"))
+    }
+
+    async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Record>, Timestamp)> {
+        let inner = self.inner.load();
+        if let Some(inner) = inner.deref() {
+            return T::sync(inner, ts).await;
+        }
+        Err(anyhow!("MetaProxy not filled yet"))
+    }
+
+    async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
+        let inner = self.inner.load();
+        if let Some(inner) = inner.deref() {
+            return T::tablet_ids(inner, ts).await;
+        }
+        Err(anyhow!("MetaProxy not filled yet"))
+    }
+}
+
+pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
     let tablets = Arc::new(StaticTablets {
         m: Mutex::new(HashMap::new()),
     });
 
-    let colo_group_id = ColoGroupId(1);
-    let keyspace_ids = [KeyspaceId(colo_group_id, 1), KeyspaceId(colo_group_id, 2)];
-
-    // META gets everything up to the first split.
-    let mut tablet_ids = vec![TabletId::META];
-    let mut splits = vec![];
-    for i in 0..n_tablets {
-        let shard_id = ShardId(((i % 2) + 1) as u32);
-        tablet_ids.push(TabletId(shard_id, (i + 2) as u64));
-        splits.push(Bound::Before(vec![(i + 1) as u8]));
-    }
-
-    let router = Arc::new(StaticRouter::new(
-        vec![(colo_group_id, (splits.clone(), tablet_ids.clone()))]
-            .into_iter()
-            .collect(),
-    ));
+    let meta_proxy = Arc::new(MetaProxy::new());
 
     let storage = Arc::new(MemStorage::new());
-
-    for (i, tablet_id) in tablet_ids.iter().enumerate() {
-        let range = Range {
-            lower: if i == 0 {
-                Bound::BeforeAll
-            } else {
-                splits[i - 1].clone()
-            },
-            upper: if i == tablet_ids.len() - 1 {
-                Bound::AfterAll
-            } else {
-                splits[i].clone()
-            },
-        };
-        println!("{:?} owns {:?}", tablet_id, range);
-        let tablet = LsmTablet::new(
-            *tablet_id,
+    let meta_tablet = Arc::new(
+        LsmTablet::new(
+            TabletId::META,
             LsmBuilder::new().storage(storage.clone()).build().await?,
-            vec![(colo_group_id, RangeSet::from(range))]
-                .into_iter()
-                .collect(),
+            Box::new(meta_proxy.clone()),
             Box::new(tablets.clone()),
-            Box::new(router.clone()),
+        )
+        .await?,
+    );
+    meta_tablet.create_keyspace(KeyspaceId::META).await?;
+    // TODO: remove when keyspace sync from meta works
+    meta_tablet
+        .create_keyspace(KeyspaceId(ColoGroupId(1), 1))
+        .await?;
+    let meta = MetaImpl::new(meta_tablet.clone());
+
+    {
+        let mut m = tablets.m.lock().unwrap();
+        m.insert(TabletId::META, meta_tablet);
+    }
+    meta.add_tablet(TabletId::META).await?;
+
+    for i in 0..(n_tablets - 1) {
+        let tablet_id = TabletId(ShardId(1), (i + 2) as u64);
+        let tablet = LsmTablet::new(
+            tablet_id,
+            LsmBuilder::new().storage(storage.clone()).build().await?,
+            Box::new(meta_proxy.clone()),
+            Box::new(tablets.clone()),
         )
         .await?;
-        for keyspace_id in keyspace_ids {
-            tablet.create_keyspace(keyspace_id).await?;
-        }
+        // TODO: remove when keyspace sync from meta works
+        tablet
+            .create_keyspace(KeyspaceId(ColoGroupId(1), 1))
+            .await?;
+
         let mut m = tablets.m.lock().unwrap();
-        m.insert(*tablet_id, Arc::new(tablet));
+        m.insert(tablet_id, Arc::new(tablet));
+        meta.add_tablet(tablet_id).await?;
     }
 
-    Ok(Frontend::new(Box::new(router.clone()), Box::new(tablets)))
+    meta_proxy.put(meta);
+
+    Ok(Frontend::new(
+        Box::new(meta_proxy.clone()),
+        Box::new(MetaSynced::new(meta_proxy.clone())),
+        Box::new(tablets),
+    ))
+}
+
+pub(crate) fn single_byte_splits(n: usize) -> Vec<Bound<Vec<u8>>> {
+    if n > 255 {
+        panic!("can't do single_byte_splits with n > 255");
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        out.push(Bound::Before(vec![i as u8]));
+    }
+    out
 }
 
 pub(crate) fn assert_roundtrip<E: Encode + Decode + Debug + Eq>(e: &E) -> anyhow::Result<()> {
