@@ -278,20 +278,20 @@ impl LsmTablet {
             }
         });
 
-        //bg.spawn({
-        //    let inner = inner.clone();
-        //    let prepare_sender = prepare_sender.clone();
-        //    async move {
-        //        inner.scan_for_pending_mutations(prepare_sender).await;
-        //    }
-        //});
+        bg.spawn({
+            let inner = inner.clone();
+            let prepare_sender = prepare_sender.clone();
+            async move {
+                inner.scan_for_pending_mutations(prepare_sender).await;
+            }
+        });
 
-        //bg.spawn({
-        //    let inner = inner.clone();
-        //    async move {
-        //        inner.scan_for_precond_locks(prepare_sender).await;
-        //    }
-        //});
+        bg.spawn({
+            let inner = inner.clone();
+            async move {
+                inner.scan_for_precond_locks(prepare_sender).await;
+            }
+        });
 
         bg.spawn({
             let inner = inner.clone();
@@ -602,27 +602,26 @@ impl LsmTabletInner {
 
         let range = match range {
             HistoryRange::Until(max) => {
-                self.sequencer
-                    .wait_for_safe_read(max)
-                    .await?;
+                self.sequencer.wait_for_safe_read(max).await?;
                 range
-            },
+            }
             HistoryRange::Between(_, max) => {
-                self.sequencer
-                    .wait_for_safe_read(max)
-                    .await?;
+                self.sequencer.wait_for_safe_read(max).await?;
                 range
-            },
+            }
             HistoryRange::All => {
-                let max = self.latest_snapshot(BTreeSet::from([(keyspace_id, key)])).await?;
+                let max = self
+                    .latest_snapshot(BTreeSet::from([(keyspace_id, key)]))
+                    .await?;
                 HistoryRange::Until(max)
-            },
+            }
             HistoryRange::Since(min) => {
-                let max = self.latest_snapshot(BTreeSet::from([(keyspace_id, key)])).await?;
+                let max = self
+                    .latest_snapshot(BTreeSet::from([(keyspace_id, key)]))
+                    .await?;
                 HistoryRange::Between(min, max)
-            },
+            }
         };
-
 
         let (page, continue_cursor) = self
             .lsm
@@ -1121,26 +1120,40 @@ impl LsmTabletInner {
         &self,
         sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
     ) {
+        // Below depends on knowning the ranges that this tablet owns before starting. Because
+        // meta_synced does not yet persist into the tablet, we have to wait for it to sync. It
+        // always currently syncs to latest, so wait(timestamp(1)) is the same as waiting for
+        // latest.
+        Retry::new()
+            .indefinitely(|| {
+                self.meta_synced.wait(Timestamp(1))
+            }).await;
+
         for keyspace_id in self.lsm.keyspaces() {
             Retry::new()
                 .indefinitely(|| {
                     let sender = sender.clone();
                     async move {
-                        let mut s = self
-                            .scan_all(
-                                self.sequencer.safe_read_ts(),
-                                keyspace_id,
-                                // XXX: this needs to be the owned range, not all
-                                Range::all(),
-                                Direction::Asc,
-                            )
-                            .boxed();
-                        while let Some((key, _, value)) = s.try_next().await? {
-                            let pending = PendingMutation::decode(&value)?;
+                        for range in self
+                            .meta_synced
+                            .ranges_for_tablet(self.tablet_id, keyspace_id.0)
+                            .into_iter()
+                        {
+                            let mut s = self
+                                .scan_all(
+                                    self.sequencer.safe_read_ts(),
+                                    keyspace_id,
+                                    range,
+                                    Direction::Asc,
+                                )
+                                .boxed();
+                            while let Some((key, _, value)) = s.try_next().await? {
+                                let pending = PendingMutation::decode(&value)?;
 
-                            let _ = sender
-                                .send((pending.txid, keyspace_id, key, PrepareType::Mutation))
-                                .await;
+                                let _ = sender
+                                    .send((pending.txid, keyspace_id, key, PrepareType::Mutation))
+                                    .await;
+                            }
                         }
                         Ok::<_, anyhow::Error>(())
                     }
@@ -1154,31 +1167,45 @@ impl LsmTabletInner {
         &self,
         sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
     ) {
+        // Below depends on knowning the ranges that this tablet owns before starting. Because
+        // meta_synced does not yet persist into the tablet, we have to wait for it to sync. It
+        // always currently syncs to latest, so wait(timestamp(1)) is the same as waiting for
+        // latest.
+        Retry::new()
+            .indefinitely(|| {
+                self.meta_synced.wait(Timestamp(1))
+            }).await;
+
         for keyspace_id in self.lsm.keyspaces() {
             Retry::new()
                 .indefinitely(|| {
                     let sender = sender.clone();
                     async move {
-                        let mut s = self
-                            .scan_all(
-                                self.sequencer.safe_read_ts(),
-                                keyspace_id,
-                                // TODO: needs to be owned range, not all
-                                Range::all(),
-                                Direction::Asc,
-                            )
-                            .boxed();
-                        while let Some((key, _, value)) = s.try_next().await? {
-                            let precond_locks = PrecondLocks::decode(&value)?;
-                            for txid in precond_locks.txids {
-                                let _ = sender
-                                    .send((
-                                        txid,
-                                        keyspace_id,
-                                        key.clone(),
-                                        PrepareType::Precondition,
-                                    ))
-                                    .await;
+                        for range in self
+                            .meta_synced
+                            .ranges_for_tablet(self.tablet_id, keyspace_id.0)
+                            .into_iter()
+                        {
+                            let mut s = self
+                                .scan_all(
+                                    self.sequencer.safe_read_ts(),
+                                    keyspace_id,
+                                    range,
+                                    Direction::Asc,
+                                )
+                                .boxed();
+                            while let Some((key, _, value)) = s.try_next().await? {
+                                let precond_locks = PrecondLocks::decode(&value)?;
+                                for txid in precond_locks.txids {
+                                    let _ = sender
+                                        .send((
+                                            txid,
+                                            keyspace_id,
+                                            key.clone(),
+                                            PrepareType::Precondition,
+                                        ))
+                                        .await;
+                                }
                             }
                         }
                         Ok::<_, anyhow::Error>(())

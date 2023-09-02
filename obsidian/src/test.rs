@@ -192,7 +192,7 @@ impl<T> MetaProxy<T> {
 
 #[async_trait]
 impl<T: Meta + Send + Sync> Meta for Arc<MetaProxy<T>> {
-    async fn add_tablet(&self, tablet_id: TabletId) -> anyhow::Result<()> {
+    async fn add_tablet(&self, _tablet_id: TabletId) -> anyhow::Result<()> {
         todo!()
     }
 
