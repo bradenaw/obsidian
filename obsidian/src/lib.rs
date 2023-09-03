@@ -27,16 +27,16 @@ mod wal;
 
 mod pb {
     mod obsidian {
-        include!(concat!(env!("OUT_DIR"), "/obsidian.rs"));
+        tonic::include_proto!("obsidian");
     }
     pub(crate) mod internal {
-        include!(concat!(env!("OUT_DIR"), "/obsidian_internal.rs"));
+        tonic::include_proto!("obsidian_internal");
     }
 
-    pub use obsidian::bound;
-    pub use obsidian::Bound;
-    pub use obsidian::KeyspaceId;
-    pub use obsidian::Range;
+    pub use crate::pb::obsidian::bound;
+    pub use crate::pb::obsidian::Bound;
+    pub use crate::pb::obsidian::KeyspaceId;
+    pub use crate::pb::obsidian::Range;
 }
 
 #[cfg(test)]
