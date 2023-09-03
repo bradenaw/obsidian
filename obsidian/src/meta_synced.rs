@@ -190,7 +190,7 @@ impl MetaSyncedInner {
         for (k, v) in r {
             let (_, shard_id_raw, tablet_id_id_raw): (u64, u64, u64) = tuple_decode(&k[..])?;
             let tablet_id = TabletId(ShardId(shard_id_raw as u32), tablet_id_id_raw);
-            let tablet_metadata = pb::MetaTablet::decode(&v[..])?;
+            let tablet_metadata = pb::internal::MetaTablet::decode(&v[..])?;
 
             if tablet_metadata.colo_group_ids.len() != tablet_metadata.ranges.len() {
                 // TODO: log

@@ -4,6 +4,59 @@ package obsidian;
 
 import "google/protobuf/empty.proto";
 
+service Obsidian {
+    rpc GetLatest(GetLatestReq) returns (GetLatestResp);
+    rpc Write(WriteReq) returns (WriteResp);
+}
+
+message GetLatestReq {
+    repeated Key keys = 1;
+}
+
+message GetLatestResp {
+    uint64 snapshot_ts = 1;
+    repeated Record records = 2;
+}
+
+message WriteReq {
+    repeated Precond preconds = 1;
+    repeated Mutation muts = 2;
+}
+
+message WriteResp {
+    uint64 write_ts = 1;
+}
+
+message Precond {
+    message NotChangedSince {
+        Key key = 1;
+        uint64 ts = 2;
+    }
+
+    oneof precond_type {
+        NotChangedSince not_changed_since = 1;
+    }
+}
+
+message Mutation {
+    Key key = 1;
+    oneof mutation_type {
+        bytes put = 2;
+        google.protobuf.Empty delete = 3;
+    }
+}
+
+message Record {
+    Key key = 1;
+    uint64 ts = 2;
+    bytes value = 3;
+}
+
+message Key {
+    KeyspaceId keyspace_id = 1;
+    bytes bytes = 2;
+}
+
 message Range {
     Bound lower = 1;
     Bound upper = 2;
@@ -22,12 +75,4 @@ message Bound {
 message KeyspaceId {
     uint32 colo_group_id = 1;
     uint32 id = 2;
-}
-
-message CompressedKeySet {
-    repeated KeyspaceId keyspace_ids = 1;
-    repeated bytes key_fragments = 2;
-    repeated uint32 key_shared_prefixes = 3;
-    repeated uint32 key_keyspaces_counts = 4;
-    repeated uint32 key_keyspaces_refs = 5;
 }

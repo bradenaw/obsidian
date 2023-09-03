@@ -26,7 +26,17 @@ mod util;
 mod wal;
 
 mod pb {
-    include!(concat!(env!("OUT_DIR"), "/obsidian.rs"));
+    mod obsidian {
+        include!(concat!(env!("OUT_DIR"), "/obsidian.rs"));
+    }
+    pub(crate) mod internal {
+        include!(concat!(env!("OUT_DIR"), "/obsidian_internal.rs"));
+    }
+
+    pub use obsidian::bound;
+    pub use obsidian::Bound;
+    pub use obsidian::KeyspaceId;
+    pub use obsidian::Range;
 }
 
 #[cfg(test)]

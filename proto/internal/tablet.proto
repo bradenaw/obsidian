@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package obsidian_internal;
+
+import "obsidian.proto";
+
+service Tablet {
+    rpc GetLatest(obsidian.GetLatestReq) returns (obsidian.GetLatestResp);
+}
