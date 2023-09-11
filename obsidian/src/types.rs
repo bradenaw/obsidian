@@ -6,6 +6,7 @@ use std::time::SystemTime;
 
 use thiserror::Error;
 
+use crate::pb;
 use crate::util::hexlify;
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy)]
@@ -165,6 +166,23 @@ impl Debug for KeyspaceId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "ksp:")?;
         Display::fmt(&self, f)
+    }
+}
+
+impl From<KeyspaceId> for pb::KeyspaceId {
+    fn from(keyspace_id: KeyspaceId) -> Self {
+        pb::KeyspaceId {
+            colo_group_id: keyspace_id.0 .0,
+            id: keyspace_id.1,
+        }
+    }
+}
+
+impl TryFrom<pb::KeyspaceId> for KeyspaceId {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::KeyspaceId) -> Result<Self, Self::Error> {
+        Ok(KeyspaceId(ColoGroupId(value.colo_group_id), value.id))
     }
 }
 

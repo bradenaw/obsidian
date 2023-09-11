@@ -5,6 +5,7 @@
 #![feature(is_sorted)]
 #![feature(map_first_last)]
 
+mod grpc;
 mod lock_mgr;
 mod lsm;
 mod lsm_block;
@@ -34,9 +35,15 @@ mod pb {
     }
 
     pub use crate::pb::obsidian::bound;
+    pub use crate::pb::obsidian::obsidian_client;
+    pub use crate::pb::obsidian::obsidian_server;
     pub use crate::pb::obsidian::Bound;
+    pub use crate::pb::obsidian::GetLatestReq;
+    pub use crate::pb::obsidian::GetLatestResp;
     pub use crate::pb::obsidian::KeyspaceId;
     pub use crate::pb::obsidian::Range;
+    pub use crate::pb::obsidian::WriteReq;
+    pub use crate::pb::obsidian::WriteResp;
 }
 
 #[cfg(test)]
