@@ -50,17 +50,31 @@ impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for Fron
             .await
             .map_err(|e| tonic::Status::unknown(format!("{}", e)))?;
 
+        let mut values = Vec::with_capacity(keys.len());
         for key in keys {
-            let value = self.inner
+            let maybe_value = self
+                .inner
                 .get(ts, key.0, key.1)
                 .await
                 .map_err(|e| tonic::Status::unknown(e.to_string()))?;
+
+            values.push(maybe_value);
         }
 
-        todo!();
-        //Ok(tonic::Response::new(pb::GetLatestReq {
-
-        //}))
+        Ok(tonic::Response::new(pb::GetLatestResp {
+            snapshot_ts: ts.as_nanos(),
+            results: values
+                .into_iter()
+                .map(|maybe_value| match maybe_value {
+                    Some(value) => pb::GetResult {
+                        result_type: Some(pb::get_result::ResultType::Value(value)),
+                    },
+                    None => pb::GetResult {
+                        result_type: Some(pb::get_result::ResultType::Missing(())),
+                    },
+                })
+                .collect(),
+        }))
     }
 
     async fn write(

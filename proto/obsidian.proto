@@ -13,9 +13,16 @@ message GetLatestReq {
     repeated Key keys = 1;
 }
 
+message GetResult {
+    oneof result_type {
+        bytes value = 1;
+        google.protobuf.Empty missing = 2;
+    }
+}
+
 message GetLatestResp {
     uint64 snapshot_ts = 1;
-    repeated Record records = 2;
+    repeated GetResult results = 2;
 }
 
 message WriteReq {
@@ -48,7 +55,6 @@ message Mutation {
 
 message Record {
     Key key = 1;
-    uint64 ts = 2;
     bytes value = 3;
 }
 

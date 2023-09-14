@@ -35,11 +35,13 @@ mod pb {
     }
 
     pub use crate::pb::obsidian::bound;
+    pub use crate::pb::obsidian::get_result;
     pub use crate::pb::obsidian::obsidian_client;
     pub use crate::pb::obsidian::obsidian_server;
     pub use crate::pb::obsidian::Bound;
     pub use crate::pb::obsidian::GetLatestReq;
     pub use crate::pb::obsidian::GetLatestResp;
+    pub use crate::pb::obsidian::GetResult;
     pub use crate::pb::obsidian::KeyspaceId;
     pub use crate::pb::obsidian::Range;
     pub use crate::pb::obsidian::WriteReq;
