@@ -6,6 +6,8 @@ import "google/protobuf/empty.proto";
 
 service Obsidian {
     rpc GetLatest(GetLatestReq) returns (GetLatestResp);
+    //rpc Get(GetReq) returns (GetResp);
+    //rpc LatestSnapshot(LatestSnapshotReq) returns (LatestSnapshotResp);
     rpc Write(WriteReq) returns (WriteResp);
 }
 
@@ -26,7 +28,7 @@ message GetLatestResp {
 }
 
 message WriteReq {
-    repeated Precond preconds = 1;
+    repeated Precondition preconds = 1;
     repeated Mutation muts = 2;
 }
 
@@ -34,7 +36,7 @@ message WriteResp {
     uint64 write_ts = 1;
 }
 
-message Precond {
+message Precondition {
     message NotChangedSince {
         Key key = 1;
         uint64 ts = 2;

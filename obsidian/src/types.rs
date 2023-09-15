@@ -4,6 +4,7 @@ use std::fmt::Display;
 use std::time::Duration;
 use std::time::SystemTime;
 
+use anyhow::anyhow;
 use thiserror::Error;
 
 use crate::pb;
@@ -186,6 +187,29 @@ impl TryFrom<pb::KeyspaceId> for KeyspaceId {
     }
 }
 
+impl TryFrom<pb::Key> for (KeyspaceId, Vec<u8>) {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::Key) -> Result<Self, Self::Error> {
+        let keyspace_id = KeyspaceId::try_from(
+            value
+                .keyspace_id
+                .ok_or_else(|| anyhow!("missing keyspace_id"))?,
+        )?;
+
+        Ok((keyspace_id, value.bytes))
+    }
+}
+
+impl From<(KeyspaceId, Vec<u8>)> for pb::Key {
+    fn from((keyspace_id, bytes): (KeyspaceId, Vec<u8>)) -> Self {
+        Self {
+            keyspace_id: Some(keyspace_id.into()),
+            bytes,
+        }
+    }
+}
+
 #[derive(Eq, PartialEq, Clone)]
 pub struct Record {
     pub key: Vec<u8>,
@@ -275,6 +299,29 @@ impl Precondition {
         match self {
             Precondition::NotChangedSince(_, key, _) => &key,
         }
+    }
+}
+
+impl TryFrom<pb::Precondition> for Precondition {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::Precondition) -> Result<Self, Self::Error> {
+        match value.precond_type {
+            Some(pb::precondition::PrecondType::NotChangedSince(not_changed_since)) => {
+                let (keyspace_id, key_bytes): (KeyspaceId, Vec<u8>) = not_changed_since
+                    .key
+                    .ok_or_else(|| anyhow!("missing key"))?
+                    .try_into()?;
+                let ts = Timestamp::from_nanos(not_changed_since.ts);
+                Ok(Precondition::NotChangedSince(keyspace_id, key_bytes, ts))
+            }
+            None => return Err(anyhow!("missing precond_type on Precondition")),
+        }
+    }
+}
+impl From<Precondition> for pb::Precondition {
+    fn from(_: Precondition) -> Self {
+        todo!()
     }
 }
 
