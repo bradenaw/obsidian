@@ -1,19 +1,20 @@
-use std::collections::BTreeSet;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::iter;
 
 use async_trait::async_trait;
 
 use crate::obsidian::Obsidian;
 use crate::pb;
-use crate::types::KeyspaceId;
-use crate::types::Timestamp;
-use crate::types::ColoGroupId;
-use crate::types::Precondition;
-use crate::types::Mutation;
-use crate::types::WriteError;
-use crate::types::Direction;
-use crate::range::Range;
 use crate::range::Bound;
+use crate::range::Range;
+use crate::types::ColoGroupId;
+use crate::types::Direction;
+use crate::types::KeyspaceId;
+use crate::types::Mutation;
+use crate::types::Precondition;
+use crate::types::Timestamp;
+use crate::types::WriteError;
 
 pub struct FrontendClient {
     inner: pb::obsidian_client::ObsidianClient<tonic::transport::Channel>,
@@ -111,7 +112,7 @@ impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for Fron
             .inner
             .latest_snapshot(keys.clone())
             .await
-            .map_err(|e| tonic::Status::unknown(e.to_string()))?;
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
         let mut values = Vec::with_capacity(keys.len());
         for key in keys {
@@ -119,7 +120,7 @@ impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for Fron
                 .inner
                 .get(ts, key.0, key.1)
                 .await
-                .map_err(|e| tonic::Status::unknown(e.to_string()))?;
+                .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
             values.push(maybe_value);
         }
@@ -142,8 +143,53 @@ impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for Fron
 
     async fn write(
         &self,
-        request: tonic::Request<pb::WriteReq>,
+        req: tonic::Request<pb::WriteReq>,
     ) -> Result<tonic::Response<pb::WriteResp>, tonic::Status> {
-        todo!();
+        let req_inner = req.into_inner();
+
+        let preconds = req_inner
+            .preconds
+            .into_iter()
+            .map(|x| x.try_into())
+            .collect::<Result<Vec<Precondition>, _>>()
+            .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+        let keys = req_inner
+            .keys
+            .into_iter()
+            .map(|x| x.try_into())
+            .collect::<Result<Vec<(KeyspaceId, Vec<u8>)>, _>>()
+            .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+        let muts = req_inner
+            .muts
+            .into_iter()
+            .map(|x| x.try_into())
+            .collect::<Result<Vec<Mutation>, _>>()
+            .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+
+        let mut muts_map = BTreeMap::new();
+        if keys.len() != muts.len() {
+            return Err(tonic::Status::invalid_argument(
+                "keys and muts must have the same number of elements",
+            ));
+        }
+        for (key, m) in iter::zip(keys, muts) {
+            if muts_map.contains_key(&key) {
+                return Err(tonic::Status::invalid_argument(format!(
+                    "duplicate key {:?}",
+                    key
+                )));
+            }
+            muts_map.insert(key, m);
+        }
+
+        let ts = self
+            .inner
+            .write(preconds, muts_map)
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        Ok(tonic::Response::new(pb::WriteResp {
+            write_ts: ts.as_nanos(),
+        }))
     }
 }

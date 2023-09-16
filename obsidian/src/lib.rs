@@ -36,6 +36,7 @@ mod pb {
 
     pub use crate::pb::obsidian::bound;
     pub use crate::pb::obsidian::get_result;
+    pub use crate::pb::obsidian::mutation;
     pub use crate::pb::obsidian::obsidian_client;
     pub use crate::pb::obsidian::obsidian_server;
     pub use crate::pb::obsidian::precondition;

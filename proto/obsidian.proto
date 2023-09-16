@@ -29,6 +29,8 @@ message GetLatestResp {
 
 message WriteReq {
     repeated Precondition preconds = 1;
+    // TODO: put key into mutations
+    repeated Key keys = 3;
     repeated Mutation muts = 2;
 }
 
@@ -48,7 +50,6 @@ message Precondition {
 }
 
 message Mutation {
-    Key key = 1;
     oneof mutation_type {
         bytes put = 2;
         google.protobuf.Empty delete = 3;
