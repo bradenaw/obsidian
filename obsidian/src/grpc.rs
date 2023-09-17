@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::iter;
+use std::ops::Deref;
+use std::ops::DerefMut;
 
 use async_trait::async_trait;
 
@@ -17,7 +19,7 @@ use crate::types::Timestamp;
 use crate::types::WriteError;
 
 pub struct FrontendClient {
-    inner: pb::obsidian_client::ObsidianClient<tonic::transport::Channel>,
+    inner: Pool<pb::obsidian_client::ObsidianClient<tonic::transport::Channel>>,
 }
 
 #[async_trait]
@@ -54,7 +56,32 @@ impl Obsidian for FrontendClient {
         preconds: Vec<Precondition>,
         muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
     ) -> Result<Timestamp, WriteError> {
-        todo!()
+        let preconds_pb: Vec<_> = preconds.into_iter().map(pb::Precondition::from).collect();
+
+        let mut keys_pb = Vec::with_capacity(muts.len());
+        let mut muts_pb = Vec::with_capacity(muts.len());
+        for ((keyspace_id, key), m) in muts.into_iter() {
+            keys_pb.push(pb::Key::from((keyspace_id, key)));
+            muts_pb.push(pb::Mutation::from(m));
+        }
+
+        let resp = self
+            .inner
+            .acquire()
+            .await
+            .write(pb::WriteReq {
+                preconds: preconds_pb,
+                keys: keys_pb,
+                muts: muts_pb,
+            })
+            .await
+            // TODO: make a proper WriteError.
+            .map_err(anyhow::Error::from)?
+            .into_inner();
+
+        let write_ts = Timestamp::from_nanos(resp.write_ts);
+
+        Ok(write_ts)
     }
 
     async fn create_colo_group(
@@ -191,5 +218,68 @@ impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for Fron
         Ok(tonic::Response::new(pb::WriteResp {
             write_ts: ts.as_nanos(),
         }))
+    }
+}
+
+struct Pool<T> {
+    free: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<T>>,
+    ret: tokio::sync::mpsc::Sender<T>,
+}
+
+impl<T: Clone> Pool<T> {
+    fn new(n: usize, t: &T) -> Self {
+        let (ret, free) = tokio::sync::mpsc::channel(n);
+        for _ in 0..n {
+            ret.try_send(t.clone());
+        }
+
+        Pool {
+            free: tokio::sync::Mutex::new(free),
+            ret,
+        }
+    }
+
+    async fn acquire(&self) -> PooledItem<T> {
+        // unwrap is appropriate here because recv() only returns None if the sender has been
+        // dropped, but the sender lives in self and we have &self here.
+        let item = self.free.lock().await.recv().await.unwrap();
+
+        PooledItem {
+            item: Some(item),
+            ret: self.ret.clone(),
+        }
+    }
+}
+
+struct PooledItem<T> {
+    item: Option<T>,
+    ret: tokio::sync::mpsc::Sender<T>,
+}
+
+impl<T> DerefMut for PooledItem<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // unwrap is appropriate here because item is only None once self is dropped.
+        self.item.as_mut().unwrap()
+    }
+}
+
+impl<T> Deref for PooledItem<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        // unwrap is appropriate here because item is only None once self is dropped.
+        self.item.as_ref().unwrap()
+    }
+}
+
+impl<T> Drop for PooledItem<T> {
+    fn drop(&mut self) {
+        // unwrap is appropriate here because this is the only way that item becomes None and
+        // it only happens once.
+        //
+        // try_send will never fail if the pool is still alive because the sender is guaranteed to
+        // have capacity based on the construction of the Pool. We can get an error here only if
+        // the pool is already gone.
+        self.ret.try_send(self.item.take().unwrap());
     }
 }
