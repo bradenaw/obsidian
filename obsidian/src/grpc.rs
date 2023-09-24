@@ -18,11 +18,11 @@ use crate::types::Precondition;
 use crate::types::Timestamp;
 use crate::types::WriteError;
 
-pub struct FrontendClient {
+pub struct ObsidianClient {
     inner: Pool<pb::obsidian_client::ObsidianClient<tonic::transport::Channel>>,
 }
 
-impl FrontendClient {
+impl ObsidianClient {
     fn new(inner: &pb::obsidian_client::ObsidianClient<tonic::transport::Channel>) -> Self {
         Self {
             inner: Pool::new(32, inner),
@@ -31,7 +31,7 @@ impl FrontendClient {
 }
 
 #[async_trait]
-impl Obsidian for FrontendClient {
+impl Obsidian for ObsidianClient {
     async fn get(
         &self,
         _ts: Timestamp,
@@ -115,18 +115,18 @@ impl Obsidian for FrontendClient {
     }
 }
 
-pub struct FrontendServer<O> {
+pub struct ObsidianServer<O> {
     inner: O,
 }
 
-impl<O> FrontendServer<O> {
+impl<O> ObsidianServer<O> {
     fn new(inner: O) -> Self {
         Self { inner }
     }
 }
 
 #[async_trait]
-impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for FrontendServer<O> {
+impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for ObsidianServer<O> {
     async fn get_latest(
         &self,
         req: tonic::Request<pb::GetLatestReq>,
@@ -332,23 +332,26 @@ mod tests {
         let (shutdown, on_shutdown) = tokio::sync::oneshot::channel::<()>();
         let listener = tokio::net::TcpListener::bind("[::1]:0").await?;
         let addr = listener.local_addr()?;
-        // TODO: remove unwrap
-        let incoming =
-            tonic::transport::server::TcpIncoming::from_listener(listener, true, None).unwrap();
         let serve = tonic::transport::Server::builder()
             .add_service(pb::obsidian_server::ObsidianServer::new(
-                super::FrontendServer::new(obs),
+                super::ObsidianServer::new(obs),
             ))
-            .serve_with_incoming_shutdown(incoming, on_shutdown.map(|_| ()));
+            .serve_with_incoming_shutdown(
+                // TODO: remove unwrap
+                tonic::transport::server::TcpIncoming::from_listener(listener, true, None).unwrap(),
+                on_shutdown.map(|_| ()),
+            );
 
         tokio::spawn(async move {
             serve.await.expect("got error serving");
         });
 
-        let raw_client =
-            pb::obsidian_client::ObsidianClient::connect("http://".to_string() + &addr.to_string())
-                .await?;
-        let client = super::FrontendClient::new(&raw_client);
+        let client = super::ObsidianClient::new(
+            &pb::obsidian_client::ObsidianClient::connect(
+                "http://".to_string() + &addr.to_string(),
+            )
+            .await?,
+        );
 
         let key = (KeyspaceId(ColoGroupId(1), 1), b"abc".to_vec());
 
