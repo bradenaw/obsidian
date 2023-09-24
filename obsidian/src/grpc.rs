@@ -22,6 +22,14 @@ pub struct FrontendClient {
     inner: Pool<pb::obsidian_client::ObsidianClient<tonic::transport::Channel>>,
 }
 
+impl FrontendClient {
+    fn new(inner: &pb::obsidian_client::ObsidianClient<tonic::transport::Channel>) -> Self {
+        Self {
+            inner: Pool::new(32, inner),
+        }
+    }
+}
+
 #[async_trait]
 impl Obsidian for FrontendClient {
     async fn get(
@@ -48,7 +56,17 @@ impl Obsidian for FrontendClient {
         &self,
         keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
     ) -> anyhow::Result<Timestamp> {
-        todo!()
+        let resp = self
+            .inner
+            .acquire()
+            .await
+            .get_latest(pb::GetLatestReq {
+                keys: keys.into_iter().map(pb::Key::from).collect(),
+            })
+            .await?
+            .into_inner();
+
+        Ok(Timestamp::from_nanos(resp.snapshot_ts))
     }
 
     async fn write(
@@ -99,6 +117,12 @@ impl Obsidian for FrontendClient {
 
 pub struct FrontendServer<O> {
     inner: O,
+}
+
+impl<O> FrontendServer<O> {
+    fn new(inner: O) -> Self {
+        Self { inner }
+    }
 }
 
 #[async_trait]
@@ -230,7 +254,8 @@ impl<T: Clone> Pool<T> {
     fn new(n: usize, t: &T) -> Self {
         let (ret, free) = tokio::sync::mpsc::channel(n);
         for _ in 0..n {
-            ret.try_send(t.clone());
+            ret.try_send(t.clone())
+                .expect("channel should have capacity by construction");
         }
 
         Pool {
@@ -279,7 +304,65 @@ impl<T> Drop for PooledItem<T> {
         //
         // try_send will never fail if the pool is still alive because the sender is guaranteed to
         // have capacity based on the construction of the Pool. We can get an error here only if
-        // the pool is already gone.
-        self.ret.try_send(self.item.take().unwrap());
+        // the pool is already gone, and so we don't care.
+        _ = self.ret.try_send(self.item.take().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::collections::BTreeSet;
+
+    use futures::FutureExt;
+
+    use crate::obsidian::Obsidian;
+    use crate::pb;
+    use crate::test::new_for_test;
+    use crate::types::ColoGroupId;
+    use crate::types::KeyspaceId;
+    use crate::types::Mutation;
+
+    #[tokio::test]
+    async fn test_write() -> anyhow::Result<()> {
+        let obs = new_for_test(1).await?;
+        obs.create_colo_group(ColoGroupId(1), vec![] /*splits*/).await?;
+
+        let (shutdown, on_shutdown) = tokio::sync::oneshot::channel::<()>();
+        let addr = "[::1]:5051";
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        // TODO: remove unwrap
+        let incoming =
+            tonic::transport::server::TcpIncoming::from_listener(listener, true, None).unwrap();
+        let serve = tonic::transport::Server::builder()
+            .add_service(pb::obsidian_server::ObsidianServer::new(
+                super::FrontendServer::new(obs),
+            ))
+            .serve_with_incoming_shutdown(incoming, on_shutdown.map(|_| ()));
+
+        tokio::spawn(async move {
+            serve.await.expect("got error serving");
+        });
+
+        let raw_client =
+            pb::obsidian_client::ObsidianClient::connect("http://".to_string() + addr).await?;
+        let client = super::FrontendClient::new(&raw_client);
+
+        let key = (KeyspaceId(ColoGroupId(1), 1), b"abc".to_vec());
+
+        let write_ts = client
+            .write(
+                vec![],
+                BTreeMap::from([(key.clone(), Mutation::Put(b"def".to_vec()))]),
+            )
+            .await?;
+
+        let snapshot_ts = client.latest_snapshot(BTreeSet::from([key])).await?;
+
+        assert_eq!(write_ts, snapshot_ts);
+
+        _ = shutdown.send(());
+
+        Ok(())
     }
 }
