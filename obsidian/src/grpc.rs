@@ -34,20 +34,20 @@ impl FrontendClient {
 impl Obsidian for FrontendClient {
     async fn get(
         &self,
-        ts: Timestamp,
-        keyspace_id: KeyspaceId,
-        key: Vec<u8>,
+        _ts: Timestamp,
+        _keyspace_id: KeyspaceId,
+        _key: Vec<u8>,
     ) -> anyhow::Result<Option<Vec<u8>>> {
         todo!()
     }
 
     async fn scan_page(
         &self,
-        ts: Timestamp,
-        keyspace_id: KeyspaceId,
-        range: Range<&[u8]>,
-        direction: Direction,
-        limit: usize,
+        _ts: Timestamp,
+        _keyspace_id: KeyspaceId,
+        _range: Range<&[u8]>,
+        _direction: Direction,
+        _limit: usize,
     ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)> {
         todo!()
     }
@@ -104,13 +104,13 @@ impl Obsidian for FrontendClient {
 
     async fn create_colo_group(
         &self,
-        colo_group_id: ColoGroupId,
-        initial_splits: Vec<Bound<Vec<u8>>>,
+        _colo_group_id: ColoGroupId,
+        _initial_splits: Vec<Bound<Vec<u8>>>,
     ) -> anyhow::Result<()> {
         todo!()
     }
 
-    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+    async fn create_keyspace(&self, _keyspace_id: KeyspaceId) -> anyhow::Result<()> {
         todo!()
     }
 }
@@ -326,11 +326,12 @@ mod tests {
     #[tokio::test]
     async fn test_write() -> anyhow::Result<()> {
         let obs = new_for_test(1).await?;
-        obs.create_colo_group(ColoGroupId(1), vec![] /*splits*/).await?;
+        obs.create_colo_group(ColoGroupId(1), vec![] /*splits*/)
+            .await?;
 
         let (shutdown, on_shutdown) = tokio::sync::oneshot::channel::<()>();
-        let addr = "[::1]:5051";
-        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await?;
+        let addr = listener.local_addr()?;
         // TODO: remove unwrap
         let incoming =
             tonic::transport::server::TcpIncoming::from_listener(listener, true, None).unwrap();
@@ -345,7 +346,8 @@ mod tests {
         });
 
         let raw_client =
-            pb::obsidian_client::ObsidianClient::connect("http://".to_string() + addr).await?;
+            pb::obsidian_client::ObsidianClient::connect("http://".to_string() + &addr.to_string())
+                .await?;
         let client = super::FrontendClient::new(&raw_client);
 
         let key = (KeyspaceId(ColoGroupId(1), 1), b"abc".to_vec());
