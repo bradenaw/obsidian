@@ -314,7 +314,11 @@ mod tests {
     use std::collections::BTreeMap;
     use std::collections::BTreeSet;
 
+    use anyhow::anyhow;
     use futures::FutureExt;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tonic::transport::server::TcpIncoming;
 
     use crate::obsidian::Obsidian;
     use crate::pb;
@@ -329,16 +333,19 @@ mod tests {
         obs.create_colo_group(ColoGroupId(1), vec![] /*splits*/)
             .await?;
 
-        let (shutdown, on_shutdown) = tokio::sync::oneshot::channel::<()>();
-        let listener = tokio::net::TcpListener::bind("[::1]:0").await?;
+        let (shutdown, on_shutdown) = oneshot::channel::<()>();
+        let listener = TcpListener::bind("[::1]:0").await?;
         let addr = listener.local_addr()?;
         let serve = tonic::transport::Server::builder()
             .add_service(pb::obsidian_server::ObsidianServer::new(
                 super::ObsidianServer::new(obs),
             ))
             .serve_with_incoming_shutdown(
-                // TODO: remove unwrap
-                tonic::transport::server::TcpIncoming::from_listener(listener, true, None).unwrap(),
+                TcpIncoming::from_listener(
+                    listener, true, /*nodelay*/
+                    None, /*keepalive*/
+                )
+                .map_err(|e| anyhow!("{}", e))?,
                 on_shutdown.map(|_| ()),
             );
 
