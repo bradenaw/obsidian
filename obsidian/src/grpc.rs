@@ -185,7 +185,7 @@ impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for Obsi
                         result_type: Some(pb::get_result::ResultType::Value(value)),
                     },
                     None => pb::GetResult {
-                        result_type: Some(pb::get_result::ResultType::Missing(())),
+                        result_type: Some(pb::get_result::ResultType::NotFound(())),
                     },
                 })
                 .collect(),
