@@ -4,6 +4,7 @@ use std::iter;
 use std::ops::Deref;
 use std::ops::DerefMut;
 
+use anyhow::anyhow;
 use async_trait::async_trait;
 
 use crate::obsidian::Obsidian;
@@ -43,13 +44,51 @@ impl Obsidian for ObsidianClient {
 
     async fn scan_page(
         &self,
-        _ts: Timestamp,
-        _keyspace_id: KeyspaceId,
-        _range: Range<&[u8]>,
-        _direction: Direction,
-        _limit: usize,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        range: Range<&[u8]>,
+        direction: Direction,
+        limit: usize,
     ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)> {
-        todo!()
+        let resp = self
+            .inner
+            .acquire()
+            .await
+            .scan(pb::ScanReq {
+                snapshot_ts: ts.as_nanos(),
+                keyspace_id: Some(keyspace_id.into()),
+                range: Some(range.to_vec().into()),
+                direction: pb::Direction::from(direction).into(),
+                limit: u64::try_from(limit)?,
+            })
+            .await?
+            .into_inner();
+
+        let results: Vec<(Vec<u8>, Timestamp, Vec<u8>)> = resp
+            .records
+            .into_iter()
+            .map(|r| {
+                Ok((
+                    r.key
+                        .ok_or_else(|| anyhow!("invalid response: record missing key"))?
+                        .bytes,
+                    Timestamp::from_nanos(r.ts),
+                    r.value,
+                ))
+            })
+            .collect::<anyhow::Result<Vec<(Vec<u8>, Timestamp, Vec<u8>)>>>()?;
+
+        let continue_range = Range::try_from(
+            resp.remaining
+                .ok_or_else(|| anyhow!("invalid response: missing continue_range"))?,
+        )?;
+        let maybe_continue_range = if continue_range.is_empty() {
+            None
+        } else {
+            Some(continue_range)
+        };
+
+        Ok((results, maybe_continue_range))
     }
 
     async fn latest_snapshot(
@@ -192,6 +231,44 @@ impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for Obsi
         }))
     }
 
+    async fn scan(
+        &self,
+        req: tonic::Request<pb::ScanReq>,
+    ) -> Result<tonic::Response<pb::ScanResp>, tonic::Status> {
+        let req_inner = req.into_inner();
+
+        let snapshot_ts = Timestamp::from_nanos(req_inner.snapshot_ts);
+        let keyspace_id: KeyspaceId = required("keyspace_id", req_inner.keyspace_id)?;
+        let range: Range<Vec<u8>> = required("range", req_inner.range)?;
+        let direction: Direction = pb::Direction::from_i32(req_inner.direction)
+            .ok_or_else(|| tonic::Status::invalid_argument("unknown direction"))?
+            .try_into()
+            .map_err(invalid_argument)?;
+        let limit = usize::try_from(req_inner.limit)
+            .map_err(|_| tonic::Status::invalid_argument("invalid limit"))?;
+
+        let (records, maybe_continue_range) = self
+            .inner
+            .scan_page(snapshot_ts, keyspace_id, range.borrow(), direction, limit)
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        Ok(tonic::Response::new(pb::ScanResp {
+            records: records
+                .into_iter()
+                .map(|(key, ts, value)| pb::Record {
+                    key: Some(pb::Key {
+                        keyspace_id: Some(keyspace_id.into()),
+                        bytes: key,
+                    }),
+                    ts: ts.as_nanos(),
+                    value,
+                })
+                .collect(),
+            remaining: maybe_continue_range.map(|continue_range| continue_range.into()),
+        }))
+    }
+
     async fn write(
         &self,
         req: tonic::Request<pb::WriteReq>,
@@ -203,19 +280,19 @@ impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for Obsi
             .into_iter()
             .map(|x| x.try_into())
             .collect::<Result<Vec<Precondition>, _>>()
-            .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+            .map_err(invalid_argument)?;
         let keys = req_inner
             .keys
             .into_iter()
             .map(|x| x.try_into())
             .collect::<Result<Vec<(KeyspaceId, Vec<u8>)>, _>>()
-            .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+            .map_err(invalid_argument)?;
         let muts = req_inner
             .muts
             .into_iter()
             .map(|x| x.try_into())
             .collect::<Result<Vec<Mutation>, _>>()
-            .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+            .map_err(invalid_argument)?;
 
         let mut muts_map = BTreeMap::new();
         if keys.len() != muts.len() {
@@ -243,6 +320,21 @@ impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for Obsi
             write_ts: ts.as_nanos(),
         }))
     }
+}
+
+fn required<T, U>(name: &'static str, v: Option<T>) -> Result<U, tonic::Status>
+where
+    U: TryFrom<T, Error = anyhow::Error>,
+{
+    v.ok_or_else(|| tonic::Status::invalid_argument(format!("missing {}", name)))?
+        .try_into()
+        .map_err(|e: anyhow::Error| {
+            tonic::Status::invalid_argument(format!("couldn't parse {}: {}", name, e.to_string()))
+        })
+}
+
+fn invalid_argument(e: anyhow::Error) -> tonic::Status {
+    tonic::Status::invalid_argument(e.to_string())
 }
 
 struct Pool<T> {

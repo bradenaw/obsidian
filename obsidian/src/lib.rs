@@ -41,6 +41,7 @@ mod pb {
     pub use crate::pb::obsidian::obsidian_server;
     pub use crate::pb::obsidian::precondition;
     pub use crate::pb::obsidian::Bound;
+    pub use crate::pb::obsidian::Direction;
     pub use crate::pb::obsidian::GetLatestReq;
     pub use crate::pb::obsidian::GetLatestResp;
     pub use crate::pb::obsidian::GetResult;
@@ -49,6 +50,9 @@ mod pb {
     pub use crate::pb::obsidian::Mutation;
     pub use crate::pb::obsidian::Precondition;
     pub use crate::pb::obsidian::Range;
+    pub use crate::pb::obsidian::Record;
+    pub use crate::pb::obsidian::ScanReq;
+    pub use crate::pb::obsidian::ScanResp;
     pub use crate::pb::obsidian::WriteReq;
     pub use crate::pb::obsidian::WriteResp;
 }

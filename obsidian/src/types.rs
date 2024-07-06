@@ -284,6 +284,27 @@ impl Debug for Direction {
     }
 }
 
+impl From<Direction> for pb::Direction {
+    fn from(value: Direction) -> Self {
+        match value {
+            Direction::Asc => pb::Direction::Asc,
+            Direction::Desc => pb::Direction::Desc,
+        }
+    }
+}
+
+impl TryFrom<pb::Direction> for Direction {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::Direction) -> Result<Self, Self::Error> {
+        Ok(match value {
+            pb::Direction::Unknown => return Err(anyhow!("unknown direction")),
+            pb::Direction::Asc => Direction::Asc,
+            pb::Direction::Desc => Direction::Desc,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Precondition {
     NotChangedSince(KeyspaceId, Vec<u8>, Timestamp),

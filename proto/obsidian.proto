@@ -6,9 +6,13 @@ import "google/protobuf/empty.proto";
 
 service Obsidian {
     rpc GetLatest(GetLatestReq) returns (GetLatestResp);
+    rpc Scan(ScanReq) returns (ScanResp);
     //rpc Get(GetReq) returns (GetResp);
     //rpc LatestSnapshot(LatestSnapshotReq) returns (LatestSnapshotResp);
     rpc Write(WriteReq) returns (WriteResp);
+
+    //rpc CreateColoGroup(CreateColoGroupReq) returns (CreateColoGroupResp);
+    //rpc CreateKeyspace(CreateKeyspaceReq) returns (CreateKeyspaceResp);
 }
 
 message GetLatestReq {
@@ -25,6 +29,19 @@ message GetResult {
 message GetLatestResp {
     uint64 snapshot_ts = 1;
     repeated GetResult results = 2;
+}
+
+message ScanReq {
+    uint64 snapshot_ts = 1;
+    KeyspaceId keyspace_id = 2;
+    Range range = 3;
+    Direction direction = 4;
+    uint64 limit = 5;
+}
+
+message ScanResp {
+    repeated Record records = 1;
+    Range remaining = 2;
 }
 
 message WriteReq {
@@ -58,6 +75,7 @@ message Mutation {
 
 message Record {
     Key key = 1;
+    uint64 ts = 2;
     bytes value = 3;
 }
 
@@ -79,6 +97,12 @@ message Bound {
         bytes after_prefix = 4;
         google.protobuf.Empty after_all = 5;
     }
+}
+
+enum Direction {
+    DIRECTION_UNKNOWN = 0;
+    DIRECTION_ASC = 1;
+    DIRECTION_DESC = 2;
 }
 
 message KeyspaceId {
