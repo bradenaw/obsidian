@@ -243,7 +243,7 @@ impl<R: AsyncReadExactAt> Run<R> {
         }
     }
 
-    async fn block_for_key(&self, k: &[u8]) -> anyhow::Result<Option<Block<R>>> {
+    async fn block_for_key(&self, k: &[u8]) -> anyhow::Result<Option<Block<'_, R>>> {
         let block_header_idx = match self.index.search(k) {
             Ok(idx) => idx,
             Err(idx) => {

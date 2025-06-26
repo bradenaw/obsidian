@@ -523,9 +523,7 @@ impl<K: Ord + HasPrefix + Clone> RangeSet<K> {
             .next_back()
         {
             Some(next_below) => {
-                if !range.intersection(next_below.borrow()).is_empty()
-                    || range.adjacent(next_below.borrow())
-                {
+                if !range.intersection(next_below).is_empty() || range.adjacent(next_below) {
                     result.push(next_below.clone().into());
                 }
             }
