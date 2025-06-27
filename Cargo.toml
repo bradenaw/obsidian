@@ -2,4 +2,5 @@
 
 members = [
     "obsidian",
+    "page_cache",
 ]
