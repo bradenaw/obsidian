@@ -250,7 +250,7 @@ impl Segment {
         unsafe {
             self.items[idx].replace(val);
         }
-        assert_eq!(self.ref_counts[idx].fetch_add(1, Ordering::SeqCst), 0);
+        self.ref_counts[idx].fetch_add(1, Ordering::SeqCst);
         Some(Handle {
             parent: self.clone(),
             idx: idx,
@@ -270,10 +270,19 @@ struct SegmentStats {
     capacity: usize,
 }
 
-#[derive(Clone)]
 pub struct Handle {
     parent: Arc<Segment>,
     idx: usize,
+}
+
+impl Clone for Handle {
+    fn clone(&self) -> Self {
+        self.parent.ref_counts[self.idx].fetch_add(1, Ordering::SeqCst);
+        Self {
+            parent: self.parent.clone(),
+            idx: self.idx,
+        }
+    }
 }
 
 impl Handle {
@@ -351,7 +360,7 @@ mod tests {
         let start = Instant::now();
 
         const WRITERS: usize = 8;
-        const READERS: usize = 1;
+        const READERS: usize = 8;
         const DURATION: Duration = Duration::from_secs(3);
 
         let counters = Arc::new({
@@ -417,26 +426,21 @@ mod tests {
 
     fn make_page() -> Page {
         let mut page = [0u8; PAGE_SIZE];
-        //rand::fill(&mut page);
+        rand::fill(&mut page);
 
-        //let mut h = Sha256::new();
-        //h.update(&page[0..PAGE_SIZE - 32]);
-        //let hash = h.finalize();
-        //page[PAGE_SIZE - 32..].copy_from_slice(&hash);
-
-        let x = rand::random_range(0..256);
-        page.fill(x as u8);
+        let mut h = Sha256::new();
+        h.update(&page[0..PAGE_SIZE - 32]);
+        let hash = h.finalize();
+        page[PAGE_SIZE - 32..].copy_from_slice(&hash);
 
         page
     }
 
     fn check_page(page: &Page) {
-        let x = page[0];
-        assert_eq!(page, &[x; PAGE_SIZE]);
-        //let mut h = Sha256::new();
-        //h.update(&page[0..PAGE_SIZE - 32]);
-        //let hash = h.finalize();
+        let mut h = Sha256::new();
+        h.update(&page[0..PAGE_SIZE - 32]);
+        let hash = h.finalize();
 
-        //assert_eq!(&page[PAGE_SIZE - 32..], hash.as_slice());
+        assert_eq!(&page[PAGE_SIZE - 32..], hash.as_slice());
     }
 }
