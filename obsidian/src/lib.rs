@@ -1,9 +1,6 @@
 #![allow(dead_code)]
 #![feature(assert_matches)]
-#![feature(build_hasher_simple_hash_one)]
-#![feature(generators)]
-#![feature(is_sorted)]
-#![feature(map_first_last)]
+#![feature(coroutines)]
 
 mod grpc;
 mod lock_mgr;
