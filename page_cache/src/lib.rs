@@ -39,8 +39,10 @@ impl<K: Eq + Hash + Clone> PageCache<K> {
         }
     }
 
-    pub fn insert(&self, k: K, page: Page) {
-        self.cache.insert(k, self.slab.put(page));
+    pub fn insert(&self, k: K, page: Page) -> Handle {
+        let handle = self.slab.put(page);
+        self.cache.insert(k, handle.clone());
+        handle
     }
 
     pub fn get(&self, k: &K) -> Option<Handle> {
@@ -89,13 +91,14 @@ impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
 
 struct CacheShard<K, V> {
     m: HashMap<K, usize>,
-    entries: Vec<CacheEntry<K, V>>,
+    entries: Vec<Option<CacheEntry<K, V>>>,
     hand: usize,
     capacity: usize,
 }
 
 struct CacheEntry<K, V> {
-    kv: Option<(K, V)>,
+    k: K,
+    v: V,
     touched: AtomicBool,
 }
 
@@ -112,49 +115,59 @@ impl<K: Eq + Hash + Clone, V: Clone> CacheShard<K, V> {
     fn insert(&mut self, k: K, v: V) {
         if let Some(idx) = self.m.get(&k) {
             let entry = &mut self.entries[*idx];
-            entry.kv = Some((k, v));
-            entry.touched.store(true, Ordering::SeqCst);
+            entry.replace(CacheEntry {
+                k,
+                v,
+                touched: AtomicBool::new(true),
+            });
             return;
         }
 
         if self.m.len() < self.capacity {
-            self.entries.push(CacheEntry {
-                kv: Some((k.clone(), v)),
+            self.entries.push(Some(CacheEntry {
+                k: k.clone(),
+                v,
                 touched: AtomicBool::new(true),
-            });
+            }));
             self.m.insert(k, self.entries.len() - 1);
             return;
         }
 
         loop {
             let idx = self.hand;
-            let entry = &mut self.entries[idx];
+            let maybe_entry = &mut self.entries[idx];
             self.hand = (self.hand + 1) % self.m.len();
-            if !entry.touched.swap(false, Ordering::SeqCst) {
-                if let Some((k, _)) = &entry.kv {
-                    self.m.remove(&k);
+            if let Some(entry) = maybe_entry {
+                if entry.touched.swap(false, Ordering::SeqCst) {
+                    continue;
                 }
-
-                self.m.insert(k.clone(), idx);
-                entry.kv = Some((k, v));
-                entry.touched.store(true, Ordering::SeqCst);
-
-                return;
             }
+            if let Some(prev_entry) = maybe_entry.replace(CacheEntry {
+                k: k.clone(),
+                v: v,
+                touched: AtomicBool::new(true),
+            }) {
+                self.m.remove(&prev_entry.k);
+            }
+            self.m.insert(k, idx);
+            return;
         }
     }
 
     fn get(&self, k: &K) -> Option<V> {
         let idx = self.m.get(k)?;
-        let entry = &self.entries[*idx];
-        entry.touched.store(true, Ordering::SeqCst);
-        Some(entry.kv.as_ref()?.1.clone())
+        match &self.entries[*idx] {
+            Some(entry) => {
+                entry.touched.store(true, Ordering::SeqCst);
+                Some(entry.v.clone())
+            }
+            None => return None,
+        }
     }
 
     fn remove(&mut self, k: &K) {
         if let Some(idx) = self.m.remove(k) {
-            self.entries[idx].kv = None;
-            self.entries[idx].touched.store(false, Ordering::SeqCst);
+            self.entries[idx] = None;
         }
     }
 }
