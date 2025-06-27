@@ -425,32 +425,7 @@ mod tests {
         obs.create_colo_group(ColoGroupId(1), vec![] /*splits*/)
             .await?;
 
-        let (shutdown, on_shutdown) = oneshot::channel::<()>();
-        let listener = TcpListener::bind("[::1]:0").await?;
-        let addr = listener.local_addr()?;
-        let serve = tonic::transport::Server::builder()
-            .add_service(pb::obsidian_server::ObsidianServer::new(
-                super::ObsidianServer::new(obs),
-            ))
-            .serve_with_incoming_shutdown(
-                TcpIncoming::from_listener(
-                    listener, true, /*nodelay*/
-                    None, /*keepalive*/
-                )
-                .map_err(|e| anyhow!("{}", e))?,
-                on_shutdown.map(|_| ()),
-            );
-
-        tokio::spawn(async move {
-            serve.await.expect("got error serving");
-        });
-
-        let client = super::ObsidianClient::new(
-            &pb::obsidian_client::ObsidianClient::connect(
-                "http://".to_string() + &addr.to_string(),
-            )
-            .await?,
-        );
+        let (client, shutdown_server) = spawn_server(obs).await?;
 
         let key = (KeyspaceId(ColoGroupId(1), 1), b"abc".to_vec());
 
@@ -465,8 +440,42 @@ mod tests {
 
         assert_eq!(write_ts, snapshot_ts);
 
-        _ = shutdown.send(());
+        shutdown_server();
 
         Ok(())
+    }
+
+    async fn spawn_server<O: Obsidian + Send + Sync + 'static>(obs: O) -> anyhow::Result<(super::ObsidianClient, impl FnOnce())> {
+        let (shutdown, on_shutdown) = oneshot::channel::<()>();
+        let listener = TcpListener::bind("[::1]:0").await?;
+        let addr = listener.local_addr()?;
+        let server = super::ObsidianServer::new(obs);
+        let serve = tonic::transport::Server::builder()
+            .add_service(pb::obsidian_server::ObsidianServer::new(
+                server,
+            ))
+            .serve_with_incoming_shutdown(
+                TcpIncoming::from_listener(
+                    listener, true, /*nodelay*/
+                    None, /*keepalive*/
+                )
+                .map_err(|e| anyhow!("{}", e))?,
+                on_shutdown.map(|_| ()),
+            );
+
+        tokio::spawn(serve);
+
+        let client = super::ObsidianClient::new(
+            &pb::obsidian_client::ObsidianClient::connect(
+                "http://".to_string() + &addr.to_string(),
+            )
+            .await?,
+        );
+
+        Ok((client, || {
+            let _ = shutdown.send(());
+            // TODO: Not clear if there's a way to find out that the serve actually stopped and
+            // unbound the port. The `serve` future appears not to end.
+        }))
     }
 }
