@@ -1878,7 +1878,6 @@ mod test {
                     assert_eq!(
                         results,
                         expected
-                            .clone()
                             .into_iter()
                             .map(|(ts, is_tombstone)| {
                                 let record = lsm_diagram_record(key, *ts, *is_tombstone);
