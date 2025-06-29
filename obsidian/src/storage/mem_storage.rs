@@ -6,18 +6,7 @@ use async_trait::async_trait;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 
-use crate::util::AsyncReadExactAt;
-
-#[async_trait]
-pub(crate) trait Storage {
-    type R: AsyncReadExactAt;
-
-    async fn put<W: AsyncRead + Send>(&self, name: &str, w: W) -> anyhow::Result<()>;
-
-    async fn delete(&self, name: &str) -> anyhow::Result<()>;
-
-    async fn get(&self, name: &str) -> anyhow::Result<Self::R>;
-}
+use crate::storage::Storage;
 
 pub(crate) struct MemStorage {
     inner: Mutex<MemStorageInner>,
@@ -28,7 +17,7 @@ struct MemStorageInner {
 }
 
 impl MemStorage {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             inner: Mutex::new(MemStorageInner {
                 files: HashMap::new(),
