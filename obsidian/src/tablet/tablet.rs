@@ -1384,6 +1384,7 @@ impl Encode for TxOutcomeRecord {
         }
     }
 
+    // TODO: replace with proto
     fn encode(&self, w: &mut Vec<u8>) {
         match self {
             TxOutcomeRecord::Aborted => w.push(0),
