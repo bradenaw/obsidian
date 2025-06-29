@@ -35,11 +35,34 @@ impl ObsidianClient {
 impl Obsidian for ObsidianClient {
     async fn get(
         &self,
-        _ts: Timestamp,
-        _keyspace_id: KeyspaceId,
-        _key: Vec<u8>,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        key: Vec<u8>,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        todo!()
+        let resp = self
+            .inner
+            .acquire()
+            .await
+            .get(pb::GetReq {
+                snapshot_ts: ts.as_nanos(),
+                keys: Vec::from([pb::Key::from((keyspace_id, key))]),
+            })
+            .await?
+            .into_inner();
+
+        let mut results: Vec<Option<Vec<u8>>> = resp
+            .results
+            .into_iter()
+            .map(|result_pb| match result_pb.result_type {
+                Some(pb::get_result::ResultType::Value(v)) => Ok(Some(v)),
+                Some(pb::get_result::ResultType::NotFound(())) => Ok(None),
+                None => Err(anyhow!("invalid response: GetResult.result_type missing")),
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        Ok(results
+            .pop()
+            .ok_or_else(|| anyhow!("invalid response: missing GetResp.results"))?)
     }
 
     async fn scan_page(
@@ -143,14 +166,33 @@ impl Obsidian for ObsidianClient {
 
     async fn create_colo_group(
         &self,
-        _colo_group_id: ColoGroupId,
-        _initial_splits: Vec<Bound<Vec<u8>>>,
+        colo_group_id: ColoGroupId,
+        initial_splits: Vec<Bound<Vec<u8>>>,
     ) -> anyhow::Result<()> {
-        todo!()
+        self.inner
+            .acquire()
+            .await
+            .create_colo_group(pb::CreateColoGroupReq {
+                colo_group_id: colo_group_id.0,
+                initial_splits: initial_splits.into_iter().map(Bound::into).collect(),
+            })
+            .await
+            .map_err(anyhow::Error::from)?;
+
+        Ok(())
     }
 
-    async fn create_keyspace(&self, _keyspace_id: KeyspaceId) -> anyhow::Result<()> {
-        todo!()
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        self.inner
+            .acquire()
+            .await
+            .create_keyspace(pb::CreateKeyspaceReq {
+                keyspace_id: Some(keyspace_id.into()),
+            })
+            .await
+            .map_err(anyhow::Error::from)?;
+
+        Ok(())
     }
 }
 
@@ -166,37 +208,47 @@ impl<O> ObsidianServer<O> {
 
 #[async_trait]
 impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for ObsidianServer<O> {
+    async fn get(
+        &self,
+        req: tonic::Request<pb::GetReq>,
+    ) -> Result<tonic::Response<pb::GetResp>, tonic::Status> {
+        let req_inner = req.into_inner();
+
+        let (keys, key_idxs) = key_set_from_pb(req_inner.keys).map_err(invalid_argument)?;
+        let ts = Timestamp::from_nanos(req_inner.snapshot_ts);
+
+        if keys.len() != 1 {
+            return Err(tonic::Status::invalid_argument(
+                "TODO: Get() only allows one key",
+            ));
+        }
+
+        let mut values = Vec::with_capacity(keys.len());
+        for _ in &keys {
+            values.push(None);
+        }
+        for (keyspace_id, key) in keys {
+            let maybe_value = self
+                .inner
+                .get(ts, keyspace_id, key.clone())
+                .await
+                .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+            values[key_idxs[&(keyspace_id, key)]] = maybe_value;
+        }
+
+        Ok(tonic::Response::new(pb::GetResp {
+            results: options_to_get_results(values),
+        }))
+    }
+
     async fn get_latest(
         &self,
         req: tonic::Request<pb::GetLatestReq>,
     ) -> Result<tonic::Response<pb::GetLatestResp>, tonic::Status> {
         let req_inner = req.into_inner();
 
-        let keys = {
-            let mut keys = BTreeSet::new();
-            for (i, key_pb) in req_inner.keys.into_iter().enumerate() {
-                let keyspace_id = KeyspaceId::try_from(key_pb.keyspace_id.ok_or_else(|| {
-                    tonic::Status::invalid_argument(format!("missing keyspace_id on key {}", i))
-                })?)
-                .map_err(|e| {
-                    tonic::Status::invalid_argument(format!(
-                        "invalid keyspace_id on key {}: {}",
-                        i, e
-                    ))
-                })?;
-                let key = (keyspace_id, key_pb.bytes);
-
-                if keys.contains(&key) {
-                    return Err(tonic::Status::invalid_argument(format!(
-                        "duplicate key {:?}",
-                        key
-                    )));
-                }
-
-                keys.insert(key);
-            }
-            keys
-        };
+        let (keys, key_idxs) = key_set_from_pb(req_inner.keys).map_err(invalid_argument)?;
 
         let ts = self
             .inner
@@ -205,29 +257,22 @@ impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for Obsi
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
         let mut values = Vec::with_capacity(keys.len());
-        for key in keys {
+        for _ in &keys {
+            values.push(None);
+        }
+        for (keyspace_id, key) in keys {
             let maybe_value = self
                 .inner
-                .get(ts, key.0, key.1)
+                .get(ts, keyspace_id, key.clone())
                 .await
                 .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
-            values.push(maybe_value);
+            values[key_idxs[&(keyspace_id, key)]] = maybe_value;
         }
 
         Ok(tonic::Response::new(pb::GetLatestResp {
             snapshot_ts: ts.as_nanos(),
-            results: values
-                .into_iter()
-                .map(|maybe_value| match maybe_value {
-                    Some(value) => pb::GetResult {
-                        result_type: Some(pb::get_result::ResultType::Value(value)),
-                    },
-                    None => pb::GetResult {
-                        result_type: Some(pb::get_result::ResultType::NotFound(())),
-                    },
-                })
-                .collect(),
+            results: options_to_get_results(values),
         }))
     }
 
@@ -265,7 +310,7 @@ impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for Obsi
                     value,
                 })
                 .collect(),
-            remaining: maybe_continue_range.map(|continue_range| continue_range.into()),
+            remaining: Some(maybe_continue_range.unwrap_or(Range::empty()).into()),
         }))
     }
 
@@ -320,6 +365,83 @@ impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for Obsi
             write_ts: ts.as_nanos(),
         }))
     }
+
+    async fn create_colo_group(
+        &self,
+        req: tonic::Request<pb::CreateColoGroupReq>,
+    ) -> Result<tonic::Response<()>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let colo_group_id = ColoGroupId(req_inner.colo_group_id);
+        let initial_splits = req_inner
+            .initial_splits
+            .into_iter()
+            .map(Bound::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| invalid_argument(e.context("initial_splits")))?;
+
+        self.inner
+            .create_colo_group(colo_group_id, initial_splits)
+            .await
+            .map_err(internal)?;
+
+        Ok(tonic::Response::new(()))
+    }
+
+    async fn create_keyspace(
+        &self,
+        req: tonic::Request<pb::CreateKeyspaceReq>,
+    ) -> Result<tonic::Response<()>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let keyspace_id: KeyspaceId = required("keyspace_id", req_inner.keyspace_id)?;
+
+        self.inner
+            .create_keyspace(keyspace_id)
+            .await
+            .map_err(internal)?;
+
+        Ok(tonic::Response::new(()))
+    }
+}
+
+fn options_to_get_results(values: Vec<Option<Vec<u8>>>) -> Vec<pb::GetResult> {
+    values
+        .into_iter()
+        .map(|maybe_value| match maybe_value {
+            Some(value) => pb::GetResult {
+                result_type: Some(pb::get_result::ResultType::Value(value)),
+            },
+            None => pb::GetResult {
+                result_type: Some(pb::get_result::ResultType::NotFound(())),
+            },
+        })
+        .collect()
+}
+
+fn key_set_from_pb(
+    keys_pb: Vec<pb::Key>,
+) -> anyhow::Result<(
+    BTreeSet<(KeyspaceId, Vec<u8>)>,
+    BTreeMap<(KeyspaceId, Vec<u8>), usize>,
+)> {
+    let mut keys = BTreeSet::new();
+    let mut key_idxs = BTreeMap::new();
+    for (i, key_pb) in keys_pb.into_iter().enumerate() {
+        let keyspace_id = KeyspaceId::try_from(
+            key_pb
+                .keyspace_id
+                .ok_or_else(|| anyhow!("missing keyspace_id on key {}", i))?,
+        )
+        .map_err(|e| anyhow!("invalid keyspace_id on key {}: {}", i, e))?;
+        let key = (keyspace_id, key_pb.bytes);
+
+        if keys.contains(&key) {
+            return Err(anyhow!("duplicate key {:?}", key));
+        }
+
+        keys.insert(key.clone());
+        key_idxs.insert(key, i);
+    }
+    Ok((keys, key_idxs))
 }
 
 fn required<T, U>(name: &'static str, v: Option<T>) -> Result<U, tonic::Status>
@@ -335,6 +457,10 @@ where
 
 fn invalid_argument(e: anyhow::Error) -> tonic::Status {
     tonic::Status::invalid_argument(e.to_string())
+}
+
+fn internal(e: anyhow::Error) -> tonic::Status {
+    tonic::Status::internal(e.to_string())
 }
 
 struct Pool<T> {
@@ -407,6 +533,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use anyhow::anyhow;
+    use async_trait::async_trait;
     use futures::FutureExt;
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
@@ -415,6 +542,7 @@ mod tests {
     use crate::obsidian::Obsidian;
     use crate::pb;
     use crate::test::new_for_test;
+    use crate::test::obsidian_test_suite;
     use crate::types::ColoGroupId;
     use crate::types::KeyspaceId;
     use crate::types::Mutation;
@@ -425,7 +553,7 @@ mod tests {
         obs.create_colo_group(ColoGroupId(1), vec![] /*splits*/)
             .await?;
 
-        let (client, shutdown_server) = spawn_server(obs).await?;
+        let client = spawn_server(obs).await?;
 
         let key = (KeyspaceId(ColoGroupId(1), 1), b"abc".to_vec());
 
@@ -440,20 +568,29 @@ mod tests {
 
         assert_eq!(write_ts, snapshot_ts);
 
-        shutdown_server();
-
         Ok(())
     }
 
-    async fn spawn_server<O: Obsidian + Send + Sync + 'static>(obs: O) -> anyhow::Result<(super::ObsidianClient, impl FnOnce())> {
+    obsidian_test_suite!(
+        async |n_tablets: usize| -> anyhow::Result<crate::grpc::tests::ObsidianClientServer> {
+            use super::spawn_server;
+            use crate::test::new_for_test;
+
+            let obs = new_for_test(n_tablets).await?;
+            let client = spawn_server(obs).await?;
+            Ok(client)
+        }
+    );
+
+    async fn spawn_server<O: Obsidian + Send + Sync + 'static>(
+        obs: O,
+    ) -> anyhow::Result<ObsidianClientServer> {
         let (shutdown, on_shutdown) = oneshot::channel::<()>();
         let listener = TcpListener::bind("[::1]:0").await?;
         let addr = listener.local_addr()?;
         let server = super::ObsidianServer::new(obs);
         let serve = tonic::transport::Server::builder()
-            .add_service(pb::obsidian_server::ObsidianServer::new(
-                server,
-            ))
+            .add_service(pb::obsidian_server::ObsidianServer::new(server))
             .serve_with_incoming_shutdown(
                 TcpIncoming::from_listener(
                     listener, true, /*nodelay*/
@@ -463,19 +600,88 @@ mod tests {
                 on_shutdown.map(|_| ()),
             );
 
-        tokio::spawn(serve);
+        tokio::spawn(async { serve.await.unwrap() });
 
-        let client = super::ObsidianClient::new(
-            &pb::obsidian_client::ObsidianClient::connect(
-                "http://".to_string() + &addr.to_string(),
-            )
-            .await?,
-        );
+        let url = "http://".to_string() + &addr.to_string();
 
-        Ok((client, || {
-            let _ = shutdown.send(());
+        let client =
+            super::ObsidianClient::new(&pb::obsidian_client::ObsidianClient::connect(url).await?);
+
+        Ok(ObsidianClientServer {
+            inner: client,
+            shutdown: Some(shutdown),
+        })
+    }
+
+    struct ObsidianClientServer {
+        inner: super::ObsidianClient,
+        shutdown: Option<oneshot::Sender<()>>,
+    }
+
+    #[async_trait]
+    impl Obsidian for ObsidianClientServer {
+        async fn get(
+            &self,
+            ts: crate::types::Timestamp,
+            keyspace_id: KeyspaceId,
+            key: Vec<u8>,
+        ) -> anyhow::Result<Option<Vec<u8>>> {
+            self.inner.get(ts, keyspace_id, key).await
+        }
+
+        async fn scan_page(
+            &self,
+            ts: crate::types::Timestamp,
+            keyspace_id: KeyspaceId,
+            range: crate::range::Range<&[u8]>,
+            direction: crate::types::Direction,
+            limit: usize,
+        ) -> anyhow::Result<(
+            Vec<(Vec<u8>, crate::types::Timestamp, Vec<u8>)>,
+            Option<crate::range::Range<Vec<u8>>>,
+        )> {
+            self.inner
+                .scan_page(ts, keyspace_id, range, direction, limit)
+                .await
+        }
+
+        async fn latest_snapshot(
+            &self,
+            keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        ) -> anyhow::Result<crate::types::Timestamp> {
+            self.inner.latest_snapshot(keys).await
+        }
+
+        async fn write(
+            &self,
+            preconds: Vec<crate::types::Precondition>,
+            muts: BTreeMap<(KeyspaceId, Vec<u8>), crate::types::Mutation>,
+        ) -> Result<crate::types::Timestamp, crate::types::WriteError> {
+            self.inner.write(preconds, muts).await
+        }
+
+        async fn create_colo_group(
+            &self,
+            colo_group_id: ColoGroupId,
+            initial_splits: Vec<crate::range::Bound<Vec<u8>>>,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .create_colo_group(colo_group_id, initial_splits)
+                .await
+        }
+
+        async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+            self.inner.create_keyspace(keyspace_id).await
+        }
+    }
+
+    impl Drop for ObsidianClientServer {
+        fn drop(&mut self) {
             // TODO: Not clear if there's a way to find out that the serve actually stopped and
             // unbound the port. The `serve` future appears not to end.
-        }))
+            if let Some(shutdown) = self.shutdown.take() {
+                let _ = shutdown.send(());
+            }
+        }
     }
 }

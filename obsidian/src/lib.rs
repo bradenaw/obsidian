@@ -38,9 +38,13 @@ mod pb {
     pub use crate::pb::obsidian::obsidian_server;
     pub use crate::pb::obsidian::precondition;
     pub use crate::pb::obsidian::Bound;
+    pub use crate::pb::obsidian::CreateColoGroupReq;
+    pub use crate::pb::obsidian::CreateKeyspaceReq;
     pub use crate::pb::obsidian::Direction;
     pub use crate::pb::obsidian::GetLatestReq;
     pub use crate::pb::obsidian::GetLatestResp;
+    pub use crate::pb::obsidian::GetReq;
+    pub use crate::pb::obsidian::GetResp;
     pub use crate::pb::obsidian::GetResult;
     pub use crate::pb::obsidian::Key;
     pub use crate::pb::obsidian::KeyspaceId;

@@ -7,12 +7,12 @@ import "google/protobuf/empty.proto";
 service Obsidian {
     rpc GetLatest(GetLatestReq) returns (GetLatestResp);
     rpc Scan(ScanReq) returns (ScanResp);
-    //rpc Get(GetReq) returns (GetResp);
+    rpc Get(GetReq) returns (GetResp);
     //rpc LatestSnapshot(LatestSnapshotReq) returns (LatestSnapshotResp);
     rpc Write(WriteReq) returns (WriteResp);
 
-    //rpc CreateColoGroup(CreateColoGroupReq) returns (CreateColoGroupResp);
-    //rpc CreateKeyspace(CreateKeyspaceReq) returns (CreateKeyspaceResp);
+    rpc CreateColoGroup(CreateColoGroupReq) returns (google.protobuf.Empty);
+    rpc CreateKeyspace(CreateKeyspaceReq) returns (google.protobuf.Empty);
 }
 
 message GetLatestReq {
@@ -29,6 +29,15 @@ message GetResult {
 message GetLatestResp {
     uint64 snapshot_ts = 1;
     repeated GetResult results = 2;
+}
+
+message GetReq {
+    uint64 snapshot_ts = 1;
+    repeated Key keys = 2;
+}
+
+message GetResp {
+    repeated GetResult results = 1;
 }
 
 message ScanReq {
@@ -53,6 +62,15 @@ message WriteReq {
 
 message WriteResp {
     uint64 write_ts = 1;
+}
+
+message CreateColoGroupReq {
+    uint32 colo_group_id = 1;
+    repeated Bound initial_splits = 2;
+}
+
+message CreateKeyspaceReq {
+    KeyspaceId keyspace_id = 1;
 }
 
 message Precondition {
