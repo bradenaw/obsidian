@@ -27,12 +27,12 @@ message GetResult {
 }
 
 message GetLatestResp {
-    uint64 snapshot_ts = 1;
+    fixed64 snapshot_ts = 1;
     repeated GetResult results = 2;
 }
 
 message GetReq {
-    uint64 snapshot_ts = 1;
+    fixed64 snapshot_ts = 1;
     repeated Key keys = 2;
 }
 
@@ -41,7 +41,7 @@ message GetResp {
 }
 
 message ScanReq {
-    uint64 snapshot_ts = 1;
+    fixed64 snapshot_ts = 1;
     KeyspaceId keyspace_id = 2;
     Range range = 3;
     Direction direction = 4;
@@ -61,7 +61,7 @@ message WriteReq {
 }
 
 message WriteResp {
-    uint64 write_ts = 1;
+    fixed64 write_ts = 1;
 }
 
 message CreateColoGroupReq {
@@ -76,7 +76,7 @@ message CreateKeyspaceReq {
 message Precondition {
     message NotChangedSince {
         Key key = 1;
-        uint64 ts = 2;
+        fixed64 ts = 2;
     }
 
     oneof precond_type {
@@ -93,7 +93,7 @@ message Mutation {
 
 message Record {
     Key key = 1;
-    uint64 ts = 2;
+    fixed64 ts = 2;
     bytes value = 3;
 }
 
