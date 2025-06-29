@@ -90,6 +90,8 @@ pub trait ObsidianExt {
 }
 
 impl<T: Obsidian + Sync> ObsidianExt for T {
+    // TODO: This needs to give access to the underlying cursor in case it gets interrupted between
+    // results (e.g. timing out between yielding two results).
     fn scan(
         &self,
         ts: Timestamp,
