@@ -794,7 +794,12 @@ impl LsmTabletInner {
                     }
                     // Must be done with _guard still active.
                     None => self.waiters.wait(txid),
-                    _ => return Err(anyhow!("{:?} already deleted", txid)),
+                    _ => {
+                        return Err(anyhow!(
+                            "can't wait for transaction {:?}: TxOutcome record missing",
+                            txid,
+                        ))
+                    }
                 }
             };
 
