@@ -3,11 +3,11 @@ use std::iter;
 
 use async_trait::async_trait;
 
+use crate::grpc::util::internal;
+use crate::grpc::util::invalid_argument;
 use crate::grpc::util::key_set_from_pb;
 use crate::grpc::util::options_to_get_results;
 use crate::grpc::util::required;
-use crate::grpc::util::invalid_argument;
-use crate::grpc::util::internal;
 use crate::obsidian::Obsidian;
 use crate::pb;
 use crate::range::Bound;

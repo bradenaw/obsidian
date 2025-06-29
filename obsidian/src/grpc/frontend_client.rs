@@ -206,6 +206,7 @@ mod tests {
     use tokio::sync::oneshot;
     use tonic::transport::server::TcpIncoming;
 
+    use crate::grpc::FrontendServer;
     use crate::obsidian::Obsidian;
     use crate::pb;
     use crate::test::new_for_test;
@@ -213,7 +214,6 @@ mod tests {
     use crate::types::ColoGroupId;
     use crate::types::KeyspaceId;
     use crate::types::Mutation;
-    use crate::grpc::FrontendServer;
 
     #[tokio::test]
     async fn test_write() -> anyhow::Result<()> {

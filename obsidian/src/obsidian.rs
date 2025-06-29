@@ -76,10 +76,7 @@ pub trait Obsidian {
         initial_splits: Vec<Bound<Vec<u8>>>,
     ) -> anyhow::Result<()>;
 
-    async fn create_keyspace(
-        &self,
-        keyspace_id: KeyspaceId,
-    ) -> anyhow::Result<()>;
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()>;
 }
 
 pub trait ObsidianExt {
@@ -373,10 +370,7 @@ impl Obsidian for Frontend {
         Ok(())
     }
 
-    async fn create_keyspace(
-        &self,
-        keyspace_id: KeyspaceId,
-    ) -> anyhow::Result<()> {
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
         self.meta.create_keyspace(keyspace_id).await?;
 
         self.sync_meta().await?;

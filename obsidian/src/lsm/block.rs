@@ -537,6 +537,7 @@ mod test {
 
     use futures::TryStreamExt;
 
+    use super::Block;
     use crate::range::Bound;
     use crate::range::Range;
     use crate::types::Direction;
@@ -545,8 +546,6 @@ mod test {
     use crate::types::Timestamp;
     use crate::types::Value;
     use crate::util::AsyncReadExactAt;
-
-    use super::Block;
 
     #[tokio::test]
     async fn test_get() -> anyhow::Result<()> {

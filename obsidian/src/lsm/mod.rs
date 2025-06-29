@@ -1353,9 +1353,9 @@ mod test {
     use super::LsmInnerInner;
     use super::Manifest;
     use super::MaybeActiveMemtable;
+    use crate::lsm::memtable::Memtable;
     use crate::lsm::run::dump_run;
     use crate::lsm::run::Run;
-    use crate::lsm::memtable::Memtable;
     use crate::range::Bound;
     use crate::range::Range;
     use crate::storage::MemStorage;

@@ -416,6 +416,9 @@ mod test {
     use rand::RngCore;
     use uuid::Uuid;
 
+    use super::dump_run;
+    use super::Run;
+    use super::RunBuilder;
     use crate::range::Bound;
     use crate::range::Range;
     use crate::types::ColoGroupId;
@@ -425,10 +428,6 @@ mod test {
     use crate::types::Timestamp;
     use crate::types::Value;
     use crate::util::AsyncReadExactAt;
-
-    use super::dump_run;
-    use super::Run;
-    use super::RunBuilder;
 
     #[tokio::test]
     async fn test_run_file() -> anyhow::Result<()> {

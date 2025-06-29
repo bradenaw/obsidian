@@ -1125,9 +1125,8 @@ impl LsmTabletInner {
         // always currently syncs to latest, so wait(timestamp(1)) is the same as waiting for
         // latest.
         Retry::new()
-            .indefinitely(|| {
-                self.meta_synced.wait(Timestamp(1))
-            }).await;
+            .indefinitely(|| self.meta_synced.wait(Timestamp(1)))
+            .await;
 
         for keyspace_id in self.lsm.keyspaces() {
             Retry::new()
@@ -1172,9 +1171,8 @@ impl LsmTabletInner {
         // always currently syncs to latest, so wait(timestamp(1)) is the same as waiting for
         // latest.
         Retry::new()
-            .indefinitely(|| {
-                self.meta_synced.wait(Timestamp(1))
-            }).await;
+            .indefinitely(|| self.meta_synced.wait(Timestamp(1)))
+            .await;
 
         for keyspace_id in self.lsm.keyspaces() {
             Retry::new()
