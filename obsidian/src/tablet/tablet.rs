@@ -26,8 +26,6 @@ use futures::StreamExt;
 use futures::TryStreamExt;
 use tokio::sync::mpsc;
 
-use crate::lock_mgr::Guard;
-use crate::lock_mgr::LockMgr;
 use crate::lsm::Lsm;
 use crate::meta::Meta;
 use crate::meta_synced::MetaSynced;
@@ -39,7 +37,10 @@ use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
 use crate::range::Range;
 use crate::range::RangeSet;
-use crate::sequencer::Sequencer;
+use crate::tablet::lock_mgr::Guard;
+use crate::tablet::lock_mgr::LockMgr;
+use crate::tablet::sequencer::Sequencer;
+use crate::tablet::Tablet;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::HistoryRange;
@@ -60,77 +61,6 @@ use crate::util::Retry;
 
 const MAX_PRECOND_VALUE_LEN: usize = 256;
 const WAIT_ABORT_TIMEOUT: Duration = Duration::from_millis(1_000);
-
-#[async_trait]
-pub(crate) trait Tablet {
-    async fn get(
-        &self,
-        ts: Timestamp,
-        keyspace_id: KeyspaceId,
-        key: Vec<u8>,
-    ) -> Result<Option<Vec<u8>>, InternalError>;
-
-    async fn get_latest(
-        &self,
-        keyspace_id: KeyspaceId,
-        key: &[u8],
-    ) -> Result<(Timestamp, Option<Vec<u8>>), InternalError>;
-
-    async fn latest_snapshot(
-        &self,
-        keys: BTreeSet<(KeyspaceId, &[u8])>,
-    ) -> Result<Timestamp, InternalError>;
-
-    async fn scan_page(
-        &self,
-        ts: Timestamp,
-        keyspace_id: KeyspaceId,
-        range: Range<&[u8]>,
-        direction: Direction,
-        limit: usize,
-    ) -> Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>), InternalError>;
-
-    async fn history_page(
-        &self,
-        keyspace_id: KeyspaceId,
-        key: &[u8],
-        range: HistoryRange,
-        direction: Direction,
-        limit: usize,
-    ) -> Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>), InternalError>;
-
-    async fn write(
-        &self,
-        preconds: Vec<Precondition>,
-        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
-    ) -> Result<Timestamp, InternalError>;
-
-    async fn prepare(
-        &self,
-        txid: Txid,
-        preconds: Vec<Precondition>,
-        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
-    ) -> Result<Timestamp, InternalError>;
-
-    async fn try_commit(
-        &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
-        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
-    ) -> anyhow::Result<TxOutcome>;
-    async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome>;
-    async fn wait(&self, txid: Txid) -> anyhow::Result<TxOutcome>;
-    async fn cleanup_committed(
-        &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
-        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
-    ) -> anyhow::Result<()>;
-
-    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()>;
-}
 
 pub(crate) struct LsmTablet {
     inner: Arc<LsmTabletInner>,
@@ -1643,7 +1573,7 @@ impl Waiters {
 mod tests {
     use std::collections::BTreeSet;
 
-    use crate::tablet::TxOutcomeRecord;
+    use crate::tablet::tablet::TxOutcomeRecord;
     use crate::test::assert_roundtrip;
     use crate::types::ColoGroupId;
     use crate::types::KeyspaceId;

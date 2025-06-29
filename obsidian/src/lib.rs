@@ -3,7 +3,6 @@
 #![feature(coroutines)]
 
 mod grpc;
-mod lock_mgr;
 mod lsm;
 mod meta;
 mod meta_synced;
@@ -11,7 +10,6 @@ mod obsidian;
 mod range;
 mod router;
 mod rtest;
-mod sequencer;
 mod storage;
 mod tablet;
 mod tuple_encoding;

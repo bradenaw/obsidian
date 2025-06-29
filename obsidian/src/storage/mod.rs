@@ -1,6 +1,5 @@
 mod mem_storage;
 
-
 use async_trait::async_trait;
 use tokio::io::AsyncRead;
 
@@ -16,6 +15,5 @@ pub(crate) trait Storage {
 
     async fn get(&self, name: &str) -> anyhow::Result<Self::R>;
 }
-
 
 pub(crate) use mem_storage::MemStorage;
