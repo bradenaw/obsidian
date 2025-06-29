@@ -12,9 +12,9 @@ use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
-use crate::lsm_block::dump_block;
-use crate::lsm_block::Block;
-use crate::lsm_util::PrefixCompressedKV;
+use crate::lsm::block::dump_block;
+use crate::lsm::block::Block;
+use crate::lsm::util::PrefixCompressedKV;
 use crate::range::Bound;
 use crate::range::KeyOrBound;
 use crate::range::Range;
@@ -31,7 +31,7 @@ use crate::util::AsyncReadExactAt;
 use crate::util::IteratorEither;
 
 #[derive(Clone)]
-pub(crate) struct Run<R> {
+pub(super) struct Run<R> {
     r: R,
 
     id: Uuid,
@@ -50,7 +50,7 @@ const INDEX_BLOCK_HEADER_SIZE: usize = 48;
 
 impl<R> Run<R> {
     // Assumes S is in (key, rev(ts)) order, and assumes termination at a reasonable size limit.
-    pub(crate) async fn write<W: AsyncWrite + Unpin, S: Stream<Item = anyhow::Result<Record>>>(
+    pub(super) async fn write<W: AsyncWrite + Unpin, S: Stream<Item = anyhow::Result<Record>>>(
         w: &mut W,
         id: Uuid,
         keyspace_id: KeyspaceId,
@@ -70,7 +70,7 @@ impl<R> Run<R> {
 }
 
 impl<R: AsyncReadExactAt> Run<R> {
-    pub(crate) async fn open(r: R) -> anyhow::Result<Self> {
+    pub(super) async fn open(r: R) -> anyhow::Result<Self> {
         let file_len = r.len().await?;
         let mut index_block_offset_buf = [0u8; 4];
         r.read_exact_at(&mut index_block_offset_buf[..], file_len - 4)
@@ -133,15 +133,15 @@ impl<R: AsyncReadExactAt> Run<R> {
         })
     }
 
-    pub(crate) fn id(&self) -> Uuid {
+    pub(super) fn id(&self) -> Uuid {
         self.id
     }
 
-    pub(crate) fn size(&self) -> usize {
+    pub(super) fn size(&self) -> usize {
         self.size
     }
 
-    pub(crate) async fn get(
+    pub(super) async fn get(
         &self,
         ts: Timestamp,
         k: &[u8],
@@ -155,7 +155,7 @@ impl<R: AsyncReadExactAt> Run<R> {
         return Ok(None);
     }
 
-    pub(crate) fn scan(
+    pub(super) fn scan(
         &self,
         ts: Timestamp,
         range: Range<Vec<u8>>,
@@ -198,7 +198,7 @@ impl<R: AsyncReadExactAt> Run<R> {
         }
     }
 
-    pub(crate) fn history<'a>(
+    pub(super) fn history<'a>(
         &'a self,
         k: &[u8],
         range: HistoryRange,
@@ -222,14 +222,14 @@ impl<R: AsyncReadExactAt> Run<R> {
         }
     }
 
-    pub(crate) fn range(&self) -> Range<Vec<u8>> {
+    pub(super) fn range(&self) -> Range<Vec<u8>> {
         Range {
             lower: Bound::Before(self.min_key.clone()),
             upper: Bound::After(self.max_key.clone()),
         }
     }
 
-    pub(crate) fn stream(&self) -> impl Stream<Item = anyhow::Result<Record>> + '_ {
+    pub(super) fn stream(&self) -> impl Stream<Item = anyhow::Result<Record>> + '_ {
         try_stream! {
             for i in 0..self.index.len() {
                 let block_header_offset = self.index.get_value(i);
@@ -383,7 +383,7 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
     }
 }
 
-pub(crate) async fn dump_run<R: AsyncReadExactAt>(run: &Run<R>) -> anyhow::Result<()> {
+pub(super) async fn dump_run<R: AsyncReadExactAt>(run: &Run<R>) -> anyhow::Result<()> {
     println!("    min_ts: {}", run.min_ts);
     println!("    max_ts: {}", run.max_ts);
     println!("    index");

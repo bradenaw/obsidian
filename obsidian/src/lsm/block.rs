@@ -7,7 +7,7 @@ use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use futures::Stream;
 
-use crate::lsm_util::PrefixCompressedKV;
+use crate::lsm::util::PrefixCompressedKV;
 use crate::range::KeyOrBound;
 use crate::range::Range;
 use crate::types::Direction;
@@ -23,7 +23,7 @@ use crate::util::IteratorEither;
 
 /// A Block is conceptually a BTreeMap<Vec<u8>, BTreeMap<Timestamp, Value>>, but it is compactly
 /// serialized and can be used as-is without fully deserializing.
-pub(crate) struct Block<'a, R> {
+pub(super) struct Block<'a, R> {
     values_len: usize,
     n_versions: usize,
     min_ts: Timestamp,
@@ -42,7 +42,7 @@ impl<'a, R> Block<'a, R> {
     /// values is less than 64K.
     ///
     /// Returns the encoded block and the offset of the header within the block.
-    pub(crate) fn encode(
+    pub(super) fn encode(
         kvs: &BTreeMap<Vec<u8>, Vec<(Timestamp, Value)>>,
     ) -> anyhow::Result<(Vec<u8>, usize)> {
         // For this example block:
@@ -174,7 +174,7 @@ impl<'a, R> Block<'a, R> {
 }
 
 impl<'a, R: AsyncReadExactAt> Block<'a, R> {
-    pub(crate) async fn open(r: &'a R, header_offset: u64) -> anyhow::Result<Block<'a, R>> {
+    pub(super) async fn open(r: &'a R, header_offset: u64) -> anyhow::Result<Block<'a, R>> {
         let mut header = [0u8; BLOCK_INDEX_HEADER_SIZE];
 
         r.read_exact_at(&mut header[..], header_offset).await?;
@@ -215,7 +215,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         })
     }
 
-    pub(crate) async fn get(
+    pub(super) async fn get(
         &self,
         ts: Timestamp,
         k: &[u8],
@@ -241,7 +241,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         )))
     }
 
-    pub(crate) fn scan(
+    pub(super) fn scan(
         &self,
         ts: Timestamp,
         range: Range<Vec<u8>>,
@@ -294,7 +294,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         }
     }
 
-    pub(crate) fn scan_desc(
+    pub(super) fn scan_desc(
         &self,
         ts: Timestamp,
         range: Range<Vec<u8>>,
@@ -330,7 +330,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         }
     }
 
-    pub(crate) fn history<'b>(
+    pub(super) fn history<'b>(
         &'b self,
         k: &[u8],
         range: HistoryRange,
@@ -380,7 +380,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
 
     /// Produces all records contained in this block in Record's natural ordering: (key,
     /// Reverse(ts)).
-    pub(crate) fn stream(&self) -> impl Stream<Item = anyhow::Result<Record>> + '_ {
+    pub(super) fn stream(&self) -> impl Stream<Item = anyhow::Result<Record>> + '_ {
         try_stream! {
             for j in 0..self.index.len() {
                 let key = self.index.get_key(j);
@@ -446,11 +446,11 @@ struct BlockVersions<'a> {
 }
 
 impl<'a> BlockVersions<'a> {
-    pub(crate) fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         self.b.len() / (self.ts_bytes + self.offset_bytes)
     }
 
-    pub(crate) fn elem(&self, idx: usize) -> (Timestamp, bool, usize) {
+    pub(super) fn elem(&self, idx: usize) -> (Timestamp, bool, usize) {
         let width = self.ts_bytes + self.offset_bytes;
         let elem = &self.b[width * idx..width * (idx + 1)];
         let mut ts_offset_buf = [0u8; 8];
@@ -482,11 +482,11 @@ impl<'a> BlockVersions<'a> {
         }
     }
 
-    pub(crate) fn ts(&self, idx: usize) -> Timestamp {
+    pub(super) fn ts(&self, idx: usize) -> Timestamp {
         self.elem(idx).0
     }
 
-    pub(crate) fn value_offsets(&self, idx: usize) -> Option<(usize, usize)> {
+    pub(super) fn value_offsets(&self, idx: usize) -> Option<(usize, usize)> {
         let (_, tombstone, start) = self.elem(idx);
         if tombstone {
             return None;
@@ -500,7 +500,7 @@ impl<'a> BlockVersions<'a> {
     }
 }
 
-pub(crate) async fn dump_block<'a, R: AsyncReadExactAt>(
+pub(super) async fn dump_block<'a, R: AsyncReadExactAt>(
     block: &Block<'a, R>,
 ) -> anyhow::Result<()> {
     println!("    n_keys: {}", block.index.len());

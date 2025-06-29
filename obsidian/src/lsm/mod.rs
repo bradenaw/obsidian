@@ -1,3 +1,7 @@
+mod run;
+mod util;
+mod block;
+
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -20,7 +24,7 @@ use futures::TryStreamExt;
 use rand::Rng;
 use uuid::Uuid;
 
-use crate::lsm_run::Run;
+use crate::lsm::run::Run;
 use crate::memtable::Memtable;
 use crate::range::intersect_in_ranges_by_key;
 use crate::range::Bound;
@@ -1342,8 +1346,8 @@ mod test {
     use proptest::prelude::*;
     use uuid::Uuid;
 
-    use crate::lsm_run::dump_run;
-    use crate::lsm_run::Run;
+    use crate::lsm::run::dump_run;
+    use crate::lsm::run::Run;
     use crate::memtable::Memtable;
     use crate::range::Bound;
     use crate::range::Range;

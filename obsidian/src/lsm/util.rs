@@ -22,7 +22,7 @@ pub(crate) struct PrefixCompressedKV<V> {
 const PREFIX_COMPRESSED_KV_HEADER_SIZE: usize = 9;
 
 impl<V: FixedSizeSerializable> PrefixCompressedKV<V> {
-    pub(crate) fn encode(m: &BTreeMap<Vec<u8>, V>) -> Vec<u8> {
+    pub(super) fn encode(m: &BTreeMap<Vec<u8>, V>) -> Vec<u8> {
         let prefix: Vec<u8> = match (m.first_key_value(), m.last_key_value()) {
             (Some((first_key, _)), Some((last_key, _))) => {
                 longest_shared_prefix(&first_key[..], &last_key[..])
@@ -69,7 +69,7 @@ impl<V: FixedSizeSerializable> PrefixCompressedKV<V> {
         out
     }
 
-    pub(crate) fn decode(data: Vec<u8>) -> Self {
+    pub(super) fn decode(data: Vec<u8>) -> Self {
         let header = &data[0..PREFIX_COMPRESSED_KV_HEADER_SIZE];
         let offset_width = header[0] as usize;
         let n = LittleEndian::read_u16(&header[1..3]) as usize;
@@ -86,7 +86,7 @@ impl<V: FixedSizeSerializable> PrefixCompressedKV<V> {
         }
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         self.n
     }
 
@@ -108,7 +108,7 @@ impl<V: FixedSizeSerializable> PrefixCompressedKV<V> {
         &self.data[start..end]
     }
 
-    pub(crate) fn search(&self, k: &[u8]) -> Result<usize, usize> {
+    pub(super) fn search(&self, k: &[u8]) -> Result<usize, usize> {
         let prefix = self.prefix();
         if !k.starts_with(&prefix) {
             match k.cmp(&prefix) {
@@ -145,7 +145,7 @@ impl<V: FixedSizeSerializable> PrefixCompressedKV<V> {
         &self.suffixes()[start..end]
     }
 
-    pub(crate) fn get_key(&self, idx: usize) -> Vec<u8> {
+    pub(super) fn get_key(&self, idx: usize) -> Vec<u8> {
         let prefix = self.prefix();
         let suffix = self.get_suffix(idx);
         let mut k = Vec::with_capacity(prefix.len() + suffix.len());
@@ -154,7 +154,7 @@ impl<V: FixedSizeSerializable> PrefixCompressedKV<V> {
         k
     }
 
-    pub(crate) fn get_value(&self, idx: usize) -> V {
+    pub(super) fn get_value(&self, idx: usize) -> V {
         let width = self.offset_width + V::size();
         let offset_start = idx * width + self.offset_width;
         let offset_end = offset_start + V::size();
@@ -162,7 +162,7 @@ impl<V: FixedSizeSerializable> PrefixCompressedKV<V> {
     }
 }
 
-pub(crate) trait FixedSizeSerializable {
+pub(super) trait FixedSizeSerializable {
     fn size() -> usize;
     fn read(b: &[u8]) -> Self;
     fn write(&self, b: &mut [u8]);

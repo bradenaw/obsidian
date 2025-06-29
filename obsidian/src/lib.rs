@@ -5,9 +5,6 @@
 mod grpc;
 mod lock_mgr;
 mod lsm;
-mod lsm_block;
-mod lsm_run;
-mod lsm_util;
 mod memtable;
 mod meta;
 mod meta_synced;
