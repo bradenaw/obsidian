@@ -5,7 +5,6 @@
 mod grpc;
 mod lock_mgr;
 mod lsm;
-mod memtable;
 mod meta;
 mod meta_synced;
 mod obsidian;

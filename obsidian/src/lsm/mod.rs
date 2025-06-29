@@ -1,6 +1,7 @@
+mod block;
+mod memtable;
 mod run;
 mod util;
-mod block;
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
@@ -24,8 +25,8 @@ use futures::TryStreamExt;
 use rand::Rng;
 use uuid::Uuid;
 
+use crate::lsm::memtable::Memtable;
 use crate::lsm::run::Run;
-use crate::memtable::Memtable;
 use crate::range::intersect_in_ranges_by_key;
 use crate::range::Bound;
 use crate::range::KeyOrBound;
@@ -1346,9 +1347,15 @@ mod test {
     use proptest::prelude::*;
     use uuid::Uuid;
 
+    use super::Level;
+    use super::Lsm;
+    use super::LsmBuilder;
+    use super::LsmInnerInner;
+    use super::Manifest;
+    use super::MaybeActiveMemtable;
     use crate::lsm::run::dump_run;
     use crate::lsm::run::Run;
-    use crate::memtable::Memtable;
+    use crate::lsm::memtable::Memtable;
     use crate::range::Bound;
     use crate::range::Range;
     use crate::storage::MemStorage;
@@ -1365,13 +1372,6 @@ mod test {
     use crate::util::binary_search_by_idx;
     use crate::wal;
     use crate::wal::SeqNo;
-
-    use super::Level;
-    use super::Lsm;
-    use super::LsmBuilder;
-    use super::LsmInnerInner;
-    use super::Manifest;
-    use super::MaybeActiveMemtable;
 
     #[tokio::test]
     async fn test_put_get() -> anyhow::Result<()> {
