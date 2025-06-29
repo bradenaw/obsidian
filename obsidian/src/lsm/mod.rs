@@ -38,7 +38,7 @@ use crate::types::HistoryRange;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
-use crate::types::Record;
+use crate::types::Revision;
 use crate::types::Timestamp;
 use crate::types::Value;
 use crate::types::WriteError;
@@ -199,7 +199,7 @@ impl Lsm {
         range: Range<&[u8]>,
         direction: Direction,
         limit: usize,
-    ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
+    ) -> anyhow::Result<(Vec<Revision>, Option<Range<Vec<u8>>>)> {
         self.inner
             .load()
             .get(&keyspace_id)
@@ -488,7 +488,7 @@ impl LsmInner {
         range: Range<&[u8]>,
         direction: Direction,
         limit: usize,
-    ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
+    ) -> anyhow::Result<(Vec<Revision>, Option<Range<Vec<u8>>>)> {
         self.inner.scan_page(ts, range, direction, limit).await
     }
 
@@ -664,7 +664,7 @@ impl LsmInner {
             storage,
             1,
             chosen_l0_range,
-            futures::stream::iter(chosen_l0.iter().map(|record| Ok(record))),
+            futures::stream::iter(chosen_l0.iter().map(|revision| Ok(revision))),
         )
         .await?;
         removes.insert(chosen_l0_id);
@@ -713,7 +713,7 @@ impl LsmInner {
         storage: &MemStorage,
         into_level: usize,
         entries_range: Range<Vec<u8>>,
-        entries: impl Stream<Item = anyhow::Result<Record>> + Send,
+        entries: impl Stream<Item = anyhow::Result<Revision>> + Send,
     ) -> anyhow::Result<(Vec<Run<Arc<Vec<u8>>>>, HashSet<Uuid>)> {
         let overlapping_runs = manifest.levels[into_level].overlapping_runs(entries_range);
 
@@ -741,16 +741,17 @@ impl LsmInner {
                     Ok(())
                 },
                 async {
-                    while let Some(record) = sorted.next().await.transpose()? {
-                        let record_size =
-                            (record.key.len() as u64) + 8 + (record.value.len() as u64);
-                        curr_size += record_size;
+                    while let Some(revision) = sorted.next().await.transpose()? {
+                        let revision_size =
+                            (revision.key.len() as u64) + 8 + (revision.value.len() as u64);
+                        curr_size += revision_size;
                         let break_after = {
-                            // All of the records for a single key need to end up in the same run, so once
+                            // All of the revisions for a single key need to end up in the same run, so once
                             // we've gone over the target size look for a break between keys.
                             if curr_size > run_target_size {
-                                if let Some(Ok(next_record)) = Pin::new(&mut sorted).peek().await {
-                                    if record.key != next_record.key {
+                                if let Some(Ok(next_revision)) = Pin::new(&mut sorted).peek().await
+                                {
+                                    if revision.key != next_revision.key {
                                         true
                                     } else {
                                         false
@@ -762,7 +763,7 @@ impl LsmInner {
                                 false
                             }
                         };
-                        tx.send(Ok(record)).await?;
+                        tx.send(Ok(revision)).await?;
                         if break_after {
                             break;
                         }
@@ -815,7 +816,7 @@ impl LsmInnerInner {
         let manifest = self.manifest.load();
 
         // Any memtable might have the latest for the key, so must check all of them.
-        let maybe_record = Iterator::chain(
+        let maybe_revision = Iterator::chain(
             manifest
                 .l0_active
                 .iter()
@@ -827,12 +828,12 @@ impl LsmInnerInner {
         )
         .filter_map(core::convert::identity)
         .max_by_key(|(ts, _)| *ts);
-        if let Some((record_ts, v)) = maybe_record {
-            return Ok(Some((record_ts, v)));
+        if let Some((revision_ts, v)) = maybe_revision {
+            return Ok(Some((revision_ts, v)));
         }
         for level in &manifest.levels {
-            if let Some((record_ts, v)) = level.get(ts, k).await? {
-                return Ok(Some((record_ts, v)));
+            if let Some((revision_ts, v)) = level.get(ts, k).await? {
+                return Ok(Some((revision_ts, v)));
             }
         }
         Ok(None)
@@ -844,7 +845,7 @@ impl LsmInnerInner {
         range: Range<&[u8]>,
         direction: Direction,
         limit: usize,
-    ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
+    ) -> anyhow::Result<(Vec<Revision>, Option<Range<Vec<u8>>>)> {
         if range.is_empty() {
             return Ok((vec![], None));
         }
@@ -856,18 +857,18 @@ impl LsmInnerInner {
         );
         for l0_active in &manifest.l0_active {
             let l0_run = l0_active.1.read().unwrap();
-            let records: Vec<_> = l0_run
+            let revisions: Vec<_> = l0_run
                 .scan(ts, range.clone(), direction)
-                .map(|record| Ok(record))
+                .map(|revision| Ok(revision))
                 .collect();
-            streams.push(futures::stream::iter(records.into_iter()).boxed());
+            streams.push(futures::stream::iter(revisions.into_iter()).boxed());
         }
         for l0_run in &manifest.l0_sealed {
             streams.push(
                 futures::stream::iter(
                     l0_run
                         .scan(ts, range.clone(), direction)
-                        .map(|record| Ok(record)),
+                        .map(|revision| Ok(revision)),
                 )
                 .boxed(),
             );
@@ -904,10 +905,10 @@ impl LsmInnerInner {
                     .into_iter()
                     .map(|stream| {
                         stream.map(|result| {
-                            result.map(|record| {
+                            result.map(|revision| {
                                 OrdEqByFirst(
-                                    (Reverse(record.key), Reverse(record.ts)),
-                                    record.value,
+                                    (Reverse(revision.key), Reverse(revision.ts)),
+                                    revision.value,
                                 )
                             })
                         })
@@ -915,37 +916,35 @@ impl LsmInnerInner {
                     .collect(),
             )
             .map(|result| {
-                result.map(|OrdEqByFirst((Reverse(key), Reverse(ts)), value)| Record {
-                    key,
-                    ts,
-                    value,
-                })
+                result.map(
+                    |OrdEqByFirst((Reverse(key), Reverse(ts)), value)| Revision { key, ts, value },
+                )
             })
             .peekable()
             .boxed(),
         };
 
         let mut page = vec![];
-        while let Some(record) = merged.next().await.transpose()? {
-            if let Some(Record {
+        while let Some(revision) = merged.next().await.transpose()? {
+            if let Some(Revision {
                 key: last_key,
                 ts: last_ts,
                 ..
             }) = page.last()
             {
-                if last_key == &record.key {
-                    assert!(*last_ts > record.ts);
+                if last_key == &revision.key {
+                    assert!(*last_ts > revision.ts);
                     continue;
                 }
             }
-            page.push(record);
+            page.push(revision);
             if page.len() == limit {
                 break;
             }
         }
 
         let continue_cursor = match page.last() {
-            Some(Record { key: last_key, .. }) => Some(match direction {
+            Some(Revision { key: last_key, .. }) => Some(match direction {
                 Direction::Asc => Range {
                     lower: Bound::After(last_key.clone()),
                     upper: range.upper.clone().map(Vec::from),
@@ -960,7 +959,7 @@ impl LsmInnerInner {
 
         page = page
             .into_iter()
-            .filter(|record| match record.value {
+            .filter(|revision| match revision.value {
                 Value::Tombstone => false,
                 _ => true,
             })
@@ -983,18 +982,18 @@ impl LsmInnerInner {
             Vec::with_capacity(manifest.l0_active.len() + manifest.l0_sealed.len());
         for l0_active in &manifest.l0_active {
             let l0_run = l0_active.1.read().unwrap();
-            let records: Vec<_> = l0_run
+            let revisions: Vec<_> = l0_run
                 .history(key, range, direction)
-                .map(|record| Ok(record))
+                .map(|revision| Ok(revision))
                 .collect();
-            l0_streams.push(futures::stream::iter(records.into_iter()).boxed());
+            l0_streams.push(futures::stream::iter(revisions.into_iter()).boxed());
         }
         for l0_run in &manifest.l0_sealed {
             l0_streams.push(
                 futures::stream::iter(
                     l0_run
                         .history(key, range, direction)
-                        .map(|record| Ok(record)),
+                        .map(|revision| Ok(revision)),
                 )
                 .boxed(),
             );
@@ -1034,8 +1033,8 @@ impl LsmInnerInner {
         let mut stream = futures::stream::iter(streams.into_iter()).flatten();
 
         let mut page = vec![];
-        while let Some(record) = stream.try_next().await? {
-            page.push(record);
+        while let Some(revision) = stream.try_next().await? {
+            page.push(revision);
             if page.len() >= limit {
                 break;
             }
@@ -1365,7 +1364,7 @@ mod test {
     use crate::types::KeyspaceId;
     use crate::types::Mutation;
     use crate::types::Precondition;
-    use crate::types::Record;
+    use crate::types::Revision;
     use crate::types::Timestamp;
     use crate::types::Value;
     use crate::types::WriteError;
@@ -1775,12 +1774,12 @@ mod test {
                         expected
                             .clone()
                             .into_iter()
-                            .map(|(key, ts)| Record {
+                            .map(|(key, ts)| Revision {
                                 key: (key).into(),
                                 ts: Timestamp(ts as u64),
                                 value: Value::Regular(format!("{} {}", key, ts).into()),
                             })
-                            .collect::<Vec<Record>>(),
+                            .collect::<Vec<Revision>>(),
                         "scan_page(ts={:?}, /*keyspace_id*/, /*cursor*/, direction={:?}, page_size={})",
                         ts,
                         direction,
@@ -1884,8 +1883,8 @@ mod test {
                         expected
                             .into_iter()
                             .map(|(ts, is_tombstone)| {
-                                let record = lsm_diagram_record(key, *ts, *is_tombstone);
-                                (record.ts, record.value)
+                                let revision = lsm_diagram_revision(key, *ts, *is_tombstone);
+                                (revision.ts, revision.value)
                             })
                             .collect::<Vec<_>>(),
                         "history_page(key = {:?}, range = {:?}, direction={:?}, page_size={})",
@@ -2029,8 +2028,8 @@ mod test {
                         maybe_cursor = continue_cursor;
                     }
 
-                    let mut expected_recs: Vec<Record> = expected.into_iter().map(|(key, (ts, value))| {
-                        Record{key: key.clone(), ts: *ts, value: Value::Regular(value.clone())}
+                    let mut expected_recs: Vec<Revision> = expected.into_iter().map(|(key, (ts, value))| {
+                        Revision{key: key.clone(), ts: *ts, value: Value::Regular(value.clone())}
                     }).collect();
                     if direction == Direction::Desc {
                         expected_recs.reverse();
@@ -2153,18 +2152,18 @@ mod test {
         assert_eq!(
             l0_active_guard.iter().collect::<Vec<_>>(),
             vec![
-                lsm_diagram_record(b.as_bytes(), 9, false),
-                lsm_diagram_record(d.as_bytes(), 9, false),
+                lsm_diagram_revision(b.as_bytes(), 9, false),
+                lsm_diagram_revision(d.as_bytes(), 9, false),
             ],
         );
         assert_eq!(
             manifest.l0_sealed[0].iter().collect::<Vec<_>>(),
             vec![
-                lsm_diagram_record(a.as_bytes(), 9, false),
-                lsm_diagram_record(a.as_bytes(), 8, false),
-                lsm_diagram_record(b.as_bytes(), 8, true),
-                lsm_diagram_record(c.as_bytes(), 9, true),
-                lsm_diagram_record(c.as_bytes(), 8, false),
+                lsm_diagram_revision(a.as_bytes(), 9, false),
+                lsm_diagram_revision(a.as_bytes(), 8, false),
+                lsm_diagram_revision(b.as_bytes(), 8, true),
+                lsm_diagram_revision(c.as_bytes(), 9, true),
+                lsm_diagram_revision(c.as_bytes(), 8, false),
             ],
         );
 
@@ -2210,9 +2209,9 @@ mod test {
                     .map(|run| {
                         run.into_iter()
                             .map(|(key, ts, is_tombstone)| {
-                                lsm_diagram_record(key.as_bytes(), ts, is_tombstone)
+                                lsm_diagram_revision(key.as_bytes(), ts, is_tombstone)
                             })
-                            .collect::<Vec<Record>>()
+                            .collect::<Vec<Revision>>()
                     })
                     .collect::<Vec<_>>()
             })
@@ -2226,8 +2225,8 @@ mod test {
         Value::Regular(format!("{:?} {}", key, ts).into())
     }
 
-    fn lsm_diagram_record(key: &[u8], ts: usize, is_tombstone: bool) -> Record {
-        Record {
+    fn lsm_diagram_revision(key: &[u8], ts: usize, is_tombstone: bool) -> Revision {
+        Revision {
             key: key.into(),
             ts: Timestamp(ts as u64),
             value: match is_tombstone {
@@ -2243,13 +2242,13 @@ mod test {
             visited: &mut HashSet<(usize, usize)>,
             x: usize,
             y: usize,
-        ) -> Vec<Record> {
+        ) -> Vec<Revision> {
             fn find_touching_inner(
                 diagram: &[(&str, &[u8])],
                 visited: &mut HashSet<(usize, usize)>,
                 x: usize,
                 y: usize,
-                out: &mut Vec<Record>,
+                out: &mut Vec<Revision>,
             ) {
                 if visited.contains(&(x, y)) {
                     return;
@@ -2266,7 +2265,7 @@ mod test {
                     b' ' => None,
                     _ => return,
                 } {
-                    out.push(Record { key, ts, value });
+                    out.push(Revision { key, ts, value });
                 }
 
                 for (dx, dy) in [(0isize, -1isize), (1, 0), (0, 1), (-1, 0)] {
@@ -2293,10 +2292,10 @@ mod test {
         let mut visited = HashSet::new();
 
         let x_max = diagram[0].1.len() - 1;
-        let l0_active_records = find_touching(&diagram[..], &mut visited, x_max, 0);
+        let l0_active_revisions = find_touching(&diagram[..], &mut visited, x_max, 0);
         let mut l0_active = Memtable::new();
-        for record in l0_active_records {
-            l0_active.insert(SeqNo(1), record.key, record.ts, record.value);
+        for revision in l0_active_revisions {
+            l0_active.insert(SeqNo(1), revision.key, revision.ts, revision.value);
         }
         let mut l0_sealed = Memtable::new();
 
@@ -2304,14 +2303,14 @@ mod test {
         for x in (0..=x_max).rev().filter(|x| x % 2 == 1) {
             let mut level = Level::new();
             for y in (0..diagram.len()).filter(|y| y % 2 == 0) {
-                let records = find_touching(&diagram[..], &mut visited, x, y);
-                if records.is_empty() {
+                let revisions = find_touching(&diagram[..], &mut visited, x, y);
+                if revisions.is_empty() {
                     continue;
                 }
 
                 if l0_sealed.size() == 0 {
-                    for record in records {
-                        l0_sealed.insert(SeqNo(1), record.key, record.ts, record.value);
+                    for revision in revisions {
+                        l0_sealed.insert(SeqNo(1), revision.key, revision.ts, revision.value);
                     }
                 } else {
                     let mut v = vec![];
@@ -2320,7 +2319,7 @@ mod test {
                         Uuid::new_v4(),
                         KeyspaceId(ColoGroupId(1), 1),
                         1024, // block_size
-                        futures::stream::iter(records.into_iter().map(|record| Ok(record))),
+                        futures::stream::iter(revisions.into_iter().map(|revision| Ok(revision))),
                     )
                     .await?;
                     let run = Run::open(Arc::new(v)).await?;

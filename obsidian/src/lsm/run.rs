@@ -22,7 +22,7 @@ use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::HistoryRange;
 use crate::types::KeyspaceId;
-use crate::types::Record;
+use crate::types::Revision;
 use crate::types::Timestamp;
 use crate::types::Value;
 use crate::util::binary_search_by_idx;
@@ -50,7 +50,7 @@ const INDEX_BLOCK_HEADER_SIZE: usize = 48;
 
 impl<R> Run<R> {
     // Assumes S is in (key, rev(ts)) order, and assumes termination at a reasonable size limit.
-    pub(super) async fn write<W: AsyncWrite + Unpin, S: Stream<Item = anyhow::Result<Record>>>(
+    pub(super) async fn write<W: AsyncWrite + Unpin, S: Stream<Item = anyhow::Result<Revision>>>(
         w: &mut W,
         id: Uuid,
         keyspace_id: KeyspaceId,
@@ -60,8 +60,8 @@ impl<R> Run<R> {
         pin_mut!(s);
 
         let mut b = RunBuilder::new(w, id, keyspace_id, block_size_limit);
-        while let Some(record) = s.next().await.transpose()? {
-            b.push(record).await?;
+        while let Some(revision) = s.next().await.transpose()? {
+            b.push(revision).await?;
         }
         b.finish().await?;
 
@@ -160,7 +160,7 @@ impl<R: AsyncReadExactAt> Run<R> {
         ts: Timestamp,
         range: Range<Vec<u8>>,
         direction: Direction,
-    ) -> impl Stream<Item = anyhow::Result<Record>> + '_ {
+    ) -> impl Stream<Item = anyhow::Result<Revision>> + '_ {
         try_stream! {
             if ts < self.min_ts {
                 return;
@@ -191,8 +191,8 @@ impl<R: AsyncReadExactAt> Run<R> {
                 let block = Block::open(&self.r, block_header_offset as u64).await?;
                 let block_scan = block.scan(ts, range.clone(), direction);
                 pin_mut!(block_scan);
-                while let Some(record) = block_scan.try_next().await? {
-                    yield record;
+                while let Some(revision) = block_scan.try_next().await? {
+                    yield revision;
                 }
             }
         }
@@ -216,8 +216,8 @@ impl<R: AsyncReadExactAt> Run<R> {
 
             let history = block.history(&k_owned, range, direction);
             pin_mut!(history);
-            while let Some(record) = history.try_next().await? {
-                yield record;
+            while let Some(revision) = history.try_next().await? {
+                yield revision;
             }
         }
     }
@@ -229,15 +229,15 @@ impl<R: AsyncReadExactAt> Run<R> {
         }
     }
 
-    pub(super) fn stream(&self) -> impl Stream<Item = anyhow::Result<Record>> + '_ {
+    pub(super) fn stream(&self) -> impl Stream<Item = anyhow::Result<Revision>> + '_ {
         try_stream! {
             for i in 0..self.index.len() {
                 let block_header_offset = self.index.get_value(i);
                 let block = Block::open(&self.r, block_header_offset as u64).await?;
                 let block_stream = block.stream();
                 pin_mut!(block_stream);
-                while let Some(record) = block_stream.try_next().await? {
-                    yield record;
+                while let Some(revision) = block_stream.try_next().await? {
+                    yield revision;
                 }
             }
         }
@@ -292,39 +292,39 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
         }
     }
 
-    async fn push(&mut self, record: Record) -> anyhow::Result<()> {
-        let record_size_estimate = {
-            let key_len = if self.buffer.contains_key(&record.key) {
+    async fn push(&mut self, revision: Revision) -> anyhow::Result<()> {
+        let revision_size_estimate = {
+            let key_len = if self.buffer.contains_key(&revision.key) {
                 0
             } else {
-                (record.key.len() as u64) + 4
+                (revision.key.len() as u64) + 4
             };
-            (key_len as u64) + 10 + (record.value.len() as u64)
+            (key_len as u64) + 10 + (revision.value.len() as u64)
         };
 
         if !self.buffer.is_empty()
-            && self.buffer_size_estimate + record_size_estimate > self.block_size_limit
-            && !self.buffer.contains_key(&record.key)
+            && self.buffer_size_estimate + revision_size_estimate > self.block_size_limit
+            && !self.buffer.contains_key(&revision.key)
         {
             self.flush_block().await?;
         }
 
-        if let Some(prev_record) = self
+        if let Some(prev_revision) = self
             .buffer
-            .get(&record.key)
+            .get(&revision.key)
             .map(|versions| versions.last())
             .flatten()
         {
-            assert!(prev_record.0 > record.ts);
+            assert!(prev_revision.0 > revision.ts);
         }
         self.buffer
-            .entry(record.key)
+            .entry(revision.key)
             .or_insert_with(Vec::new)
-            .push((record.ts, record.value));
-        self.buffer_size_estimate += record_size_estimate;
+            .push((revision.ts, revision.value));
+        self.buffer_size_estimate += revision_size_estimate;
 
-        self.min_ts = std::cmp::min(self.min_ts, record.ts);
-        self.max_ts = std::cmp::max(self.max_ts, record.ts);
+        self.min_ts = std::cmp::min(self.min_ts, revision.ts);
+        self.max_ts = std::cmp::max(self.max_ts, revision.ts);
 
         Ok(())
     }
@@ -424,7 +424,7 @@ mod test {
     use crate::types::ColoGroupId;
     use crate::types::Direction;
     use crate::types::KeyspaceId;
-    use crate::types::Record;
+    use crate::types::Revision;
     use crate::types::Timestamp;
     use crate::types::Value;
     use crate::util::AsyncReadExactAt;
@@ -436,28 +436,28 @@ mod test {
             rand::thread_rng().fill_bytes(&mut out);
             out
         }
-        let records = vec![
-            Record {
+        let revisions = vec![
+            Revision {
                 key: b"prefixbar".to_vec(),
                 ts: Timestamp(20101),
                 value: Value::Regular(rand_bytes(10_000)),
             },
-            Record {
+            Revision {
                 key: b"prefixbar".to_vec(),
                 ts: Timestamp(19230),
                 value: Value::Tombstone,
             },
-            Record {
+            Revision {
                 key: b"prefixbar".to_vec(),
                 ts: Timestamp(10230),
                 value: Value::Regular(rand_bytes(128)),
             },
-            Record {
+            Revision {
                 key: b"prefixfoo".to_vec(),
                 ts: Timestamp(21925),
                 value: Value::Regular(rand_bytes(10_000)),
             },
-            Record {
+            Revision {
                 key: b"prefixfoo".to_vec(),
                 ts: Timestamp(12031),
                 value: Value::Regular(rand_bytes(10_000)),
@@ -469,7 +469,7 @@ mod test {
             Uuid::new_v4(),
             KeyspaceId(ColoGroupId(1), 1),
             32768,
-            futures::stream::iter(records.iter().map(|record| Ok(record.clone()))),
+            futures::stream::iter(revisions.iter().map(|revision| Ok(revision.clone()))),
         )
         .await
         .unwrap();
@@ -481,10 +481,10 @@ mod test {
         assert_eq!(run.min_key, b"prefixbar".to_vec());
         assert_eq!(run.max_key, b"prefixfoo".to_vec());
 
-        for record in records {
+        for revision in revisions {
             assert_eq!(
-                run.get(record.ts, &record.key).await?,
-                Some((record.ts, record.value)),
+                run.get(revision.ts, &revision.key).await?,
+                Some((revision.ts, revision.value)),
             );
         }
 
@@ -532,7 +532,7 @@ mod test {
                         _ => continue,
                     };
 
-                    b.push(Record {
+                    b.push(Revision {
                         key: key_str.into(),
                         ts: Timestamp(ts as u64),
                         value,
@@ -567,7 +567,7 @@ mod test {
                     expected
                         .clone()
                         .into_iter()
-                        .map(|(key, ts, tombstone)| Record {
+                        .map(|(key, ts, tombstone)| Revision {
                             key: (key).into(),
                             ts: Timestamp(ts as u64),
                             value: match tombstone {
@@ -575,7 +575,7 @@ mod test {
                                 true => Value::Tombstone,
                             },
                         })
-                        .collect::<Vec<Record>>(),
+                        .collect::<Vec<Revision>>(),
                     "direction={:?}",
                     direction,
                 );
@@ -669,13 +669,13 @@ mod test {
             let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
 
             rt.block_on(async {
-                let mut records = m.into_iter().map(|((key, ts), maybe_value)| Record{
+                let mut revisions = m.into_iter().map(|((key, ts), maybe_value)| Revision{
                     key, ts: Timestamp(ts), value: match maybe_value {
                         Some(v) => Value::Regular(v),
                         None => Value::Tombstone,
                     },
-                }).collect::<Vec<Record>>();
-                records.sort_by_key(|record| (record.key.clone(), Reverse(record.ts)));
+                }).collect::<Vec<Revision>>();
+                revisions.sort_by_key(|revision| (revision.key.clone(), Reverse(revision.ts)));
 
                 let mut v = vec![];
                 Run::<()>::write(
@@ -683,29 +683,29 @@ mod test {
                     Uuid::new_v4(),
                     KeyspaceId(ColoGroupId(1), 1),
                     1024,
-                    futures::stream::iter(records.iter().map(|record| Ok(record.clone()))),
+                    futures::stream::iter(revisions.iter().map(|revision| Ok(revision.clone()))),
                 ).await.unwrap();
 
                 let run = Run::open(v).await.unwrap();
 
                 dump_run(&run).await.unwrap();
 
-                for record in &records {
+                for revision in &revisions {
                     assert_eq!(
-                        run.get(record.ts, &record.key[..]).await.unwrap(),
-                        Some((record.ts, record.value.clone())),
+                        run.get(revision.ts, &revision.key[..]).await.unwrap(),
+                        Some((revision.ts, revision.value.clone())),
                     );
                 }
 
-                let streamed_out_records = run
+                let streamed_out_revisions = run
                     .stream()
-                    .collect::<Vec<anyhow::Result<Record>>>()
+                    .collect::<Vec<anyhow::Result<Revision>>>()
                     .await
                     .into_iter()
-                    .collect::<anyhow::Result<Vec<Record>>>()
+                    .collect::<anyhow::Result<Vec<Revision>>>()
                     .unwrap();
 
-                assert_eq!(streamed_out_records, records);
+                assert_eq!(streamed_out_revisions, revisions);
             });
         }
     }

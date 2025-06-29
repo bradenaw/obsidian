@@ -7,7 +7,7 @@ use crate::range::Bound;
 use crate::range::Range;
 use crate::types::Direction;
 use crate::types::HistoryRange;
-use crate::types::Record;
+use crate::types::Revision;
 use crate::types::Timestamp;
 use crate::types::Value;
 use crate::util::IteratorEither;
@@ -51,8 +51,8 @@ impl Memtable {
     }
 
     pub fn get(&self, ts: Timestamp, k: &[u8]) -> Option<(Timestamp, Value)> {
-        let (record_ts, record_v) = self.kvs.get(k)?.range(Timestamp::ZERO..=ts).next_back()?;
-        Some((*record_ts, record_v.clone()))
+        let (revision_ts, revision_v) = self.kvs.get(k)?.range(Timestamp::ZERO..=ts).next_back()?;
+        Some((*revision_ts, revision_v.clone()))
     }
 
     pub fn insert(&mut self, seqno: wal::SeqNo, k: Vec<u8>, ts: Timestamp, v: Value) -> u64 {
@@ -81,7 +81,7 @@ impl Memtable {
         ts: Timestamp,
         range: Range<&[u8]>,
         direction: Direction,
-    ) -> impl Iterator<Item = Record> + Send + '_ {
+    ) -> impl Iterator<Item = Revision> + Send + '_ {
         let range_bounds = (
             match range.lower {
                 Bound::BeforeAll => std::ops::Bound::Unbounded,
@@ -132,10 +132,10 @@ impl Memtable {
             .kvs
             .range(range_bounds)
             .filter_map(move |(key, versions)| {
-                let (record_ts, value) = versions.range(Timestamp::ZERO..=ts).next_back()?;
-                Some(Record {
+                let (revision_ts, value) = versions.range(Timestamp::ZERO..=ts).next_back()?;
+                Some(Revision {
                     key: key.clone(),
-                    ts: *record_ts,
+                    ts: *revision_ts,
                     value: value.clone(),
                 })
             });
@@ -168,11 +168,11 @@ impl Memtable {
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = Record> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = Revision> + '_ {
         self.kvs
             .iter()
             .map(|(key, entries)| {
-                entries.into_iter().rev().map(move |(ts, value)| Record {
+                entries.into_iter().rev().map(move |(ts, value)| Revision {
                     key: key.clone(),
                     ts: *ts,
                     value: value.clone(),
@@ -187,7 +187,7 @@ impl Memtable {
             for (ts, value) in versions {
                 println!(
                     "  {:?}",
-                    Record {
+                    Revision {
                         key: key.clone(),
                         ts: *ts,
                         value: value.clone()

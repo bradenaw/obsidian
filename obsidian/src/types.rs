@@ -211,19 +211,19 @@ impl From<(KeyspaceId, Vec<u8>)> for pb::Key {
 }
 
 #[derive(Eq, PartialEq, Clone)]
-pub struct Record {
+pub struct Revision {
     pub key: Vec<u8>,
     pub ts: Timestamp,
     pub value: Value,
 }
 
-impl PartialOrd for Record {
+impl PartialOrd for Revision {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for Record {
+impl Ord for Revision {
     fn cmp(&self, other: &Self) -> Ordering {
         match self.key.cmp(&other.key) {
             Ordering::Equal => {}
@@ -233,7 +233,7 @@ impl Ord for Record {
     }
 }
 
-impl Debug for Record {
+impl Debug for Revision {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,

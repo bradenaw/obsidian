@@ -20,7 +20,7 @@ use crate::types::HistoryRange;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
-use crate::types::Record;
+use crate::types::Revision;
 use crate::types::ShardId;
 use crate::types::Timestamp;
 use crate::types::Value;
@@ -56,7 +56,7 @@ pub(crate) trait Meta {
         ts: Timestamp,
         range: Range<Vec<u8>>,
     ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)>;
-    async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Record>, Timestamp)>;
+    async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Revision>, Timestamp)>;
 
     async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>>;
 }
@@ -216,7 +216,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
         Ok((page, continue_cursor))
     }
 
-    async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Record>, Timestamp)> {
+    async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Revision>, Timestamp)> {
         let (page, _) = self
             .tablet
             .history_page(
@@ -240,7 +240,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
                 )?;
 
                 for (keyspace_id, key) in keys {
-                    let record = Record {
+                    let record = Revision {
                         key: key.clone(),
                         ts,
                         value: match self.tablet.get(ts, keyspace_id, key).await? {
@@ -532,7 +532,7 @@ impl<T: Meta + Sync + Send + ?Sized> Meta for Box<T> {
         T::scan_page(self, ts, range).await
     }
 
-    async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Record>, Timestamp)> {
+    async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Revision>, Timestamp)> {
         T::sync(self, ts).await
     }
 

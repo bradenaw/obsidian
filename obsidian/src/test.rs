@@ -31,7 +31,7 @@ use crate::types::HistoryRange;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
-use crate::types::Record;
+use crate::types::Revision;
 use crate::types::ShardId;
 use crate::types::Timestamp;
 use crate::types::Value;
@@ -244,7 +244,7 @@ impl<T: Meta + Send + Sync> Meta for Arc<MetaProxy<T>> {
         Err(anyhow!("MetaProxy not filled yet"))
     }
 
-    async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Record>, Timestamp)> {
+    async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Revision>, Timestamp)> {
         let inner = self.inner.load();
         if let Some(inner) = inner.deref() {
             return T::sync(inner, ts).await;

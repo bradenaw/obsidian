@@ -12,7 +12,7 @@ use crate::range::KeyOrBound;
 use crate::range::Range;
 use crate::types::Direction;
 use crate::types::HistoryRange;
-use crate::types::Record;
+use crate::types::Revision;
 use crate::types::Timestamp;
 use crate::types::Value;
 use crate::util::binary_search_by_idx;
@@ -63,7 +63,7 @@ impl<'a, R> Block<'a, R> {
         // barfoobazhello
         // ^  ^  ^  ^
         //
-        // And we store a list of (timestamp, tombstone, value_offset) in Record order.
+        // And we store a list of (timestamp, tombstone, value_offset) in Revision order.
         // [
         //   (5, false, 0),
         //   (2, false, 3),
@@ -89,8 +89,8 @@ impl<'a, R> Block<'a, R> {
         //   ~24 days                          4
         //   ~17 years                         5
         //
-        // Thus, very new blocks (which contain records written at similar times) will use 3-4
-        // bytes and old blocks (which contain records from many different times compacted
+        // Thus, very new blocks (which contain revisions written at similar times) will use 3-4
+        // bytes and old blocks (which contain revisions from many different times compacted
         // together) will use 4-5.
         //
         //
@@ -233,10 +233,10 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         if version_idx == key_versions.len() {
             return Ok(None);
         }
-        let record_ts = key_versions.ts(version_idx);
+        let revision_ts = key_versions.ts(version_idx);
 
         Ok(Some((
-            record_ts,
+            revision_ts,
             self.value(&key_versions, version_idx).await?,
         )))
     }
@@ -246,7 +246,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         ts: Timestamp,
         range: Range<Vec<u8>>,
         direction: Direction,
-    ) -> impl Stream<Item = anyhow::Result<Record>> + '_ {
+    ) -> impl Stream<Item = anyhow::Result<Revision>> + '_ {
         try_stream! {
             let key_idxs = match direction {
                 Direction::Asc => {
@@ -289,7 +289,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
                 let ts = versions.ts(version_idx);
                 let value = self.value(&versions, version_idx).await?;
 
-                yield Record { key, ts, value };
+                yield Revision { key, ts, value };
             }
         }
     }
@@ -298,7 +298,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         &self,
         ts: Timestamp,
         range: Range<Vec<u8>>,
-    ) -> impl Stream<Item = anyhow::Result<Record>> + '_ {
+    ) -> impl Stream<Item = anyhow::Result<Revision>> + '_ {
         try_stream! {
             let upper_key_idx = binary_search_by_idx(
                     self.index.len(),
@@ -325,7 +325,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
                 let ts = versions.ts(version_idx);
                 let value = self.value(&versions, version_idx).await?;
 
-                yield Record { key, ts, value };
+                yield Revision { key, ts, value };
             }
         }
     }
@@ -367,20 +367,20 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
             };
 
             for idx in version_idxs {
-                let record_ts = key_versions.ts(idx);
+                let revision_ts = key_versions.ts(idx);
                 let value = self.value(&key_versions, idx).await?;
 
-                assert!(min <= record_ts, "{:?} <= {:?}", min, record_ts);
-                assert!(max >= record_ts, "{:?} >= {:?}", max, record_ts);
+                assert!(min <= revision_ts, "{:?} <= {:?}", min, revision_ts);
+                assert!(max >= revision_ts, "{:?} >= {:?}", max, revision_ts);
 
-                yield (record_ts, value);
+                yield (revision_ts, value);
             }
         }
     }
 
-    /// Produces all records contained in this block in Record's natural ordering: (key,
+    /// Produces all revisions contained in this block in Revision's natural ordering: (key,
     /// Reverse(ts)).
-    pub(super) fn stream(&self) -> impl Stream<Item = anyhow::Result<Record>> + '_ {
+    pub(super) fn stream(&self) -> impl Stream<Item = anyhow::Result<Revision>> + '_ {
         try_stream! {
             for j in 0..self.index.len() {
                 let key = self.index.get_key(j);
@@ -388,7 +388,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
                 for k in 0..versions.len() {
                     let ts = versions.ts(k);
                     let value = self.value(&versions, k).await?;
-                    yield Record{key: key.clone(), ts, value};
+                    yield Revision{key: key.clone(), ts, value};
                 }
             }
         }
@@ -542,7 +542,7 @@ mod test {
     use crate::range::Range;
     use crate::types::Direction;
     use crate::types::HistoryRange;
-    use crate::types::Record;
+    use crate::types::Revision;
     use crate::types::Timestamp;
     use crate::types::Value;
     use crate::util::AsyncReadExactAt;
@@ -695,7 +695,7 @@ mod test {
                     expected
                         .clone()
                         .into_iter()
-                        .map(|(key, ts, tombstone)| Record {
+                        .map(|(key, ts, tombstone)| Revision {
                             key: (key).into(),
                             ts: Timestamp(ts as u64),
                             value: match tombstone {
@@ -703,7 +703,7 @@ mod test {
                                 true => Value::Tombstone,
                             },
                         })
-                        .collect::<Vec<Record>>(),
+                        .collect::<Vec<Revision>>(),
                     "direction={:?}",
                     direction,
                 );
