@@ -4,6 +4,104 @@ package obsidian;
 
 import "google/protobuf/empty.proto";
 
+service Obsidian {
+    rpc GetLatest(GetLatestReq) returns (GetLatestResp);
+    rpc Scan(ScanReq) returns (ScanResp);
+    rpc Get(GetReq) returns (GetResp);
+    //rpc LatestSnapshot(LatestSnapshotReq) returns (LatestSnapshotResp);
+    rpc Write(WriteReq) returns (WriteResp);
+
+    rpc CreateColoGroup(CreateColoGroupReq) returns (google.protobuf.Empty);
+    rpc CreateKeyspace(CreateKeyspaceReq) returns (google.protobuf.Empty);
+}
+
+message GetLatestReq {
+    repeated Key keys = 1;
+}
+
+message GetResult {
+    oneof result_type {
+        bytes value = 1;
+        google.protobuf.Empty not_found = 2;
+    }
+}
+
+message GetLatestResp {
+    uint64 snapshot_ts = 1;
+    repeated GetResult results = 2;
+}
+
+message GetReq {
+    uint64 snapshot_ts = 1;
+    repeated Key keys = 2;
+}
+
+message GetResp {
+    repeated GetResult results = 1;
+}
+
+message ScanReq {
+    uint64 snapshot_ts = 1;
+    KeyspaceId keyspace_id = 2;
+    Range range = 3;
+    Direction direction = 4;
+    uint64 limit = 5;
+}
+
+message ScanResp {
+    repeated Record records = 1;
+    Range remaining = 2;
+}
+
+message WriteReq {
+    repeated Precondition preconds = 1;
+    // TODO: put key into mutations
+    repeated Key keys = 3;
+    repeated Mutation muts = 2;
+}
+
+message WriteResp {
+    uint64 write_ts = 1;
+}
+
+message CreateColoGroupReq {
+    uint32 colo_group_id = 1;
+    repeated Bound initial_splits = 2;
+}
+
+message CreateKeyspaceReq {
+    KeyspaceId keyspace_id = 1;
+}
+
+message Precondition {
+    message NotChangedSince {
+        Key key = 1;
+        uint64 ts = 2;
+    }
+
+    oneof precond_type {
+        NotChangedSince not_changed_since = 1;
+    }
+}
+
+message Mutation {
+    oneof mutation_type {
+        bytes put = 2;
+        google.protobuf.Empty delete = 3;
+    }
+}
+
+message Record {
+    Key key = 1;
+    uint64 ts = 2;
+    bytes value = 3;
+}
+
+message Key {
+    KeyspaceId keyspace_id = 1;
+    bytes bytes = 2;
+}
+
 message Range {
     Bound lower = 1;
     Bound upper = 2;
@@ -19,15 +117,13 @@ message Bound {
     }
 }
 
+enum Direction {
+    DIRECTION_UNKNOWN = 0;
+    DIRECTION_ASC = 1;
+    DIRECTION_DESC = 2;
+}
+
 message KeyspaceId {
     uint32 colo_group_id = 1;
     uint32 id = 2;
-}
-
-message CompressedKeySet {
-    repeated KeyspaceId keyspace_ids = 1;
-    repeated bytes key_fragments = 2;
-    repeated uint32 key_shared_prefixes = 3;
-    repeated uint32 key_keyspaces_counts = 4;
-    repeated uint32 key_keyspaces_refs = 5;
 }

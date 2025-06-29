@@ -24,10 +24,10 @@ use crate::types::Record;
 use crate::types::ShardId;
 use crate::types::Timestamp;
 use crate::types::Value;
-use crate::util::WaitableTimestamp;
 use crate::util::longest_shared_prefix_len;
+use crate::util::WaitableTimestamp;
 
-// (PFX_SYNC) -> pb::MetaTx
+// (PFX_SYNC) -> pb::internal::MetaTx
 const PFX_SYNC: u64 = 1;
 
 // (PFX_COLO_GROUPS, colo_group_id) -> []
@@ -36,7 +36,7 @@ const PFX_COLO_GROUPS: u64 = 2;
 // (PFX_KEYSPACES, keyspace_id) -> []
 const PFX_KEYSPACES: u64 = 3;
 
-// (PFX_TABLETS, tablet_id) -> pb::MetaTablet
+// (PFX_TABLETS, tablet_id) -> pb::internal::MetaTablet
 pub(crate) const PFX_TABLETS: u64 = 4;
 
 #[async_trait]
@@ -83,7 +83,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
             return Err(anyhow!("{:?} already exists", tablet_id));
         }
 
-        let starting_meta_tablet_pb = pb::MetaTablet {
+        let starting_meta_tablet_pb = pb::internal::MetaTablet {
             colo_group_ids: vec![],
             ranges: vec![],
         };
@@ -95,7 +95,8 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
                 (KeyspaceId::META, tablet_key),
                 Mutation::Put(starting_meta_tablet_pb.encode_to_vec()),
             )]),
-        ).await?;
+        )
+        .await?;
 
         Ok(())
     }
@@ -124,8 +125,8 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
                 .tablet
                 .get(ts, KeyspaceId::META, tablet_key.clone())
                 .await?
-                .map(|v| pb::MetaTablet::decode(&v[..]))
-                .unwrap_or(Ok(pb::MetaTablet {
+                .map(|v| pb::internal::MetaTablet::decode(&v[..]))
+                .unwrap_or(Ok(pb::internal::MetaTablet {
                     colo_group_ids: vec![],
                     ranges: vec![],
                 }))?;
@@ -231,7 +232,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
         let mut new_ts = ts;
         for (ts, maybe_value) in page {
             if let Value::Regular(value) = maybe_value {
-                let proto_tx = pb::MetaTx::decode(&value[..])?;
+                let proto_tx = pb::internal::MetaTx::decode(&value[..])?;
                 let keys = BTreeSet::try_from(
                     proto_tx
                         .keys
@@ -305,8 +306,8 @@ impl<T: Tablet + Sync + Send> MetaImpl<T> {
         muts.insert(
             (KeyspaceId::META, self.sync_key.clone()),
             Mutation::Put(
-                pb::MetaTx {
-                    keys: Some(pb::CompressedKeySet::from(
+                pb::internal::MetaTx {
+                    keys: Some(pb::internal::CompressedKeySet::from(
                         muts.keys().cloned().collect::<BTreeSet<_>>(),
                     )),
                 }
@@ -335,7 +336,7 @@ impl<T: Tablet + Sync + Send> MetaImpl<T> {
     }
 }
 
-impl From<BTreeSet<(KeyspaceId, Vec<u8>)>> for pb::CompressedKeySet {
+impl From<BTreeSet<(KeyspaceId, Vec<u8>)>> for pb::internal::CompressedKeySet {
     fn from(set: BTreeSet<(KeyspaceId, Vec<u8>)>) -> Self {
         let mut keyspace_id_counts = HashMap::new();
         let mut key_to_keyspace_ids = BTreeMap::new();
@@ -383,7 +384,7 @@ impl From<BTreeSet<(KeyspaceId, Vec<u8>)>> for pb::CompressedKeySet {
             }
         }
 
-        pb::CompressedKeySet {
+        pb::internal::CompressedKeySet {
             keyspace_ids: keyspace_ids_by_pop
                 .iter()
                 .map(|keyspace_id| pb::KeyspaceId {
@@ -399,10 +400,10 @@ impl From<BTreeSet<(KeyspaceId, Vec<u8>)>> for pb::CompressedKeySet {
     }
 }
 
-impl TryFrom<pb::CompressedKeySet> for BTreeSet<(KeyspaceId, Vec<u8>)> {
+impl TryFrom<pb::internal::CompressedKeySet> for BTreeSet<(KeyspaceId, Vec<u8>)> {
     type Error = anyhow::Error;
 
-    fn try_from(value: pb::CompressedKeySet) -> Result<Self, Self::Error> {
+    fn try_from(value: pb::internal::CompressedKeySet) -> Result<Self, Self::Error> {
         let keyspace_ids = value
             .keyspace_ids
             .iter()

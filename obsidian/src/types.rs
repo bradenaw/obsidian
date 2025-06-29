@@ -4,8 +4,10 @@ use std::fmt::Display;
 use std::time::Duration;
 use std::time::SystemTime;
 
+use anyhow::anyhow;
 use thiserror::Error;
 
+use crate::pb;
 use crate::util::hexlify;
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy)]
@@ -168,6 +170,46 @@ impl Debug for KeyspaceId {
     }
 }
 
+impl From<KeyspaceId> for pb::KeyspaceId {
+    fn from(keyspace_id: KeyspaceId) -> Self {
+        pb::KeyspaceId {
+            colo_group_id: keyspace_id.0 .0,
+            id: keyspace_id.1,
+        }
+    }
+}
+
+impl TryFrom<pb::KeyspaceId> for KeyspaceId {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::KeyspaceId) -> Result<Self, Self::Error> {
+        Ok(KeyspaceId(ColoGroupId(value.colo_group_id), value.id))
+    }
+}
+
+impl TryFrom<pb::Key> for (KeyspaceId, Vec<u8>) {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::Key) -> Result<Self, Self::Error> {
+        let keyspace_id = KeyspaceId::try_from(
+            value
+                .keyspace_id
+                .ok_or_else(|| anyhow!("missing keyspace_id"))?,
+        )?;
+
+        Ok((keyspace_id, value.bytes))
+    }
+}
+
+impl From<(KeyspaceId, Vec<u8>)> for pb::Key {
+    fn from((keyspace_id, bytes): (KeyspaceId, Vec<u8>)) -> Self {
+        Self {
+            keyspace_id: Some(keyspace_id.into()),
+            bytes,
+        }
+    }
+}
+
 #[derive(Eq, PartialEq, Clone)]
 pub struct Record {
     pub key: Vec<u8>,
@@ -242,6 +284,27 @@ impl Debug for Direction {
     }
 }
 
+impl From<Direction> for pb::Direction {
+    fn from(value: Direction) -> Self {
+        match value {
+            Direction::Asc => pb::Direction::Asc,
+            Direction::Desc => pb::Direction::Desc,
+        }
+    }
+}
+
+impl TryFrom<pb::Direction> for Direction {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::Direction) -> Result<Self, Self::Error> {
+        Ok(match value {
+            pb::Direction::Unknown => return Err(anyhow!("unknown direction")),
+            pb::Direction::Asc => Direction::Asc,
+            pb::Direction::Desc => Direction::Desc,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Precondition {
     NotChangedSince(KeyspaceId, Vec<u8>, Timestamp),
@@ -260,6 +323,29 @@ impl Precondition {
     }
 }
 
+impl TryFrom<pb::Precondition> for Precondition {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::Precondition) -> Result<Self, Self::Error> {
+        match value.precond_type {
+            Some(pb::precondition::PrecondType::NotChangedSince(not_changed_since)) => {
+                let (keyspace_id, key_bytes): (KeyspaceId, Vec<u8>) = not_changed_since
+                    .key
+                    .ok_or_else(|| anyhow!("missing key"))?
+                    .try_into()?;
+                let ts = Timestamp::from_nanos(not_changed_since.ts);
+                Ok(Precondition::NotChangedSince(keyspace_id, key_bytes, ts))
+            }
+            None => return Err(anyhow!("missing precond_type on Precondition")),
+        }
+    }
+}
+impl From<Precondition> for pb::Precondition {
+    fn from(_: Precondition) -> Self {
+        todo!()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Mutation {
     Put(Vec<u8>),
@@ -271,6 +357,28 @@ impl Mutation {
         match self {
             Mutation::Put(v) => v.len(),
             Mutation::Delete => 0,
+        }
+    }
+}
+
+impl TryFrom<pb::Mutation> for Mutation {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::Mutation) -> Result<Self, Self::Error> {
+        Ok(match value.mutation_type {
+            Some(pb::mutation::MutationType::Put(value)) => Mutation::Put(value),
+            Some(pb::mutation::MutationType::Delete(())) => Mutation::Delete,
+            None => return Err(anyhow!("missing mutation_type")),
+        })
+    }
+}
+impl From<Mutation> for pb::Mutation {
+    fn from(value: Mutation) -> Self {
+        pb::Mutation {
+            mutation_type: Some(match value {
+                Mutation::Put(value) => pb::mutation::MutationType::Put(value),
+                Mutation::Delete => pb::mutation::MutationType::Delete(()),
+            }),
         }
     }
 }
