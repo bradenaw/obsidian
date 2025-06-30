@@ -32,6 +32,7 @@ use crate::types::Direction;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
+use crate::types::Record;
 use crate::types::ShardId;
 use crate::types::Timestamp;
 use crate::types::WriteError;
@@ -57,7 +58,7 @@ pub trait Obsidian {
         range: Range<&[u8]>,
         direction: Direction,
         limit: usize,
-    ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)>;
+    ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)>;
 
     async fn latest_snapshot(
         &self,
@@ -86,7 +87,7 @@ pub trait ObsidianExt {
         keyspace_id: KeyspaceId,
         range: Range<Vec<u8>>,
         direction: Direction,
-    ) -> Box<dyn Stream<Item = anyhow::Result<(Vec<u8>, Timestamp, Vec<u8>)>> + Send + '_>;
+    ) -> Box<dyn Stream<Item = anyhow::Result<Record>> + Send + '_>;
 }
 
 impl<T: Obsidian + Sync> ObsidianExt for T {
@@ -98,7 +99,7 @@ impl<T: Obsidian + Sync> ObsidianExt for T {
         keyspace_id: KeyspaceId,
         range: Range<Vec<u8>>,
         direction: Direction,
-    ) -> Box<dyn Stream<Item = anyhow::Result<(Vec<u8>, Timestamp, Vec<u8>)>> + Send + '_> {
+    ) -> Box<dyn Stream<Item = anyhow::Result<Record>> + Send + '_> {
         Box::new(try_stream! {
             let mut maybe_cursor = Some(range);
             while let Some(cursor) = maybe_cursor {
@@ -110,8 +111,8 @@ impl<T: Obsidian + Sync> ObsidianExt for T {
                     1000, // page_size
                 ).await?;
 
-                for (key, ts, value) in page {
-                    yield (key, ts, value);
+                for record in page {
+                    yield record;
                 }
 
                 maybe_cursor = continue_cursor;
@@ -154,7 +155,7 @@ impl Obsidian for Frontend {
         range: Range<&[u8]>,
         direction: Direction,
         limit: usize,
-    ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)> {
+    ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
         self.with_resolve_conflicts(|| async move {
             let start_bound = match direction {
                 Direction::Asc => range.lower,

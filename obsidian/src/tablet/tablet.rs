@@ -47,6 +47,7 @@ use crate::types::HistoryRange;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
+use crate::types::Record;
 use crate::types::ShardId;
 use crate::types::Timestamp;
 use crate::types::Value;
@@ -101,7 +102,7 @@ impl Tablet for LsmTablet {
         range: Range<&[u8]>,
         direction: Direction,
         limit: usize,
-    ) -> Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>), InternalError> {
+    ) -> Result<(Vec<Record>, Option<Range<Vec<u8>>>), InternalError> {
         self.inner
             .scan_page(ts, keyspace_id, range, direction, limit)
             .await
@@ -392,7 +393,7 @@ impl LsmTabletInner {
         range: Range<&[u8]>,
         direction: Direction,
         limit: usize,
-    ) -> Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>), InternalError> {
+    ) -> Result<(Vec<Record>, Option<Range<Vec<u8>>>), InternalError> {
         if limit == 0 {
             return Err(anyhow!("scan_page limit=0").into());
         }
@@ -509,8 +510,12 @@ impl LsmTabletInner {
 
         Ok((
             page.into_iter()
-                .filter_map(|record| match record.value {
-                    Value::Regular(v) => Some((record.key, record.ts, v)),
+                .filter_map(|revision| match revision.value {
+                    Value::Regular(v) => Some(Record {
+                        key: (keyspace_id, revision.key),
+                        ts: revision.ts,
+                        value: v,
+                    }),
                     Value::Tombstone => None,
                 })
                 .collect(),
@@ -1081,11 +1086,16 @@ impl LsmTabletInner {
                                     Direction::Asc,
                                 )
                                 .boxed();
-                            while let Some((key, _, value)) = s.try_next().await? {
-                                let pending = PendingMutation::decode(&value)?;
+                            while let Some(record) = s.try_next().await? {
+                                let pending = PendingMutation::decode(&record.value)?;
 
                                 let _ = sender
-                                    .send((pending.txid, keyspace_id, key, PrepareType::Mutation))
+                                    .send((
+                                        pending.txid,
+                                        keyspace_id,
+                                        record.key.1,
+                                        PrepareType::Mutation,
+                                    ))
                                     .await;
                             }
                         }
@@ -1127,14 +1137,14 @@ impl LsmTabletInner {
                                     Direction::Asc,
                                 )
                                 .boxed();
-                            while let Some((key, _, value)) = s.try_next().await? {
-                                let precond_locks = PrecondLocks::decode(&value)?;
+                            while let Some(record) = s.try_next().await? {
+                                let precond_locks = PrecondLocks::decode(&record.value)?;
                                 for txid in precond_locks.txids {
                                     let _ = sender
                                         .send((
                                             txid,
                                             keyspace_id,
-                                            key.clone(),
+                                            record.key.1.clone(),
                                             PrepareType::Precondition,
                                         ))
                                         .await;
@@ -1170,9 +1180,9 @@ impl LsmTabletInner {
                             Direction::Asc,
                         )
                         .boxed();
-                    while let Some((key, _, value)) = s.try_next().await? {
-                        let txid = Txid::decode(&key[..])?;
-                        let tx_outcome_record = TxOutcomeRecord::decode(&value)?;
+                    while let Some(record) = s.try_next().await? {
+                        let txid = Txid::decode(&record.key.1[..])?;
+                        let tx_outcome_record = TxOutcomeRecord::decode(&record.value)?;
                         if let TxOutcomeRecord::Committed {
                             ts: commit_ts,
                             precond_keys,
@@ -1195,7 +1205,7 @@ impl LsmTabletInner {
         keyspace_id: KeyspaceId,
         range: Range<Vec<u8>>,
         direction: Direction,
-    ) -> impl Stream<Item = anyhow::Result<(Vec<u8>, Timestamp, Vec<u8>)>> + '_ {
+    ) -> impl Stream<Item = anyhow::Result<Record>> + '_ {
         scan_all(
             move |ts, keyspace_id, range, direction| async move {
                 self.scan_page(ts, keyspace_id, range.borrow(), direction, 1000)
@@ -1249,23 +1259,18 @@ fn scan_all<F, Fut>(
     keyspace_id: KeyspaceId,
     range: Range<Vec<u8>>,
     direction: Direction,
-) -> impl Stream<Item = anyhow::Result<(Vec<u8>, Timestamp, Vec<u8>)>>
+) -> impl Stream<Item = anyhow::Result<Record>>
 where
     F: Fn(Timestamp, KeyspaceId, Range<Vec<u8>>, Direction) -> Fut,
-    Fut: Future<
-        Output = Result<
-            (Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>),
-            InternalError,
-        >,
-    >,
+    Fut: Future<Output = Result<(Vec<Record>, Option<Range<Vec<u8>>>), InternalError>>,
 {
     try_stream! {
         let mut maybe_cursor = Some(range);
         while let Some(cursor) = maybe_cursor {
             let (page, continue_cursor) = f(ts, keyspace_id, cursor, direction).await?;
 
-            for (key, ts, value) in page {
-                yield (key, ts, value);
+            for record in page {
+                yield record;
             }
 
             maybe_cursor = continue_cursor;

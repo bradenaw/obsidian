@@ -268,8 +268,8 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
         pin_mut!(s);
 
         let mut result = vec![];
-        while let Some((_, _, value)) = s.try_next().await? {
-            let observed_txid = Txid::decode(&value)?;
+        while let Some(record) = s.try_next().await? {
+            let observed_txid = Txid::decode(&record.value)?;
             result.push(observed_txid);
         }
 

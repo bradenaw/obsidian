@@ -14,6 +14,7 @@ use crate::types::Direction;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
+use crate::types::Record;
 use crate::types::Timestamp;
 use crate::types::WriteError;
 
@@ -70,7 +71,7 @@ impl Obsidian for FrontendClient {
         range: Range<&[u8]>,
         direction: Direction,
         limit: usize,
-    ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)> {
+    ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
         let resp = self
             .inner
             .acquire()
@@ -85,19 +86,20 @@ impl Obsidian for FrontendClient {
             .await?
             .into_inner();
 
-        let results: Vec<(Vec<u8>, Timestamp, Vec<u8>)> = resp
+        let results: Vec<Record> = resp
             .records
             .into_iter()
             .map(|r| {
-                Ok((
-                    r.key
+                Ok(Record {
+                    key: r
+                        .key
                         .ok_or_else(|| anyhow!("invalid response: record missing key"))?
-                        .bytes,
-                    Timestamp::from_nanos(r.ts),
-                    r.value,
-                ))
+                        .try_into()?,
+                    ts: Timestamp::from_nanos(r.ts),
+                    value: r.value,
+                })
             })
-            .collect::<anyhow::Result<Vec<(Vec<u8>, Timestamp, Vec<u8>)>>>()?;
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
         let continue_range = Range::try_from(
             resp.remaining
@@ -214,6 +216,7 @@ mod tests {
     use crate::types::ColoGroupId;
     use crate::types::KeyspaceId;
     use crate::types::Mutation;
+    use crate::types::Record;
 
     #[tokio::test]
     async fn test_write() -> anyhow::Result<()> {
@@ -304,10 +307,7 @@ mod tests {
             range: crate::range::Range<&[u8]>,
             direction: crate::types::Direction,
             limit: usize,
-        ) -> anyhow::Result<(
-            Vec<(Vec<u8>, crate::types::Timestamp, Vec<u8>)>,
-            Option<crate::range::Range<Vec<u8>>>,
-        )> {
+        ) -> anyhow::Result<(Vec<Record>, Option<crate::range::Range<Vec<u8>>>)> {
             self.inner
                 .scan_page(ts, keyspace_id, range, direction, limit)
                 .await

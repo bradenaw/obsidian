@@ -133,8 +133,8 @@ impl MetaSyncedInner {
                 })
                 .await;
 
-            for (key, _, value) in page {
-                kv.insert(key, value);
+            for record in page {
+                kv.insert(record.key.1, record.value);
             }
 
             maybe_cursor = continue_cursor;

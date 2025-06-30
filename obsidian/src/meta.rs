@@ -20,6 +20,7 @@ use crate::types::HistoryRange;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
+use crate::types::Record;
 use crate::types::Revision;
 use crate::types::ShardId;
 use crate::types::Timestamp;
@@ -55,7 +56,7 @@ pub(crate) trait Meta {
         &self,
         ts: Timestamp,
         range: Range<Vec<u8>>,
-    ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)>;
+    ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)>;
     async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Revision>, Timestamp)>;
 
     async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>>;
@@ -208,7 +209,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
         &self,
         ts: Timestamp,
         range: Range<Vec<u8>>,
-    ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)> {
+    ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
         let (page, continue_cursor) = self
             .tablet
             .scan_page(ts, KeyspaceId::META, range.borrow(), Direction::Asc, 1000)
@@ -266,8 +267,9 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
         let mut maybe_cursor = Some(Range::prefix(tuple_encode(&(PFX_TABLETS,))));
         while let Some(cursor) = maybe_cursor {
             let (page, continue_cursor) = self.scan_page(ts, cursor).await?;
-            for (key, _, _) in page {
-                let (_, tablet_shard_id, tablet_id_seq): (u64, u64, u64) = tuple_decode(&key)?;
+            for record in page {
+                let (_, tablet_shard_id, tablet_id_seq): (u64, u64, u64) =
+                    tuple_decode(&record.key.1)?;
                 let tablet_id = TabletId(ShardId(tablet_shard_id as u32), tablet_id_seq);
                 out.push(tablet_id);
             }
@@ -528,7 +530,7 @@ impl<T: Meta + Sync + Send + ?Sized> Meta for Box<T> {
         &self,
         ts: Timestamp,
         range: Range<Vec<u8>>,
-    ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)> {
+    ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
         T::scan_page(self, ts, range).await
     }
 

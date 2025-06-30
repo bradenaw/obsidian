@@ -122,17 +122,7 @@ impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for Fron
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
         Ok(tonic::Response::new(pb::ScanResp {
-            records: records
-                .into_iter()
-                .map(|(key, ts, value)| pb::Record {
-                    key: Some(pb::Key {
-                        keyspace_id: Some(keyspace_id.into()),
-                        bytes: key,
-                    }),
-                    ts: ts.as_nanos(),
-                    value,
-                })
-                .collect(),
+            records: records.into_iter().map(pb::Record::from).collect(),
             remaining: Some(maybe_continue_range.unwrap_or(Range::empty()).into()),
         }))
     }

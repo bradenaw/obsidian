@@ -210,6 +210,43 @@ impl From<(KeyspaceId, Vec<u8>)> for pb::Key {
     }
 }
 
+pub type Key = (KeyspaceId, Vec<u8>);
+
+#[derive(Eq, PartialEq, Clone, Debug)]
+pub struct Record {
+    pub key: Key,
+    pub ts: Timestamp,
+    pub value: Vec<u8>,
+}
+
+impl TryFrom<pb::Record> for Record {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::Record) -> Result<Self, Self::Error> {
+        let key: (KeyspaceId, Vec<u8>) = value
+            .key
+            .ok_or_else(|| anyhow!("missing key"))?
+            .try_into()?;
+        let ts = Timestamp::from_nanos(value.ts);
+
+        Ok(Self {
+            key,
+            ts,
+            value: value.value,
+        })
+    }
+}
+
+impl From<Record> for pb::Record {
+    fn from(value: Record) -> Self {
+        Self {
+            key: Some(value.key.into()),
+            ts: value.ts.as_nanos(),
+            value: value.value,
+        }
+    }
+}
+
 #[derive(Eq, PartialEq, Clone)]
 pub struct Revision {
     pub key: Vec<u8>,

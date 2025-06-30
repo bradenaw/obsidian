@@ -30,6 +30,7 @@ use crate::types::Direction;
 use crate::types::HistoryRange;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
+use crate::types::Record;
 use crate::types::Precondition;
 use crate::types::Revision;
 use crate::types::ShardId;
@@ -92,7 +93,7 @@ impl<T: Tablet + Send + Sync> Tablet for Arc<T> {
         range: Range<&[u8]>,
         direction: Direction,
         limit: usize,
-    ) -> Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>), InternalError> {
+    ) -> Result<(Vec<Record>, Option<Range<Vec<u8>>>), InternalError> {
         T::scan_page(self, ts, keyspace_id, range, direction, limit).await
     }
 
@@ -236,7 +237,7 @@ impl<T: Meta + Send + Sync> Meta for Arc<MetaProxy<T>> {
         &self,
         ts: Timestamp,
         range: Range<Vec<u8>>,
-    ) -> anyhow::Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>)> {
+    ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
         let inner = self.inner.load();
         if let Some(inner) = inner.deref() {
             return T::scan_page(inner, ts, range).await;
@@ -349,6 +350,7 @@ macro_rules! obsidian_test_suite {
             use crate::types::Direction;
             use crate::types::KeyspaceId;
             use crate::types::Mutation;
+            use crate::types::Record;
             use crate::types::Timestamp;
 
             #[tokio::test]
@@ -475,11 +477,11 @@ macro_rules! obsidian_test_suite {
                                     expected
                                         .clone()
                                         .into_iter()
-                                        .map(|(key, ts_idx)| (
-                                            key.clone(),
-                                            timestamps[ts_idx],
-                                            format!("{:?} {}", key, ts_idx).into(),
-                                        ))
+                                        .map(|(key, ts_idx)| Record {
+                                            key: (keyspace_id, key.clone()),
+                                            ts: timestamps[ts_idx],
+                                            value: format!("{:?} {}", key, ts_idx).into(),
+                                        })
                                         .collect::<Vec<_>>(),
                                     "scan_page(ts={:?}, /*keyspace_id*/, /*cursor*/, direction={:?}, page_size={})",
                                     timestamps[ts_idx],

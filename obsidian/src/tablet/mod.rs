@@ -16,6 +16,7 @@ use crate::types::HistoryRange;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
+use crate::types::Record;
 use crate::types::Timestamp;
 use crate::types::Value;
 
@@ -46,7 +47,7 @@ pub(crate) trait Tablet {
         range: Range<&[u8]>,
         direction: Direction,
         limit: usize,
-    ) -> Result<(Vec<(Vec<u8>, Timestamp, Vec<u8>)>, Option<Range<Vec<u8>>>), InternalError>;
+    ) -> Result<(Vec<Record>, Option<Range<Vec<u8>>>), InternalError>;
 
     async fn history_page(
         &self,
