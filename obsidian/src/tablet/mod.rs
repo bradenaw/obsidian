@@ -27,10 +27,7 @@ pub(crate) trait Tablet {
 
     async fn get_latest(&self, key: Key) -> Result<(Timestamp, Option<Record>), InternalError>;
 
-    async fn latest_snapshot(
-        &self,
-        keys: BTreeSet<Key>,
-    ) -> Result<Timestamp, InternalError>;
+    async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError>;
 
     async fn scan_page(
         &self,
