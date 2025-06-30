@@ -11,6 +11,7 @@ use crate::range::Bound;
 use crate::range::Range;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
+use crate::types::Key;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
@@ -106,10 +107,7 @@ impl Obsidian for FrontendClient {
         Ok((results, maybe_continue_range))
     }
 
-    async fn latest_snapshot(
-        &self,
-        keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
-    ) -> anyhow::Result<Timestamp> {
+    async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> anyhow::Result<Timestamp> {
         let resp = self
             .inner
             .acquire()
@@ -126,7 +124,7 @@ impl Obsidian for FrontendClient {
     async fn write(
         &self,
         preconds: Vec<Precondition>,
-        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+        muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, WriteError> {
         let preconds_pb: Vec<_> = preconds.into_iter().map(pb::Precondition::from).collect();
 
@@ -206,6 +204,7 @@ mod tests {
     use crate::test::new_for_test;
     use crate::test::obsidian_test_suite;
     use crate::types::ColoGroupId;
+    use crate::types::Key;
     use crate::types::KeyspaceId;
     use crate::types::Mutation;
     use crate::types::Record;
@@ -307,7 +306,7 @@ mod tests {
 
         async fn latest_snapshot(
             &self,
-            keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+            keys: BTreeSet<Key>,
         ) -> anyhow::Result<crate::types::Timestamp> {
             self.inner.latest_snapshot(keys).await
         }
@@ -315,7 +314,7 @@ mod tests {
         async fn write(
             &self,
             preconds: Vec<crate::types::Precondition>,
-            muts: BTreeMap<(KeyspaceId, Vec<u8>), crate::types::Mutation>,
+            muts: BTreeMap<Key, crate::types::Mutation>,
         ) -> Result<crate::types::Timestamp, crate::types::WriteError> {
             self.inner.write(preconds, muts).await
         }

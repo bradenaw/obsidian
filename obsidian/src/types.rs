@@ -187,7 +187,9 @@ impl TryFrom<pb::KeyspaceId> for KeyspaceId {
     }
 }
 
-impl TryFrom<pb::Key> for (KeyspaceId, Vec<u8>) {
+pub type Key = (KeyspaceId, Vec<u8>);
+
+impl TryFrom<pb::Key> for Key {
     type Error = anyhow::Error;
 
     fn try_from(value: pb::Key) -> Result<Self, Self::Error> {
@@ -201,16 +203,14 @@ impl TryFrom<pb::Key> for (KeyspaceId, Vec<u8>) {
     }
 }
 
-impl From<(KeyspaceId, Vec<u8>)> for pb::Key {
-    fn from((keyspace_id, bytes): (KeyspaceId, Vec<u8>)) -> Self {
+impl From<Key> for pb::Key {
+    fn from((keyspace_id, bytes): Key) -> Self {
         Self {
             keyspace_id: Some(keyspace_id.into()),
             bytes,
         }
     }
 }
-
-pub type Key = (KeyspaceId, Vec<u8>);
 
 #[derive(Eq, PartialEq, Clone)]
 pub struct Record {
@@ -223,7 +223,7 @@ impl TryFrom<pb::Record> for Record {
     type Error = anyhow::Error;
 
     fn try_from(value: pb::Record) -> Result<Self, Self::Error> {
-        let key: (KeyspaceId, Vec<u8>) = value
+        let key: Key = value
             .key
             .ok_or_else(|| anyhow!("missing key"))?
             .try_into()?;
@@ -380,7 +380,7 @@ impl TryFrom<pb::Precondition> for Precondition {
     fn try_from(value: pb::Precondition) -> Result<Self, Self::Error> {
         match value.precond_type {
             Some(pb::precondition::PrecondType::NotChangedSince(not_changed_since)) => {
-                let (keyspace_id, key_bytes): (KeyspaceId, Vec<u8>) = not_changed_since
+                let (keyspace_id, key_bytes): Key = not_changed_since
                     .key
                     .ok_or_else(|| anyhow!("missing key"))?
                     .try_into()?;

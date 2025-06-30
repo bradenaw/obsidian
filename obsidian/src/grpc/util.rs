@@ -6,6 +6,7 @@ use std::ops::DerefMut;
 use anyhow::anyhow;
 
 use crate::pb;
+use crate::types::Key;
 use crate::types::KeyspaceId;
 
 pub(super) fn options_to_get_results(values: Vec<Option<Vec<u8>>>) -> Vec<pb::GetResult> {
@@ -24,10 +25,7 @@ pub(super) fn options_to_get_results(values: Vec<Option<Vec<u8>>>) -> Vec<pb::Ge
 
 pub(super) fn key_set_from_pb(
     keys_pb: Vec<pb::Key>,
-) -> anyhow::Result<(
-    BTreeSet<(KeyspaceId, Vec<u8>)>,
-    BTreeMap<(KeyspaceId, Vec<u8>), usize>,
-)> {
+) -> anyhow::Result<(BTreeSet<Key>, BTreeMap<Key, usize>)> {
     let mut keys = BTreeSet::new();
     let mut key_idxs = BTreeMap::new();
     for (i, key_pb) in keys_pb.into_iter().enumerate() {

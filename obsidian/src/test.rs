@@ -28,6 +28,7 @@ use crate::tablet::Tablet;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::HistoryRange;
+use crate::types::Key;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
@@ -111,7 +112,7 @@ impl<T: Tablet + Send + Sync> Tablet for Arc<T> {
     async fn write(
         &self,
         preconds: Vec<Precondition>,
-        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+        muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
         T::write(self, preconds, muts).await
     }
@@ -120,7 +121,7 @@ impl<T: Tablet + Send + Sync> Tablet for Arc<T> {
         &self,
         txid: Txid,
         preconds: Vec<Precondition>,
-        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+        muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
         T::prepare(self, txid, preconds, muts).await
     }
@@ -129,8 +130,8 @@ impl<T: Tablet + Send + Sync> Tablet for Arc<T> {
         &self,
         txid: Txid,
         ts: Timestamp,
-        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
-        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<TxOutcome> {
         T::try_commit(self, txid, ts, precond_keys, mut_keys).await
     }
@@ -147,8 +148,8 @@ impl<T: Tablet + Send + Sync> Tablet for Arc<T> {
         &self,
         txid: Txid,
         ts: Timestamp,
-        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
-        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()> {
         T::cleanup_committed(self, txid, ts, precond_keys, mut_keys).await
     }

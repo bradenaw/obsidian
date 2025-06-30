@@ -17,6 +17,7 @@ use crate::tuple_encoding::tuple_encode;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::HistoryRange;
+use crate::types::Key;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
@@ -293,7 +294,7 @@ impl<T: Tablet + Sync + Send> MetaImpl<T> {
         &self,
         read_ts: Timestamp,
         mut preconds: Vec<Precondition>,
-        mut muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+        mut muts: BTreeMap<Key, Mutation>,
     ) -> anyhow::Result<Timestamp> {
         preconds.push(Precondition::NotChangedSince(
             KeyspaceId::META,
@@ -338,8 +339,8 @@ impl<T: Tablet + Sync + Send> MetaImpl<T> {
     }
 }
 
-impl From<BTreeSet<(KeyspaceId, Vec<u8>)>> for pb::internal::CompressedKeySet {
-    fn from(set: BTreeSet<(KeyspaceId, Vec<u8>)>) -> Self {
+impl From<BTreeSet<Key>> for pb::internal::CompressedKeySet {
+    fn from(set: BTreeSet<Key>) -> Self {
         let mut keyspace_id_counts = HashMap::new();
         let mut key_to_keyspace_ids = BTreeMap::new();
         for (keyspace_id, key) in set {
@@ -402,7 +403,7 @@ impl From<BTreeSet<(KeyspaceId, Vec<u8>)>> for pb::internal::CompressedKeySet {
     }
 }
 
-impl TryFrom<pb::internal::CompressedKeySet> for BTreeSet<(KeyspaceId, Vec<u8>)> {
+impl TryFrom<pb::internal::CompressedKeySet> for BTreeSet<Key> {
     type Error = anyhow::Error;
 
     fn try_from(value: pb::internal::CompressedKeySet) -> Result<Self, Self::Error> {

@@ -14,6 +14,7 @@ use crate::range::Bound;
 use crate::range::Range;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
+use crate::types::Key;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
@@ -143,7 +144,7 @@ impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for Fron
             .keys
             .into_iter()
             .map(|x| x.try_into())
-            .collect::<Result<Vec<(KeyspaceId, Vec<u8>)>, _>>()
+            .collect::<Result<Vec<Key>, _>>()
             .map_err(invalid_argument)?;
         let muts = req_inner
             .muts

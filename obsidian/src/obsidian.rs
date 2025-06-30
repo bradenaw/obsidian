@@ -171,10 +171,7 @@ impl Obsidian for Frontend {
         .await
     }
 
-    async fn latest_snapshot(
-        &self,
-        keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
-    ) -> anyhow::Result<Timestamp> {
+    async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> anyhow::Result<Timestamp> {
         let mut by_tablet = BTreeMap::new();
         for (keyspace_id, key) in &keys {
             let tablet_id = self.router.tablet_id_for_key(keyspace_id.0, &key)?;
@@ -204,7 +201,7 @@ impl Obsidian for Frontend {
     async fn write(
         &self,
         preconds: Vec<Precondition>,
-        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+        muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, WriteError> {
         let write_by_tablet = self.split_write(preconds.clone(), muts.clone())?;
 
@@ -396,10 +393,8 @@ impl Frontend {
     fn split_write(
         &self,
         preconds: Vec<Precondition>,
-        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
-    ) -> anyhow::Result<
-        BTreeMap<TabletId, (Vec<Precondition>, BTreeMap<(KeyspaceId, Vec<u8>), Mutation>)>,
-    > {
+        muts: BTreeMap<Key, Mutation>,
+    ) -> anyhow::Result<BTreeMap<TabletId, (Vec<Precondition>, BTreeMap<Key, Mutation>)>> {
         let mut result = BTreeMap::new();
 
         for precond in preconds {

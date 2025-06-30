@@ -36,6 +36,7 @@ use crate::storage::MemStorage;
 use crate::storage::Storage;
 use crate::types::Direction;
 use crate::types::HistoryRange;
+use crate::types::Key;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
@@ -241,7 +242,7 @@ impl Lsm {
         &self,
         ts: Timestamp,
         preconds: Vec<Precondition>,
-        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+        muts: BTreeMap<Key, Mutation>,
     ) -> Result<(), WriteError> {
         let keyspaces = self.inner.load();
 
