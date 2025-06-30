@@ -46,7 +46,7 @@ use crate::util::Retry;
 
 #[async_trait]
 pub trait Obsidian {
-    async fn get(&self, ts: Timestamp, key: Key) -> anyhow::Result<Option<Record>>;
+    async fn get(&self, ts: Timestamp, key: &Key) -> anyhow::Result<Option<Record>>;
 
     async fn scan_page(
         &self,
@@ -125,14 +125,13 @@ const MAX_CONFLICT_RETRIES: usize = 10;
 
 #[async_trait]
 impl Obsidian for Frontend {
-    async fn get(&self, ts: Timestamp, key: Key) -> anyhow::Result<Option<Record>> {
+    async fn get(&self, ts: Timestamp, key: &Key) -> anyhow::Result<Option<Record>> {
         let keyspace_id = key.0;
         self.with_resolve_conflicts(|| {
-            let key = key.clone();
             async move {
                 let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key.1)?;
                 let tablet = self.tablets.tablet(tablet_id)?;
-                tablet.get(ts, key.clone()).await
+                tablet.get(ts, key).await
             }
         })
         .await

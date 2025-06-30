@@ -33,14 +33,14 @@ impl FrontendClient {
 
 #[async_trait]
 impl Obsidian for FrontendClient {
-    async fn get(&self, ts: Timestamp, key: Key) -> anyhow::Result<Option<Record>> {
+    async fn get(&self, ts: Timestamp, key: &Key) -> anyhow::Result<Option<Record>> {
         let resp = self
             .inner
             .acquire()
             .await
             .get(pb::GetReq {
                 snapshot_ts: ts.as_nanos(),
-                keys: Vec::from([pb::Key::from(key)]),
+                keys: Vec::from([pb::Key::from(key.clone())]),
             })
             .await?
             .into_inner();
@@ -273,7 +273,7 @@ mod tests {
         async fn get(
             &self,
             ts: crate::types::Timestamp,
-            key: Key,
+            key: &Key,
         ) -> anyhow::Result<Option<Record>> {
             self.inner.get(ts, key).await
         }

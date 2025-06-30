@@ -23,7 +23,7 @@ use crate::types::Timestamp;
 
 #[async_trait]
 pub(crate) trait Tablet {
-    async fn get(&self, ts: Timestamp, key: Key) -> Result<Option<Record>, InternalError>;
+    async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError>;
 
     async fn get_latest(&self, key: Key) -> Result<(Timestamp, Option<Record>), InternalError>;
 

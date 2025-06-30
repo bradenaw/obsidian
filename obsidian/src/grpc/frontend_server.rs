@@ -51,14 +51,14 @@ impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for Fron
         for _ in &keys {
             values.push(None);
         }
-        for (keyspace_id, key) in keys {
+        for key in keys {
             let maybe_value = self
                 .inner
-                .get(ts, (keyspace_id, key.clone()))
+                .get(ts, &key)
                 .await
                 .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
-            values[key_idxs[&(keyspace_id, key)]] = maybe_value;
+            values[key_idxs[&key]] = maybe_value;
         }
 
         Ok(tonic::Response::new(pb::GetResp {
@@ -84,14 +84,14 @@ impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for Fron
         for _ in &keys {
             values.push(None);
         }
-        for (keyspace_id, key) in keys {
+        for key in keys {
             let maybe_value = self
                 .inner
-                .get(ts, (keyspace_id, key.clone()))
+                .get(ts, &key)
                 .await
                 .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
-            values[key_idxs[&(keyspace_id, key)]] = maybe_value;
+            values[key_idxs[&key]] = maybe_value;
         }
 
         Ok(tonic::Response::new(pb::GetLatestResp {

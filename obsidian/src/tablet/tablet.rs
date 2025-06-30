@@ -73,7 +73,7 @@ pub(crate) struct LsmTablet {
 
 #[async_trait]
 impl Tablet for LsmTablet {
-    async fn get(&self, ts: Timestamp, key: Key) -> Result<Option<Record>, InternalError> {
+    async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
         self.inner.get(ts, key).await
     }
 
@@ -280,7 +280,7 @@ impl LsmTabletInner {
         }
     }
 
-    async fn get(&self, ts: Timestamp, key: Key) -> Result<Option<Record>, InternalError> {
+    async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
         let keyspace_id = key.0;
 
         self.check_key(keyspace_id.0, &key.1)?;
@@ -306,7 +306,7 @@ impl LsmTabletInner {
         Ok(match maybe_record {
             Some((ts, value)) => match value {
                 RevisionValue::Regular(v) => Some(Record {
-                    key: key,
+                    key: key.clone(),
                     ts: ts,
                     value: v,
                 }),

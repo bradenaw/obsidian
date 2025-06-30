@@ -78,7 +78,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
 
         if self
             .tablet
-            .get(ts, (KeyspaceId::META, tablet_key.clone()))
+            .get(ts, &(KeyspaceId::META, tablet_key.clone()))
             .await?
             .is_some()
         {
@@ -125,7 +125,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
             let tablet_key = tuple_encode(&(PFX_TABLETS, tablet_id.0 .0 as u64, tablet_id.1));
             let meta_tablet = self
                 .tablet
-                .get(ts, (KeyspaceId::META, tablet_key.clone()))
+                .get(ts, &(KeyspaceId::META, tablet_key.clone()))
                 .await?
                 .map(|record| pb::internal::MetaTablet::decode(&record.value[..]))
                 .unwrap_or(Ok(pb::internal::MetaTablet {
@@ -174,7 +174,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
 
         if self
             .tablet
-            .get(ts, (KeyspaceId::META, keyspace_key.clone()))
+            .get(ts, &(KeyspaceId::META, keyspace_key.clone()))
             .await?
             .is_some()
         {
@@ -241,13 +241,14 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
                 )?;
 
                 for key in keys {
+                    let rev_value = match self.tablet.get(revision.ts, &key).await? {
+                        Some(record) => RevisionValue::Regular(record.value),
+                        None => RevisionValue::Tombstone,
+                    };
                     let revision = Revision {
-                        key: key.clone(),
+                        key: key,
                         ts: revision.ts,
-                        value: match self.tablet.get(revision.ts, key).await? {
-                            Some(record) => RevisionValue::Regular(record.value),
-                            None => RevisionValue::Tombstone,
-                        },
+                        value: rev_value,
                     };
                     out_page.push(revision);
                 }
@@ -332,7 +333,7 @@ impl<T: Tablet + Sync + Send> MetaImpl<T> {
 
         Ok(self
             .tablet
-            .get(ts, (KeyspaceId::META, colo_group_key.clone()))
+            .get(ts, &(KeyspaceId::META, colo_group_key.clone()))
             .await?
             .is_some())
     }

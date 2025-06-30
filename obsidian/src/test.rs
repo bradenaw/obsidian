@@ -62,7 +62,7 @@ impl<T: Router> Router for Arc<T> {
 
 #[async_trait]
 impl<T: Tablet + Send + Sync> Tablet for Arc<T> {
-    async fn get(&self, ts: Timestamp, key: Key) -> Result<Option<Record>, InternalError> {
+    async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
         T::get(self, ts, key).await
     }
 
@@ -364,11 +364,11 @@ macro_rules! obsidian_test_suite {
                     .await?;
 
                 assert_eq!(
-                    obs.get(write_ts, (keyspace_id, key1)).await?.map(|record| record.value),
+                    obs.get(write_ts, &(keyspace_id, key1)).await?.map(|record| record.value),
                     Some(vec![1, 2, 3])
                 );
                 assert_eq!(
-                    obs.get(write_ts, (keyspace_id, key2)).await?.map(|record| record.value),
+                    obs.get(write_ts, &(keyspace_id, key2)).await?.map(|record| record.value),
                     Some(vec![4, 5, 6])
                 );
 
