@@ -123,7 +123,7 @@ impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for Fron
 
         Ok(tonic::Response::new(pb::ScanResp {
             records: records.into_iter().map(pb::Record::from).collect(),
-            remaining: Some(maybe_continue_range.unwrap_or(Range::empty()).into()),
+            remaining: maybe_continue_range.map(Range::into),
         }))
     }
 

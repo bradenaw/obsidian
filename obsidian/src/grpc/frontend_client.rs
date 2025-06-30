@@ -101,15 +101,7 @@ impl Obsidian for FrontendClient {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
 
-        let continue_range = Range::try_from(
-            resp.remaining
-                .ok_or_else(|| anyhow!("invalid response: missing continue_range"))?,
-        )?;
-        let maybe_continue_range = if continue_range.is_empty() {
-            None
-        } else {
-            Some(continue_range)
-        };
+        let maybe_continue_range = resp.remaining.map(Range::try_from).transpose()?;
 
         Ok((results, maybe_continue_range))
     }
