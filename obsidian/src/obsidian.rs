@@ -127,12 +127,10 @@ const MAX_CONFLICT_RETRIES: usize = 10;
 impl Obsidian for Frontend {
     async fn get(&self, ts: Timestamp, key: &Key) -> anyhow::Result<Option<Record>> {
         let keyspace_id = key.0;
-        self.with_resolve_conflicts(|| {
-            async move {
-                let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key.1)?;
-                let tablet = self.tablets.tablet(tablet_id)?;
-                tablet.get(ts, key).await
-            }
+        self.with_resolve_conflicts(|| async move {
+            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key.1)?;
+            let tablet = self.tablets.tablet(tablet_id)?;
+            tablet.get(ts, key).await
         })
         .await
     }
