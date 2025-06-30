@@ -251,7 +251,7 @@ impl Debug for Record {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "rec:{}/[{}]@{}: [{}]",
+            "rec:{}/[{}]@{}:[{}]",
             self.key.0,
             hexlify(&self.key.1),
             self.ts,
@@ -262,9 +262,9 @@ impl Debug for Record {
 
 #[derive(Eq, PartialEq, Clone)]
 pub struct Revision {
-    pub key: Vec<u8>,
+    pub key: Key,
     pub ts: Timestamp,
-    pub value: Value,
+    pub value: RevisionValue,
 }
 
 impl PartialOrd for Revision {
@@ -287,8 +287,9 @@ impl Debug for Revision {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "[{}] @ {}: {:?}",
-            hexlify(&self.key),
+            "rev:{}/[{}]@{}:{:?}",
+            self.key.0,
+            hexlify(&self.key.1),
             self.ts,
             self.value
         )
@@ -296,25 +297,25 @@ impl Debug for Revision {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-pub enum Value {
+pub enum RevisionValue {
     Regular(Vec<u8>),
     Tombstone,
 }
 
-impl Value {
+impl RevisionValue {
     pub fn len(&self) -> usize {
         match self {
-            Value::Regular(v) => v.len(),
-            Value::Tombstone => 0,
+            RevisionValue::Regular(v) => v.len(),
+            RevisionValue::Tombstone => 0,
         }
     }
 }
 
-impl Debug for Value {
+impl Debug for RevisionValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Value::Regular(v) => write!(f, "[{}]", hexlify(v)),
-            Value::Tombstone => write!(f, "<TOMBSTONE>"),
+            RevisionValue::Regular(v) => write!(f, "[{}]", hexlify(v)),
+            RevisionValue::Tombstone => write!(f, "<TOMBSTONE>"),
         }
     }
 }

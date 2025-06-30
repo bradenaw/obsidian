@@ -18,8 +18,8 @@ use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
 use crate::types::Record;
+use crate::types::RevisionValue;
 use crate::types::Timestamp;
-use crate::types::Value;
 
 #[async_trait]
 pub(crate) trait Tablet {
@@ -57,7 +57,7 @@ pub(crate) trait Tablet {
         range: HistoryRange,
         direction: Direction,
         limit: usize,
-    ) -> Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>), InternalError>;
+    ) -> Result<(Vec<(Timestamp, RevisionValue)>, Option<HistoryRange>), InternalError>;
 
     async fn write(
         &self,

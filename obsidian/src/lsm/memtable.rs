@@ -3,13 +3,13 @@ use std::collections::BTreeMap;
 
 use uuid::Uuid;
 
+use crate::lsm::util::LsmRevision;
 use crate::range::Bound;
 use crate::range::Range;
 use crate::types::Direction;
 use crate::types::HistoryRange;
-use crate::types::Revision;
+use crate::types::RevisionValue;
 use crate::types::Timestamp;
-use crate::types::Value;
 use crate::util::IteratorEither;
 use crate::wal;
 
@@ -23,7 +23,7 @@ pub(crate) struct Memtable {
     id: Uuid,
     size: u64,
     max_seqno: wal::SeqNo,
-    kvs: BTreeMap<Vec<u8>, BTreeMap<Timestamp, Value>>,
+    kvs: BTreeMap<Vec<u8>, BTreeMap<Timestamp, RevisionValue>>,
     max_key_len: usize,
 }
 
@@ -50,12 +50,18 @@ impl Memtable {
         self.size
     }
 
-    pub fn get(&self, ts: Timestamp, k: &[u8]) -> Option<(Timestamp, Value)> {
+    pub fn get(&self, ts: Timestamp, k: &[u8]) -> Option<(Timestamp, RevisionValue)> {
         let (revision_ts, revision_v) = self.kvs.get(k)?.range(Timestamp::ZERO..=ts).next_back()?;
         Some((*revision_ts, revision_v.clone()))
     }
 
-    pub fn insert(&mut self, seqno: wal::SeqNo, k: Vec<u8>, ts: Timestamp, v: Value) -> u64 {
+    pub fn insert(
+        &mut self,
+        seqno: wal::SeqNo,
+        k: Vec<u8>,
+        ts: Timestamp,
+        v: RevisionValue,
+    ) -> u64 {
         self.size += (k.len() + v.len() + 8) as u64;
         self.max_key_len = std::cmp::max(k.len(), self.max_key_len);
         self.kvs
@@ -81,7 +87,7 @@ impl Memtable {
         ts: Timestamp,
         range: Range<&[u8]>,
         direction: Direction,
-    ) -> impl Iterator<Item = Revision> + Send + '_ {
+    ) -> impl Iterator<Item = LsmRevision> + Send + '_ {
         let range_bounds = (
             match range.lower {
                 Bound::BeforeAll => std::ops::Bound::Unbounded,
@@ -133,7 +139,7 @@ impl Memtable {
             .range(range_bounds)
             .filter_map(move |(key, versions)| {
                 let (revision_ts, value) = versions.range(Timestamp::ZERO..=ts).next_back()?;
-                Some(Revision {
+                Some(LsmRevision {
                     key: key.clone(),
                     ts: *revision_ts,
                     value: value.clone(),
@@ -151,7 +157,7 @@ impl Memtable {
         key: &[u8],
         range: HistoryRange,
         direction: Direction,
-    ) -> impl Iterator<Item = (Timestamp, Value)> + Send + '_ {
+    ) -> impl Iterator<Item = (Timestamp, RevisionValue)> + Send + '_ {
         let versions = match self.kvs.get(key) {
             Some(versions) => versions,
             None => return IteratorEither::Right(std::iter::empty()),
@@ -168,15 +174,18 @@ impl Memtable {
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = Revision> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = LsmRevision> + '_ {
         self.kvs
             .iter()
             .map(|(key, entries)| {
-                entries.into_iter().rev().map(move |(ts, value)| Revision {
-                    key: key.clone(),
-                    ts: *ts,
-                    value: value.clone(),
-                })
+                entries
+                    .into_iter()
+                    .rev()
+                    .map(move |(ts, value)| LsmRevision {
+                        key: key.clone(),
+                        ts: *ts,
+                        value: value.clone(),
+                    })
             })
             .flatten()
     }
@@ -187,7 +196,7 @@ impl Memtable {
             for (ts, value) in versions {
                 println!(
                     "  {:?}",
-                    Revision {
+                    LsmRevision {
                         key: key.clone(),
                         ts: *ts,
                         value: value.clone()

@@ -49,9 +49,9 @@ use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
 use crate::types::Record;
+use crate::types::RevisionValue;
 use crate::types::ShardId;
 use crate::types::Timestamp;
-use crate::types::Value;
 use crate::util::encode;
 use crate::util::longest_shared_prefix_len;
 use crate::util::read_varint_from;
@@ -116,7 +116,7 @@ impl Tablet for LsmTablet {
         range: HistoryRange,
         direction: Direction,
         limit: usize,
-    ) -> Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>), InternalError> {
+    ) -> Result<(Vec<(Timestamp, RevisionValue)>, Option<HistoryRange>), InternalError> {
         self.inner
             .history_page(keyspace_id, key, range, direction, limit)
             .await
@@ -315,15 +315,15 @@ impl LsmTabletInner {
         )
         .await?;
 
-        if let Some((_, Value::Regular(bytes))) = maybe_pending_value {
+        if let Some((_, RevisionValue::Regular(bytes))) = maybe_pending_value {
             let pending_mut = PendingMutation::decode(&bytes)?;
             return Err(InternalError::Conflict(pending_mut.txid));
         }
 
         Ok(match maybe_record {
             Some((_, value)) => match value {
-                Value::Regular(v) => Some(v),
-                Value::Tombstone => None,
+                RevisionValue::Regular(v) => Some(v),
+                RevisionValue::Tombstone => None,
             },
             None => None,
         })
@@ -351,15 +351,15 @@ impl LsmTabletInner {
         )
         .await?;
 
-        if let Some((_, Value::Regular(bytes))) = maybe_pending_value {
+        if let Some((_, RevisionValue::Regular(bytes))) = maybe_pending_value {
             let pending_mut = PendingMutation::decode(&bytes)?;
             return Err(InternalError::Conflict(pending_mut.txid));
         }
 
         Ok(match maybe_record {
             Some((ts, value)) => match value {
-                Value::Regular(v) => (ts, Some(v)),
-                Value::Tombstone => (ts, None),
+                RevisionValue::Regular(v) => (ts, Some(v)),
+                RevisionValue::Tombstone => (ts, None),
             },
             None => (safe_read_ts, None),
         })
@@ -484,7 +484,7 @@ impl LsmTabletInner {
                 // better just to return it and hope that the conflict gets cleaned up by the time
                 // the caller asks for the next page.
                 for record in conflict_page {
-                    if let Value::Regular(bytes) = record.value {
+                    if let RevisionValue::Regular(bytes) = record.value {
                         let pending_mut = PendingMutation::decode(&bytes)?;
                         return Err(InternalError::Conflict(pending_mut.txid));
                     }
@@ -502,12 +502,12 @@ impl LsmTabletInner {
         Ok((
             page.into_iter()
                 .filter_map(|revision| match revision.value {
-                    Value::Regular(v) => Some(Record {
-                        key: (keyspace_id, revision.key),
+                    RevisionValue::Regular(v) => Some(Record {
+                        key: revision.key,
                         ts: revision.ts,
                         value: v,
                     }),
-                    Value::Tombstone => None,
+                    RevisionValue::Tombstone => None,
                 })
                 .collect(),
             maybe_continue_cursor,
@@ -521,7 +521,7 @@ impl LsmTabletInner {
         range: HistoryRange,
         direction: Direction,
         limit: usize,
-    ) -> Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>), InternalError> {
+    ) -> Result<(Vec<(Timestamp, RevisionValue)>, Option<HistoryRange>), InternalError> {
         let limit = cmp::min(limit, 1000);
 
         let _guard = self.lock_mgr.read_lock(key).await;
@@ -563,7 +563,7 @@ impl LsmTabletInner {
             )
             .await?;
 
-        if let Some((ts, Value::Regular(v))) = maybe_pending {
+        if let Some((ts, RevisionValue::Regular(v))) = maybe_pending {
             if range.contains(ts) {
                 // TODO: we can constrain this a lot more - really we only need to surface a
                 // conflict if the page actually could have seen it, and we should be linearizing
@@ -623,8 +623,8 @@ impl LsmTabletInner {
                 .await
                 .map_err(|e| InternalError::Other(e.into()))?
                 .map(|(_, v)| match v {
-                    Value::Regular(v) => v,
-                    Value::Tombstone => vec![],
+                    RevisionValue::Regular(v) => v,
+                    RevisionValue::Tombstone => vec![],
                 })
                 .unwrap_or(vec![]);
 
@@ -714,7 +714,7 @@ impl LsmTabletInner {
                     .unsafe_get_latest_record(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
                     .await?
                 {
-                    Some((_, Value::Regular(tx_outcome_bytes))) => {
+                    Some((_, RevisionValue::Regular(tx_outcome_bytes))) => {
                         let tx_outcome_record = TxOutcomeRecord::decode(&tx_outcome_bytes[..])?;
                         return Ok(tx_outcome_record.tx_outcome());
                     }
@@ -758,7 +758,7 @@ impl LsmTabletInner {
         &self,
         keyspace_id: KeyspaceId,
         key: &[u8],
-    ) -> anyhow::Result<Option<(Timestamp, Value)>> {
+    ) -> anyhow::Result<Option<(Timestamp, RevisionValue)>> {
         self.lsm.get(Timestamp(u64::MAX), keyspace_id, key).await
     }
 
@@ -795,7 +795,7 @@ impl LsmTabletInner {
             muts.keys()
                 .map(|(keyspace_id, key)| (*keyspace_id, &key[..])),
         ) {
-            if let Some((_, Value::Regular(value))) = self
+            if let Some((_, RevisionValue::Regular(value))) = self
                 .unsafe_get_latest_record(
                     keyspace_id
                         .pending()
@@ -819,7 +819,7 @@ impl LsmTabletInner {
         let tx_outcome_key = txid.encode_fixed();
         {
             let _guard = self.lock_mgr.write_lock(&tx_outcome_key[..]).await;
-            if let Some((_, Value::Regular(tx_outcome_bytes))) = self
+            if let Some((_, RevisionValue::Regular(tx_outcome_bytes))) = self
                 .unsafe_get_latest_record(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
                 .await?
             {
@@ -876,14 +876,14 @@ impl LsmTabletInner {
             None => return Ok(()),
         };
         let m = match value {
-            Value::Regular(v) => {
+            RevisionValue::Regular(v) => {
                 let pending_m = PendingMutation::decode(&v)?;
                 if pending_m.txid != txid {
                     return Ok(());
                 }
                 pending_m.m
             }
-            Value::Tombstone => return Ok(()),
+            RevisionValue::Tombstone => return Ok(()),
         };
         let resolve_ts = match tx_outcome {
             TxOutcome::Committed(commit_ts) => commit_ts,
@@ -910,7 +910,7 @@ impl LsmTabletInner {
         let mut muts = BTreeMap::new();
         let _guard = self.lock_mgr.write_lock(&key[..]).await;
 
-        let (overwrite_ts, m) = if let Some((prepare_ts, Value::Regular(bytes))) = self
+        let (overwrite_ts, m) = if let Some((prepare_ts, RevisionValue::Regular(bytes))) = self
             .unsafe_get_latest_record(precond_keyspace_id, &key)
             .await?
         {

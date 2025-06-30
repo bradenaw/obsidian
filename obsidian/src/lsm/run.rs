@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::lsm::block::dump_block;
 use crate::lsm::block::Block;
+use crate::lsm::util::LsmRevision;
 use crate::lsm::util::PrefixCompressedKV;
 use crate::range::Bound;
 use crate::range::KeyOrBound;
@@ -22,9 +23,8 @@ use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::HistoryRange;
 use crate::types::KeyspaceId;
-use crate::types::Revision;
+use crate::types::RevisionValue;
 use crate::types::Timestamp;
-use crate::types::Value;
 use crate::util::binary_search_by_idx;
 use crate::util::hexlify;
 use crate::util::AsyncReadExactAt;
@@ -50,7 +50,10 @@ const INDEX_BLOCK_HEADER_SIZE: usize = 48;
 
 impl<R> Run<R> {
     // Assumes S is in (key, rev(ts)) order, and assumes termination at a reasonable size limit.
-    pub(super) async fn write<W: AsyncWrite + Unpin, S: Stream<Item = anyhow::Result<Revision>>>(
+    pub(super) async fn write<
+        W: AsyncWrite + Unpin,
+        S: Stream<Item = anyhow::Result<LsmRevision>>,
+    >(
         w: &mut W,
         id: Uuid,
         keyspace_id: KeyspaceId,
@@ -145,7 +148,7 @@ impl<R: AsyncReadExactAt> Run<R> {
         &self,
         ts: Timestamp,
         k: &[u8],
-    ) -> anyhow::Result<Option<(Timestamp, Value)>> {
+    ) -> anyhow::Result<Option<(Timestamp, RevisionValue)>> {
         if ts < self.min_ts {
             return Ok(None);
         }
@@ -160,7 +163,7 @@ impl<R: AsyncReadExactAt> Run<R> {
         ts: Timestamp,
         range: Range<Vec<u8>>,
         direction: Direction,
-    ) -> impl Stream<Item = anyhow::Result<Revision>> + '_ {
+    ) -> impl Stream<Item = anyhow::Result<LsmRevision>> + '_ {
         try_stream! {
             if ts < self.min_ts {
                 return;
@@ -203,7 +206,7 @@ impl<R: AsyncReadExactAt> Run<R> {
         k: &[u8],
         range: HistoryRange,
         direction: Direction,
-    ) -> impl Stream<Item = anyhow::Result<(Timestamp, Value)>> + 'a {
+    ) -> impl Stream<Item = anyhow::Result<(Timestamp, RevisionValue)>> + 'a {
         let k_owned = k.to_vec();
         try_stream! {
             if !range.intersects(self.min_ts, self.max_ts) {
@@ -229,7 +232,7 @@ impl<R: AsyncReadExactAt> Run<R> {
         }
     }
 
-    pub(super) fn stream(&self) -> impl Stream<Item = anyhow::Result<Revision>> + '_ {
+    pub(super) fn stream(&self) -> impl Stream<Item = anyhow::Result<LsmRevision>> + '_ {
         try_stream! {
             for i in 0..self.index.len() {
                 let block_header_offset = self.index.get_value(i);
@@ -269,7 +272,7 @@ struct RunBuilder<W> {
     bytes_written: usize,
     index: BTreeMap<Vec<u8>, u32>,
     last_key: Vec<u8>,
-    buffer: BTreeMap<Vec<u8>, Vec<(Timestamp, Value)>>,
+    buffer: BTreeMap<Vec<u8>, Vec<(Timestamp, RevisionValue)>>,
     buffer_size_estimate: u64,
     min_ts: Timestamp,
     max_ts: Timestamp,
@@ -292,7 +295,7 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
         }
     }
 
-    async fn push(&mut self, revision: Revision) -> anyhow::Result<()> {
+    async fn push(&mut self, revision: LsmRevision) -> anyhow::Result<()> {
         let revision_size_estimate = {
             let key_len = if self.buffer.contains_key(&revision.key) {
                 0
@@ -419,14 +422,14 @@ mod test {
     use super::dump_run;
     use super::Run;
     use super::RunBuilder;
+    use crate::lsm::util::LsmRevision;
     use crate::range::Bound;
     use crate::range::Range;
     use crate::types::ColoGroupId;
     use crate::types::Direction;
     use crate::types::KeyspaceId;
-    use crate::types::Revision;
+    use crate::types::RevisionValue;
     use crate::types::Timestamp;
-    use crate::types::Value;
     use crate::util::AsyncReadExactAt;
 
     #[tokio::test]
@@ -437,30 +440,30 @@ mod test {
             out
         }
         let revisions = vec![
-            Revision {
+            LsmRevision {
                 key: b"prefixbar".to_vec(),
                 ts: Timestamp(20101),
-                value: Value::Regular(rand_bytes(10_000)),
+                value: RevisionValue::Regular(rand_bytes(10_000)),
             },
-            Revision {
+            LsmRevision {
                 key: b"prefixbar".to_vec(),
                 ts: Timestamp(19230),
-                value: Value::Tombstone,
+                value: RevisionValue::Tombstone,
             },
-            Revision {
+            LsmRevision {
                 key: b"prefixbar".to_vec(),
                 ts: Timestamp(10230),
-                value: Value::Regular(rand_bytes(128)),
+                value: RevisionValue::Regular(rand_bytes(128)),
             },
-            Revision {
+            LsmRevision {
                 key: b"prefixfoo".to_vec(),
                 ts: Timestamp(21925),
-                value: Value::Regular(rand_bytes(10_000)),
+                value: RevisionValue::Regular(rand_bytes(10_000)),
             },
-            Revision {
+            LsmRevision {
                 key: b"prefixfoo".to_vec(),
                 ts: Timestamp(12031),
-                value: Value::Regular(rand_bytes(10_000)),
+                value: RevisionValue::Regular(rand_bytes(10_000)),
             },
         ];
         let mut v = vec![];
@@ -527,12 +530,12 @@ mod test {
             for (key_str, versions_str) in block {
                 for ts in (1..versions_str.len()).rev() {
                     let value = match versions_str[ts] {
-                        b'o' => Value::Regular(format!("{} {}", key_str, ts).into()),
-                        b'x' => Value::Tombstone,
+                        b'o' => RevisionValue::Regular(format!("{} {}", key_str, ts).into()),
+                        b'x' => RevisionValue::Tombstone,
                         _ => continue,
                     };
 
-                    b.push(Revision {
+                    b.push(LsmRevision {
                         key: key_str.into(),
                         ts: Timestamp(ts as u64),
                         value,
@@ -567,15 +570,15 @@ mod test {
                     expected
                         .clone()
                         .into_iter()
-                        .map(|(key, ts, tombstone)| Revision {
+                        .map(|(key, ts, tombstone)| LsmRevision {
                             key: (key).into(),
                             ts: Timestamp(ts as u64),
                             value: match tombstone {
-                                false => Value::Regular(format!("{} {}", key, ts).into()),
-                                true => Value::Tombstone,
+                                false => RevisionValue::Regular(format!("{} {}", key, ts).into()),
+                                true => RevisionValue::Tombstone,
                             },
                         })
-                        .collect::<Vec<Revision>>(),
+                        .collect::<Vec<LsmRevision>>(),
                     "direction={:?}",
                     direction,
                 );
@@ -669,12 +672,12 @@ mod test {
             let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
 
             rt.block_on(async {
-                let mut revisions = m.into_iter().map(|((key, ts), maybe_value)| Revision{
+                let mut revisions = m.into_iter().map(|((key, ts), maybe_value)| LsmRevision{
                     key, ts: Timestamp(ts), value: match maybe_value {
-                        Some(v) => Value::Regular(v),
-                        None => Value::Tombstone,
+                        Some(v) => RevisionValue::Regular(v),
+                        None => RevisionValue::Tombstone,
                     },
-                }).collect::<Vec<Revision>>();
+                }).collect::<Vec<LsmRevision>>();
                 revisions.sort_by_key(|revision| (revision.key.clone(), Reverse(revision.ts)));
 
                 let mut v = vec![];
@@ -699,10 +702,10 @@ mod test {
 
                 let streamed_out_revisions = run
                     .stream()
-                    .collect::<Vec<anyhow::Result<Revision>>>()
+                    .collect::<Vec<anyhow::Result<LsmRevision>>>()
                     .await
                     .into_iter()
-                    .collect::<anyhow::Result<Vec<Revision>>>()
+                    .collect::<anyhow::Result<Vec<LsmRevision>>>()
                     .unwrap();
 
                 assert_eq!(streamed_out_revisions, revisions);

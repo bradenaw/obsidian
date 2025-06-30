@@ -33,9 +33,9 @@ use crate::types::Mutation;
 use crate::types::Precondition;
 use crate::types::Record;
 use crate::types::Revision;
+use crate::types::RevisionValue;
 use crate::types::ShardId;
 use crate::types::Timestamp;
-use crate::types::Value;
 use crate::util::encode;
 use crate::util::AtomicArc;
 use crate::util::Decode;
@@ -104,7 +104,7 @@ impl<T: Tablet + Send + Sync> Tablet for Arc<T> {
         range: HistoryRange,
         direction: Direction,
         limit: usize,
-    ) -> Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>), InternalError> {
+    ) -> Result<(Vec<(Timestamp, RevisionValue)>, Option<HistoryRange>), InternalError> {
         T::history_page(self, keyspace_id, key, range, direction, limit).await
     }
 

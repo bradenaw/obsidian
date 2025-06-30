@@ -22,9 +22,9 @@ use crate::types::Mutation;
 use crate::types::Precondition;
 use crate::types::Record;
 use crate::types::Revision;
+use crate::types::RevisionValue;
 use crate::types::ShardId;
 use crate::types::Timestamp;
-use crate::types::Value;
 use crate::util::longest_shared_prefix_len;
 use crate::util::WaitableTimestamp;
 
@@ -232,7 +232,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
         let mut out_page = vec![];
         let mut new_ts = ts;
         for (ts, maybe_value) in page {
-            if let Value::Regular(value) = maybe_value {
+            if let RevisionValue::Regular(value) = maybe_value {
                 let proto_tx = pb::internal::MetaTx::decode(&value[..])?;
                 let keys = BTreeSet::try_from(
                     proto_tx
@@ -242,11 +242,11 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
 
                 for (keyspace_id, key) in keys {
                     let record = Revision {
-                        key: key.clone(),
+                        key: (keyspace_id, key.clone()),
                         ts,
                         value: match self.tablet.get(ts, keyspace_id, key).await? {
-                            Some(v) => Value::Regular(v),
-                            None => Value::Tombstone,
+                            Some(v) => RevisionValue::Regular(v),
+                            None => RevisionValue::Tombstone,
                         },
                     };
                     out_page.push(record);

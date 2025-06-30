@@ -7,21 +7,21 @@ use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use futures::Stream;
 
+use crate::lsm::util::LsmRevision;
 use crate::lsm::util::PrefixCompressedKV;
 use crate::range::KeyOrBound;
 use crate::range::Range;
 use crate::types::Direction;
 use crate::types::HistoryRange;
-use crate::types::Revision;
+use crate::types::RevisionValue;
 use crate::types::Timestamp;
-use crate::types::Value;
 use crate::util::binary_search_by_idx;
 use crate::util::byte_width;
 use crate::util::hexlify;
 use crate::util::AsyncReadExactAt;
 use crate::util::IteratorEither;
 
-/// A Block is conceptually a BTreeMap<Vec<u8>, BTreeMap<Timestamp, Value>>, but it is compactly
+/// A Block is conceptually a BTreeMap<Vec<u8>, BTreeMap<Timestamp, RevisionValue>>, but it is compactly
 /// serialized and can be used as-is without fully deserializing.
 pub(super) struct Block<'a, R> {
     values_len: usize,
@@ -43,7 +43,7 @@ impl<'a, R> Block<'a, R> {
     ///
     /// Returns the encoded block and the offset of the header within the block.
     pub(super) fn encode(
-        kvs: &BTreeMap<Vec<u8>, Vec<(Timestamp, Value)>>,
+        kvs: &BTreeMap<Vec<u8>, Vec<(Timestamp, RevisionValue)>>,
     ) -> anyhow::Result<(Vec<u8>, usize)> {
         // For this example block:
         //
@@ -63,7 +63,7 @@ impl<'a, R> Block<'a, R> {
         // barfoobazhello
         // ^  ^  ^  ^
         //
-        // And we store a list of (timestamp, tombstone, value_offset) in Revision order.
+        // And we store a list of (timestamp, tombstone, value_offset) in LsmRevision order.
         // [
         //   (5, false, 0),
         //   (2, false, 3),
@@ -137,11 +137,11 @@ impl<'a, R> Block<'a, R> {
             for (ts, value) in key_versions {
                 let value_offset = block.len();
                 let tombstone_bit = match value {
-                    Value::Regular(value) => {
+                    RevisionValue::Regular(value) => {
                         block.extend_from_slice(&value[..]);
                         0
                     }
-                    Value::Tombstone => 1,
+                    RevisionValue::Tombstone => 1,
                 };
                 let ts_offset_and_tombstone =
                     ((ts.as_nanos() - min_ts.as_nanos()) << 1) | tombstone_bit;
@@ -219,7 +219,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         &self,
         ts: Timestamp,
         k: &[u8],
-    ) -> anyhow::Result<Option<(Timestamp, Value)>> {
+    ) -> anyhow::Result<Option<(Timestamp, RevisionValue)>> {
         let key_idx = match self.index.search(k) {
             Ok(idx) => idx,
             Err(_) => return Ok(None),
@@ -246,7 +246,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         ts: Timestamp,
         range: Range<Vec<u8>>,
         direction: Direction,
-    ) -> impl Stream<Item = anyhow::Result<Revision>> + '_ {
+    ) -> impl Stream<Item = anyhow::Result<LsmRevision>> + '_ {
         try_stream! {
             let key_idxs = match direction {
                 Direction::Asc => {
@@ -289,7 +289,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
                 let ts = versions.ts(version_idx);
                 let value = self.value(&versions, version_idx).await?;
 
-                yield Revision { key, ts, value };
+                yield LsmRevision { key, ts, value };
             }
         }
     }
@@ -298,7 +298,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         &self,
         ts: Timestamp,
         range: Range<Vec<u8>>,
-    ) -> impl Stream<Item = anyhow::Result<Revision>> + '_ {
+    ) -> impl Stream<Item = anyhow::Result<LsmRevision>> + '_ {
         try_stream! {
             let upper_key_idx = binary_search_by_idx(
                     self.index.len(),
@@ -325,7 +325,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
                 let ts = versions.ts(version_idx);
                 let value = self.value(&versions, version_idx).await?;
 
-                yield Revision { key, ts, value };
+                yield LsmRevision { key, ts, value };
             }
         }
     }
@@ -335,7 +335,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         k: &[u8],
         range: HistoryRange,
         direction: Direction,
-    ) -> impl Stream<Item = anyhow::Result<(Timestamp, Value)>> + 'b {
+    ) -> impl Stream<Item = anyhow::Result<(Timestamp, RevisionValue)>> + 'b {
         let k_owned = k.to_vec();
         try_stream! {
             let key_idx = match self.index.search(&k_owned) {
@@ -378,9 +378,9 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         }
     }
 
-    /// Produces all revisions contained in this block in Revision's natural ordering: (key,
+    /// Produces all revisions contained in this block in LsmRevision's natural ordering: (key,
     /// Reverse(ts)).
-    pub(super) fn stream(&self) -> impl Stream<Item = anyhow::Result<Revision>> + '_ {
+    pub(super) fn stream(&self) -> impl Stream<Item = anyhow::Result<LsmRevision>> + '_ {
         try_stream! {
             for j in 0..self.index.len() {
                 let key = self.index.get_key(j);
@@ -388,7 +388,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
                 for k in 0..versions.len() {
                     let ts = versions.ts(k);
                     let value = self.value(&versions, k).await?;
-                    yield Revision{key: key.clone(), ts, value};
+                    yield LsmRevision{key: key.clone(), ts, value};
                 }
             }
         }
@@ -418,10 +418,10 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         &'b self,
         versions: &BlockVersions<'b>,
         idx: usize,
-    ) -> anyhow::Result<Value> {
+    ) -> anyhow::Result<RevisionValue> {
         let (value_start, value_end) = match versions.value_offsets(idx) {
             Some(v) => v,
-            None => return Ok(Value::Tombstone),
+            None => return Ok(RevisionValue::Tombstone),
         };
         let value_len = value_end - value_start;
 
@@ -433,7 +433,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
             )
             .await?;
 
-        Ok(Value::Regular(value))
+        Ok(RevisionValue::Regular(value))
     }
 }
 
@@ -538,24 +538,24 @@ mod test {
     use futures::TryStreamExt;
 
     use super::Block;
+    use crate::lsm::util::LsmRevision;
     use crate::range::Bound;
     use crate::range::Range;
     use crate::types::Direction;
     use crate::types::HistoryRange;
-    use crate::types::Revision;
+    use crate::types::RevisionValue;
     use crate::types::Timestamp;
-    use crate::types::Value;
     use crate::util::AsyncReadExactAt;
 
     #[tokio::test]
     async fn test_get() -> anyhow::Result<()> {
         let aa: Vec<u8> = "aa".into();
         let ab: Vec<u8> = "ab".into();
-        let aa_279: Value = Value::Regular("foo".into());
-        let aa_265: Value = Value::Regular("bar".into());
-        let ab_341: Value = Value::Regular("baz".into());
-        let ab_302: Value = Value::Regular("qux".into());
-        let ab_290: Value = Value::Regular("garply".into());
+        let aa_279: RevisionValue = RevisionValue::Regular("foo".into());
+        let aa_265: RevisionValue = RevisionValue::Regular("bar".into());
+        let ab_341: RevisionValue = RevisionValue::Regular("baz".into());
+        let ab_302: RevisionValue = RevisionValue::Regular("qux".into());
+        let ab_290: RevisionValue = RevisionValue::Regular("garply".into());
         let kvs = {
             let mut kvs = BTreeMap::new();
             kvs.insert(
@@ -570,7 +570,7 @@ mod test {
                 vec![
                     (Timestamp(341), ab_341.clone()),
                     (Timestamp(302), ab_302.clone()),
-                    (Timestamp(297), Value::Tombstone),
+                    (Timestamp(297), RevisionValue::Tombstone),
                     (Timestamp(290), ab_290.clone()),
                 ],
             );
@@ -609,7 +609,7 @@ mod test {
         );
         assert_eq!(
             block.get(Timestamp(297), &ab[..]).await?,
-            Some((Timestamp(297), Value::Tombstone))
+            Some((Timestamp(297), RevisionValue::Tombstone))
         );
         assert_eq!(
             block.get(Timestamp(290), &ab[..]).await?,
@@ -627,7 +627,7 @@ mod test {
         );
         assert_eq!(
             block.get(Timestamp(300), &ab[..]).await?,
-            Some((Timestamp(297), Value::Tombstone))
+            Some((Timestamp(297), RevisionValue::Tombstone))
         );
         assert_eq!(
             block.get(Timestamp(296), &ab[..]).await?,
@@ -660,8 +660,8 @@ mod test {
             let mut versions = vec![];
             for ts in 1..versions_str.len() {
                 let value = match versions_str[ts] {
-                    b'o' => Value::Regular(format!("{} {}", key_str, ts).into()),
-                    b'x' => Value::Tombstone,
+                    b'o' => RevisionValue::Regular(format!("{} {}", key_str, ts).into()),
+                    b'x' => RevisionValue::Tombstone,
                     _ => continue,
                 };
 
@@ -695,15 +695,15 @@ mod test {
                     expected
                         .clone()
                         .into_iter()
-                        .map(|(key, ts, tombstone)| Revision {
+                        .map(|(key, ts, tombstone)| LsmRevision {
                             key: (key).into(),
                             ts: Timestamp(ts as u64),
                             value: match tombstone {
-                                false => Value::Regular(format!("{} {}", key, ts).into()),
-                                true => Value::Tombstone,
+                                false => RevisionValue::Regular(format!("{} {}", key, ts).into()),
+                                true => RevisionValue::Tombstone,
                             },
                         })
-                        .collect::<Vec<Revision>>(),
+                        .collect::<Vec<LsmRevision>>(),
                     "direction={:?}",
                     direction,
                 );
@@ -757,22 +757,22 @@ mod test {
             (
                 b"a".to_vec(),
                 vec![
-                    (Timestamp(5), Value::Regular(b"a five".to_vec())),
-                    (Timestamp(2), Value::Regular(b"a two".to_vec())),
+                    (Timestamp(5), RevisionValue::Regular(b"a five".to_vec())),
+                    (Timestamp(2), RevisionValue::Regular(b"a two".to_vec())),
                 ],
             ),
             (
                 b"b".to_vec(),
                 vec![
-                    (Timestamp(9), Value::Regular(b"b nine".to_vec())),
-                    (Timestamp(7), Value::Regular(b"b seven".to_vec())),
-                    (Timestamp(4), Value::Tombstone),
-                    (Timestamp(2), Value::Regular(b"b two".to_vec())),
+                    (Timestamp(9), RevisionValue::Regular(b"b nine".to_vec())),
+                    (Timestamp(7), RevisionValue::Regular(b"b seven".to_vec())),
+                    (Timestamp(4), RevisionValue::Tombstone),
+                    (Timestamp(2), RevisionValue::Regular(b"b two".to_vec())),
                 ],
             ),
             (
                 b"c".to_vec(),
-                vec![(Timestamp(3), Value::Regular(b"c three".to_vec()))],
+                vec![(Timestamp(3), RevisionValue::Regular(b"c three".to_vec()))],
             ),
         ]
         .into_iter()
@@ -790,8 +790,8 @@ mod test {
                 .try_collect::<Vec<_>>()
                 .await?,
             vec![
-                (Timestamp(4), Value::Tombstone),
-                (Timestamp(7), Value::Regular(b"b seven".to_vec())),
+                (Timestamp(4), RevisionValue::Tombstone),
+                (Timestamp(7), RevisionValue::Regular(b"b seven".to_vec())),
             ],
         );
 
@@ -805,8 +805,8 @@ mod test {
                 .try_collect::<Vec<_>>()
                 .await?,
             vec![
-                (Timestamp(4), Value::Tombstone),
-                (Timestamp(7), Value::Regular(b"b seven".to_vec())),
+                (Timestamp(4), RevisionValue::Tombstone),
+                (Timestamp(7), RevisionValue::Regular(b"b seven".to_vec())),
             ],
         );
 

@@ -20,9 +20,9 @@ use crate::tuple_encoding::tuple_decode;
 use crate::tuple_encoding::tuple_encode;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
+use crate::types::RevisionValue;
 use crate::types::ShardId;
 use crate::types::Timestamp;
-use crate::types::Value;
 use crate::util::Background;
 use crate::util::Retry;
 use crate::util::WaitableTimestamp;
@@ -156,11 +156,11 @@ impl MetaSyncedInner {
 
             for record in records {
                 match record.value {
-                    Value::Regular(v) => {
-                        kv.insert(record.key, v);
+                    RevisionValue::Regular(v) => {
+                        kv.insert(record.key.1, v);
                     }
-                    Value::Tombstone => {
-                        kv.remove(&record.key);
+                    RevisionValue::Tombstone => {
+                        kv.remove(&record.key.1);
                     }
                 }
             }

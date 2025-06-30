@@ -27,6 +27,7 @@ use uuid::Uuid;
 
 use crate::lsm::memtable::Memtable;
 use crate::lsm::run::Run;
+use crate::lsm::util::LsmRevision;
 use crate::range::intersect_in_ranges_by_key;
 use crate::range::Bound;
 use crate::range::KeyOrBound;
@@ -39,8 +40,8 @@ use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
 use crate::types::Revision;
+use crate::types::RevisionValue;
 use crate::types::Timestamp;
-use crate::types::Value;
 use crate::types::WriteError;
 use crate::util::merge_sorted;
 use crate::util::merge_sorted_streams;
@@ -183,7 +184,7 @@ impl Lsm {
         ts: Timestamp,
         keyspace_id: KeyspaceId,
         key: &[u8],
-    ) -> anyhow::Result<Option<(Timestamp, Value)>> {
+    ) -> anyhow::Result<Option<(Timestamp, RevisionValue)>> {
         self.inner
             .load()
             .get(&keyspace_id)
@@ -200,12 +201,24 @@ impl Lsm {
         direction: Direction,
         limit: usize,
     ) -> anyhow::Result<(Vec<Revision>, Option<Range<Vec<u8>>>)> {
-        self.inner
+        let (page, continue_cursor) = self
+            .inner
             .load()
             .get(&keyspace_id)
             .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?
             .scan_page(ts, range, direction, limit)
-            .await
+            .await?;
+
+        let page = page
+            .into_iter()
+            .map(|lsm_revision| Revision {
+                key: (keyspace_id, lsm_revision.key),
+                ts: lsm_revision.ts,
+                value: lsm_revision.value,
+            })
+            .collect();
+
+        Ok((page, continue_cursor))
     }
 
     pub async fn history_page(
@@ -215,7 +228,7 @@ impl Lsm {
         range: HistoryRange,
         direction: Direction,
         limit: usize,
-    ) -> anyhow::Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>)> {
+    ) -> anyhow::Result<(Vec<(Timestamp, RevisionValue)>, Option<HistoryRange>)> {
         self.inner
             .load()
             .get(&keyspace_id)
@@ -257,8 +270,8 @@ impl Lsm {
                 muts.into_iter()
                     .map(|((keyspace_id, key), m)| {
                         let value = match m {
-                            Mutation::Put(raw_value) => Value::Regular(raw_value),
-                            Mutation::Delete => Value::Tombstone,
+                            Mutation::Put(raw_value) => RevisionValue::Regular(raw_value),
+                            Mutation::Delete => RevisionValue::Tombstone,
                         };
                         (keyspace_id, key, value)
                     })
@@ -478,7 +491,7 @@ impl LsmInner {
         &self,
         ts: Timestamp,
         key: &[u8],
-    ) -> anyhow::Result<Option<(Timestamp, Value)>> {
+    ) -> anyhow::Result<Option<(Timestamp, RevisionValue)>> {
         self.inner.get(ts, key).await
     }
 
@@ -488,7 +501,7 @@ impl LsmInner {
         range: Range<&[u8]>,
         direction: Direction,
         limit: usize,
-    ) -> anyhow::Result<(Vec<Revision>, Option<Range<Vec<u8>>>)> {
+    ) -> anyhow::Result<(Vec<LsmRevision>, Option<Range<Vec<u8>>>)> {
         self.inner.scan_page(ts, range, direction, limit).await
     }
 
@@ -498,7 +511,7 @@ impl LsmInner {
         range: HistoryRange,
         direction: Direction,
         limit: usize,
-    ) -> anyhow::Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>)> {
+    ) -> anyhow::Result<(Vec<(Timestamp, RevisionValue)>, Option<HistoryRange>)> {
         self.inner.history_page(key, range, direction, limit).await
     }
 
@@ -713,7 +726,7 @@ impl LsmInner {
         storage: &MemStorage,
         into_level: usize,
         entries_range: Range<Vec<u8>>,
-        entries: impl Stream<Item = anyhow::Result<Revision>> + Send,
+        entries: impl Stream<Item = anyhow::Result<LsmRevision>> + Send,
     ) -> anyhow::Result<(Vec<Run<Arc<Vec<u8>>>>, HashSet<Uuid>)> {
         let overlapping_runs = manifest.levels[into_level].overlapping_runs(entries_range);
 
@@ -812,7 +825,11 @@ impl LsmInnerInner {
         }
     }
 
-    async fn get(&self, ts: Timestamp, k: &[u8]) -> anyhow::Result<Option<(Timestamp, Value)>> {
+    async fn get(
+        &self,
+        ts: Timestamp,
+        k: &[u8],
+    ) -> anyhow::Result<Option<(Timestamp, RevisionValue)>> {
         let manifest = self.manifest.load();
 
         // Any memtable might have the latest for the key, so must check all of them.
@@ -845,7 +862,7 @@ impl LsmInnerInner {
         range: Range<&[u8]>,
         direction: Direction,
         limit: usize,
-    ) -> anyhow::Result<(Vec<Revision>, Option<Range<Vec<u8>>>)> {
+    ) -> anyhow::Result<(Vec<LsmRevision>, Option<Range<Vec<u8>>>)> {
         if range.is_empty() {
             return Ok((vec![], None));
         }
@@ -917,7 +934,11 @@ impl LsmInnerInner {
             )
             .map(|result| {
                 result.map(
-                    |OrdEqByFirst((Reverse(key), Reverse(ts)), value)| Revision { key, ts, value },
+                    |OrdEqByFirst((Reverse(key), Reverse(ts)), value)| LsmRevision {
+                        key,
+                        ts,
+                        value,
+                    },
                 )
             })
             .peekable()
@@ -926,7 +947,7 @@ impl LsmInnerInner {
 
         let mut page = vec![];
         while let Some(revision) = merged.next().await.transpose()? {
-            if let Some(Revision {
+            if let Some(LsmRevision {
                 key: last_key,
                 ts: last_ts,
                 ..
@@ -944,7 +965,7 @@ impl LsmInnerInner {
         }
 
         let continue_cursor = match page.last() {
-            Some(Revision { key: last_key, .. }) => Some(match direction {
+            Some(LsmRevision { key: last_key, .. }) => Some(match direction {
                 Direction::Asc => Range {
                     lower: Bound::After(last_key.clone()),
                     upper: range.upper.clone().map(Vec::from),
@@ -960,7 +981,7 @@ impl LsmInnerInner {
         page = page
             .into_iter()
             .filter(|revision| match revision.value {
-                Value::Tombstone => false,
+                RevisionValue::Tombstone => false,
                 _ => true,
             })
             .collect();
@@ -974,7 +995,7 @@ impl LsmInnerInner {
         range: HistoryRange,
         direction: Direction,
         limit: usize,
-    ) -> anyhow::Result<(Vec<(Timestamp, Value)>, Option<HistoryRange>)> {
+    ) -> anyhow::Result<(Vec<(Timestamp, RevisionValue)>, Option<HistoryRange>)> {
         let manifest = self.manifest.load();
 
         let mut streams = Vec::with_capacity(manifest.levels.len());
@@ -1075,7 +1096,7 @@ impl LsmInnerInner {
         Ok((page, continue_cursor))
     }
 
-    fn insert(&self, seqno: wal::SeqNo, k: Vec<u8>, ts: Timestamp, v: Value) {
+    fn insert(&self, seqno: wal::SeqNo, k: Vec<u8>, ts: Timestamp, v: RevisionValue) {
         loop {
             let l0_active = self.l0_active.load();
             let overfilled = {
@@ -1279,7 +1300,11 @@ impl Level {
         Self { runs: vec![] }
     }
 
-    async fn get(&self, ts: Timestamp, k: &[u8]) -> anyhow::Result<Option<(Timestamp, Value)>> {
+    async fn get(
+        &self,
+        ts: Timestamp,
+        k: &[u8],
+    ) -> anyhow::Result<Option<(Timestamp, RevisionValue)>> {
         let run = match self.run_for_key(k) {
             Some(run) => run,
             None => return Ok(None),
@@ -1315,7 +1340,7 @@ impl Level {
 
 #[derive(Clone, Debug)]
 pub(crate) enum WalEntry {
-    Write(Timestamp, Vec<(KeyspaceId, Vec<u8>, Value)>),
+    Write(Timestamp, Vec<(KeyspaceId, Vec<u8>, RevisionValue)>),
     Manifest(KeyspaceId, wal::SeqNo, Vec<Vec<Uuid>>),
 }
 
@@ -1355,6 +1380,7 @@ mod test {
     use crate::lsm::memtable::Memtable;
     use crate::lsm::run::dump_run;
     use crate::lsm::run::Run;
+    use crate::lsm::util::LsmRevision;
     use crate::range::Bound;
     use crate::range::Range;
     use crate::storage::MemStorage;
@@ -1365,8 +1391,8 @@ mod test {
     use crate::types::Mutation;
     use crate::types::Precondition;
     use crate::types::Revision;
+    use crate::types::RevisionValue;
     use crate::types::Timestamp;
-    use crate::types::Value;
     use crate::types::WriteError;
     use crate::util::binary_search_by_idx;
     use crate::wal;
@@ -1390,11 +1416,11 @@ mod test {
         assert_eq!(lsm.get(Timestamp(4), keyspace_id, k).await?, None);
         assert_eq!(
             lsm.get(Timestamp(5), keyspace_id, k).await?,
-            Some((Timestamp(5), Value::Regular(v.to_vec())))
+            Some((Timestamp(5), RevisionValue::Regular(v.to_vec())))
         );
         assert_eq!(
             lsm.get(Timestamp(6), keyspace_id, k).await?,
-            Some((Timestamp(5), Value::Regular(v.to_vec())))
+            Some((Timestamp(5), RevisionValue::Regular(v.to_vec())))
         );
         assert_eq!(lsm.get(Timestamp(4), keyspace_id, not_k).await?, None);
         assert_eq!(lsm.get(Timestamp(5), keyspace_id, not_k).await?, None);
@@ -1454,19 +1480,19 @@ mod test {
         assert_eq!(lsm.get(Timestamp(4), keyspace_id, kb).await?, None);
         assert_eq!(
             lsm.get(Timestamp(9), keyspace_id, ka).await?,
-            Some((Timestamp(5), Value::Regular(b"a0".to_vec())))
+            Some((Timestamp(5), RevisionValue::Regular(b"a0".to_vec())))
         );
         assert_eq!(
             lsm.get(Timestamp(9), keyspace_id, kb).await?,
-            Some((Timestamp(5), Value::Regular(b"b0".to_vec())))
+            Some((Timestamp(5), RevisionValue::Regular(b"b0".to_vec())))
         );
         assert_eq!(
             lsm.get(Timestamp(10), keyspace_id, ka).await?,
-            Some((Timestamp(10), Value::Regular(b"a1".to_vec())))
+            Some((Timestamp(10), RevisionValue::Regular(b"a1".to_vec())))
         );
         assert_eq!(
             lsm.get(Timestamp(10), keyspace_id, kb).await?,
-            Some((Timestamp(10), Value::Tombstone))
+            Some((Timestamp(10), RevisionValue::Tombstone))
         );
 
         Ok(())
@@ -1504,7 +1530,7 @@ mod test {
             for (k, v) in &map {
                 assert_eq!(
                     lsm.get(last_ts, keyspace_id, &[*k]).await?.map(|(_, b)| b),
-                    Some(Value::Regular(vec![*v])),
+                    Some(RevisionValue::Regular(vec![*v])),
                 );
             }
         }
@@ -1581,7 +1607,7 @@ mod test {
 
             for (k, v) in &map {
                 let actual = lsm.get(last_ts, keyspace_id, &[*k]).await?.map(|(_, b)| b);
-                assert_eq!(actual, Some(Value::Regular(v.clone())));
+                assert_eq!(actual, Some(RevisionValue::Regular(v.clone())));
             }
         }
 
@@ -1628,7 +1654,7 @@ mod test {
                     lsm.get(Timestamp(write_ts), keyspace_id, &[*k])
                         .await?
                         .map(|(_, b)| b),
-                    Some(Value::Regular(vec![*v])),
+                    Some(RevisionValue::Regular(vec![*v])),
                 );
             }
         }
@@ -1658,7 +1684,7 @@ mod test {
                 lsm.get(Timestamp(write_ts), keyspace_id, &[*k])
                     .await?
                     .map(|(_, b)| b),
-                Some(Value::Regular(vec![*v]))
+                Some(RevisionValue::Regular(vec![*v]))
             );
         }
 
@@ -1721,8 +1747,8 @@ mod test {
                 };
 
                 //let value = match mutation {
-                //    Mutation::Put(v) => Value::Regular(v),
-                //    Mutation::Delete => Value::Tombstone,
+                //    Mutation::Put(v) => RevisionValue::Regular(v),
+                //    Mutation::Delete => RevisionValue::Tombstone,
                 //};
                 lsm.write(
                     Timestamp(ts as u64),
@@ -1775,9 +1801,9 @@ mod test {
                             .clone()
                             .into_iter()
                             .map(|(key, ts)| Revision {
-                                key: (key).into(),
+                                key: (keyspace_id, (key).into()),
                                 ts: Timestamp(ts as u64),
-                                value: Value::Regular(format!("{} {}", key, ts).into()),
+                                value: RevisionValue::Regular(format!("{} {}", key, ts).into()),
                             })
                             .collect::<Vec<Revision>>(),
                         "scan_page(ts={:?}, /*keyspace_id*/, /*cursor*/, direction={:?}, page_size={})",
@@ -2029,7 +2055,7 @@ mod test {
                     }
 
                     let mut expected_recs: Vec<Revision> = expected.into_iter().map(|(key, (ts, value))| {
-                        Revision{key: key.clone(), ts: *ts, value: Value::Regular(value.clone())}
+                        Revision{key: (keyspace_id, key.clone()), ts: *ts, value: RevisionValue::Regular(value.clone())}
                     }).collect();
                     if direction == Direction::Desc {
                         expected_recs.reverse();
@@ -2211,7 +2237,7 @@ mod test {
                             .map(|(key, ts, is_tombstone)| {
                                 lsm_diagram_revision(key.as_bytes(), ts, is_tombstone)
                             })
-                            .collect::<Vec<Revision>>()
+                            .collect::<Vec<LsmRevision>>()
                     })
                     .collect::<Vec<_>>()
             })
@@ -2221,17 +2247,17 @@ mod test {
         Ok(())
     }
 
-    fn lsm_diagram_value(key: &[u8], ts: usize) -> Value {
-        Value::Regular(format!("{:?} {}", key, ts).into())
+    fn lsm_diagram_value(key: &[u8], ts: usize) -> RevisionValue {
+        RevisionValue::Regular(format!("{:?} {}", key, ts).into())
     }
 
-    fn lsm_diagram_revision(key: &[u8], ts: usize, is_tombstone: bool) -> Revision {
-        Revision {
+    fn lsm_diagram_revision(key: &[u8], ts: usize, is_tombstone: bool) -> LsmRevision {
+        LsmRevision {
             key: key.into(),
             ts: Timestamp(ts as u64),
             value: match is_tombstone {
                 false => lsm_diagram_value(key, ts),
-                true => Value::Tombstone,
+                true => RevisionValue::Tombstone,
             },
         }
     }
@@ -2242,13 +2268,13 @@ mod test {
             visited: &mut HashSet<(usize, usize)>,
             x: usize,
             y: usize,
-        ) -> Vec<Revision> {
+        ) -> Vec<LsmRevision> {
             fn find_touching_inner(
                 diagram: &[(&str, &[u8])],
                 visited: &mut HashSet<(usize, usize)>,
                 x: usize,
                 y: usize,
-                out: &mut Vec<Revision>,
+                out: &mut Vec<LsmRevision>,
             ) {
                 if visited.contains(&(x, y)) {
                     return;
@@ -2261,11 +2287,11 @@ mod test {
 
                 if let Some(value) = match diagram[y].1[x] {
                     b'o' => Some(lsm_diagram_value(&key, ts.0 as usize)),
-                    b'x' => Some(Value::Tombstone),
+                    b'x' => Some(RevisionValue::Tombstone),
                     b' ' => None,
                     _ => return,
                 } {
-                    out.push(Revision { key, ts, value });
+                    out.push(LsmRevision { key, ts, value });
                 }
 
                 for (dx, dy) in [(0isize, -1isize), (1, 0), (0, 1), (-1, 0)] {
