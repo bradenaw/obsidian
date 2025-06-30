@@ -13,6 +13,7 @@ use crate::obsidian::Txid;
 use crate::range::Range;
 use crate::types::Direction;
 use crate::types::HistoryRange;
+use crate::types::Key;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
@@ -61,22 +62,22 @@ pub(crate) trait Tablet {
     async fn write(
         &self,
         preconds: Vec<Precondition>,
-        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+        muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError>;
 
     async fn prepare(
         &self,
         txid: Txid,
         preconds: Vec<Precondition>,
-        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+        muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError>;
 
     async fn try_commit(
         &self,
         txid: Txid,
         ts: Timestamp,
-        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
-        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<TxOutcome>;
     async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome>;
     async fn wait(&self, txid: Txid) -> anyhow::Result<TxOutcome>;
@@ -84,8 +85,8 @@ pub(crate) trait Tablet {
         &self,
         txid: Txid,
         ts: Timestamp,
-        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
-        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()>;
 
     async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()>;

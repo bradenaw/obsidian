@@ -29,6 +29,7 @@ use crate::range::Range;
 use crate::tablet::Tablet;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
+use crate::types::Key;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
@@ -60,15 +61,12 @@ pub trait Obsidian {
         limit: usize,
     ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)>;
 
-    async fn latest_snapshot(
-        &self,
-        keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
-    ) -> anyhow::Result<Timestamp>;
+    async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> anyhow::Result<Timestamp>;
 
     async fn write(
         &self,
         preconds: Vec<Precondition>,
-        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+        muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, WriteError>;
 
     async fn create_colo_group(

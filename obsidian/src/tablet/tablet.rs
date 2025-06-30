@@ -44,6 +44,7 @@ use crate::tablet::Tablet;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::HistoryRange;
+use crate::types::Key;
 use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
@@ -124,7 +125,7 @@ impl Tablet for LsmTablet {
     async fn write(
         &self,
         preconds: Vec<Precondition>,
-        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+        muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
         self.inner.write(preconds, muts).await
     }
@@ -133,7 +134,7 @@ impl Tablet for LsmTablet {
         &self,
         txid: Txid,
         preconds: Vec<Precondition>,
-        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+        muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
         self.inner.prepare(txid, preconds, muts).await
     }
@@ -142,8 +143,8 @@ impl Tablet for LsmTablet {
         &self,
         txid: Txid,
         ts: Timestamp,
-        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
-        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<TxOutcome> {
         self.inner
             .try_commit(txid, ts, precond_keys, mut_keys)
@@ -159,8 +160,8 @@ impl Tablet for LsmTablet {
         &self,
         txid: Txid,
         ts: Timestamp,
-        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
-        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()> {
         self.inner
             .cleanup_committed(txid, ts, precond_keys, mut_keys)
@@ -267,12 +268,7 @@ struct LsmTabletInner {
     lock_mgr: LockMgr,
 
     prepare_sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
-    commit_sender: mpsc::Sender<(
-        Txid,
-        Timestamp,
-        BTreeSet<(KeyspaceId, Vec<u8>)>,
-        BTreeSet<(KeyspaceId, Vec<u8>)>,
-    )>,
+    commit_sender: mpsc::Sender<(Txid, Timestamp, BTreeSet<Key>, BTreeSet<Key>)>,
     waiters: Waiters,
 }
 
@@ -283,12 +279,7 @@ impl LsmTabletInner {
         meta_synced: MetaSynced,
         tablets: Box<dyn Tablets + Sync + Send>,
         prepare_sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
-        commit_sender: mpsc::Sender<(
-            Txid,
-            Timestamp,
-            BTreeSet<(KeyspaceId, Vec<u8>)>,
-            BTreeSet<(KeyspaceId, Vec<u8>)>,
-        )>,
+        commit_sender: mpsc::Sender<(Txid, Timestamp, BTreeSet<Key>, BTreeSet<Key>)>,
     ) -> Self {
         Self {
             tablet_id,
@@ -588,7 +579,7 @@ impl LsmTabletInner {
     async fn write(
         &self,
         preconds: Vec<Precondition>,
-        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+        muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
         let _guard = self.acquire_write_locks(&preconds, &muts).await?;
 
@@ -610,7 +601,7 @@ impl LsmTabletInner {
         &self,
         txid: Txid,
         preconds: Vec<Precondition>,
-        muts: BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+        muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
         let _guard = self.acquire_write_locks(&preconds, &muts).await?;
 
@@ -694,8 +685,8 @@ impl LsmTabletInner {
         &self,
         txid: Txid,
         ts: Timestamp,
-        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
-        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<TxOutcome> {
         self.try_write_tx_outcome(
             txid,
@@ -730,10 +721,13 @@ impl LsmTabletInner {
                     // Must be done with _guard still active.
                     None => self.waiters.wait(txid),
                     _ => {
+                        // TODO: This should only happen when the pending records have already been
+                        // cleaned up, so we should return a specific error to tell the caller to
+                        // just retry whatever they were trying to do.
                         return Err(anyhow!(
                             "can't wait for transaction {:?}: TxOutcome record missing",
                             txid,
-                        ))
+                        ));
                     }
                 }
             };
@@ -746,8 +740,8 @@ impl LsmTabletInner {
         &self,
         txid: Txid,
         ts: Timestamp,
-        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
-        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()> {
         let tx_outcome = TxOutcome::Committed(ts);
 
@@ -774,7 +768,7 @@ impl LsmTabletInner {
     async fn acquire_write_locks<'a>(
         &'a self,
         preconds: &Vec<Precondition>,
-        muts: &BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+        muts: &BTreeMap<Key, Mutation>,
     ) -> anyhow::Result<Guard<'a>> {
         for precond in preconds {
             self.check_key(precond.keyspace_id().0, precond.key())?;
@@ -795,7 +789,7 @@ impl LsmTabletInner {
     async fn check_write_conflicts(
         &self,
         preconds: &Vec<Precondition>,
-        muts: &BTreeMap<(KeyspaceId, Vec<u8>), Mutation>,
+        muts: &BTreeMap<Key, Mutation>,
     ) -> anyhow::Result<Option<Txid>> {
         for (keyspace_id, key) in Iterator::chain(
             preconds
@@ -945,12 +939,7 @@ impl LsmTabletInner {
 
     async fn cleanup_committed_outcomes(
         &self,
-        mut r: mpsc::Receiver<(
-            Txid,
-            Timestamp,
-            BTreeSet<(KeyspaceId, Vec<u8>)>,
-            BTreeSet<(KeyspaceId, Vec<u8>)>,
-        )>,
+        mut r: mpsc::Receiver<(Txid, Timestamp, BTreeSet<Key>, BTreeSet<Key>)>,
     ) {
         while let Some((txid, ts, precond_keys, mut_keys)) = r.recv().await {
             Retry::new()
@@ -971,8 +960,8 @@ impl LsmTabletInner {
         &self,
         txid: Txid,
         ts: Timestamp,
-        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
-        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()> {
         let mut by_tablet = HashMap::new();
 
@@ -1161,12 +1150,7 @@ impl LsmTabletInner {
     // Scans for committed outcomes that exist on disk already and delivers them to `sender`.
     async fn scan_for_committed_outcomes(
         &self,
-        sender: mpsc::Sender<(
-            Txid,
-            Timestamp,
-            BTreeSet<(KeyspaceId, Vec<u8>)>,
-            BTreeSet<(KeyspaceId, Vec<u8>)>,
-        )>,
+        sender: mpsc::Sender<(Txid, Timestamp, BTreeSet<Key>, BTreeSet<Key>)>,
     ) {
         Retry::new()
             .indefinitely(|| {
@@ -1362,8 +1346,8 @@ impl Decode for PrecondLocks {
 enum TxOutcomeRecord {
     Committed {
         ts: Timestamp,
-        precond_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
-        mut_keys: BTreeSet<(KeyspaceId, Vec<u8>)>,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
     },
     Aborted,
 }
