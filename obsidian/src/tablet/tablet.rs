@@ -153,7 +153,7 @@ impl Tablet for LsmTablet {
     async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
         self.inner.try_abort(txid).await
     }
-    async fn wait(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
+    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
         self.inner.wait(txid).await
     }
     async fn cleanup_committed(
@@ -704,7 +704,7 @@ impl LsmTabletInner {
             .await
     }
 
-    async fn wait(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
+    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
         loop {
             let tx_outcome_key = txid.encode_fixed();
             let wait = {
@@ -724,10 +724,7 @@ impl LsmTabletInner {
                         // TODO: This should only happen when the pending records have already been
                         // cleaned up, so we should return a specific error to tell the caller to
                         // just retry whatever they were trying to do.
-                        return Err(anyhow!(
-                            "can't wait for transaction {:?}: TxOutcome record missing",
-                            txid,
-                        ));
+                        return Err(InternalError::TxOutcomeMissing);
                     }
                 }
             };
@@ -1220,7 +1217,10 @@ impl LsmTabletInner {
         }
         if colo_group_id == ColoGroupId::TABLET_META {
             if key.len() < 12 {
-                return Err(anyhow!("key {:?} too short for ColoGroupId::META", key));
+                return Err(anyhow!(
+                    "key {:?} too short for ColoGroupId::TABLET_META",
+                    key
+                ));
             }
             let tablet_id = TabletId(
                 ShardId(BigEndian::read_u32(&key[0..4])),

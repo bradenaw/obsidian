@@ -80,7 +80,7 @@ pub(crate) trait Tablet {
         mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<TxOutcome>;
     async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome>;
-    async fn wait(&self, txid: Txid) -> anyhow::Result<TxOutcome>;
+    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError>;
     async fn cleanup_committed(
         &self,
         txid: Txid,

@@ -139,7 +139,7 @@ impl<T: Tablet + Send + Sync> Tablet for Arc<T> {
         T::try_abort(self, txid).await
     }
 
-    async fn wait(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
+    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
         T::wait(self, txid).await
     }
 

@@ -639,23 +639,23 @@ impl Decode for Txid {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum TxOutcome {
-    Committed(Timestamp),
-    Aborted,
-}
-
 impl Debug for Txid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}/{}/{}/{}",
+            "tx:{}/{}/{}/{}",
             self.ts,
             hexlify(&self.rand),
             self.owner.0 .0,
             self.owner.1
         )
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum TxOutcome {
+    Committed(Timestamp),
+    Aborted,
 }
 
 #[derive(Error, Debug)]
@@ -668,6 +668,10 @@ pub(crate) enum InternalError {
     AlreadyAborted,
     #[error("precondition failed")]
     PreconditionFailed,
+    // Can happen on an attempt at a wait() if Tablet::cleanup_committed_outcomes already
+    // cleaned everything up and removed the TxOutcome.
+    #[error("TxOutcome missing")]
+    TxOutcomeMissing,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

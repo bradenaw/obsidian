@@ -88,7 +88,7 @@ impl Display for ColoGroupId {
 
 impl Debug for ColoGroupId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "colo:")?;
+        write!(f, "cg:")?;
         Display::fmt(&self, f)
     }
 }
@@ -212,7 +212,7 @@ impl From<(KeyspaceId, Vec<u8>)> for pb::Key {
 
 pub type Key = (KeyspaceId, Vec<u8>);
 
-#[derive(Eq, PartialEq, Clone, Debug)]
+#[derive(Eq, PartialEq, Clone)]
 pub struct Record {
     pub key: Key,
     pub ts: Timestamp,
@@ -244,6 +244,19 @@ impl From<Record> for pb::Record {
             ts: value.ts.as_nanos(),
             value: value.value,
         }
+    }
+}
+
+impl Debug for Record {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "rec:{}/[{}]@{}: [{}]",
+            self.key.0,
+            hexlify(&self.key.1),
+            self.ts,
+            hexlify(&self.value),
+        )
     }
 }
 
