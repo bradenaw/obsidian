@@ -34,7 +34,6 @@ use crate::types::Mutation;
 use crate::types::Precondition;
 use crate::types::Record;
 use crate::types::Revision;
-use crate::types::RevisionValue;
 use crate::types::ShardId;
 use crate::types::Timestamp;
 use crate::util::encode;
@@ -63,27 +62,15 @@ impl<T: Router> Router for Arc<T> {
 
 #[async_trait]
 impl<T: Tablet + Send + Sync> Tablet for Arc<T> {
-    async fn get(
-        &self,
-        ts: Timestamp,
-        keyspace_id: KeyspaceId,
-        key: Vec<u8>,
-    ) -> Result<Option<Vec<u8>>, InternalError> {
-        T::get(self, ts, keyspace_id, key).await
+    async fn get(&self, ts: Timestamp, key: Key) -> Result<Option<Record>, InternalError> {
+        T::get(self, ts, key).await
     }
 
-    async fn get_latest(
-        &self,
-        keyspace_id: KeyspaceId,
-        key: &[u8],
-    ) -> Result<(Timestamp, Option<Vec<u8>>), InternalError> {
-        T::get_latest(self, keyspace_id, key).await
+    async fn get_latest(&self, key: Key) -> Result<(Timestamp, Option<Record>), InternalError> {
+        T::get_latest(self, key).await
     }
 
-    async fn latest_snapshot(
-        &self,
-        keys: BTreeSet<(KeyspaceId, &[u8])>,
-    ) -> Result<Timestamp, InternalError> {
+    async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError> {
         T::latest_snapshot(self, keys).await
     }
 
@@ -100,13 +87,12 @@ impl<T: Tablet + Send + Sync> Tablet for Arc<T> {
 
     async fn history_page(
         &self,
-        keyspace_id: KeyspaceId,
-        key: &[u8],
+        key: Key,
         range: HistoryRange,
         direction: Direction,
         limit: usize,
-    ) -> Result<(Vec<(Timestamp, RevisionValue)>, Option<HistoryRange>), InternalError> {
-        T::history_page(self, keyspace_id, key, range, direction, limit).await
+    ) -> Result<(Vec<Revision>, Option<HistoryRange>), InternalError> {
+        T::history_page(self, key, range, direction, limit).await
     }
 
     async fn write(
@@ -316,7 +302,7 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
 
     Ok(Frontend::new(
         Box::new(meta_proxy.clone()),
-        Box::new(MetaSynced::new(meta_proxy.clone())),
+        MetaSynced::new(meta_proxy.clone()),
         Box::new(tablets),
     ))
 }
@@ -378,11 +364,11 @@ macro_rules! obsidian_test_suite {
                     .await?;
 
                 assert_eq!(
-                    obs.get(write_ts, keyspace_id, key1).await?,
+                    obs.get(write_ts, (keyspace_id, key1)).await?.map(|record| record.value),
                     Some(vec![1, 2, 3])
                 );
                 assert_eq!(
-                    obs.get(write_ts, keyspace_id, key2).await?,
+                    obs.get(write_ts, (keyspace_id, key2)).await?.map(|record| record.value),
                     Some(vec![4, 5, 6])
                 );
 
@@ -391,6 +377,8 @@ macro_rules! obsidian_test_suite {
 
             #[tokio::test]
             async fn test_scan_page() {
+                let _ = pretty_env_logger::try_init();
+
                 async fn inner() -> anyhow::Result<()> {
                     let colo_group_id = ColoGroupId(1);
                     let keyspace_id = KeyspaceId(colo_group_id, 1);

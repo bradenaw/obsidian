@@ -21,7 +21,7 @@ message GetLatestReq {
 
 message GetResult {
     oneof result_type {
-        bytes value = 1;
+        Record record = 1;
         google.protobuf.Empty not_found = 2;
     }
 }

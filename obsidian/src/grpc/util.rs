@@ -8,13 +8,14 @@ use anyhow::anyhow;
 use crate::pb;
 use crate::types::Key;
 use crate::types::KeyspaceId;
+use crate::types::Record;
 
-pub(super) fn options_to_get_results(values: Vec<Option<Vec<u8>>>) -> Vec<pb::GetResult> {
+pub(super) fn options_to_get_results(values: Vec<Option<Record>>) -> Vec<pb::GetResult> {
     values
         .into_iter()
-        .map(|maybe_value| match maybe_value {
-            Some(value) => pb::GetResult {
-                result_type: Some(pb::get_result::ResultType::Value(value)),
+        .map(|maybe_record| match maybe_record {
+            Some(record) => pb::GetResult {
+                result_type: Some(pb::get_result::ResultType::Record(record.into())),
             },
             None => pb::GetResult {
                 result_type: Some(pb::get_result::ResultType::NotFound(())),

@@ -33,32 +33,29 @@ impl FrontendClient {
 
 #[async_trait]
 impl Obsidian for FrontendClient {
-    async fn get(
-        &self,
-        ts: Timestamp,
-        keyspace_id: KeyspaceId,
-        key: Vec<u8>,
-    ) -> anyhow::Result<Option<Vec<u8>>> {
+    async fn get(&self, ts: Timestamp, key: Key) -> anyhow::Result<Option<Record>> {
         let resp = self
             .inner
             .acquire()
             .await
             .get(pb::GetReq {
                 snapshot_ts: ts.as_nanos(),
-                keys: Vec::from([pb::Key::from((keyspace_id, key))]),
+                keys: Vec::from([pb::Key::from(key)]),
             })
             .await?
             .into_inner();
 
-        let mut results: Vec<Option<Vec<u8>>> = resp
+        let mut results: Vec<Option<Record>> = resp
             .results
             .into_iter()
             .map(|result_pb| match result_pb.result_type {
-                Some(pb::get_result::ResultType::Value(v)) => Ok(Some(v)),
+                Some(pb::get_result::ResultType::Record(record_pb)) => {
+                    Ok(Some(Record::try_from(record_pb)?))
+                }
                 Some(pb::get_result::ResultType::NotFound(())) => Ok(None),
                 None => Err(anyhow!("invalid response: GetResult.result_type missing")),
             })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            .collect::<anyhow::Result<_>>()?;
 
         Ok(results
             .pop()
@@ -90,16 +87,7 @@ impl Obsidian for FrontendClient {
         let results: Vec<Record> = resp
             .records
             .into_iter()
-            .map(|r| {
-                Ok(Record {
-                    key: r
-                        .key
-                        .ok_or_else(|| anyhow!("invalid response: record missing key"))?
-                        .try_into()?,
-                    ts: Timestamp::from_nanos(r.ts),
-                    value: r.value,
-                })
-            })
+            .map(Record::try_from)
             .collect::<anyhow::Result<Vec<_>>>()?;
 
         let maybe_continue_range = resp.remaining.map(Range::try_from).transpose()?;
@@ -130,8 +118,8 @@ impl Obsidian for FrontendClient {
 
         let mut keys_pb = Vec::with_capacity(muts.len());
         let mut muts_pb = Vec::with_capacity(muts.len());
-        for ((keyspace_id, key), m) in muts.into_iter() {
-            keys_pb.push(pb::Key::from((keyspace_id, key)));
+        for (key, m) in muts.into_iter() {
+            keys_pb.push(pb::Key::from(key));
             muts_pb.push(pb::Mutation::from(m));
         }
 
@@ -285,10 +273,9 @@ mod tests {
         async fn get(
             &self,
             ts: crate::types::Timestamp,
-            keyspace_id: KeyspaceId,
-            key: Vec<u8>,
-        ) -> anyhow::Result<Option<Vec<u8>>> {
-            self.inner.get(ts, keyspace_id, key).await
+            key: Key,
+        ) -> anyhow::Result<Option<Record>> {
+            self.inner.get(ts, key).await
         }
 
         async fn scan_page(

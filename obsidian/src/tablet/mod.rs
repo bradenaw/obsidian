@@ -18,27 +18,18 @@ use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
 use crate::types::Record;
-use crate::types::RevisionValue;
+use crate::types::Revision;
 use crate::types::Timestamp;
 
 #[async_trait]
 pub(crate) trait Tablet {
-    async fn get(
-        &self,
-        ts: Timestamp,
-        keyspace_id: KeyspaceId,
-        key: Vec<u8>,
-    ) -> Result<Option<Vec<u8>>, InternalError>;
+    async fn get(&self, ts: Timestamp, key: Key) -> Result<Option<Record>, InternalError>;
 
-    async fn get_latest(
-        &self,
-        keyspace_id: KeyspaceId,
-        key: &[u8],
-    ) -> Result<(Timestamp, Option<Vec<u8>>), InternalError>;
+    async fn get_latest(&self, key: Key) -> Result<(Timestamp, Option<Record>), InternalError>;
 
     async fn latest_snapshot(
         &self,
-        keys: BTreeSet<(KeyspaceId, &[u8])>,
+        keys: BTreeSet<Key>,
     ) -> Result<Timestamp, InternalError>;
 
     async fn scan_page(
@@ -52,12 +43,11 @@ pub(crate) trait Tablet {
 
     async fn history_page(
         &self,
-        keyspace_id: KeyspaceId,
-        key: &[u8],
+        key: Key,
         range: HistoryRange,
         direction: Direction,
         limit: usize,
-    ) -> Result<(Vec<(Timestamp, RevisionValue)>, Option<HistoryRange>), InternalError>;
+    ) -> Result<(Vec<Revision>, Option<HistoryRange>), InternalError>;
 
     async fn write(
         &self,

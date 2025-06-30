@@ -54,7 +54,7 @@ impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for Fron
         for (keyspace_id, key) in keys {
             let maybe_value = self
                 .inner
-                .get(ts, keyspace_id, key.clone())
+                .get(ts, (keyspace_id, key.clone()))
                 .await
                 .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
@@ -87,7 +87,7 @@ impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for Fron
         for (keyspace_id, key) in keys {
             let maybe_value = self
                 .inner
-                .get(ts, keyspace_id, key.clone())
+                .get(ts, (keyspace_id, key.clone()))
                 .await
                 .map_err(|e| tonic::Status::internal(e.to_string()))?;
 

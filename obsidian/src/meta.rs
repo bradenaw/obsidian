@@ -78,7 +78,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
 
         if self
             .tablet
-            .get(ts, KeyspaceId::META, tablet_key.clone())
+            .get(ts, (KeyspaceId::META, tablet_key.clone()))
             .await?
             .is_some()
         {
@@ -125,9 +125,9 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
             let tablet_key = tuple_encode(&(PFX_TABLETS, tablet_id.0 .0 as u64, tablet_id.1));
             let meta_tablet = self
                 .tablet
-                .get(ts, KeyspaceId::META, tablet_key.clone())
+                .get(ts, (KeyspaceId::META, tablet_key.clone()))
                 .await?
-                .map(|v| pb::internal::MetaTablet::decode(&v[..]))
+                .map(|record| pb::internal::MetaTablet::decode(&record.value[..]))
                 .unwrap_or(Ok(pb::internal::MetaTablet {
                     colo_group_ids: vec![],
                     ranges: vec![],
@@ -174,7 +174,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
 
         if self
             .tablet
-            .get(ts, KeyspaceId::META, keyspace_key.clone())
+            .get(ts, (KeyspaceId::META, keyspace_key.clone()))
             .await?
             .is_some()
         {
@@ -194,7 +194,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
     async fn latest_snapshot(&self) -> anyhow::Result<Timestamp> {
         let ts = self
             .tablet
-            .latest_snapshot(BTreeSet::from([(KeyspaceId::META, &self.sync_key[..])]))
+            .latest_snapshot(BTreeSet::from([(KeyspaceId::META, self.sync_key.clone())]))
             .await?;
         Ok(ts)
     }
@@ -222,8 +222,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
         let (page, _) = self
             .tablet
             .history_page(
-                KeyspaceId::META,
-                &self.sync_key[..],
+                (KeyspaceId::META, self.sync_key.clone()),
                 HistoryRange::Since(ts),
                 Direction::Asc,
                 100,
@@ -232,8 +231,8 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
 
         let mut out_page = vec![];
         let mut new_ts = ts;
-        for (ts, maybe_value) in page {
-            if let RevisionValue::Regular(value) = maybe_value {
+        for revision in page {
+            if let RevisionValue::Regular(value) = revision.value {
                 let proto_tx = pb::internal::MetaTx::decode(&value[..])?;
                 let keys = BTreeSet::try_from(
                     proto_tx
@@ -241,19 +240,19 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
                         .ok_or_else(|| anyhow!("ProtoTx with no keys"))?,
                 )?;
 
-                for (keyspace_id, key) in keys {
-                    let record = Revision {
-                        key: (keyspace_id, key.clone()),
-                        ts,
-                        value: match self.tablet.get(ts, keyspace_id, key).await? {
-                            Some(v) => RevisionValue::Regular(v),
+                for key in keys {
+                    let revision = Revision {
+                        key: key.clone(),
+                        ts: revision.ts,
+                        value: match self.tablet.get(revision.ts, key).await? {
+                            Some(record) => RevisionValue::Regular(record.value),
                             None => RevisionValue::Tombstone,
                         },
                     };
-                    out_page.push(record);
+                    out_page.push(revision);
                 }
             }
-            new_ts = ts;
+            new_ts = revision.ts;
 
             if out_page.len() > 1000 {
                 break;
@@ -333,7 +332,7 @@ impl<T: Tablet + Sync + Send> MetaImpl<T> {
 
         Ok(self
             .tablet
-            .get(ts, KeyspaceId::META, colo_group_key.clone())
+            .get(ts, (KeyspaceId::META, colo_group_key.clone()))
             .await?
             .is_some())
     }

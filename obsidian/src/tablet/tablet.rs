@@ -49,6 +49,7 @@ use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
 use crate::types::Record;
+use crate::types::Revision;
 use crate::types::RevisionValue;
 use crate::types::ShardId;
 use crate::types::Timestamp;
@@ -72,27 +73,15 @@ pub(crate) struct LsmTablet {
 
 #[async_trait]
 impl Tablet for LsmTablet {
-    async fn get(
-        &self,
-        ts: Timestamp,
-        keyspace_id: KeyspaceId,
-        key: Vec<u8>,
-    ) -> Result<Option<Vec<u8>>, InternalError> {
-        self.inner.get(ts, keyspace_id, key).await
+    async fn get(&self, ts: Timestamp, key: Key) -> Result<Option<Record>, InternalError> {
+        self.inner.get(ts, key).await
     }
 
-    async fn get_latest(
-        &self,
-        keyspace_id: KeyspaceId,
-        key: &[u8],
-    ) -> Result<(Timestamp, Option<Vec<u8>>), InternalError> {
-        self.inner.get_latest(keyspace_id, key).await
+    async fn get_latest(&self, key: Key) -> Result<(Timestamp, Option<Record>), InternalError> {
+        self.inner.get_latest(key).await
     }
 
-    async fn latest_snapshot(
-        &self,
-        keys: BTreeSet<(KeyspaceId, &[u8])>,
-    ) -> Result<Timestamp, InternalError> {
+    async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError> {
         self.inner.latest_snapshot(keys).await
     }
 
@@ -111,15 +100,12 @@ impl Tablet for LsmTablet {
 
     async fn history_page(
         &self,
-        keyspace_id: KeyspaceId,
-        key: &[u8],
+        key: Key,
         range: HistoryRange,
         direction: Direction,
         limit: usize,
-    ) -> Result<(Vec<(Timestamp, RevisionValue)>, Option<HistoryRange>), InternalError> {
-        self.inner
-            .history_page(keyspace_id, key, range, direction, limit)
-            .await
+    ) -> Result<(Vec<Revision>, Option<HistoryRange>), InternalError> {
+        self.inner.history_page(key, range, direction, limit).await
     }
 
     async fn write(
@@ -294,59 +280,20 @@ impl LsmTabletInner {
         }
     }
 
-    async fn get(
-        &self,
-        ts: Timestamp,
-        keyspace_id: KeyspaceId,
-        key: Vec<u8>,
-    ) -> Result<Option<Vec<u8>>, InternalError> {
-        self.check_key(keyspace_id.0, &key)?;
+    async fn get(&self, ts: Timestamp, key: Key) -> Result<Option<Record>, InternalError> {
+        let keyspace_id = key.0;
+
+        self.check_key(keyspace_id.0, &key.1)?;
         self.sequencer.wait_for_safe_read(ts).await?;
 
         let (maybe_record, maybe_pending_value) = future::try_join(
-            self.lsm.get(ts, keyspace_id, &key),
+            self.lsm.get(ts, keyspace_id, &key.1),
             self.lsm.get(
                 ts,
                 keyspace_id
                     .pending()
                     .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?,
-                &key,
-            ),
-        )
-        .await?;
-
-        if let Some((_, RevisionValue::Regular(bytes))) = maybe_pending_value {
-            let pending_mut = PendingMutation::decode(&bytes)?;
-            return Err(InternalError::Conflict(pending_mut.txid));
-        }
-
-        Ok(match maybe_record {
-            Some((_, value)) => match value {
-                RevisionValue::Regular(v) => Some(v),
-                RevisionValue::Tombstone => None,
-            },
-            None => None,
-        })
-    }
-
-    async fn get_latest(
-        &self,
-        keyspace_id: KeyspaceId,
-        key: &[u8],
-    ) -> Result<(Timestamp, Option<Vec<u8>>), InternalError> {
-        self.check_key(keyspace_id.0, &key)?;
-
-        let _guard = self.lock_mgr.read_lock(key).await;
-
-        let safe_read_ts = self.sequencer.safe_read_ts();
-
-        let (maybe_record, maybe_pending_value) = future::try_join(
-            self.unsafe_get_latest_record(keyspace_id, &key),
-            self.unsafe_get_latest_record(
-                keyspace_id
-                    .pending()
-                    .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?,
-                &key,
+                &key.1,
             ),
         )
         .await?;
@@ -358,20 +305,61 @@ impl LsmTabletInner {
 
         Ok(match maybe_record {
             Some((ts, value)) => match value {
-                RevisionValue::Regular(v) => (ts, Some(v)),
+                RevisionValue::Regular(v) => Some(Record {
+                    key: key,
+                    ts: ts,
+                    value: v,
+                }),
+                RevisionValue::Tombstone => None,
+            },
+            None => None,
+        })
+    }
+
+    async fn get_latest(&self, key: Key) -> Result<(Timestamp, Option<Record>), InternalError> {
+        let keyspace_id = key.0;
+        self.check_key(keyspace_id.0, &key.1)?;
+
+        let _guard = self.lock_mgr.read_lock(&key.1).await;
+
+        let safe_read_ts = self.sequencer.safe_read_ts();
+
+        let (maybe_record, maybe_pending_value) = future::try_join(
+            self.unsafe_get_latest_record(keyspace_id, &key.1),
+            self.unsafe_get_latest_record(
+                keyspace_id
+                    .pending()
+                    .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?,
+                &key.1,
+            ),
+        )
+        .await?;
+
+        if let Some((_, RevisionValue::Regular(bytes))) = maybe_pending_value {
+            let pending_mut = PendingMutation::decode(&bytes)?;
+            return Err(InternalError::Conflict(pending_mut.txid));
+        }
+
+        Ok(match maybe_record {
+            Some((ts, value)) => match value {
+                RevisionValue::Regular(v) => (
+                    ts,
+                    Some(Record {
+                        key: key,
+                        ts: ts,
+                        value: v,
+                    }),
+                ),
                 RevisionValue::Tombstone => (ts, None),
             },
             None => (safe_read_ts, None),
         })
     }
 
-    async fn latest_snapshot(
-        &self,
-        keys: BTreeSet<(KeyspaceId, &[u8])>,
-    ) -> Result<Timestamp, InternalError> {
+    async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError> {
         let mut result = Timestamp::ZERO;
-        for (keyspace_id, key) in keys {
-            let (ts, _) = self.get_latest(keyspace_id, key).await?;
+        for key in keys {
+            let (ts, _) = self.get_latest(key).await?;
             result = cmp::max(result, ts);
         }
         Ok(result)
@@ -516,15 +504,15 @@ impl LsmTabletInner {
 
     async fn history_page(
         &self,
-        keyspace_id: KeyspaceId,
-        key: &[u8],
+        key: Key,
         range: HistoryRange,
         direction: Direction,
         limit: usize,
-    ) -> Result<(Vec<(Timestamp, RevisionValue)>, Option<HistoryRange>), InternalError> {
+    ) -> Result<(Vec<Revision>, Option<HistoryRange>), InternalError> {
         let limit = cmp::min(limit, 1000);
+        let keyspace_id = key.0;
 
-        let _guard = self.lock_mgr.read_lock(key).await;
+        let _guard = self.lock_mgr.read_lock(&key.1).await;
 
         let range = match range {
             HistoryRange::Until(max) => {
@@ -536,22 +524,18 @@ impl LsmTabletInner {
                 range
             }
             HistoryRange::All => {
-                let max = self
-                    .latest_snapshot(BTreeSet::from([(keyspace_id, key)]))
-                    .await?;
+                let max = self.latest_snapshot(BTreeSet::from([key.clone()])).await?;
                 HistoryRange::Until(max)
             }
             HistoryRange::Since(min) => {
-                let max = self
-                    .latest_snapshot(BTreeSet::from([(keyspace_id, key)]))
-                    .await?;
+                let max = self.latest_snapshot(BTreeSet::from([key.clone()])).await?;
                 HistoryRange::Between(min, max)
             }
         };
 
         let (page, continue_cursor) = self
             .lsm
-            .history_page(keyspace_id, key, range, direction, limit)
+            .history_page(keyspace_id, &key.1, range, direction, limit)
             .await?;
 
         let maybe_pending = self
@@ -559,7 +543,7 @@ impl LsmTabletInner {
                 keyspace_id
                     .pending()
                     .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?,
-                &key,
+                &key.1,
             )
             .await?;
 
@@ -573,7 +557,16 @@ impl LsmTabletInner {
             }
         }
 
-        Ok((page, continue_cursor))
+        Ok((
+            page.into_iter()
+                .map(|(ts, value)| Revision {
+                    key: key.clone(),
+                    ts: ts,
+                    value: value,
+                })
+                .collect(),
+            continue_cursor,
+        ))
     }
 
     async fn write(
@@ -1055,6 +1048,10 @@ impl LsmTabletInner {
             .await;
 
         for keyspace_id in self.lsm.keyspaces() {
+            if !keyspace_id.is_pending() {
+                continue;
+            }
+
             Retry::new()
                 .indefinitely(|| {
                     let sender = sender.clone();
@@ -1106,6 +1103,10 @@ impl LsmTabletInner {
             .await;
 
         for keyspace_id in self.lsm.keyspaces() {
+            if !keyspace_id.is_precond() {
+                continue;
+            }
+
             Retry::new()
                 .indefinitely(|| {
                     let sender = sender.clone();
@@ -1292,7 +1293,11 @@ impl Encode for PendingMutation {
 impl Decode for PendingMutation {
     fn decode(b: &[u8]) -> anyhow::Result<Self> {
         if b.len() < Txid::ENCODED_LEN + 1 {
-            anyhow::bail!("invalid pending mutation: too short");
+            anyhow::bail!(
+                "invalid pending mutation: expected >={}B, got {}B",
+                Txid::ENCODED_LEN + 1,
+                b.len()
+            );
         }
 
         let txid = Txid::decode(&b[..Txid::ENCODED_LEN])?;

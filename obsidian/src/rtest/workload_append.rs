@@ -214,8 +214,9 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
 
         let list_value = self
             .obsidian
-            .get(read_ts, self.list_keyspace_id, list_id.to_key())
+            .get(read_ts, (self.list_keyspace_id, list_id.to_key()))
             .await?
+            .map(|record| record.value)
             .unwrap_or(vec![0u8; 8]);
         let new_len = BigEndian::read_u64(&list_value[..]) + 1;
         let mut new_len_value = vec![0u8; 8];

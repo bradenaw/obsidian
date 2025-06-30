@@ -24,6 +24,7 @@ use rand::Rng;
 use thiserror::Error;
 
 use crate::meta::Meta;
+use crate::meta_synced::MetaSynced;
 use crate::range::Bound;
 use crate::range::Range;
 use crate::tablet::Tablet;
@@ -45,12 +46,7 @@ use crate::util::Retry;
 
 #[async_trait]
 pub trait Obsidian {
-    async fn get(
-        &self,
-        ts: Timestamp,
-        keyspace_id: KeyspaceId,
-        key: Vec<u8>,
-    ) -> anyhow::Result<Option<Vec<u8>>>;
+    async fn get(&self, ts: Timestamp, key: Key) -> anyhow::Result<Option<Record>>;
 
     async fn scan_page(
         &self,
@@ -121,7 +117,7 @@ impl<T: Obsidian + Sync> ObsidianExt for T {
 
 pub(crate) struct Frontend {
     meta: Box<dyn Meta + Send + Sync>,
-    router: Box<dyn Router + Send + Sync>,
+    meta_synced: MetaSynced,
     tablets: Box<dyn Tablets + Send + Sync>,
 }
 
@@ -129,18 +125,14 @@ const MAX_CONFLICT_RETRIES: usize = 10;
 
 #[async_trait]
 impl Obsidian for Frontend {
-    async fn get(
-        &self,
-        ts: Timestamp,
-        keyspace_id: KeyspaceId,
-        key: Vec<u8>,
-    ) -> anyhow::Result<Option<Vec<u8>>> {
+    async fn get(&self, ts: Timestamp, key: Key) -> anyhow::Result<Option<Record>> {
+        let keyspace_id = key.0;
         self.with_resolve_conflicts(|| {
             let key = key.clone();
             async move {
-                let tablet_id = self.router.tablet_id_for_key(keyspace_id.0, &key)?;
+                let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key.1)?;
                 let tablet = self.tablets.tablet(tablet_id)?;
-                tablet.get(ts, keyspace_id, key.clone()).await
+                tablet.get(ts, key.clone()).await
             }
         })
         .await
@@ -160,7 +152,7 @@ impl Obsidian for Frontend {
                 Direction::Desc => range.upper,
             };
             let tablet_id =
-                self.router
+                self.meta_synced
                     .tablet_id_for_bound(keyspace_id.0, start_bound, direction)?;
 
             let tablet = self.tablets.tablet(tablet_id)?;
@@ -174,11 +166,11 @@ impl Obsidian for Frontend {
     async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> anyhow::Result<Timestamp> {
         let mut by_tablet = BTreeMap::new();
         for (keyspace_id, key) in &keys {
-            let tablet_id = self.router.tablet_id_for_key(keyspace_id.0, &key)?;
+            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
             by_tablet
                 .entry(tablet_id)
                 .or_insert_with(BTreeSet::new)
-                .insert((*keyspace_id, &key[..]));
+                .insert((*keyspace_id, key.clone()));
         }
         let mut futures = FuturesUnordered::new();
         for (tablet_id, keys) in by_tablet.into_iter() {
@@ -380,12 +372,12 @@ impl Obsidian for Frontend {
 impl Frontend {
     pub(crate) fn new(
         meta: Box<dyn Meta + Send + Sync>,
-        router: Box<dyn Router + Send + Sync>,
+        meta_synced: MetaSynced,
         tablets: Box<dyn Tablets + Send + Sync>,
     ) -> Self {
         Self {
             meta,
-            router,
+            meta_synced,
             tablets,
         }
     }
@@ -399,7 +391,7 @@ impl Frontend {
 
         for precond in preconds {
             let tablet_id = self
-                .router
+                .meta_synced
                 .tablet_id_for_key(precond.keyspace_id().0, precond.key())?;
 
             result
@@ -408,13 +400,13 @@ impl Frontend {
                 .0
                 .push(precond);
         }
-        for ((keyspace_id, key), m) in muts {
-            let tablet_id = self.router.tablet_id_for_key(keyspace_id.0, &key)?;
+        for (key, m) in muts {
+            let tablet_id = self.meta_synced.tablet_id_for_key(key.0 .0, &key.1)?;
             result
                 .entry(tablet_id)
                 .or_insert_with(|| (vec![], BTreeMap::new()))
                 .1
-                .insert((keyspace_id, key), m);
+                .insert(key, m);
         }
 
         Ok(result)
@@ -464,6 +456,8 @@ impl Frontend {
 
     async fn sync_meta(&self) -> anyhow::Result<()> {
         let ts = self.meta.latest_snapshot().await?;
+
+        self.meta_synced.wait(ts).await?;
 
         let tablet_ids = {
             let mut tablet_ids = self.meta.tablet_ids(ts).await?;
