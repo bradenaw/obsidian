@@ -438,6 +438,8 @@ impl<K: Eq + Hash, V> HashTrie<K, V> {
                         return false;
                     }
 
+                    // We didn't insert because we need to split the node.
+
                     let mut new_leaves: [Option<HashMap<K, V>>; HASH_TRIE_BRANCH_FACTOR] =
                         [const { None }; HASH_TRIE_BRANCH_FACTOR];
                     for (other_k, other_v) in m.drain() {
@@ -454,6 +456,7 @@ impl<K: Eq + Hash, V> HashTrie<K, V> {
                         new_leaves.map(|maybe_m| maybe_m.map(|m| Box::new(HashTrieNode::Leaf(m))));
                     *node = HashTrieNode::Internal(children);
 
+                    // After split, revisit the same node to actually insert k,v.
                     return insert_inner(random_state, node, depth, h, k, v);
                 }
             }
