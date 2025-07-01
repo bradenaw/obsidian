@@ -1,4 +1,5 @@
 mod mem_storage;
+mod cached_storage;
 
 use async_trait::async_trait;
 use tokio::io::AsyncRead;
@@ -17,3 +18,5 @@ pub(crate) trait Storage {
 }
 
 pub(crate) use mem_storage::MemStorage;
+#[allow(unused_imports)]
+pub(crate) use cached_storage::CachedStorage;
