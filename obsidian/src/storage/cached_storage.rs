@@ -369,17 +369,27 @@ impl<K: Eq + Hash + Clone, V: Clone> CacheStripe<K, V> {
     }
 }
 
-// HashTrie behaves mostly like a HashMap, but does not have the amortized growth problem at the
-// cost of being a little slower.
+// HashTrie behaves mostly like a HashMap, but does not have the amortized growth problem
+// (occasional very slow inserts in a large map) at the cost of being a little slower.
 struct HashTrie<K, V> {
     random_state: RandomState,
     root: HashTrieNode<K, V>,
     len: usize,
 }
 
-// Must be a power of 2 because of the masking done to walk the trie.
-const HASH_TRIE_BRANCH_FACTOR: usize = 16;
-const HASH_TRIE_LEAF_MAX: usize = 4096;
+// The number of bits of the hash we use per level of the trie.
+const HASH_TRIE_BITS_PER_LEVEL: usize = 4;
+// How many children does each node need to have in order to use up HASH_TRIE_BITS_PER_LEVEL?
+const HASH_TRIE_BRANCH_FACTOR: usize = 1 << HASH_TRIE_BITS_PER_LEVEL;
+// Leaves can't be any deeper than this because there aren't any more hash bits to differentiate.
+// Won't happen unless the hash is really weak.
+const HASH_TRIE_MAX_DEPTH: usize = 64 / HASH_TRIE_BITS_PER_LEVEL;
+// How many K,V pairs can a leaf hold before we split it into HASH_TRIE_BRANCH_FACTOR nodes?
+//
+// Since we have to make HASH_TRIE_BRANCH_FACTOR new hashmaps and re-hash this many contents in
+// order to do the split, this determines approximately how expensive the most expensive write is,
+// but setting it larger will mean slightly cheaper reads because the tree depth is lower.
+const HASH_TRIE_LEAF_MAX: usize = 16384;
 
 enum HashTrieNode<K, V> {
     Internal([Option<Box<HashTrieNode<K, V>>>; HASH_TRIE_BRANCH_FACTOR]),
@@ -418,7 +428,7 @@ impl<K: Eq + Hash, V> HashTrie<K, V> {
                     // If we're this deep then we're out of hash bits, so we don't have any choice
                     // but to just let the leaf get bigger. This isn't realistically a problem
                     // unless the hash function is very poor.
-                    if depth == (64 / HASH_TRIE_LEAF_MAX.ilog2() as usize) - 1
+                    if depth == HASH_TRIE_MAX_DEPTH
                         || m.len() < HASH_TRIE_LEAF_MAX
                         || m.contains_key(&k)
                     {
@@ -562,21 +572,21 @@ impl<K: Eq + Hash, V> HashTrie<K, V> {
     }
 
     fn child_idx(h: u64, depth: usize) -> usize {
-        let shift = 64 - (depth + 1) * (HASH_TRIE_BRANCH_FACTOR.ilog2() as usize);
-        let mask = (HASH_TRIE_BRANCH_FACTOR as u64) - 1;
+        const MASK: u64 = (HASH_TRIE_BRANCH_FACTOR as u64) - 1;
+        let shift = 64 - (depth + 1) * HASH_TRIE_BITS_PER_LEVEL;
 
-        ((h >> shift) & mask) as usize
+        ((h >> shift) & MASK) as usize
     }
 }
 
-const TREE_LIST_NODE_SIZE: usize = 1024;
+const TREE_LIST_NODE_SIZE: usize = 16384;
 
 // TreeList mostly behaves like a Vec<T> but it has non-amortized inserts at the cost of log(n)
 // accesses.
 struct TreeList<T> {
     // Map from page index to page. BTreeMap just because it grows gracefully in log(n) time on
     // inserts.
-    m: BTreeMap<usize, [MaybeUninit<T>; TREE_LIST_NODE_SIZE]>,
+    m: BTreeMap<usize, Vec<T>>,
     len: usize,
 }
 
@@ -591,9 +601,8 @@ impl<T> TreeList<T> {
     fn push(&mut self, item: T) {
         self.m
             .entry(self.len / TREE_LIST_NODE_SIZE)
-            .or_insert_with(|| [const { MaybeUninit::uninit() }; TREE_LIST_NODE_SIZE])
-            [self.len % TREE_LIST_NODE_SIZE]
-            .write(item);
+            .or_insert_with(|| Vec::new())
+            .push(item);
         self.len += 1;
     }
 
@@ -609,11 +618,7 @@ impl<T> std::ops::Index<usize> for TreeList<T> {
         if index >= self.len {
             panic!("out of bounds");
         }
-        unsafe {
-            MaybeUninit::assume_init_ref(
-                &self.m[&(index / TREE_LIST_NODE_SIZE)][index % TREE_LIST_NODE_SIZE],
-            )
-        }
+        &self.m[&(index / TREE_LIST_NODE_SIZE)][index % TREE_LIST_NODE_SIZE]
     }
 }
 
@@ -622,12 +627,7 @@ impl<T> std::ops::IndexMut<usize> for TreeList<T> {
         if index >= self.len {
             panic!("out of bounds");
         }
-        unsafe {
-            MaybeUninit::assume_init_mut(
-                &mut self.m.get_mut(&(index / TREE_LIST_NODE_SIZE)).unwrap()
-                    [index % TREE_LIST_NODE_SIZE],
-            )
-        }
+        &mut self.m.get_mut(&(index / TREE_LIST_NODE_SIZE)).unwrap()[index % TREE_LIST_NODE_SIZE]
     }
 }
 
@@ -642,6 +642,7 @@ mod tests {
     use super::HashTrieNode;
     use super::TreeList;
     use super::HASH_TRIE_LEAF_MAX;
+    use super::TREE_LIST_NODE_SIZE;
 
     #[test]
     fn test_cache_insert_remove() {
@@ -711,19 +712,21 @@ mod tests {
     fn test_tree_list() {
         let mut list = TreeList::new();
 
-        for i in 0..10000 {
+        let n = TREE_LIST_NODE_SIZE * 2;
+
+        for i in 0..n {
             list.push(i);
         }
 
-        for i in 0..10000 {
+        for i in 0..n {
             assert_eq!(list[i], i);
         }
 
-        for i in 0..10000 {
+        for i in 0..n {
             list[i] = i * 5;
         }
 
-        for i in 0..10000 {
+        for i in 0..n {
             assert_eq!(list[i], i * 5);
         }
     }
