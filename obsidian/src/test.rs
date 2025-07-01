@@ -22,6 +22,7 @@ use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
 use crate::range::Bound;
 use crate::range::Range;
+use crate::storage::CachedStorage;
 use crate::storage::MemStorage;
 use crate::tablet::LsmTablet;
 use crate::tablet::Tablet;
@@ -61,7 +62,7 @@ impl<T: Router> Router for Arc<T> {
 }
 
 #[async_trait]
-impl<T: Tablet + Send + Sync> Tablet for Arc<T> {
+impl<T: Tablet + Send + Sync + ?Sized> Tablet for Arc<T> {
     async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
         T::get(self, ts, key).await
     }
@@ -146,19 +147,17 @@ impl<T: Tablet + Send + Sync> Tablet for Arc<T> {
 }
 
 struct StaticTablets {
-    m: Mutex<HashMap<TabletId, Arc<LsmTablet>>>,
+    m: Mutex<HashMap<TabletId, Arc<dyn Tablet + Send + Sync + 'static>>>,
 }
 
 impl Tablets for Arc<StaticTablets> {
     fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Box<dyn Tablet + Send + Sync>> {
-        Ok(Box::new(
-            self.m
-                .lock()
-                .unwrap()
-                .get(&tablet_id)
-                .ok_or_else(|| anyhow::anyhow!("no tablet for {}", tablet_id))?
-                .clone(),
-        ))
+        let m = self.m.lock().unwrap();
+        let tablet_arc = m
+            .get(&tablet_id)
+            .ok_or_else(|| anyhow::anyhow!("no tablet for {}", tablet_id))?;
+
+        Ok(Box::new(tablet_arc.clone()))
     }
 }
 
@@ -256,11 +255,16 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
 
     let meta_proxy = Arc::new(MetaProxy::new());
 
-    let storage = Arc::new(MemStorage::new());
+    let storage = Arc::new(CachedStorage::new(
+        MemStorage::new(),
+        4096, // page_size
+        128,  // cache_size_pages
+    ));
+
     let meta_tablet = Arc::new(
         LsmTablet::new(
             TabletId::META,
-            LsmBuilder::new().storage(storage.clone()).build().await?,
+            LsmBuilder::new(storage.clone()).build().await?,
             Box::new(meta_proxy.clone()),
             Box::new(tablets.clone()),
         )
@@ -283,7 +287,7 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
         let tablet_id = TabletId(ShardId(1), (i + 2) as u64);
         let tablet = LsmTablet::new(
             tablet_id,
-            LsmBuilder::new().storage(storage.clone()).build().await?,
+            LsmBuilder::new(storage.clone()).build().await?,
             Box::new(meta_proxy.clone()),
             Box::new(tablets.clone()),
         )

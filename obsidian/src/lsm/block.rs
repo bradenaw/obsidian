@@ -32,7 +32,7 @@ pub(super) struct Block<'a, R> {
     index: PrefixCompressedKV<u16>,
     versions_bytes: Vec<u8>,
     header_offset: u64,
-    r: &'a R,
+    reader: &'a R,
 }
 
 const BLOCK_INDEX_HEADER_SIZE: usize = 18;
@@ -174,10 +174,10 @@ impl<'a, R> Block<'a, R> {
 }
 
 impl<'a, R: AsyncReadExactAt> Block<'a, R> {
-    pub(super) async fn open(r: &'a R, header_offset: u64) -> anyhow::Result<Block<'a, R>> {
+    pub(super) async fn open(reader: &'a R, header_offset: u64) -> anyhow::Result<Block<'a, R>> {
         let mut header = [0u8; BLOCK_INDEX_HEADER_SIZE];
 
-        r.read_exact_at(&mut header[..], header_offset).await?;
+        reader.read_exact_at(&mut header[..], header_offset).await?;
 
         let values_len = LittleEndian::read_u32(&header[0..4]) as usize;
         let n_versions = LittleEndian::read_u16(&header[4..6]) as usize;
@@ -188,22 +188,24 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         let versions_len = n_versions * (bytes_per_ts_offset + bytes_per_value_offset);
 
         let mut index_bytes = vec![0u8; index_len];
-        r.read_exact_at(
-            &mut index_bytes[..],
-            header_offset + (BLOCK_INDEX_HEADER_SIZE as u64),
-        )
-        .await?;
+        reader
+            .read_exact_at(
+                &mut index_bytes[..],
+                header_offset + (BLOCK_INDEX_HEADER_SIZE as u64),
+            )
+            .await?;
         let index = PrefixCompressedKV::decode(index_bytes);
 
         let mut versions_bytes = vec![0u8; versions_len];
-        r.read_exact_at(
-            &mut versions_bytes[..],
-            header_offset + (BLOCK_INDEX_HEADER_SIZE as u64) + (index_len as u64),
-        )
-        .await?;
+        reader
+            .read_exact_at(
+                &mut versions_bytes[..],
+                header_offset + (BLOCK_INDEX_HEADER_SIZE as u64) + (index_len as u64),
+            )
+            .await?;
 
         Ok(Self {
-            r,
+            reader,
             values_len,
             n_versions,
             min_ts,
@@ -426,7 +428,7 @@ impl<'a, R: AsyncReadExactAt> Block<'a, R> {
         let value_len = value_end - value_start;
 
         let mut value = vec![0u8; value_len];
-        self.r
+        self.reader
             .read_exact_at(
                 &mut value[..],
                 self.header_offset - (self.values_len as u64) + (value_start as u64),

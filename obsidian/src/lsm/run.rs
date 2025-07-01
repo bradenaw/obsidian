@@ -32,7 +32,7 @@ use crate::util::IteratorEither;
 
 #[derive(Clone)]
 pub(super) struct Run<R> {
-    r: R,
+    reader: R,
 
     id: Uuid,
     size: usize,
@@ -73,15 +73,17 @@ impl<R> Run<R> {
 }
 
 impl<R: AsyncReadExactAt> Run<R> {
-    pub(super) async fn open(r: R) -> anyhow::Result<Self> {
-        let file_len = r.len().await?;
+    pub(super) async fn open(reader: R) -> anyhow::Result<Self> {
+        let file_len = reader.len().await?;
         let mut index_block_offset_buf = [0u8; 4];
-        r.read_exact_at(&mut index_block_offset_buf[..], file_len - 4)
+        reader
+            .read_exact_at(&mut index_block_offset_buf[..], file_len - 4)
             .await?;
         let index_block_offset = LittleEndian::read_u32(&index_block_offset_buf[..]);
 
         let mut header = [0u8; INDEX_BLOCK_HEADER_SIZE];
-        r.read_exact_at(&mut header[..], index_block_offset as u64)
+        reader
+            .read_exact_at(&mut header[..], index_block_offset as u64)
             .await?;
 
         let id = {
@@ -100,32 +102,33 @@ impl<R: AsyncReadExactAt> Run<R> {
 
         let max_key = {
             let mut max_key = vec![0u8; max_key_len as usize];
-            r.read_exact_at(
-                &mut max_key[..],
-                (index_block_offset as u64) + (header.len() as u64),
-            )
-            .await?;
+            reader
+                .read_exact_at(
+                    &mut max_key[..],
+                    (index_block_offset as u64) + (header.len() as u64),
+                )
+                .await?;
             max_key
         };
 
         let index = {
             let mut index_bytes = vec![0u8; index_len as usize];
-            r.read_exact_at(
-                &mut index_bytes[..],
-                (index_block_offset as u64) + (header.len() as u64) + (max_key_len as u64),
-            )
-            .await?;
+            reader
+                .read_exact_at(
+                    &mut index_bytes[..],
+                    (index_block_offset as u64) + (header.len() as u64) + (max_key_len as u64),
+                )
+                .await?;
             PrefixCompressedKV::decode(index_bytes)
         };
 
         let min_key = index.get_key(0);
 
-        let size = r.len().await? as usize;
         Ok(Self {
-            r,
+            reader,
 
             id,
-            size,
+            size: file_len as usize,
             keyspace_id,
             min_ts,
             max_ts,
@@ -191,7 +194,7 @@ impl<R: AsyncReadExactAt> Run<R> {
 
             for i in block_idxs {
                 let block_header_offset = self.index.get_value(i);
-                let block = Block::open(&self.r, block_header_offset as u64).await?;
+                let block = Block::open(&self.reader, block_header_offset as u64).await?;
                 let block_scan = block.scan(ts, range.clone(), direction);
                 pin_mut!(block_scan);
                 while let Some(revision) = block_scan.try_next().await? {
@@ -236,7 +239,7 @@ impl<R: AsyncReadExactAt> Run<R> {
         try_stream! {
             for i in 0..self.index.len() {
                 let block_header_offset = self.index.get_value(i);
-                let block = Block::open(&self.r, block_header_offset as u64).await?;
+                let block = Block::open(&self.reader, block_header_offset as u64).await?;
                 let block_stream = block.stream();
                 pin_mut!(block_stream);
                 while let Some(revision) = block_stream.try_next().await? {
@@ -258,7 +261,7 @@ impl<R: AsyncReadExactAt> Run<R> {
         };
         let block_header_offset = self.index.get_value(block_header_idx);
         Ok(Some(
-            Block::open(&self.r, block_header_offset as u64).await?,
+            Block::open(&self.reader, block_header_offset as u64).await?,
         ))
     }
 }
@@ -403,7 +406,7 @@ pub(super) async fn dump_run<R: AsyncReadExactAt>(run: &Run<R>) -> anyhow::Resul
         println!("    first key: [{}]", hexlify(&run.index.get_key(i)),);
         println!("    header_offset: {}", run.index.get_value(i));
         let header_offset = run.index.get_value(i);
-        let block = Block::open(&run.r, header_offset as u64).await?;
+        let block = Block::open(&run.reader, header_offset as u64).await?;
         dump_block(&block).await?;
     }
     Ok(())
@@ -430,7 +433,6 @@ mod test {
     use crate::types::KeyspaceId;
     use crate::types::RevisionValue;
     use crate::types::Timestamp;
-    use crate::util::AsyncReadExactAt;
 
     #[tokio::test]
     async fn test_run_file() -> anyhow::Result<()> {
@@ -549,8 +551,8 @@ mod test {
 
         let run = Run::open(v).await?;
 
-        async fn check<R: AsyncReadExactAt>(
-            block: &Run<R>,
+        async fn check(
+            block: &Run<Vec<u8>>,
             ts: Timestamp,
             range: Range<Vec<u8>>,
             expected: Vec<(&str, usize, bool)>,

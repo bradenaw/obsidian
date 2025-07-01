@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::pin::Pin;
@@ -32,7 +33,6 @@ use crate::range::intersect_in_ranges_by_key;
 use crate::range::Bound;
 use crate::range::KeyOrBound;
 use crate::range::Range;
-use crate::storage::MemStorage;
 use crate::storage::Storage;
 use crate::types::Direction;
 use crate::types::HistoryRange;
@@ -46,28 +46,29 @@ use crate::types::Timestamp;
 use crate::types::WriteError;
 use crate::util::merge_sorted;
 use crate::util::merge_sorted_streams;
+use crate::util::AsyncReadExactAt;
 use crate::util::AtomicArc;
 use crate::util::Background;
 use crate::util::IteratorEither;
 use crate::util::OrdEqByFirst;
 use crate::wal;
 
-pub(crate) struct LsmBuilder {
+pub(crate) struct LsmBuilder<S> {
     l0_max_size: u64,
     run_target_size: u64,
     block_size: u64,
     wal: Option<Arc<wal::Wal<WalEntry>>>,
-    storage: Option<Arc<MemStorage>>,
+    storage: Arc<S>,
 }
 
-impl LsmBuilder {
-    pub fn new() -> Self {
+impl<S: Storage + Send + Sync + 'static> LsmBuilder<S> {
+    pub fn new(storage: Arc<S>) -> Self {
         LsmBuilder {
             l0_max_size: 8_000_000,
             run_target_size: 64_000_000,
             block_size: 32768,
             wal: None,
-            storage: None,
+            storage: storage,
         }
     }
 
@@ -91,44 +92,39 @@ impl LsmBuilder {
         self
     }
 
-    pub fn storage(mut self, storage: Arc<MemStorage>) -> Self {
-        self.storage = Some(storage);
-        self
-    }
-
-    pub async fn build(self) -> anyhow::Result<Lsm> {
+    pub async fn build(self) -> anyhow::Result<Lsm<S>> {
         Lsm::new(
             self.l0_max_size,
             self.run_target_size,
             self.block_size,
             self.wal
                 .unwrap_or_else(|| Arc::new(wal::Wal::new(16384, Duration::from_millis(5)))),
-            self.storage.unwrap_or_else(|| Arc::new(MemStorage::new())),
+            self.storage,
         )
         .await
     }
 }
 
-pub(crate) struct Lsm {
+pub(crate) struct Lsm<S: Storage> {
     l0_max_size: u64,
     run_target_size: u64,
     block_size: u64,
 
-    inner: Arc<AtomicArc<HashMap<KeyspaceId, Arc<LsmInner>>>>,
+    inner: Arc<AtomicArc<HashMap<KeyspaceId, Arc<LsmInner<S>>>>>,
     wal: Arc<wal::Wal<WalEntry>>,
-    storage: Arc<MemStorage>,
+    storage: Arc<S>,
 
     bg: Background,
     wal_processed: tokio::sync::watch::Receiver<wal::SeqNo>,
 }
 
-impl Lsm {
+impl<S: Storage + Send + Sync + 'static> Lsm<S> {
     pub async fn new(
         l0_max_size: u64,
         run_target_size: u64,
         block_size: u64,
         wal: Arc<wal::Wal<WalEntry>>,
-        storage: Arc<MemStorage>,
+        storage: Arc<S>,
     ) -> anyhow::Result<Self> {
         let (manifests, newest_seqno) = Self::recovery(&wal, &storage).await?;
 
@@ -334,8 +330,8 @@ impl Lsm {
 
     async fn recovery(
         wal: &wal::Wal<WalEntry>,
-        storage: &MemStorage,
-    ) -> anyhow::Result<(HashMap<KeyspaceId, Manifest>, Option<wal::SeqNo>)> {
+        storage: &S,
+    ) -> anyhow::Result<(HashMap<KeyspaceId, Manifest<S::R>>, Option<wal::SeqNo>)> {
         let oldest_seqno = wal.oldest_available();
         let mut newest_seqno = None;
         let mut wal_stream = wal.stream(oldest_seqno, false).boxed();
@@ -402,7 +398,7 @@ impl Lsm {
     }
 
     async fn process_wal(
-        inner: Arc<AtomicArc<HashMap<KeyspaceId, Arc<LsmInner>>>>,
+        inner: Arc<AtomicArc<HashMap<KeyspaceId, Arc<LsmInner<S>>>>>,
         wal: Arc<wal::Wal<WalEntry>>,
         start: wal::SeqNo,
         wal_processed: tokio::sync::watch::Sender<wal::SeqNo>,
@@ -414,7 +410,7 @@ impl Lsm {
     }
 
     async fn process_wal_once(
-        inner: Arc<AtomicArc<HashMap<KeyspaceId, Arc<LsmInner>>>>,
+        inner: Arc<AtomicArc<HashMap<KeyspaceId, Arc<LsmInner<S>>>>>,
         wal: Arc<wal::Wal<WalEntry>>,
         start: wal::SeqNo,
         wal_processed: tokio::sync::watch::Sender<wal::SeqNo>,
@@ -441,22 +437,24 @@ impl Lsm {
     }
 }
 
-struct LsmInner {
-    inner: Arc<LsmInnerInner>,
+struct LsmInner<S: Storage> {
+    inner: Arc<LsmInnerInner<S::R>>,
 
     bg: Background,
     compacted: tokio::sync::broadcast::Receiver<()>,
+
+    _phantom: std::marker::PhantomData<S>,
 }
 
-impl LsmInner {
+impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
     pub async fn new(
         l0_max_size: u64,
         run_target_size: u64,
         block_size: u64,
         keyspace_id: KeyspaceId,
-        manifest: Manifest,
+        manifest: Manifest<S::R>,
         wal: Arc<wal::Wal<WalEntry>>,
-        storage: Arc<MemStorage>,
+        storage: Arc<S>,
     ) -> anyhow::Result<Self> {
         let (l0_compact_notify, l0_compact_ready) = tokio::sync::mpsc::channel::<()>(1);
         let (compacted_notify, compacted) = tokio::sync::broadcast::channel(1);
@@ -485,6 +483,7 @@ impl LsmInner {
             inner,
             bg,
             compacted,
+            _phantom: PhantomData::default(),
         })
     }
 
@@ -539,8 +538,8 @@ impl LsmInner {
         run_target_size: u64,
         block_size: u64,
         keyspace_id: KeyspaceId,
-        inner: Arc<LsmInnerInner>,
-        storage: Arc<MemStorage>,
+        inner: Arc<LsmInnerInner<S::R>>,
+        storage: Arc<S>,
         wal: Arc<wal::Wal<WalEntry>>,
         mut l0_compact_ready: tokio::sync::mpsc::Receiver<()>,
         compacted_notify: tokio::sync::broadcast::Sender<()>,
@@ -566,8 +565,8 @@ impl LsmInner {
         run_target_size: u64,
         block_size: u64,
         keyspace_id: KeyspaceId,
-        inner: Arc<LsmInnerInner>,
-        storage: Arc<MemStorage>,
+        inner: Arc<LsmInnerInner<S::R>>,
+        storage: Arc<S>,
         wal: &wal::Wal<WalEntry>,
         compacted_notify: tokio::sync::broadcast::Sender<()>,
     ) -> anyhow::Result<()> {
@@ -654,9 +653,9 @@ impl LsmInner {
         run_target_size: u64,
         block_size: u64,
         keyspace_id: KeyspaceId,
-        manifest: &Manifest,
-        storage: &MemStorage,
-    ) -> anyhow::Result<(Vec<Run<Arc<Vec<u8>>>>, HashSet<Uuid>, wal::SeqNo)> {
+        manifest: &Manifest<S::R>,
+        storage: &S,
+    ) -> anyhow::Result<(Vec<Run<S::R>>, HashSet<Uuid>, wal::SeqNo)> {
         // We must always compact the oldest l0, because get, etc. assume that everything in
         // memtables is newer than anything in any lower levels.
         let chosen_l0 = &manifest.l0_sealed[0];
@@ -690,10 +689,10 @@ impl LsmInner {
         run_target_size: u64,
         block_size: u64,
         keyspace_id: KeyspaceId,
-        manifest: &Manifest,
-        storage: &MemStorage,
+        manifest: &Manifest<S::R>,
+        storage: &S,
         level: usize,
-    ) -> anyhow::Result<(Vec<Run<Arc<Vec<u8>>>>, HashSet<Uuid>)> {
+    ) -> anyhow::Result<(Vec<Run<S::R>>, HashSet<Uuid>)> {
         if manifest.levels[level].runs.is_empty() {
             return Ok((vec![], HashSet::new()));
         }
@@ -723,12 +722,12 @@ impl LsmInner {
         run_target_size: u64,
         block_size: u64,
         keyspace_id: KeyspaceId,
-        manifest: &Manifest,
-        storage: &MemStorage,
+        manifest: &Manifest<S::R>,
+        storage: &S,
         into_level: usize,
         entries_range: Range<Vec<u8>>,
         entries: impl Stream<Item = anyhow::Result<LsmRevision>> + Send,
-    ) -> anyhow::Result<(Vec<Run<Arc<Vec<u8>>>>, HashSet<Uuid>)> {
+    ) -> anyhow::Result<(Vec<Run<S::R>>, HashSet<Uuid>)> {
         let overlapping_runs = manifest.levels[into_level].overlapping_runs(entries_range);
 
         let removes = overlapping_runs.iter().map(|run| run.id()).collect();
@@ -797,22 +796,22 @@ impl LsmInner {
     }
 }
 
-struct LsmInnerInner {
+struct LsmInnerInner<R> {
     l0_max_size: u64,
     run_target_size: u64,
     block_size: u64,
 
     l0_compact_notify: tokio::sync::mpsc::Sender<()>,
     l0_active: AtomicArc<RwLock<MaybeActiveMemtable>>,
-    manifest: AtomicArc<Manifest>,
+    manifest: AtomicArc<Manifest<R>>,
 }
 
-impl LsmInnerInner {
+impl<R: AsyncReadExactAt + Clone + Sync> LsmInnerInner<R> {
     fn new(
         l0_max_size: u64,
         run_target_size: u64,
         block_size: u64,
-        initial_manifest: Manifest,
+        initial_manifest: Manifest<R>,
         l0_compact_notify: tokio::sync::mpsc::Sender<()>,
     ) -> Self {
         let l0_active = Arc::new(RwLock::new(MaybeActiveMemtable::Active(Memtable::new())));
@@ -1185,15 +1184,15 @@ impl MaybeActiveMemtable {
 // Mostly immutable, except that:
 // (a) memtables in l0_active may still be receiving writes.
 // (b) l0_active memtables may swap from active to sealed.
-struct Manifest {
+struct Manifest<R> {
     // May still be receiving writes.
     l0_active: Vec<(Uuid, Arc<RwLock<MaybeActiveMemtable>>)>,
     // Guaranteed to be read-only. In insertion order.
     l0_sealed: Vec<Arc<Memtable>>,
-    levels: Vec<Level>,
+    levels: Vec<Level<R>>,
 }
 
-impl Manifest {
+impl<R: AsyncReadExactAt + Clone> Manifest<R> {
     fn new(n_levels: usize) -> Self {
         Self {
             l0_active: vec![],
@@ -1243,12 +1242,7 @@ impl Manifest {
     }
 
     // TODO: Return an error if not all `remove`s appear in the manifest.
-    fn with_ingest(
-        &self,
-        into_level: usize,
-        mut add: Vec<Run<Arc<Vec<u8>>>>,
-        remove: HashSet<Uuid>,
-    ) -> Self {
+    fn with_ingest(&self, into_level: usize, mut add: Vec<Run<R>>, remove: HashSet<Uuid>) -> Self {
         let mut levels = Vec::with_capacity(self.levels.len());
         for (i, old_level) in self.levels.iter().enumerate() {
             let filtered_old_level = old_level
@@ -1291,12 +1285,12 @@ impl Manifest {
 }
 
 #[derive(Clone)]
-struct Level {
+struct Level<R> {
     // In sorted order by range.
-    runs: Vec<Run<Arc<Vec<u8>>>>,
+    runs: Vec<Run<R>>,
 }
 
-impl Level {
+impl<R: AsyncReadExactAt> Level<R> {
     fn new() -> Self {
         Self { runs: vec![] }
     }
@@ -1317,7 +1311,7 @@ impl Level {
         self.runs.iter().map(|run| run.size()).sum()
     }
 
-    fn run_for_key<'a>(&'a self, k: &[u8]) -> Option<&'a Run<Arc<Vec<u8>>>> {
+    fn run_for_key<'a>(&'a self, k: &[u8]) -> Option<&'a Run<R>> {
         let idx = self
             .runs
             .binary_search_by_key(&KeyOrBound::Key(k.to_vec()), |run| {
@@ -1334,7 +1328,7 @@ impl Level {
         Some(run)
     }
 
-    fn overlapping_runs(&self, range: Range<Vec<u8>>) -> &[Run<Arc<Vec<u8>>>] {
+    fn overlapping_runs(&self, range: Range<Vec<u8>>) -> &[Run<R>] {
         intersect_in_ranges_by_key(range.borrow(), &self.runs, |run| run.range())
     }
 }
@@ -1385,6 +1379,7 @@ mod test {
     use crate::range::Bound;
     use crate::range::Range;
     use crate::storage::MemStorage;
+    use crate::storage::Storage;
     use crate::types::ColoGroupId;
     use crate::types::Direction;
     use crate::types::HistoryRange;
@@ -1396,12 +1391,13 @@ mod test {
     use crate::types::Timestamp;
     use crate::types::WriteError;
     use crate::util::binary_search_by_idx;
+    use crate::util::AsyncReadExactAt;
     use crate::wal;
     use crate::wal::SeqNo;
 
     #[tokio::test]
     async fn test_put_get() -> anyhow::Result<()> {
-        let lsm = LsmBuilder::new().build().await?;
+        let lsm = LsmBuilder::new(Arc::new(MemStorage::new())).build().await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
         let k = b"abc";
         let not_k = b"def";
@@ -1432,7 +1428,7 @@ mod test {
 
     #[tokio::test]
     async fn test_write_tx() -> anyhow::Result<()> {
-        let lsm = LsmBuilder::new().build().await?;
+        let lsm = LsmBuilder::new(Arc::new(MemStorage::new())).build().await?;
 
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
         let ka = b"a";
@@ -1501,7 +1497,7 @@ mod test {
 
     #[tokio::test]
     async fn test_compact_l0() -> anyhow::Result<()> {
-        let lsm = LsmBuilder::new()
+        let lsm = LsmBuilder::new(Arc::new(MemStorage::new()))
             .l0_max_size(128)
             .block_size(128)
             .run_target_size(512)
@@ -1556,7 +1552,7 @@ mod test {
 
     #[tokio::test]
     async fn test_compact_l1() -> anyhow::Result<()> {
-        let lsm = LsmBuilder::new()
+        let lsm = LsmBuilder::new(Arc::new(MemStorage::new()))
             .l0_max_size(128)
             .block_size(128)
             .run_target_size(512)
@@ -1620,12 +1616,11 @@ mod test {
         let wal = Arc::new(wal::Wal::new(16, Duration::from_millis(2)));
         let storage = Arc::new(MemStorage::new());
 
-        let lsm = LsmBuilder::new()
+        let lsm = LsmBuilder::new(storage.clone())
             .l0_max_size(128)
             .block_size(128)
             .run_target_size(512)
             .wal(wal.clone())
-            .storage(storage.clone())
             .build()
             .await?;
 
@@ -1678,7 +1673,7 @@ mod test {
         drop(lsm);
 
         // Rebuild the LSM from the same WAL and storage, this should recover everything.
-        let lsm = LsmBuilder::new().wal(wal).storage(storage).build().await?;
+        let lsm = LsmBuilder::new(storage).wal(wal).build().await?;
 
         for (k, v) in &map {
             assert_eq!(
@@ -1708,7 +1703,7 @@ mod test {
 
     #[tokio::test]
     async fn test_scan_page() -> anyhow::Result<()> {
-        let lsm = LsmBuilder::new()
+        let lsm = LsmBuilder::new(Arc::new(MemStorage::new()))
             .l0_max_size(32)
             .block_size(48)
             .run_target_size(96)
@@ -1766,8 +1761,8 @@ mod test {
             //expecteds.push(expected);
         }
 
-        async fn check(
-            lsm: &Lsm,
+        async fn check<S: Storage + Send + Sync + 'static>(
+            lsm: &Lsm<S>,
             ts: Timestamp,
             keyspace_id: KeyspaceId,
             range: Range<Vec<u8>>,
@@ -1872,8 +1867,8 @@ mod test {
 
         let lsm = lsm_from_diagram(diagram).await?;
 
-        async fn check(
-            lsm: &LsmInnerInner,
+        async fn check<R: AsyncReadExactAt + Clone + Send + Sync>(
+            lsm: &LsmInnerInner<R>,
             key: &[u8],
             range: HistoryRange,
             expected: &[(usize, bool)],
@@ -2000,7 +1995,7 @@ mod test {
 
                 let mut writes = vec![];
 
-                let lsm = LsmBuilder::new()
+                let lsm = LsmBuilder::new(Arc::new(MemStorage::new()))
                     .l0_max_size(128)
                     .block_size(128)
                     .run_target_size(512)
@@ -2068,7 +2063,7 @@ mod test {
         }
     }
 
-    async fn dump_lsm(lsm: &Lsm) -> anyhow::Result<()> {
+    async fn dump_lsm<S: Storage>(lsm: &Lsm<S>) -> anyhow::Result<()> {
         let inner = lsm.inner.load();
         for (keyspace_id, lsm) in &*inner {
             println!("keyspace_id {:?}", keyspace_id);
@@ -2078,7 +2073,9 @@ mod test {
         Ok(())
     }
 
-    async fn dump_lsm_inner_inner(lsm: &LsmInnerInner) -> anyhow::Result<()> {
+    async fn dump_lsm_inner_inner<R: AsyncReadExactAt + Clone>(
+        lsm: &LsmInnerInner<R>,
+    ) -> anyhow::Result<()> {
         let manifest = lsm.manifest.load();
         dump_manifest(&manifest);
 
@@ -2119,7 +2116,7 @@ mod test {
         Ok(())
     }
 
-    fn dump_manifest(manifest: &Manifest) {
+    fn dump_manifest<R: AsyncReadExactAt + Clone>(manifest: &Manifest<R>) {
         println!("== manifest =====");
         println!("l0_active");
         for (_, memtable_lock) in &manifest.l0_active {
@@ -2263,7 +2260,9 @@ mod test {
         }
     }
 
-    async fn lsm_from_diagram(diagram: Vec<(&str, &[u8])>) -> anyhow::Result<LsmInnerInner> {
+    async fn lsm_from_diagram(
+        diagram: Vec<(&str, &[u8])>,
+    ) -> anyhow::Result<LsmInnerInner<Arc<Vec<u8>>>> {
         fn find_touching(
             diagram: &[(&str, &[u8])],
             visited: &mut HashSet<(usize, usize)>,

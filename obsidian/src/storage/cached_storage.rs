@@ -31,7 +31,7 @@ pub(crate) struct CachedStorage<S: Storage + Sync> {
     cache: Arc<Cache<(Arc<String>, u64), Arc<Vec<u8>>>>,
 }
 
-impl<S: Storage<R: Sync> + Sync> CachedStorage<S> {
+impl<S: Storage + Sync> CachedStorage<S> {
     /// `page_size` is the size of reads issued to `inner` and the size of the cached pages.
     ///
     /// `cache_size_pages` is the number of pages the cache can hold.
@@ -53,7 +53,9 @@ impl<S: Storage<R: Sync> + Sync> CachedStorage<S> {
 }
 
 #[async_trait]
-impl<S: Storage<R: Sync> + Sync> Storage for CachedStorage<S> {
+impl<S: Storage + Sync> Storage for CachedStorage<S> {
+    type R = GetCacher<S::R>;
+
     // Assuming that:
     // 1. Objects are immutable, i.e. put() with an object that exists will fail.
     // 2. Names are globally unique and never reused.
@@ -61,14 +63,12 @@ impl<S: Storage<R: Sync> + Sync> Storage for CachedStorage<S> {
     //
     // Then it's perfectly safe to not actually make any changes to the cache from put/delete.
 
-    type R = GetCacher<S::R>;
-
-    async fn put<W: AsyncRead + Send>(&self, name: &str, w: W) -> anyhow::Result<()> {
+    async fn put<C: AsyncRead + Send>(&self, name: &str, content: C) -> anyhow::Result<()> {
         let mut backing: Box<[MaybeUninit<u8>]> = Box::new_uninit_slice(self.page_size);
         let buf = ReadBuf::uninit(&mut backing);
 
-        let wrapper = PutCacher {
-            inner: Box::pin(w),
+        let mut wrapper = PutCacher {
+            inner: Box::pin(content),
             cache: self.cache.clone(),
             name: Arc::new(name.to_string()),
             buf: buf,
@@ -77,7 +77,7 @@ impl<S: Storage<R: Sync> + Sync> Storage for CachedStorage<S> {
             inner_done: false,
         };
 
-        self.inner.put(name, wrapper).await
+        self.inner.put(name, &mut wrapper).await
     }
 
     async fn get(&self, name: &str) -> anyhow::Result<Self::R> {
@@ -97,8 +97,8 @@ impl<S: Storage<R: Sync> + Sync> Storage for CachedStorage<S> {
 // Caches pages while a file is being put.
 //
 // put() takes in a stream of bytes, so we have to wrap the reader of that stream.
-struct PutCacher<'a, R: AsyncRead + Send> {
-    inner: R,
+struct PutCacher<'a, C: AsyncRead + Send> {
+    inner: C,
     // The name of the file being read.
     name: Arc<String>,
     // A reference to the cache from the CachedStorage this PutCacher was made from.
@@ -114,7 +114,7 @@ struct PutCacher<'a, R: AsyncRead + Send> {
     inner_done: bool,
 }
 
-impl<'a, R: AsyncRead + Send + Unpin> AsyncRead for PutCacher<'a, R> {
+impl<'a, C: AsyncRead + Send + Unpin> AsyncRead for PutCacher<'a, C> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -162,7 +162,8 @@ impl<'a, R: AsyncRead + Send + Unpin> AsyncRead for PutCacher<'a, R> {
 }
 
 // Wraps read_exact_at in a cache.
-pub(crate) struct GetCacher<R: AsyncReadExactAt + Sync> {
+#[derive(Clone)]
+pub(crate) struct GetCacher<R: AsyncReadExactAt + Sync + Clone> {
     inner: R,
     page_size: usize,
     name: Arc<String>,
@@ -171,7 +172,7 @@ pub(crate) struct GetCacher<R: AsyncReadExactAt + Sync> {
 }
 
 #[async_trait]
-impl<R: AsyncReadExactAt + Sync> AsyncReadExactAt for GetCacher<R> {
+impl<R: AsyncReadExactAt + Sync + Clone> AsyncReadExactAt for GetCacher<R> {
     async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
         let end_offset = offset + (buf.len() as u64);
 

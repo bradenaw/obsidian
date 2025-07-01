@@ -37,6 +37,7 @@ use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
 use crate::range::Range;
 use crate::range::RangeSet;
+use crate::storage::Storage;
 use crate::tablet::lock_mgr::Guard;
 use crate::tablet::lock_mgr::LockMgr;
 use crate::tablet::sequencer::Sequencer;
@@ -65,14 +66,14 @@ use crate::util::Retry;
 const MAX_PRECOND_VALUE_LEN: usize = 256;
 const WAIT_ABORT_TIMEOUT: Duration = Duration::from_millis(1_000);
 
-pub(crate) struct LsmTablet {
-    inner: Arc<LsmTabletInner>,
+pub(crate) struct LsmTablet<S: Storage> {
+    inner: Arc<LsmTabletInner<S>>,
 
     bg: Background,
 }
 
 #[async_trait]
-impl Tablet for LsmTablet {
+impl<S: Storage + Send + Sync + 'static> Tablet for LsmTablet<S> {
     async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
         self.inner.get(ts, key).await
     }
@@ -159,10 +160,10 @@ impl Tablet for LsmTablet {
     }
 }
 
-impl LsmTablet {
+impl<S: Storage + Send + Sync + 'static> LsmTablet<S> {
     pub async fn new(
         tablet_id: TabletId,
-        lsm: Lsm,
+        lsm: Lsm<S>,
         meta: Box<dyn Meta + Sync + Send + 'static>,
         tablets: Box<dyn Tablets + Sync + Send>,
     ) -> anyhow::Result<Self> {
@@ -245,9 +246,9 @@ impl LsmTablet {
     }
 }
 
-struct LsmTabletInner {
+struct LsmTabletInner<S: Storage> {
     tablet_id: TabletId,
-    lsm: Lsm,
+    lsm: Lsm<S>,
     meta_synced: MetaSynced,
     tablets: Box<dyn Tablets + Sync + Send>,
     sequencer: Sequencer,
@@ -258,10 +259,10 @@ struct LsmTabletInner {
     waiters: Waiters,
 }
 
-impl LsmTabletInner {
+impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
     fn new(
         tablet_id: TabletId,
-        lsm: Lsm,
+        lsm: Lsm<S>,
         meta_synced: MetaSynced,
         tablets: Box<dyn Tablets + Sync + Send>,
         prepare_sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,

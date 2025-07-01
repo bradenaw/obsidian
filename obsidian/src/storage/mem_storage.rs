@@ -30,9 +30,13 @@ impl MemStorage {
 impl Storage for MemStorage {
     type R = Arc<Vec<u8>>;
 
-    async fn put<W: AsyncRead + Send>(&self, name: &str, w: W) -> anyhow::Result<()> {
+    async fn put<C: AsyncRead + Send>(
+        &self,
+        name: &str,
+        content: C,
+    ) -> anyhow::Result<()> {
         let mut buf = Vec::new();
-        Box::pin(w).read_to_end(&mut buf).await?;
+        Box::pin(content).read_to_end(&mut buf).await?;
         self.inner
             .lock()
             .unwrap()
