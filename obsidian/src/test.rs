@@ -265,7 +265,12 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
     let meta_tablet = Arc::new(
         LsmTablet::new(
             TabletId::META,
-            LsmBuilder::new(storage.clone()).build().await?,
+            LsmBuilder::new(storage.clone())
+                .l0_max_size(256)
+                .run_target_size(65536)
+                .block_size(4096)
+                .build()
+                .await?,
             Box::new(meta_proxy.clone()),
             Box::new(tablets.clone()),
         )
@@ -275,6 +280,9 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
     // TODO: remove when keyspace sync from meta works
     meta_tablet
         .create_keyspace(KeyspaceId(ColoGroupId(1), 1))
+        .await?;
+    meta_tablet
+        .create_keyspace(KeyspaceId(ColoGroupId(1), 2))
         .await?;
     let meta = MetaImpl::new(meta_tablet.clone());
 
@@ -296,6 +304,9 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
         // TODO: remove when keyspace sync from meta works
         tablet
             .create_keyspace(KeyspaceId(ColoGroupId(1), 1))
+            .await?;
+        tablet
+            .create_keyspace(KeyspaceId(ColoGroupId(1), 2))
             .await?;
 
         let mut m = tablets.m.lock().unwrap();

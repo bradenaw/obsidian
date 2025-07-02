@@ -271,6 +271,21 @@ pub(crate) struct Retry {
     n_attempts: usize,
 }
 
+pub(crate) enum RetryResult<T, E> {
+    Ok(T),
+    Retry(E),
+    Err(E),
+}
+
+impl<T, E> From<Result<T, E>> for RetryResult<T, E> {
+    fn from(value: Result<T, E>) -> Self {
+        match value {
+            Ok(v) => RetryResult::Ok(v),
+            Err(e) => RetryResult::Err(e),
+        }
+    }
+}
+
 impl Retry {
     pub fn new() -> Self {
         Self {
@@ -328,7 +343,7 @@ impl Retry {
 
     pub async fn with_retry<
         F: Fn() -> Fut,
-        Fut: Future<Output = Result<T, E>>,
+        Fut: Future<Output = RetryResult<T, E>>,
         T,
         E: std::error::Error + Send + Sync + 'static,
     >(
@@ -339,10 +354,13 @@ impl Retry {
         let mut last_err = None;
         for i in 0..self.n_attempts {
             match tokio::time::timeout(self.timeout - start.elapsed(), f()).await {
-                Ok(Ok(t)) => return Ok(t),
-                Ok(Err(e)) => {
+                Ok(RetryResult::Ok(t)) => return Ok(t),
+                Ok(RetryResult::Retry(e)) => {
                     last_err = Some(e);
-                }
+                },
+                Ok(RetryResult::Err(e)) => {
+                    return Err(e.into());
+                },
                 Err(_) => {
                     // Timeout. Bubble out the last actual error if possible.
                     if let Some(e) = last_err {

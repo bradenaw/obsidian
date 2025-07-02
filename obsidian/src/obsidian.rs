@@ -9,7 +9,6 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use anyhow::anyhow;
-use anyhow::Context;
 use async_stream::try_stream;
 use async_trait::async_trait;
 use byteorder::BigEndian;
@@ -43,6 +42,7 @@ use crate::util::sleep_for_retry;
 use crate::util::Decode;
 use crate::util::Encode;
 use crate::util::Retry;
+use crate::util::RetryResult;
 
 #[async_trait]
 pub trait Obsidian {
@@ -425,30 +425,43 @@ impl Frontend {
             .n_attempts(MAX_CONFLICT_RETRIES + 1)
             .with_retry(|| async {
                 match f().await {
-                    Ok(v) => return Ok(v),
+                    Ok(v) => return RetryResult::Ok(v),
                     Err(InternalError::Conflict(other_txid)) => {
                         // If we've already seen this txid as a conflict that means we already
                         // wait/aborted it and we're still just waiting for it to get cleaned up,
                         // so just take another turn around the retry loop.
                         if already_seen_conflicts.lock().unwrap().contains(&other_txid) {
-                            return Err(InternalError::Conflict(other_txid));
+                            return RetryResult::Retry(InternalError::Conflict(other_txid));
                         }
 
-                        let other_txid_owner_tablet = self.tablets.tablet(other_txid.owner)?;
+                        let other_txid_owner_tablet = match self.tablets.tablet(other_txid.owner) {
+                            Ok(tablet_id) => tablet_id,
+                            Err(e) => {
+                                return RetryResult::Err(InternalError::Other(e));
+                            },
+                        };
                         if txid.can_preempt(&other_txid) {
-                            other_txid_owner_tablet.try_abort(other_txid).await?;
+                            log::debug!("{:?} preempting {:?}", txid, other_txid);
+                            if let Err(e) = other_txid_owner_tablet.try_abort(other_txid).await {
+                                return RetryResult::Err(InternalError::Other(e));
+                            }
                         } else {
-                            other_txid_owner_tablet.wait(other_txid).await?;
+                            log::debug!("{:?} waiting for {:?}", txid, other_txid);
+                            if let Err(e) = other_txid_owner_tablet.wait(other_txid).await {
+                                return RetryResult::Err(InternalError::Other(e.into()));
+                            }
                         }
 
                         already_seen_conflicts.lock().unwrap().insert(other_txid);
-                        Err(InternalError::Conflict(other_txid))
+                        RetryResult::Retry(InternalError::Conflict(other_txid))
                     }
-                    Err(e) => return Err(e.into()),
+                    Err(e) => {
+                        log::info!("error returned by inner: {:?}", e);
+                        return RetryResult::Err(e.into());
+                    }
                 }
             })
             .await
-            .context("too much contention")
     }
 
     async fn sync_meta(&self) -> anyhow::Result<()> {

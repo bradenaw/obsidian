@@ -45,6 +45,7 @@ use crate::types::Revision;
 use crate::types::RevisionValue;
 use crate::types::Timestamp;
 use crate::types::WriteError;
+use crate::util::hexlify;
 use crate::util::merge_sorted;
 use crate::util::merge_sorted_streams;
 use crate::util::AtomicArc;
@@ -954,7 +955,13 @@ impl<R: FileReader + Clone + Sync> LsmInnerInner<R> {
             }) = page.last()
             {
                 if last_key == &revision.key {
-                    assert!(*last_ts > revision.ts);
+                    assert!(
+                        *last_ts > revision.ts,
+                        "revisions for {} not in reverse timestamp order: got {} followed by {}",
+                        hexlify(last_key),
+                        *last_ts,
+                        revision.ts
+                    );
                     continue;
                 }
             }
