@@ -16,8 +16,8 @@ use async_trait::async_trait;
 use tokio::io::AsyncRead;
 use tokio::io::ReadBuf;
 
+use crate::storage::FileReader;
 use crate::storage::Storage;
-use crate::util::AsyncReadExactAt;
 
 /// CachedStorage wraps another implementation of `Storage`, holding pages in an
 /// approximately-LRU in-memory cache.
@@ -163,7 +163,7 @@ impl<'a, C: AsyncRead + Send + Unpin> AsyncRead for PutCacher<'a, C> {
 
 // Wraps read_exact_at in a cache.
 #[derive(Clone)]
-pub(crate) struct GetCacher<R: AsyncReadExactAt + Sync + Clone> {
+pub(crate) struct GetCacher<R: FileReader + Sync + Clone> {
     inner: R,
     page_size: usize,
     name: Arc<String>,
@@ -172,7 +172,7 @@ pub(crate) struct GetCacher<R: AsyncReadExactAt + Sync + Clone> {
 }
 
 #[async_trait]
-impl<R: AsyncReadExactAt + Sync + Clone> AsyncReadExactAt for GetCacher<R> {
+impl<R: FileReader + Sync + Clone> FileReader for GetCacher<R> {
     async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
         let end_offset = offset + (buf.len() as u64);
 
@@ -195,6 +195,8 @@ impl<R: AsyncReadExactAt + Sync + Clone> AsyncReadExactAt for GetCacher<R> {
             let page = match self.cache.get(&(self.name.clone(), page_offset)) {
                 Some(b) => b,
                 None => {
+                    // TODO: need to limit this size to the end of the file, else the read_exact_at
+                    // below will produce an unexpected eof.
                     let mut page = vec![0u8; self.page_size];
                     self.inner.read_exact_at(&mut page, page_offset).await?;
                     let page_arc = Arc::new(page);

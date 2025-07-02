@@ -19,6 +19,7 @@ use crate::lsm::util::PrefixCompressedKV;
 use crate::range::Bound;
 use crate::range::KeyOrBound;
 use crate::range::Range;
+use crate::storage::FileReader;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::HistoryRange;
@@ -27,7 +28,6 @@ use crate::types::RevisionValue;
 use crate::types::Timestamp;
 use crate::util::binary_search_by_idx;
 use crate::util::hexlify;
-use crate::util::AsyncReadExactAt;
 use crate::util::IteratorEither;
 
 #[derive(Clone)]
@@ -72,7 +72,7 @@ impl<R> Run<R> {
     }
 }
 
-impl<R: AsyncReadExactAt> Run<R> {
+impl<R: FileReader> Run<R> {
     pub(super) async fn open(reader: R) -> anyhow::Result<Self> {
         let file_len = reader.len().await?;
         let mut index_block_offset_buf = [0u8; 4];
@@ -389,7 +389,7 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
     }
 }
 
-pub(super) async fn dump_run<R: AsyncReadExactAt>(run: &Run<R>) -> anyhow::Result<()> {
+pub(super) async fn dump_run<R: FileReader>(run: &Run<R>) -> anyhow::Result<()> {
     println!("    min_ts: {}", run.min_ts);
     println!("    max_ts: {}", run.max_ts);
     println!("    index");
@@ -425,6 +425,7 @@ mod test {
     use super::dump_run;
     use super::Run;
     use super::RunBuilder;
+    use crate::lsm::test::TestFile;
     use crate::lsm::util::LsmRevision;
     use crate::range::Bound;
     use crate::range::Range;
@@ -479,7 +480,7 @@ mod test {
         .await
         .unwrap();
 
-        let run = Run::open(v).await?;
+        let run = Run::open(TestFile::from(v)).await?;
 
         assert_eq!(run.min_ts, Timestamp(10230));
         assert_eq!(run.max_ts, Timestamp(21925));
@@ -549,10 +550,10 @@ mod test {
         }
         b.finish().await?;
 
-        let run = Run::open(v).await?;
+        let run = Run::open(TestFile::from(v)).await?;
 
         async fn check(
-            block: &Run<Vec<u8>>,
+            block: &Run<TestFile>,
             ts: Timestamp,
             range: Range<Vec<u8>>,
             expected: Vec<(&str, usize, bool)>,
@@ -691,7 +692,7 @@ mod test {
                     futures::stream::iter(revisions.iter().map(|revision| Ok(revision.clone()))),
                 ).await.unwrap();
 
-                let run = Run::open(v).await.unwrap();
+                let run = Run::open(TestFile::from(v)).await.unwrap();
 
                 dump_run(&run).await.unwrap();
 

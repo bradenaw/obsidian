@@ -33,6 +33,7 @@ use crate::range::intersect_in_ranges_by_key;
 use crate::range::Bound;
 use crate::range::KeyOrBound;
 use crate::range::Range;
+use crate::storage::FileReader;
 use crate::storage::Storage;
 use crate::types::Direction;
 use crate::types::HistoryRange;
@@ -46,7 +47,6 @@ use crate::types::Timestamp;
 use crate::types::WriteError;
 use crate::util::merge_sorted;
 use crate::util::merge_sorted_streams;
-use crate::util::AsyncReadExactAt;
 use crate::util::AtomicArc;
 use crate::util::Background;
 use crate::util::IteratorEither;
@@ -806,7 +806,7 @@ struct LsmInnerInner<R> {
     manifest: AtomicArc<Manifest<R>>,
 }
 
-impl<R: AsyncReadExactAt + Clone + Sync> LsmInnerInner<R> {
+impl<R: FileReader + Clone + Sync> LsmInnerInner<R> {
     fn new(
         l0_max_size: u64,
         run_target_size: u64,
@@ -1192,7 +1192,7 @@ struct Manifest<R> {
     levels: Vec<Level<R>>,
 }
 
-impl<R: AsyncReadExactAt + Clone> Manifest<R> {
+impl<R: FileReader + Clone> Manifest<R> {
     fn new(n_levels: usize) -> Self {
         Self {
             l0_active: vec![],
@@ -1290,7 +1290,7 @@ struct Level<R> {
     runs: Vec<Run<R>>,
 }
 
-impl<R: AsyncReadExactAt> Level<R> {
+impl<R: FileReader> Level<R> {
     fn new() -> Self {
         Self { runs: vec![] }
     }
@@ -1360,6 +1360,7 @@ mod test {
     use std::sync::RwLock;
     use std::time::Duration;
 
+    use async_trait::async_trait;
     use byteorder::BigEndian;
     use byteorder::ByteOrder;
     use futures::TryStreamExt;
@@ -1378,6 +1379,7 @@ mod test {
     use crate::lsm::util::LsmRevision;
     use crate::range::Bound;
     use crate::range::Range;
+    use crate::storage::FileReader;
     use crate::storage::MemStorage;
     use crate::storage::Storage;
     use crate::types::ColoGroupId;
@@ -1391,9 +1393,39 @@ mod test {
     use crate::types::Timestamp;
     use crate::types::WriteError;
     use crate::util::binary_search_by_idx;
-    use crate::util::AsyncReadExactAt;
     use crate::wal;
     use crate::wal::SeqNo;
+
+    #[derive(Clone)]
+    pub(super) struct TestFile {
+        inner: Arc<Vec<u8>>,
+    }
+
+    impl From<Vec<u8>> for TestFile {
+        fn from(value: Vec<u8>) -> Self {
+            Self {
+                inner: Arc::new(value),
+            }
+        }
+    }
+
+    impl From<Arc<Vec<u8>>> for TestFile {
+        fn from(value: Arc<Vec<u8>>) -> Self {
+            Self {
+                inner: Arc::clone(&value),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl FileReader for TestFile {
+        async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
+            Ok(buf.copy_from_slice(&self.inner[(offset as usize)..(offset as usize) + buf.len()]))
+        }
+        async fn len(&self) -> anyhow::Result<u64> {
+            Ok(self.inner.len() as u64)
+        }
+    }
 
     #[tokio::test]
     async fn test_put_get() -> anyhow::Result<()> {
@@ -1867,7 +1899,7 @@ mod test {
 
         let lsm = lsm_from_diagram(diagram).await?;
 
-        async fn check<R: AsyncReadExactAt + Clone + Send + Sync>(
+        async fn check<R: FileReader + Clone + Send + Sync>(
             lsm: &LsmInnerInner<R>,
             key: &[u8],
             range: HistoryRange,
@@ -2073,7 +2105,7 @@ mod test {
         Ok(())
     }
 
-    async fn dump_lsm_inner_inner<R: AsyncReadExactAt + Clone>(
+    async fn dump_lsm_inner_inner<R: FileReader + Clone>(
         lsm: &LsmInnerInner<R>,
     ) -> anyhow::Result<()> {
         let manifest = lsm.manifest.load();
@@ -2116,7 +2148,7 @@ mod test {
         Ok(())
     }
 
-    fn dump_manifest<R: AsyncReadExactAt + Clone>(manifest: &Manifest<R>) {
+    fn dump_manifest<R: FileReader + Clone>(manifest: &Manifest<R>) {
         println!("== manifest =====");
         println!("l0_active");
         for (_, memtable_lock) in &manifest.l0_active {
@@ -2262,7 +2294,7 @@ mod test {
 
     async fn lsm_from_diagram(
         diagram: Vec<(&str, &[u8])>,
-    ) -> anyhow::Result<LsmInnerInner<Arc<Vec<u8>>>> {
+    ) -> anyhow::Result<LsmInnerInner<TestFile>> {
         fn find_touching(
             diagram: &[(&str, &[u8])],
             visited: &mut HashSet<(usize, usize)>,
@@ -2348,7 +2380,7 @@ mod test {
                         futures::stream::iter(revisions.into_iter().map(|revision| Ok(revision))),
                     )
                     .await?;
-                    let run = Run::open(Arc::new(v)).await?;
+                    let run = Run::open(TestFile::from(v)).await?;
                     level.runs.push(run);
                 }
             }

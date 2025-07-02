@@ -11,6 +11,7 @@ use crate::lsm::util::LsmRevision;
 use crate::lsm::util::PrefixCompressedKV;
 use crate::range::KeyOrBound;
 use crate::range::Range;
+use crate::storage::FileReader;
 use crate::types::Direction;
 use crate::types::HistoryRange;
 use crate::types::RevisionValue;
@@ -18,7 +19,6 @@ use crate::types::Timestamp;
 use crate::util::binary_search_by_idx;
 use crate::util::byte_width;
 use crate::util::hexlify;
-use crate::util::AsyncReadExactAt;
 use crate::util::IteratorEither;
 
 /// A Block is conceptually a BTreeMap<Vec<u8>, BTreeMap<Timestamp, RevisionValue>>, but it is compactly
@@ -173,7 +173,7 @@ impl<'a, R> Block<'a, R> {
     }
 }
 
-impl<'a, R: AsyncReadExactAt> Block<'a, R> {
+impl<'a, R: FileReader> Block<'a, R> {
     pub(super) async fn open(reader: &'a R, header_offset: u64) -> anyhow::Result<Block<'a, R>> {
         let mut header = [0u8; BLOCK_INDEX_HEADER_SIZE];
 
@@ -502,9 +502,7 @@ impl<'a> BlockVersions<'a> {
     }
 }
 
-pub(super) async fn dump_block<'a, R: AsyncReadExactAt>(
-    block: &Block<'a, R>,
-) -> anyhow::Result<()> {
+pub(super) async fn dump_block<'a, R: FileReader>(block: &Block<'a, R>) -> anyhow::Result<()> {
     println!("    n_keys: {}", block.index.len());
     println!("    n_versions: {}", block.n_versions);
     println!("    values_len: {}", block.values_len);
@@ -540,14 +538,15 @@ mod test {
     use futures::TryStreamExt;
 
     use super::Block;
+    use crate::lsm::test::TestFile;
     use crate::lsm::util::LsmRevision;
     use crate::range::Bound;
     use crate::range::Range;
+    use crate::storage::FileReader;
     use crate::types::Direction;
     use crate::types::HistoryRange;
     use crate::types::RevisionValue;
     use crate::types::Timestamp;
-    use crate::util::AsyncReadExactAt;
 
     #[tokio::test]
     async fn test_get() -> anyhow::Result<()> {
@@ -580,7 +579,8 @@ mod test {
         };
         let (encoded, header_offset) = Block::<()>::encode(&kvs)?;
 
-        let block = Block::open(&encoded, header_offset as u64).await?;
+        let f = TestFile::from(encoded);
+        let block = Block::open(&f, header_offset as u64).await?;
 
         assert_eq!(
             block.get(Timestamp(279), &aa[..]).await?,
@@ -674,9 +674,10 @@ mod test {
         }
 
         let (encoded, header_offset) = Block::<()>::encode(&kvs)?;
-        let block = Block::open(&encoded, header_offset as u64).await?;
+        let f = TestFile::from(encoded);
+        let block = Block::open(&f, header_offset as u64).await?;
 
-        async fn check<'a, R: AsyncReadExactAt>(
+        async fn check<'a, R: FileReader>(
             block: &Block<'a, R>,
             ts: Timestamp,
             range: Range<Vec<u8>>,
@@ -780,7 +781,8 @@ mod test {
         .into_iter()
         .collect();
         let (encoded, header_offset) = Block::<()>::encode(&kvs)?;
-        let block = Block::open(&encoded, header_offset as u64).await?;
+        let f = TestFile::from(encoded);
+        let block = Block::open(&f, header_offset as u64).await?;
 
         assert_eq!(
             block
