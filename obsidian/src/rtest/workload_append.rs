@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -51,7 +52,7 @@ struct WorkloadAppend<O> {
 // customized for Obsidian.
 //
 // https://github.com/jepsen-io/elle/raw/master/paper/elle.pdf
-impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
+impl<O: Obsidian + Sync + Send + 'static> WorkloadAppend<O> {
     fn new(obsidian: O) -> Self {
         Self {
             obsidian,
@@ -63,18 +64,24 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
         }
     }
 
-    async fn run(&self) -> anyhow::Result<()> {
+    async fn run(self: &Arc<Self>) -> anyhow::Result<()> {
         let mut futures = FuturesUnordered::new();
         let workload_start = Instant::now();
         let workload_deadline = workload_start + Duration::from_millis(5_000);
         for _ in 0..32 {
-            futures.push(self.thread(workload_deadline));
+            let self_ = self.clone();
+            futures.push(tokio::spawn(async move {
+                self_.thread(workload_deadline).await
+            }));
         }
         let mut histories = vec![];
         while let Some(thread_history) = futures.next().await {
-            histories.push(thread_history);
+            histories.push(thread_history.unwrap());
             if Instant::now() < workload_deadline {
-                futures.push(self.thread(workload_deadline));
+                let self_ = self.clone();
+                futures.push(tokio::spawn(async move {
+                    self_.thread(workload_deadline).await
+                }));
             }
         }
 
@@ -148,7 +155,7 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
         Ok(())
     }
 
-    async fn thread(&self, deadline: Instant) -> Vec<(Seq, HistoryItem)> {
+    async fn thread(self: &Arc<Self>, deadline: Instant) -> Vec<(Seq, HistoryItem)> {
         let mut history = vec![];
         while Instant::now() < deadline {
             let txid = self.new_txid();
@@ -732,6 +739,7 @@ impl Decode for Txid {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     use super::strongly_connected_components;
     use super::EdgeType;
@@ -741,7 +749,7 @@ mod tests {
     use crate::range::Bound;
     use crate::types::ColoGroupId;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_workload_append() -> anyhow::Result<()> {
         let _ = pretty_env_logger::try_init();
 
@@ -755,7 +763,7 @@ mod tests {
 
         let wl = WorkloadAppend::new(fe);
 
-        wl.run().await?;
+        Arc::new(wl).run().await?;
 
         Ok(())
     }
