@@ -258,7 +258,8 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
     let storage = Arc::new(CachedStorage::new(
         MemStorage::new(),
         4096, // page_size
-        128,  // cache_size_pages
+        16,   // stripe_size_pages
+        4,    // n_stripes
     ));
 
     let meta_tablet = Arc::new(

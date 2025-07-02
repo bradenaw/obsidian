@@ -1420,6 +1420,13 @@ mod test {
     #[async_trait]
     impl FileReader for TestFile {
         async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
+            if offset + (buf.len() as u64) > self.inner.len() as u64 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "unexpected eof",
+                )
+                .into());
+            }
             Ok(buf.copy_from_slice(&self.inner[(offset as usize)..(offset as usize) + buf.len()]))
         }
         async fn len(&self) -> anyhow::Result<u64> {

@@ -34,20 +34,22 @@ pub(crate) struct CachedStorage<S: Storage + Sync> {
 impl<S: Storage + Sync> CachedStorage<S> {
     /// `page_size` is the size of reads issued to `inner` and the size of the cached pages.
     ///
-    /// `cache_size_pages` is the number of pages the cache can hold.
+    /// The cache can hold up to `stripe_size_pages * n_stripes` pages.  Note that there is some
+    /// overhead per-page, so the cache takes more memory than `page_size * stripe_size_pages *
+    /// n_stripes`.
     ///
-    /// The cache takes more memory than `page_size * cache_size_pages`.
-    pub(crate) fn new(inner: S, page_size: usize, cache_size_pages: usize) -> Self {
+    /// `n_stripes` determines how many stripes to split the cache into. Higher `n_stripes` makes
+    /// the cache more efficient at concurrent access but slightly less accurate in its evicition.
+    pub(crate) fn new(
+        inner: S,
+        page_size: usize,
+        stripe_size_pages: usize,
+        n_stripes: usize,
+    ) -> Self {
         Self {
             inner,
             page_size,
-            // Realistically there's a bit of slop, since we need a couple of extra pointers,
-            // refcounts, the `touched` bit, two copies of every key, and whatever allocator
-            // overhead there is.
-            cache: Arc::new(Cache::new(
-                cache_size_pages / (page_size + 64),
-                64, /*n_stripes*/
-            )),
+            cache: Arc::new(Cache::new(stripe_size_pages, n_stripes)),
         }
     }
 }
@@ -81,8 +83,11 @@ impl<S: Storage + Sync> Storage for CachedStorage<S> {
     }
 
     async fn get(&self, name: &str) -> anyhow::Result<Self::R> {
+        let f = self.inner.get(name).await?;
+        let len = f.len().await?;
         Ok(GetCacher {
-            inner: self.inner.get(name).await?,
+            inner: f,
+            len: len,
             page_size: self.page_size,
             name: Arc::new(name.to_string()),
             cache: self.cache.clone(),
@@ -114,45 +119,61 @@ struct PutCacher<'a, C: AsyncRead + Send> {
     inner_done: bool,
 }
 
-impl<'a, C: AsyncRead + Send + Unpin> AsyncRead for PutCacher<'a, C> {
-    fn poll_read(
-        self: Pin<&mut Self>,
+impl<'a, C: AsyncRead + Send + Unpin> PutCacher<'a, C> {
+    fn flush_page(&mut self) {
+        if self.buf.filled().len() == 0 {
+            return;
+        }
+
+        let page = Arc::new(self.buf.filled().to_vec());
+        println!(
+            "putting a page ({}, {}) with size {}",
+            self.name,
+            self.buf_offset,
+            page.len()
+        );
+        self.cache
+            .insert((self.name.clone(), self.buf_offset), page);
+        self.buf_offset += self.buf.capacity() as u64;
+        self.buf.set_filled(0);
+        self.cursor = 0;
+    }
+
+    fn poll_read_inner(
+        &mut self,
         cx: &mut std::task::Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        let self_ = Pin::get_mut(self);
         loop {
-            let inner = pin!(&mut self_.inner);
-            let our_buf = &mut self_.buf;
-            let buf_cursor = self_.cursor;
-
-            let n = cmp::min(our_buf.filled().len() - buf_cursor, buf.remaining());
+            // See if we have any bytes to give to the caller.
+            let n = cmp::min(self.buf.filled().len() - self.cursor, buf.remaining());
             if n > 0 {
-                buf.put_slice(&our_buf.filled()[buf_cursor..buf_cursor + n]);
-                self_.cursor += n;
+                buf.put_slice(&self.buf.filled()[self.cursor..self.cursor + n]);
+                self.cursor += n;
 
                 // If that means the reader just finished a whole page, place it into cache.
-                if self_.cursor == our_buf.capacity()
-                    || (self_.inner_done && self_.cursor == buf.filled().len())
-                {
-                    let page = Arc::new(buf.filled().to_vec());
-                    self_
-                        .cache
-                        .insert((self_.name.clone(), self_.buf_offset), page);
-                    self_.buf_offset += our_buf.capacity() as u64;
-                    self_.buf.set_filled(0);
-                    self_.cursor = 0;
+                if self.cursor == self.buf.capacity() {
+                    self.flush_page();
                 }
 
                 return std::task::Poll::Ready(Ok(()));
             }
 
-            let inner_poll = inner.poll_read(cx, our_buf);
-            let start_len = our_buf.filled().len();
+            // If we're here, it implies that the cursor is at the end of our buf, we need to get
+            // some more bytes from inner.
+
+            let start_len = self.buf.filled().len();
+            let inner = pin!(&mut self.inner);
+            let inner_poll = inner.poll_read(cx, &mut self.buf);
             if let std::task::Poll::Ready(Ok(())) = inner_poll {
-                if start_len == our_buf.filled().len() {
-                    self_.inner_done = true;
+                if start_len == self.buf.filled().len() {
+                    // No more bytes from inner, so we're done reading.
+                    self.flush_page();
+                    return std::task::Poll::Ready(Ok(()));
                 }
+
+                // We got some bytes back, so loop back around to see if we can give them to the
+                // caller.
                 continue;
             }
 
@@ -161,11 +182,23 @@ impl<'a, C: AsyncRead + Send + Unpin> AsyncRead for PutCacher<'a, C> {
     }
 }
 
+impl<'a, C: AsyncRead + Send + Unpin> AsyncRead for PutCacher<'a, C> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let self_ = Pin::get_mut(self);
+        self_.poll_read_inner(cx, buf)
+    }
+}
+
 // Wraps read_exact_at in a cache.
 #[derive(Clone)]
 pub(crate) struct GetCacher<R: FileReader + Sync + Clone> {
     inner: R,
     page_size: usize,
+    len: u64,
     name: Arc<String>,
     // A reference to the cache from the CachedStorage this GetCacher was made from.
     cache: Arc<Cache<(Arc<String>, u64), Arc<Vec<u8>>>>,
@@ -195,9 +228,8 @@ impl<R: FileReader + Sync + Clone> FileReader for GetCacher<R> {
             let page = match self.cache.get(&(self.name.clone(), page_offset)) {
                 Some(b) => b,
                 None => {
-                    // TODO: need to limit this size to the end of the file, else the read_exact_at
-                    // below will produce an unexpected eof.
-                    let mut page = vec![0u8; self.page_size];
+                    let mut page =
+                        vec![0u8; cmp::min(self.page_size as u64, self.len - page_offset) as usize];
                     self.inner.read_exact_at(&mut page, page_offset).await?;
                     let page_arc = Arc::new(page);
                     self.cache
@@ -249,10 +281,21 @@ struct Cache<K, V> {
 
 impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
     fn new(capacity: usize, n_stripes: usize) -> Self {
+        // We don't want to create more actual capacity than `capacity` and we don't want any empty
+        // stripes, so min here to make sure every stripe gets at least one.
+        let n_stripes = cmp::min(n_stripes, capacity);
         let mut stripes = Vec::with_capacity(n_stripes);
+
+        // The last stripe might be smaller if `capacity % n_stripes != 0`.
+        let max_size_per_stripe = capacity.div_ceil(n_stripes);
+        let mut capacity_remaining = capacity;
+
         for _ in 0..n_stripes {
-            stripes.push(RwLock::new(CacheStripe::new(capacity / n_stripes)));
+            let stripe_size = cmp::min(max_size_per_stripe, capacity_remaining);
+            stripes.push(RwLock::new(CacheStripe::new(stripe_size)));
+            capacity_remaining -= stripe_size;
         }
+
         Self {
             random_state: RandomState::new(),
             stripes,
@@ -271,12 +314,22 @@ impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
         self.stripe_for(k).write().unwrap().remove(k)
     }
 
+    fn evictions(&self) -> usize {
+        let mut n = 0;
+        for stripe in &self.stripes {
+            n += stripe.read().unwrap().evictions;
+        }
+        n
+    }
+
     fn stripe_for(&self, k: &K) -> &RwLock<CacheStripe<K, V>> {
         &self.stripes[(self.random_state.hash_one(k) % (self.stripes.len() as u64)) as usize]
     }
 }
 
 struct CacheStripe<K, V> {
+    capacity: usize,
+
     // Map from key to index in entries. Always the same size as entries and contains the same
     // keys.
     m: HashTrie<K, usize>,
@@ -284,7 +337,7 @@ struct CacheStripe<K, V> {
     entries: TreeList<Option<CacheEntry<K, V>>>,
     // Index of the clock hand, in 0..entries.len().
     hand: usize,
-    capacity: usize,
+    evictions: usize,
 }
 
 struct CacheEntry<K, V> {
@@ -296,10 +349,11 @@ struct CacheEntry<K, V> {
 impl<K: Eq + Hash + Clone, V: Clone> CacheStripe<K, V> {
     fn new(capacity: usize) -> Self {
         Self {
+            capacity: capacity,
             m: HashTrie::new(),
             entries: TreeList::new(),
             hand: 0,
-            capacity: capacity,
+            evictions: 0,
         }
     }
 
@@ -346,6 +400,7 @@ impl<K: Eq + Hash + Clone, V: Clone> CacheStripe<K, V> {
                 v: v,
                 touched: AtomicBool::new(true),
             }) {
+                self.evictions += 1;
                 self.m.remove(&prev_entry.k);
             }
             self.m.insert(k, idx);
@@ -638,16 +693,90 @@ impl<T> std::ops::IndexMut<usize> for TreeList<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::hash::BuildHasher;
     use std::hash::Hash;
     use std::hash::RandomState;
 
     use super::Cache;
+    use super::CachedStorage;
+    use super::FileReader;
     use super::HashTrie;
     use super::HashTrieNode;
+    use super::Storage;
     use super::TreeList;
     use super::HASH_TRIE_LEAF_MAX;
     use super::TREE_LIST_NODE_SIZE;
+    use crate::storage::MemStorage;
+
+    #[tokio::test]
+    async fn test_cached_storage() -> anyhow::Result<()> {
+        const PAGE_SIZE: usize = 16;
+        const STRIPE_SIZE_PAGES: usize = 8;
+        const N_STRIPES: usize = 2;
+        const CAPACITY_PAGES: usize = STRIPE_SIZE_PAGES * N_STRIPES;
+
+        let storage = CachedStorage::new(
+            MemStorage::new(),
+            PAGE_SIZE,         // page_size
+            STRIPE_SIZE_PAGES, // stripe_size_pages
+            N_STRIPES,         // n_stripes
+        );
+
+        fn make_test_file(len: usize) -> Vec<u8> {
+            let mut content = vec![0u8; len];
+            for i in 0..len {
+                content[i] = (i % 7) as u8;
+            }
+            content
+        }
+
+        let test_files = BTreeMap::from([
+            ("foo", make_test_file(55)),
+            ("bar", make_test_file(127)),
+            ("baz", make_test_file(74)),
+        ]);
+
+        for (name, content) in &test_files {
+            storage.put(name, &content[..]).await?;
+        }
+
+        let n_pages = test_files
+            .values()
+            .map(|v| v.len().div_ceil(PAGE_SIZE))
+            .sum::<usize>();
+
+        // We might end up with _more_ evictions than this because of striping.
+        assert!(storage.cache.evictions() > n_pages - CAPACITY_PAGES);
+
+        let check = async |name, offset, size| -> anyhow::Result<()> {
+            println!("reading {} [{}..{}]", name, offset, offset + size);
+            let expected = &test_files[name][offset..offset + size];
+            let mut actual = vec![0u8; size];
+            storage
+                .get(name)
+                .await?
+                .read_exact_at(&mut actual, offset as u64)
+                .await?;
+
+            assert_eq!(&actual[..], expected);
+
+            Ok(())
+        };
+
+        check("foo", 0, 16).await?;
+        check("bar", 16, 5).await?;
+        check("bar", 125, 2).await?;
+        check("bar", 0, 16).await?;
+        check("bar", 5, 2).await?;
+        check("foo", 54, 1).await?;
+        check("foo", 0, 32).await?;
+        check("foo", 4, 15).await?;
+        check("bar", 100, 11).await?;
+        check("bar", 59, 55).await?;
+
+        Ok(())
+    }
 
     #[test]
     fn test_cache_insert_remove() {
