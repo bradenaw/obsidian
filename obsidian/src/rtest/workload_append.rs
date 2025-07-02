@@ -256,8 +256,6 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
             .latest_snapshot(BTreeSet::from([(self.list_keyspace_id, list_id.to_key())]))
             .await?;
 
-        println!("read() acquired timestamp {:?}", read_ts);
-
         let range = Range {
             lower: Bound::Before(ListItem(list_id, 0).to_key()),
             upper: Bound::After(ListItem(list_id, u64::MAX).to_key()),
@@ -280,7 +278,7 @@ impl<O: Obsidian + Sync + Send> WorkloadAppend<O> {
     }
 
     fn choose_list(&self) -> ListId {
-        ListId(thread_rng().gen_range(0..100))
+        ListId(thread_rng().gen_range(0..10))
     }
 
     fn new_txid(&self) -> Txid {
