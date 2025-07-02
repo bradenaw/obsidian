@@ -126,12 +126,6 @@ impl<'a, C: AsyncRead + Send + Unpin> PutCacher<'a, C> {
         }
 
         let page = Arc::new(self.buf.filled().to_vec());
-        println!(
-            "putting a page ({}, {}) with size {}",
-            self.name,
-            self.buf_offset,
-            page.len()
-        );
         self.cache
             .insert((self.name.clone(), self.buf_offset), page);
         self.buf_offset += self.buf.capacity() as u64;
@@ -280,20 +274,11 @@ struct Cache<K, V> {
 }
 
 impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
-    fn new(capacity: usize, n_stripes: usize) -> Self {
-        // We don't want to create more actual capacity than `capacity` and we don't want any empty
-        // stripes, so min here to make sure every stripe gets at least one.
-        let n_stripes = cmp::min(n_stripes, capacity);
-        let mut stripes = Vec::with_capacity(n_stripes);
-
-        // The last stripe might be smaller if `capacity % n_stripes != 0`.
-        let max_size_per_stripe = capacity.div_ceil(n_stripes);
-        let mut capacity_remaining = capacity;
+    fn new(stripe_size: usize, n_stripes: usize) -> Self {
+        let mut stripes = vec![];
 
         for _ in 0..n_stripes {
-            let stripe_size = cmp::min(max_size_per_stripe, capacity_remaining);
             stripes.push(RwLock::new(CacheStripe::new(stripe_size)));
-            capacity_remaining -= stripe_size;
         }
 
         Self {
@@ -323,7 +308,8 @@ impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
     }
 
     fn stripe_for(&self, k: &K) -> &RwLock<CacheStripe<K, V>> {
-        &self.stripes[(self.random_state.hash_one(k) % (self.stripes.len() as u64)) as usize]
+        let stripe_idx = self.random_state.hash_one(k) % (self.stripes.len() as u64);
+        &self.stripes[stripe_idx as usize]
     }
 }
 
@@ -697,6 +683,7 @@ mod tests {
     use std::hash::BuildHasher;
     use std::hash::Hash;
     use std::hash::RandomState;
+    use std::sync::Arc;
 
     use super::Cache;
     use super::CachedStorage;
@@ -712,7 +699,7 @@ mod tests {
     #[tokio::test]
     async fn test_cached_storage() -> anyhow::Result<()> {
         const PAGE_SIZE: usize = 16;
-        const STRIPE_SIZE_PAGES: usize = 8;
+        const STRIPE_SIZE_PAGES: usize = 4;
         const N_STRIPES: usize = 2;
         const CAPACITY_PAGES: usize = STRIPE_SIZE_PAGES * N_STRIPES;
 
@@ -746,11 +733,35 @@ mod tests {
             .map(|v| v.len().div_ceil(PAGE_SIZE))
             .sum::<usize>();
 
+        // Make sure we're actually testing cache eviction and misses.
+        assert!(n_pages > CAPACITY_PAGES);
+
+        let mut pages_cached = 0;
+        for (name, content) in &test_files {
+            let name_arc = Arc::new(name.to_string());
+            for page_offset in (0..content.len()).step_by(PAGE_SIZE) {
+                let key = (name_arc.clone(), page_offset as u64);
+                if let Some(_) = storage.cache.get(&key) {
+                    println!("{:?} is in cache", key);
+                    pages_cached += 1;
+                } else {
+                    println!("{:?} is not in cache", key);
+                }
+            }
+        }
+
+        println!("total pages: {}", n_pages);
+        println!("pages cached: {}", pages_cached);
+
+        // Might be less because of striping.
+        assert!(pages_cached <= CAPACITY_PAGES);
+
+        println!("evictions: {}", storage.cache.evictions());
+
         // We might end up with _more_ evictions than this because of striping.
-        assert!(storage.cache.evictions() > n_pages - CAPACITY_PAGES);
+        assert!(storage.cache.evictions() >= n_pages - CAPACITY_PAGES);
 
         let check = async |name, offset, size| -> anyhow::Result<()> {
-            println!("reading {} [{}..{}]", name, offset, offset + size);
             let expected = &test_files[name][offset..offset + size];
             let mut actual = vec![0u8; size];
             storage
@@ -824,7 +835,7 @@ mod tests {
 
     #[test]
     fn test_stripes() {
-        let c: Cache<usize, usize> = Cache::new(8 /*capacity*/, 2 /*n_stripes*/);
+        let c: Cache<usize, usize> = Cache::new(4 /*stripe_size*/, 2 /*n_stripes*/);
 
         for i in 0..24 {
             c.insert(i, i);
