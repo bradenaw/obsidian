@@ -1,27 +1,28 @@
+use std::cmp;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::sync::Arc;
 use std::sync::RwLock;
 
 use anyhow::anyhow;
-use prost::Message;
+use async_trait::async_trait;
+use futures::Stream;
 
 use crate::meta::Meta;
-use crate::meta::PFX_TABLETS;
+use crate::meta::MetaKey;
+use crate::meta::MetaReader;
 use crate::obsidian::Router;
 use crate::obsidian::TabletId;
-use crate::pb;
 use crate::range::Bound;
+use crate::util::hexlify;
 use crate::range::Range;
 use crate::range::RangeSet;
 use crate::router::StaticRouter;
-use crate::tuple_encoding::tuple_decode;
-use crate::tuple_encoding::tuple_encode;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::RevisionValue;
-use crate::types::ShardId;
 use crate::types::Timestamp;
 use crate::util::Background;
 use crate::util::Retry;
@@ -32,11 +33,18 @@ pub(crate) struct MetaSynced {
     inner: Arc<RwLock<MetaSyncedInner>>,
 }
 
+pub(crate) enum SyncType<'a> {
+    Initial,
+    Tx(&'a HashSet<MetaKey>),
+}
+
 struct MetaSyncedInner {
     synced_ts: Arc<WaitableTimestamp>,
-    kv: BTreeMap<Vec<u8>, Vec<u8>>,
+    kv: MetaSyncedSnapshot,
     router: StaticRouter,
     owned_ranges: HashMap<TabletId, HashMap<ColoGroupId, RangeSet<Vec<u8>>>>,
+
+    subscribers: Vec<Box<dyn Fn(SyncType) + Send + Sync>>,
 }
 
 impl MetaSynced {
@@ -45,9 +53,10 @@ impl MetaSynced {
 
         let inner = Arc::new(RwLock::new(MetaSyncedInner {
             synced_ts: Arc::new(WaitableTimestamp::new()),
-            kv: BTreeMap::new(),
+            kv: MetaSyncedSnapshot::new(),
             router: StaticRouter::new(HashMap::new()),
             owned_ranges: HashMap::new(),
+            subscribers: vec![],
         }));
 
         bg.spawn({
@@ -76,6 +85,38 @@ impl MetaSynced {
             }
         }
         RangeSet::new()
+    }
+
+    /// Subscribes to changes in `MetaSynced`. `f` will be called once, either immediately or when
+    /// initial sync finishes, with `SyncType::Initial`. Every transaction that updates the
+    /// `MetaSynced` after that point will be given as a SyncType::Tx with the changed revisions.
+    ///
+    /// The synced timestamp (as observed by `wait()`) does not advance until all subscribers
+    /// return, so that `wait()` also describes the log position that those subscribers are at.
+    ///
+    /// That also means it would be unwise to do anything terribly expensive inside f.
+    pub(crate) fn subscribe<F: Fn(SyncType) + Send + Sync + 'static>(&self, f: F) {
+        loop {
+            let need_initial = {
+                let inner = self.inner.read().unwrap();
+                inner.synced_ts.get() > Timestamp::ZERO
+            };
+            // Unfortunately important that we do this inline and not in a spawn, since
+            // subscriptions need to happen during the constructors for components (e.g. Tablet)
+            // and the initial sync needs to happen before any other part of the system can call
+            // wait().
+            if need_initial {
+                f(SyncType::Initial);
+            }
+            {
+                let mut inner = self.inner.write().unwrap();
+                if !need_initial && inner.synced_ts.get() > Timestamp::ZERO {
+                    continue;
+                }
+                inner.subscribers.push(Box::new(f));
+                return;
+            }
+        }
     }
 
     pub(crate) async fn wait(&self, ts: Timestamp) -> anyhow::Result<()> {
@@ -114,17 +155,39 @@ impl Router for MetaSynced {
 impl MetaSyncedInner {
     async fn sync<M: Meta>(inner_lock: Arc<RwLock<Self>>, meta: M) {
         let mut ts = Retry::new()
-            .indefinitely(|| async {
+            .indefinitely(&async || -> anyhow::Result<Timestamp> {
+                let ts = Self::initial_sync_once(&inner_lock, &meta).await?;
+                Ok(ts)
+            })
+            .await;
+
+        loop {
+            ts = Retry::new()
+                .indefinitely(&async || -> anyhow::Result<Timestamp> {
+                    let new_ts = Self::incremental_sync_once(&inner_lock, &meta, ts).await?;
+                    Ok(new_ts)
+                })
+                .await;
+        }
+    }
+
+    async fn initial_sync_once<M: Meta>(
+        inner_lock: &Arc<RwLock<Self>>,
+        meta: &M,
+    ) -> anyhow::Result<Timestamp> {
+        let ts = Retry::new()
+            .indefinitely(&|| async {
                 let ts = meta.latest_snapshot().await?;
                 Ok::<_, anyhow::Error>(ts)
             })
             .await;
 
-        let mut kv = BTreeMap::new();
+        let mut kv = MetaSyncedSnapshot::new();
+
         let mut maybe_cursor = Some(Range::all());
         while let Some(cursor) = maybe_cursor {
             let (page, continue_cursor) = Retry::new()
-                .indefinitely(|| {
+                .indefinitely(&|| {
                     let cursor = cursor.clone();
                     async {
                         let out = meta.scan_page(ts, cursor).await?;
@@ -140,57 +203,109 @@ impl MetaSyncedInner {
             maybe_cursor = continue_cursor;
         }
 
+        let (router, owned_ranges) = Self::regen_router(kv.clone()).await?;
+
         {
             let mut inner = inner_lock.write().unwrap();
-            _ = inner.regen_router(&kv);
+            inner.kv = kv;
+            inner.router = router;
+            inner.owned_ranges = owned_ranges;
+        }
+
+        {
+            let inner = inner_lock.read().unwrap();
+            for subscriber in &inner.subscribers {
+                subscriber(SyncType::Initial);
+            }
             inner.synced_ts.set(ts);
         }
 
-        loop {
-            let (records, new_ts) = Retry::new()
-                .indefinitely(|| async {
-                    let (records, new_ts) = meta.sync(ts).await?;
-                    Ok::<_, anyhow::Error>((records, new_ts))
-                })
-                .await;
+        Ok(ts)
+    }
 
-            for record in records {
-                match record.value {
+    async fn incremental_sync_once<M: Meta>(
+        inner_lock: &Arc<RwLock<Self>>,
+        meta: &M,
+        ts: Timestamp,
+    ) -> anyhow::Result<Timestamp> {
+        let (revisions, new_ts) = Retry::new()
+            .indefinitely(&|| async {
+                let (revisions, new_ts) = meta.sync(ts).await?;
+                Ok::<_, anyhow::Error>((revisions, new_ts))
+            })
+            .await;
+
+        let mut sync_items = HashSet::new();
+
+        let snapshot = {
+            let mut inner = inner_lock.write().unwrap();
+            for revision in &revisions {
+                // If this fails to parse it must be a key structure that we don't know about, which
+                // means that none of the readers should care about it either.
+                //
+                // Realistically this should not happen, because version upgrades should either add
+                // the structure of a new key or actual usages of a new key, but not both.
+                if let Ok(meta_key) = MetaKey::decode(&revision.key.1[..]) {
+                    sync_items.insert(meta_key);
+                } else {
+                    log::warn!(
+                        "ignoring unknown MetaKey during sync {:?}",
+                        hexlify(&revision.key.1[..])
+                    );
+                }
+
+                match &revision.value {
                     RevisionValue::Regular(v) => {
-                        kv.insert(record.key.1, v);
+                        inner.kv.insert(revision.key.1.clone(), v.clone());
                     }
                     RevisionValue::Tombstone => {
-                        kv.remove(&record.key.1);
+                        inner.kv.remove(&revision.key.1);
                     }
                 }
             }
+            inner.kv.clone()
+        };
 
-            {
-                let mut inner = inner_lock.write().unwrap();
-                _ = inner.regen_router(&kv);
-                inner.synced_ts.set(new_ts);
+        {
+            let inner = inner_lock.read().unwrap();
+            for subscriber in &inner.subscribers {
+                subscriber(SyncType::Tx(&sync_items))
             }
-            if new_ts == ts {
-                Retry::new()
-                    .indefinitely(|| async {
-                        meta.wait_for_newer(ts).await?;
-                        Ok::<_, anyhow::Error>(())
-                    })
-                    .await;
-            }
-            ts = new_ts;
         }
+
+        let (router, owned_ranges) = Self::regen_router(snapshot).await?;
+
+        {
+            let mut inner = inner_lock.write().unwrap();
+            inner.router = router;
+            inner.owned_ranges = owned_ranges;
+            // Important: this must be after all of the subscriber updates, since this timestamp
+            // also describes _their_ state.
+            inner.synced_ts.set(new_ts);
+        }
+
+        if new_ts == ts {
+            Retry::new()
+                .indefinitely(&|| async {
+                    meta.wait_for_newer(ts).await?;
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await;
+        }
+        Ok(new_ts)
     }
 
-    fn regen_router(&mut self, kv: &BTreeMap<Vec<u8>, Vec<u8>>) -> anyhow::Result<()> {
+    async fn regen_router(
+        snapshot: MetaSyncedSnapshot,
+    ) -> anyhow::Result<(
+        StaticRouter,
+        HashMap<TabletId, HashMap<ColoGroupId, RangeSet<Vec<u8>>>>,
+    )> {
         let mut ranges_by_colo_group = HashMap::new();
         let mut tablet_map = HashMap::new();
 
-        let r = kv.range(tuple_encode(&(PFX_TABLETS,))..tuple_encode(&(PFX_TABLETS, u64::MAX)));
-        for (k, v) in r {
-            let (_, shard_id_raw, tablet_id_id_raw): (u64, u64, u64) = tuple_decode(&k[..])?;
-            let tablet_id = TabletId(ShardId(shard_id_raw as u32), tablet_id_id_raw);
-            let tablet_metadata = pb::internal::MetaTablet::decode(&v[..])?;
+        for tablet_id in snapshot.tablet_ids().await? {
+            let tablet_metadata = snapshot.tablet_metadata(tablet_id).await?;
 
             if tablet_metadata.colo_group_ids.len() != tablet_metadata.ranges.len() {
                 // TODO: log
@@ -231,9 +346,59 @@ impl MetaSyncedInner {
             routing_map.insert(*colo_group_id, (bounds, tablet_ids));
         }
 
-        self.router = StaticRouter::new(routing_map);
-        self.owned_ranges = tablet_map;
+        Ok((StaticRouter::new(routing_map), tablet_map))
+    }
+}
 
-        Ok(())
+#[derive(Clone)]
+struct MetaSyncedSnapshot {
+    // TODO: This needs to be an im::OrdMap because we clone this so often.
+    m: BTreeMap<Vec<u8>, Vec<u8>>,
+    max_key_len: usize,
+}
+
+impl MetaSyncedSnapshot {
+    fn new() -> Self {
+        Self {
+            m: BTreeMap::new(),
+            max_key_len: 0,
+        }
+    }
+
+    fn insert(&mut self, k: Vec<u8>, v: Vec<u8>) {
+        self.max_key_len = cmp::max(self.max_key_len, k.len());
+        self.m.insert(k, v);
+    }
+
+    fn remove(&mut self, k: &[u8]) {
+        self.m.remove(k);
+    }
+}
+
+#[async_trait]
+impl MetaReader for MetaSyncedSnapshot {
+    async fn get(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(self.m.get(key).cloned())
+    }
+
+    fn scan(
+        &self,
+        range: Range<Vec<u8>>,
+        direction: Direction,
+    ) -> Box<dyn Stream<Item = anyhow::Result<(Vec<u8>, Vec<u8>)>> + Unpin + Send + '_> {
+        match range.to_std_ops_bounds(self.max_key_len) {
+            Some(range_bounds) => {
+                let iter = self
+                    .m
+                    .range(range_bounds)
+                    .map(|(k, v)| -> anyhow::Result<_> { Ok((k.clone(), v.clone())) });
+
+                match direction {
+                    Direction::Asc => Box::new(futures::stream::iter(iter)),
+                    Direction::Desc => Box::new(futures::stream::iter(iter.rev())),
+                }
+            }
+            None => Box::new(futures::stream::empty()),
+        }
     }
 }

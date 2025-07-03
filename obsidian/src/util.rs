@@ -323,7 +323,7 @@ impl Retry {
         E: Deref<Target = dyn std::error::Error + Send + Sync + 'static>,
     >(
         self,
-        f: F,
+        f: &F,
     ) -> T {
         let mut i = 0;
         loop {
@@ -357,10 +357,10 @@ impl Retry {
                 Ok(RetryResult::Ok(t)) => return Ok(t),
                 Ok(RetryResult::Retry(e)) => {
                     last_err = Some(e);
-                },
+                }
                 Ok(RetryResult::Err(e)) => {
                     return Err(e.into());
-                },
+                }
                 Err(_) => {
                     // Timeout. Bubble out the last actual error if possible.
                     if let Some(e) = last_err {
@@ -467,6 +467,10 @@ impl WaitableTimestamp {
             let OrdEqByFirst(_, sender) = inner.waiters.pop().unwrap();
             let _ = sender.send(());
         }
+    }
+
+    pub(crate) fn get(&self) -> Timestamp {
+        self.inner.read().unwrap().ts
     }
 
     pub(crate) async fn wait(&self, ts: Timestamp) -> anyhow::Result<()> {

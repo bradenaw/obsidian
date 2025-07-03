@@ -21,8 +21,8 @@ use crate::util::byte_width;
 use crate::util::hexlify;
 use crate::util::IteratorEither;
 
-/// A Block is conceptually a BTreeMap<Vec<u8>, BTreeMap<Timestamp, RevisionValue>>, but it is compactly
-/// serialized and can be used as-is without fully deserializing.
+/// A Block is conceptually a BTreeMap<Vec<u8>, BTreeMap<Timestamp, RevisionValue>>, but it is
+/// compactly serialized and can be used as-is without fully deserializing.
 pub(super) struct Block<'a, R> {
     values_len: usize,
     n_versions: usize,

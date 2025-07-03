@@ -88,67 +88,27 @@ impl Memtable {
         range: Range<&[u8]>,
         direction: Direction,
     ) -> impl Iterator<Item = LsmRevision> + Send + '_ {
-        let range_bounds = (
-            match range.lower {
-                Bound::BeforeAll => std::ops::Bound::Unbounded,
-                Bound::Before(k) => std::ops::Bound::Included(k.to_vec()),
-                Bound::After(k) => std::ops::Bound::Excluded(k.to_vec()),
-                Bound::AfterPrefix(k) => std::ops::Bound::Excluded(
-                    k.iter()
-                        .cloned()
-                        .chain((0..self.max_key_len.saturating_sub(k.len())).map(|_| 0xFFu8))
-                        .collect(),
-                ),
-                Bound::AfterAll => {
-                    return IteratorEither::Right(std::iter::empty());
+        match range.to_std_ops_bounds(self.max_key_len) {
+            Some(range_bounds) => {
+                let iter = self
+                    .kvs
+                    .range(range_bounds)
+                    .filter_map(move |(key, versions)| {
+                        let (revision_ts, value) =
+                            versions.range(Timestamp::ZERO..=ts).next_back()?;
+                        Some(LsmRevision {
+                            key: key.clone(),
+                            ts: *revision_ts,
+                            value: value.clone(),
+                        })
+                    });
+
+                match direction {
+                    Direction::Asc => IteratorEither::Left(IteratorEither::Left(iter)),
+                    Direction::Desc => IteratorEither::Left(IteratorEither::Right(iter.rev())),
                 }
-            },
-            match range.upper {
-                Bound::BeforeAll => {
-                    return IteratorEither::Right(std::iter::empty());
-                }
-                Bound::Before(k) => std::ops::Bound::Excluded(k.to_vec()),
-                Bound::After(k) => std::ops::Bound::Included(k.to_vec()),
-                Bound::AfterPrefix(k) => std::ops::Bound::Excluded(
-                    k.iter()
-                        .cloned()
-                        .chain((0..self.max_key_len.saturating_sub(k.len())).map(|_| 0xFFu8))
-                        .collect(),
-                ),
-                Bound::AfterAll => std::ops::Bound::Unbounded,
-            },
-        );
-
-        // BTreeMap panics in these situations because they're nonsense, but we only produce them
-        // when the range is in fact empty.
-        match (&range_bounds.0, &range_bounds.1) {
-            (std::ops::Bound::Excluded(s), std::ops::Bound::Excluded(e)) if s == e => {
-                return IteratorEither::Right(std::iter::empty());
             }
-            (
-                std::ops::Bound::Included(s) | std::ops::Bound::Excluded(s),
-                std::ops::Bound::Included(e) | std::ops::Bound::Excluded(e),
-            ) if s > e => {
-                return IteratorEither::Right(std::iter::empty());
-            }
-            _ => {}
-        }
-
-        let iter = self
-            .kvs
-            .range(range_bounds)
-            .filter_map(move |(key, versions)| {
-                let (revision_ts, value) = versions.range(Timestamp::ZERO..=ts).next_back()?;
-                Some(LsmRevision {
-                    key: key.clone(),
-                    ts: *revision_ts,
-                    value: value.clone(),
-                })
-            });
-
-        match direction {
-            Direction::Asc => IteratorEither::Left(IteratorEither::Left(iter)),
-            Direction::Desc => IteratorEither::Left(IteratorEither::Right(iter.rev())),
+            None => IteratorEither::Right(std::iter::empty()),
         }
     }
 

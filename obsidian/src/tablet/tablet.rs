@@ -934,14 +934,10 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
     ) {
         while let Some((txid, ts, precond_keys, mut_keys)) = r.recv().await {
             Retry::new()
-                .indefinitely(|| {
-                    let mut_keys = mut_keys.clone();
-                    let precond_keys = precond_keys.clone();
-                    async move {
-                        self.cleanup_one_committed_outcome(txid, ts, precond_keys, mut_keys)
-                            .await?;
-                        Ok::<_, anyhow::Error>(())
-                    }
+                .indefinitely(&async || -> anyhow::Result<()> {
+                    self.cleanup_one_committed_outcome(txid, ts, &precond_keys, &mut_keys)
+                        .await?;
+                    Ok::<_, anyhow::Error>(())
                 })
                 .await;
         }
@@ -951,8 +947,8 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         &self,
         txid: Txid,
         ts: Timestamp,
-        precond_keys: BTreeSet<Key>,
-        mut_keys: BTreeSet<Key>,
+        precond_keys: &BTreeSet<Key>,
+        mut_keys: &BTreeSet<Key>,
     ) -> anyhow::Result<()> {
         let mut by_tablet = HashMap::new();
 
@@ -962,7 +958,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
                 .entry(tablet_id)
                 .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()))
                 .0
-                .insert((keyspace_id, key));
+                .insert((*keyspace_id, key.clone()));
         }
         for (keyspace_id, key) in mut_keys {
             let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
@@ -970,7 +966,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
                 .entry(tablet_id)
                 .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()))
                 .1
-                .insert((keyspace_id, key));
+                .insert((*keyspace_id, key.clone()));
         }
 
         // Lifetime shenanigans.
@@ -1045,7 +1041,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         // always currently syncs to latest, so wait(timestamp(1)) is the same as waiting for
         // latest.
         Retry::new()
-            .indefinitely(|| self.meta_synced.wait(Timestamp(1)))
+            .indefinitely(&async || self.meta_synced.wait(Timestamp(1)).await)
             .await;
 
         for keyspace_id in self.lsm.keyspaces() {
@@ -1054,37 +1050,34 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
             }
 
             Retry::new()
-                .indefinitely(|| {
-                    let sender = sender.clone();
-                    async move {
-                        for range in self
-                            .meta_synced
-                            .ranges_for_tablet(self.tablet_id, keyspace_id.0)
-                            .into_iter()
-                        {
-                            let mut s = self
-                                .scan_all(
-                                    self.sequencer.safe_read_ts(),
-                                    keyspace_id,
-                                    range,
-                                    Direction::Asc,
-                                )
-                                .boxed();
-                            while let Some(record) = s.try_next().await? {
-                                let pending = PendingMutation::decode(&record.value)?;
+                .indefinitely(&async || -> anyhow::Result<()> {
+                    for range in self
+                        .meta_synced
+                        .ranges_for_tablet(self.tablet_id, keyspace_id.0)
+                        .into_iter()
+                    {
+                        let mut s = self
+                            .scan_all(
+                                self.sequencer.safe_read_ts(),
+                                keyspace_id,
+                                range,
+                                Direction::Asc,
+                            )
+                            .boxed();
+                        while let Some(record) = s.try_next().await? {
+                            let pending = PendingMutation::decode(&record.value)?;
 
-                                let _ = sender
-                                    .send((
-                                        pending.txid,
-                                        keyspace_id,
-                                        record.key.1,
-                                        PrepareType::Mutation,
-                                    ))
-                                    .await;
-                            }
+                            let _ = sender
+                                .send((
+                                    pending.txid,
+                                    keyspace_id,
+                                    record.key.1,
+                                    PrepareType::Mutation,
+                                ))
+                                .await;
                         }
-                        Ok::<_, anyhow::Error>(())
                     }
+                    Ok(())
                 })
                 .await;
         }
@@ -1100,7 +1093,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         // always currently syncs to latest, so wait(timestamp(1)) is the same as waiting for
         // latest.
         Retry::new()
-            .indefinitely(|| self.meta_synced.wait(Timestamp(1)))
+            .indefinitely(&async || self.meta_synced.wait(Timestamp(1)).await)
             .await;
 
         for keyspace_id in self.lsm.keyspaces() {
@@ -1109,38 +1102,35 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
             }
 
             Retry::new()
-                .indefinitely(|| {
-                    let sender = sender.clone();
-                    async move {
-                        for range in self
-                            .meta_synced
-                            .ranges_for_tablet(self.tablet_id, keyspace_id.0)
-                            .into_iter()
-                        {
-                            let mut s = self
-                                .scan_all(
-                                    self.sequencer.safe_read_ts(),
-                                    keyspace_id,
-                                    range,
-                                    Direction::Asc,
-                                )
-                                .boxed();
-                            while let Some(record) = s.try_next().await? {
-                                let precond_locks = PrecondLocks::decode(&record.value)?;
-                                for txid in precond_locks.txids {
-                                    let _ = sender
-                                        .send((
-                                            txid,
-                                            keyspace_id,
-                                            record.key.1.clone(),
-                                            PrepareType::Precondition,
-                                        ))
-                                        .await;
-                                }
+                .indefinitely(&async || -> anyhow::Result<()> {
+                    for range in self
+                        .meta_synced
+                        .ranges_for_tablet(self.tablet_id, keyspace_id.0)
+                        .into_iter()
+                    {
+                        let mut s = self
+                            .scan_all(
+                                self.sequencer.safe_read_ts(),
+                                keyspace_id,
+                                range,
+                                Direction::Asc,
+                            )
+                            .boxed();
+                        while let Some(record) = s.try_next().await? {
+                            let precond_locks = PrecondLocks::decode(&record.value)?;
+                            for txid in precond_locks.txids {
+                                let _ = sender
+                                    .send((
+                                        txid,
+                                        keyspace_id,
+                                        record.key.1.clone(),
+                                        PrepareType::Precondition,
+                                    ))
+                                    .await;
                             }
                         }
-                        Ok::<_, anyhow::Error>(())
                     }
+                    Ok(())
                 })
                 .await;
         }
@@ -1152,31 +1142,28 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         sender: mpsc::Sender<(Txid, Timestamp, BTreeSet<Key>, BTreeSet<Key>)>,
     ) {
         Retry::new()
-            .indefinitely(|| {
-                let sender = sender.clone();
-                async move {
-                    let mut s = self
-                        .scan_all(
-                            self.sequencer.safe_read_ts(),
-                            KeyspaceId::TX_OUTCOMES,
-                            Range::prefix(self.tablet_id.encode_fixed().to_vec()),
-                            Direction::Asc,
-                        )
-                        .boxed();
-                    while let Some(record) = s.try_next().await? {
-                        let txid = Txid::decode(&record.key.1[..])?;
-                        let tx_outcome_record = TxOutcomeRecord::decode(&record.value)?;
-                        if let TxOutcomeRecord::Committed {
-                            ts: commit_ts,
-                            precond_keys,
-                            mut_keys,
-                        } = tx_outcome_record
-                        {
-                            let _ = sender.send((txid, commit_ts, precond_keys, mut_keys)).await;
-                        }
+            .indefinitely(&async || -> anyhow::Result<()> {
+                let mut s = self
+                    .scan_all(
+                        self.sequencer.safe_read_ts(),
+                        KeyspaceId::TX_OUTCOMES,
+                        Range::prefix(self.tablet_id.encode_fixed().to_vec()),
+                        Direction::Asc,
+                    )
+                    .boxed();
+                while let Some(record) = s.try_next().await? {
+                    let txid = Txid::decode(&record.key.1[..])?;
+                    let tx_outcome_record = TxOutcomeRecord::decode(&record.value)?;
+                    if let TxOutcomeRecord::Committed {
+                        ts: commit_ts,
+                        precond_keys,
+                        mut_keys,
+                    } = tx_outcome_record
+                    {
+                        let _ = sender.send((txid, commit_ts, precond_keys, mut_keys)).await;
                     }
-                    Ok::<_, anyhow::Error>(())
                 }
+                Ok(())
             })
             .await
     }
@@ -1208,7 +1195,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
             let remaining = WAIT_ABORT_TIMEOUT.saturating_sub(elapsed);
             tokio::time::sleep(remaining).await;
             Retry::new()
-                .indefinitely(|| async move { self.try_abort(txid).await })
+                .indefinitely(&async || self.try_abort(txid).await)
                 .await;
         }
     }

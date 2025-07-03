@@ -4,7 +4,10 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 
 use anyhow::anyhow;
+use async_stream::try_stream;
 use async_trait::async_trait;
+use futures::Stream;
+use futures::TryStreamExt;
 use prost::Message;
 
 use crate::obsidian::TabletId;
@@ -13,6 +16,7 @@ use crate::range::Bound;
 use crate::range::Range;
 use crate::tablet::Tablet;
 use crate::tuple_encoding::tuple_decode;
+use crate::tuple_encoding::tuple_decode_prefix;
 use crate::tuple_encoding::tuple_encode;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
@@ -26,20 +30,88 @@ use crate::types::Revision;
 use crate::types::RevisionValue;
 use crate::types::ShardId;
 use crate::types::Timestamp;
+use crate::util::hexlify;
 use crate::util::longest_shared_prefix_len;
 use crate::util::WaitableTimestamp;
 
-// (PFX_SYNC) -> pb::internal::MetaTx
-const PFX_SYNC: u64 = 1;
+#[derive(Clone, Hash, Eq, PartialEq)]
+pub(crate) enum MetaKey {
+    Sync,
+    ColoGroup(ColoGroupId),
+    Keyspace(KeyspaceId),
+    Tablet(TabletId),
+}
 
-// (PFX_COLO_GROUPS, colo_group_id) -> []
-const PFX_COLO_GROUPS: u64 = 2;
+impl MetaKey {
+    // (PFX_SYNC) -> pb::internal::MetaTx
+    const PFX_SYNC: u64 = 1;
 
-// (PFX_KEYSPACES, keyspace_id) -> []
-const PFX_KEYSPACES: u64 = 3;
+    // (PFX_COLO_GROUPS, colo_group_id) -> []
+    const PFX_COLO_GROUPS: u64 = 2;
 
-// (PFX_TABLETS, tablet_id) -> pb::internal::MetaTablet
-pub(crate) const PFX_TABLETS: u64 = 4;
+    // (PFX_KEYSPACES, keyspace_id) -> []
+    const PFX_KEYSPACES: u64 = 3;
+
+    // (PFX_TABLETS, tablet_id) -> pb::internal::MetaTablet
+    const PFX_TABLETS: u64 = 4;
+
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Sync => tuple_encode(&(Self::PFX_SYNC,)),
+            Self::ColoGroup(colo_group_id) => {
+                tuple_encode(&(Self::PFX_COLO_GROUPS, colo_group_id.0 as u64))
+            }
+            Self::Keyspace(keyspace_id) => tuple_encode(&(
+                Self::PFX_KEYSPACES,
+                keyspace_id.0 .0 as u64,
+                keyspace_id.1 as u64,
+            )),
+            Self::Tablet(tablet_id) => {
+                tuple_encode(&(Self::PFX_TABLETS, tablet_id.0 .0 as u64, tablet_id.1))
+            }
+        }
+    }
+
+    pub(crate) fn decode(b: &[u8]) -> anyhow::Result<Self> {
+        let prefix = tuple_decode_prefix::<(u64,)>(b)?.0;
+        match prefix {
+            Self::PFX_SYNC => Ok(Self::Sync),
+            Self::PFX_COLO_GROUPS => {
+                let (_, colo_group_id_raw): (u64, u64) = tuple_decode(b)?;
+                Ok(Self::ColoGroup(ColoGroupId(u32::try_from(
+                    colo_group_id_raw,
+                )?)))
+            }
+            Self::PFX_KEYSPACES => {
+                let (_, colo_group_id_raw, keyspace_id_raw): (u64, u64, u64) = tuple_decode(b)?;
+                Ok(Self::Keyspace(KeyspaceId(
+                    ColoGroupId(u32::try_from(colo_group_id_raw)?),
+                    u32::try_from(keyspace_id_raw)?,
+                )))
+            }
+            Self::PFX_TABLETS => {
+                let (_, shard_id_raw, tablet_id_raw): (u64, u64, u64) = tuple_decode(b)?;
+                Ok(Self::Tablet(TabletId(
+                    ShardId(u32::try_from(shard_id_raw)?),
+                    tablet_id_raw,
+                )))
+            }
+            _ => Err(anyhow!("unrecognized MetaKey prefix {}", prefix)),
+        }
+    }
+
+    fn colo_groups() -> Range<Vec<u8>> {
+        Range::prefix(tuple_encode(&(Self::PFX_COLO_GROUPS,)))
+    }
+
+    fn keyspaces() -> Range<Vec<u8>> {
+        Range::prefix(tuple_encode(&(Self::PFX_KEYSPACES,)))
+    }
+
+    fn tablets() -> Range<Vec<u8>> {
+        Range::prefix(tuple_encode(&(Self::PFX_TABLETS,)))
+    }
+}
 
 #[async_trait]
 pub(crate) trait Meta {
@@ -72,16 +144,11 @@ pub(crate) struct MetaImpl<T> {
 #[async_trait]
 impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
     async fn add_tablet(&self, tablet_id: TabletId) -> anyhow::Result<()> {
-        let ts = self.latest_snapshot().await?;
+        let snapshot = self.latest_snapshot_().await?;
 
-        let tablet_key = tuple_encode(&(PFX_TABLETS, tablet_id.0 .0 as u64, tablet_id.1));
+        let tablet_key = MetaKey::Tablet(tablet_id);
 
-        if self
-            .tablet
-            .get(ts, &(KeyspaceId::META, tablet_key.clone()))
-            .await?
-            .is_some()
-        {
+        if snapshot.exists(&tablet_key).await? {
             return Err(anyhow!("{:?} already exists", tablet_id));
         }
 
@@ -91,10 +158,9 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
         };
 
         self.write_syncable(
-            ts,
-            vec![],
-            BTreeMap::from([(
-                (KeyspaceId::META, tablet_key),
+            snapshot,
+            HashMap::from([(
+                tablet_key,
                 Mutation::Put(starting_meta_tablet_pb.encode_to_vec()),
             )]),
         )
@@ -110,28 +176,25 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
     ) -> anyhow::Result<()> {
         let ranges = ranges_from_splits(initial_splits)?;
 
-        let ts = self.latest_snapshot().await?;
+        let snapshot = self.latest_snapshot_().await?;
 
-        let colo_group_key = tuple_encode(&(PFX_COLO_GROUPS, colo_group_id.0 as u64));
-
-        if self.colo_group_exists(ts, colo_group_id).await? {
+        if snapshot.colo_group_exists(colo_group_id).await? {
             return Err(anyhow!("{:?} already exists", colo_group_id));
         }
 
-        let tablet_ids = self.tablet_ids(ts).await?;
+        let tablet_ids = snapshot.tablet_ids().await?;
         let mut tablet_keys = Vec::with_capacity(tablet_ids.len());
         let mut meta_tablets = Vec::with_capacity(tablet_ids.len());
         for tablet_id in &tablet_ids {
-            let tablet_key = tuple_encode(&(PFX_TABLETS, tablet_id.0 .0 as u64, tablet_id.1));
-            let meta_tablet = self
-                .tablet
-                .get(ts, &(KeyspaceId::META, tablet_key.clone()))
-                .await?
-                .map(|record| pb::internal::MetaTablet::decode(&record.value[..]))
-                .unwrap_or(Ok(pb::internal::MetaTablet {
-                    colo_group_ids: vec![],
-                    ranges: vec![],
-                }))?;
+            let tablet_key = MetaKey::Tablet(*tablet_id);
+            let meta_tablet =
+                snapshot
+                    .get_meta_key(&tablet_key)
+                    .await?
+                    .unwrap_or(pb::internal::MetaTablet {
+                        colo_group_ids: vec![],
+                        ranges: vec![],
+                    });
             tablet_keys.push(tablet_key);
             meta_tablets.push(meta_tablet);
         }
@@ -143,19 +206,15 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
             meta_tablets[tablet_i].ranges.push(range.into());
         }
 
-        let mut muts =
-            BTreeMap::from([((KeyspaceId::META, colo_group_key), Mutation::Put(vec![]))]);
+        let mut muts = HashMap::from([(MetaKey::ColoGroup(colo_group_id), Mutation::Put(vec![]))]);
 
         for (tablet_key, meta_tablet) in
             Iterator::zip(tablet_keys.into_iter(), meta_tablets.into_iter())
         {
-            muts.insert(
-                (KeyspaceId::META, tablet_key),
-                Mutation::Put(meta_tablet.encode_to_vec()),
-            );
+            muts.insert(tablet_key, Mutation::Put(meta_tablet.encode_to_vec()));
         }
 
-        let write_ts = self.write_syncable(ts, vec![], muts).await?;
+        let write_ts = self.write_syncable(snapshot, muts).await?;
 
         log::info!("create_colo_group({:?}) -> {:?}", colo_group_id, write_ts);
 
@@ -163,28 +222,21 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
     }
 
     async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
-        let ts = self.latest_snapshot().await?;
+        let snapshot = self.latest_snapshot_().await?;
 
-        if !self.colo_group_exists(ts, keyspace_id.0).await? {
+        if !snapshot.colo_group_exists(keyspace_id.0).await? {
             return Err(anyhow!("{:?} does not exist", keyspace_id.0));
         }
 
-        let keyspace_key =
-            tuple_encode(&(PFX_KEYSPACES, keyspace_id.0 .0 as u64, keyspace_id.1 as u64));
+        let keyspace_key = MetaKey::Keyspace(keyspace_id);
 
-        if self
-            .tablet
-            .get(ts, &(KeyspaceId::META, keyspace_key.clone()))
-            .await?
-            .is_some()
-        {
+        if snapshot.exists(&keyspace_key).await? {
             return Err(anyhow!("{:?} already exists", keyspace_id));
         }
 
         self.write_syncable(
-            ts,
-            vec![],
-            BTreeMap::from([((KeyspaceId::META, keyspace_key), Mutation::Put(vec![]))]),
+            snapshot,
+            HashMap::from([(keyspace_key, Mutation::Put(vec![]))]),
         )
         .await?;
 
@@ -264,20 +316,8 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
     }
 
     async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
-        let mut out = vec![];
-        let mut maybe_cursor = Some(Range::prefix(tuple_encode(&(PFX_TABLETS,))));
-        while let Some(cursor) = maybe_cursor {
-            let (page, continue_cursor) = self.scan_page(ts, cursor).await?;
-            for record in page {
-                let (_, tablet_shard_id, tablet_id_seq): (u64, u64, u64) =
-                    tuple_decode(&record.key.1)?;
-                let tablet_id = TabletId(ShardId(tablet_shard_id as u32), tablet_id_seq);
-                out.push(tablet_id);
-            }
-            maybe_cursor = continue_cursor;
-        }
-
-        Ok(out)
+        let snapshot = self.snapshot_at(ts);
+        snapshot.tablet_ids().await
     }
 }
 
@@ -285,57 +325,158 @@ impl<T: Tablet + Sync + Send> MetaImpl<T> {
     pub(crate) fn new(tablet: T) -> Self {
         Self {
             tablet,
-            sync_key: tuple_encode(&(PFX_SYNC,)),
+            sync_key: MetaKey::Sync.encode(),
             ts: WaitableTimestamp::new(),
         }
     }
 
-    async fn write_syncable(
-        &self,
-        read_ts: Timestamp,
-        mut preconds: Vec<Precondition>,
-        mut muts: BTreeMap<Key, Mutation>,
+    async fn latest_snapshot_(&self) -> anyhow::Result<MetaSnapshot<'_, T>> {
+        let ts = self.latest_snapshot().await?;
+
+        Ok(MetaSnapshot {
+            tablet: &self.tablet,
+            ts,
+        })
+    }
+
+    fn snapshot_at(&self, ts: Timestamp) -> MetaSnapshot<'_, T> {
+        MetaSnapshot {
+            tablet: &self.tablet,
+            ts,
+        }
+    }
+
+    /// Writes the given mutations if `Meta` has not changed since the given snapshot.
+    async fn write_syncable<'a>(
+        &'a self,
+        snapshot: MetaSnapshot<'a, T>,
+        muts: HashMap<MetaKey, Mutation>,
     ) -> anyhow::Result<Timestamp> {
-        preconds.push(Precondition::NotChangedSince(
-            KeyspaceId::META,
-            self.sync_key.clone(),
-            read_ts,
-        ));
-        if muts.contains_key(&(KeyspaceId::META, self.sync_key.clone())) {
+        if muts.contains_key(&MetaKey::Sync) {
             return Err(anyhow!(
                 "write_syncable contains a mutation to sync_key already"
             ));
         }
-        muts.insert(
-            (KeyspaceId::META, self.sync_key.clone()),
+
+        let preconds = vec![Precondition::NotChangedSince(
+            KeyspaceId::META,
+            self.sync_key.clone(),
+            snapshot.ts,
+        )];
+
+        let mut raw_muts = muts
+            .into_iter()
+            .map(|(meta_key, mutation)| ((KeyspaceId::META, meta_key.encode()), mutation))
+            .collect::<BTreeMap<Key, Mutation>>();
+
+        raw_muts.insert(
+            (KeyspaceId::META, MetaKey::Sync.encode()),
             Mutation::Put(
                 pb::internal::MetaTx {
                     keys: Some(pb::internal::CompressedKeySet::from(
-                        muts.keys().cloned().collect::<BTreeSet<_>>(),
+                        raw_muts.keys().cloned().collect::<BTreeSet<_>>(),
                     )),
                 }
                 .encode_to_vec(),
             ),
         );
 
-        let ts = self.tablet.write(preconds, muts).await?;
+        let ts = self.tablet.write(preconds, raw_muts).await?;
         // TODO: Periodically poll in case we have a success-but-error above.
         _ = self.ts.set(ts);
         Ok(ts)
     }
+}
 
-    async fn colo_group_exists(
+#[async_trait]
+pub(crate) trait MetaReader {
+    async fn get(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>>;
+
+    fn scan(
         &self,
-        ts: Timestamp,
-        colo_group_id: ColoGroupId,
-    ) -> anyhow::Result<bool> {
-        let colo_group_key = tuple_encode(&(PFX_COLO_GROUPS, colo_group_id.0 as u64));
+        range: Range<Vec<u8>>,
+        direction: Direction,
+    ) -> Box<dyn Stream<Item = anyhow::Result<(Vec<u8>, Vec<u8>)>> + Unpin + Send + '_>;
 
+    async fn get_meta_key<V: prost::Message + Default>(
+        &self,
+        meta_key: &MetaKey,
+    ) -> anyhow::Result<Option<V>> {
+        if let Some(value) = self.get(&meta_key.encode()).await? {
+            return Ok(Some(V::decode(&value[..])?));
+        }
+        Ok(None)
+    }
+
+    async fn exists(&self, meta_key: &MetaKey) -> anyhow::Result<bool> {
+        Ok(self.get(&meta_key.encode()).await?.is_some())
+    }
+
+    async fn colo_group_exists(&self, colo_group_id: ColoGroupId) -> anyhow::Result<bool> {
+        self.exists(&MetaKey::ColoGroup(colo_group_id)).await
+    }
+
+    async fn tablet_ids(&self) -> anyhow::Result<Vec<TabletId>> {
+        let mut out = vec![];
+        let mut s = self.scan(MetaKey::tablets(), Direction::Asc);
+        while let Some((key, _)) = s.try_next().await? {
+            if let MetaKey::Tablet(tablet_id) = MetaKey::decode(&key[..])? {
+                out.push(tablet_id);
+            } else {
+                return Err(anyhow!("invalid tablet key {}", hexlify(&key)));
+            }
+        }
+        Ok(out)
+    }
+
+    async fn tablet_metadata(
+        &self,
+        tablet_id: TabletId,
+    ) -> anyhow::Result<pb::internal::MetaTablet> {
+        self.get_meta_key(&MetaKey::Tablet(tablet_id))
+            .await?
+            .ok_or_else(|| anyhow!("{:?} not found", tablet_id))
+    }
+}
+
+struct MetaSnapshot<'a, T> {
+    tablet: &'a T,
+    ts: Timestamp,
+}
+
+#[async_trait]
+impl<'a, T: Tablet + Sync> MetaReader for MetaSnapshot<'a, T> {
+    async fn get(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(self
             .tablet
-            .get(ts, &(KeyspaceId::META, colo_group_key.clone()))
+            .get(self.ts, &(KeyspaceId::META, key.to_vec()))
             .await?
-            .is_some())
+            .map(|record| record.value))
+    }
+
+    fn scan(
+        &self,
+        range: Range<Vec<u8>>,
+        direction: Direction,
+    ) -> Box<dyn Stream<Item = anyhow::Result<(Vec<u8>, Vec<u8>)>> + Unpin + Send + '_> {
+        Box::new(Box::pin(try_stream! {
+            let mut maybe_cursor = Some(range);
+            while let Some(cursor) = maybe_cursor {
+                let (page, continue_cursor) = self.tablet.scan_page(
+                    self.ts,
+                    KeyspaceId::META,
+                    cursor.borrow(),
+                    direction,
+                    1000, // page_size
+                ).await?;
+
+                for record in page {
+                    yield (record.key.1, record.value);
+                }
+
+                maybe_cursor = continue_cursor;
+            }
+        }))
     }
 }
 

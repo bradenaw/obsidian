@@ -233,6 +233,7 @@ impl Element for Vec<u8> {
 pub(crate) trait Tuple: Sized {
     fn encode(&self) -> Vec<u8>;
     fn decode(b: &[u8]) -> anyhow::Result<Self>;
+    fn decode_prefix(b: &[u8]) -> anyhow::Result<Self>;
 }
 
 impl<E: Element> Tuple for (E,) {
@@ -247,6 +248,11 @@ impl<E: Element> Tuple for (E,) {
         if i != b.len() {
             return Err(anyhow!("didn't consume full input"));
         }
+        Ok((e,))
+    }
+
+    fn decode_prefix(b: &[u8]) -> anyhow::Result<Self> {
+        let (e, _) = E::decode(b)?;
         Ok((e,))
     }
 }
@@ -272,6 +278,14 @@ impl<E0: Element, E1: Element> Tuple for (E0, E1) {
         if i != b.len() {
             return Err(anyhow!("didn't consume full input"));
         }
+        Ok((e0, e1))
+    }
+
+    fn decode_prefix(b: &[u8]) -> anyhow::Result<Self> {
+        let mut i = 0;
+        let (e0, e0_size) = E0::decode(&b[i..])?;
+        i += e0_size;
+        let (e1, _) = E1::decode(&b[i..])?;
         Ok((e0, e1))
     }
 }
@@ -304,6 +318,16 @@ impl<E0: Element, E1: Element, E2: Element> Tuple for (E0, E1, E2) {
         }
         Ok((e0, e1, e2))
     }
+
+    fn decode_prefix(b: &[u8]) -> anyhow::Result<Self> {
+        let mut i = 0;
+        let (e0, e0_size) = E0::decode(&b[i..])?;
+        i += e0_size;
+        let (e1, e1_size) = E1::decode(&b[i..])?;
+        i += e1_size;
+        let (e2, _) = E2::decode(&b[i..])?;
+        Ok((e0, e1, e2))
+    }
 }
 
 pub(crate) fn tuple_encode<T: Tuple>(t: &T) -> Vec<u8> {
@@ -312,6 +336,10 @@ pub(crate) fn tuple_encode<T: Tuple>(t: &T) -> Vec<u8> {
 
 pub(crate) fn tuple_decode<T: Tuple>(b: &[u8]) -> anyhow::Result<T> {
     Tuple::decode(b)
+}
+
+pub(crate) fn tuple_decode_prefix<T: Tuple>(b: &[u8]) -> anyhow::Result<T> {
+    Tuple::decode_prefix(b)
 }
 
 #[cfg(test)]

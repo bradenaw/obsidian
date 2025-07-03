@@ -5,6 +5,7 @@ use std::convert::TryFrom;
 use std::fmt::Debug;
 use std::iter::FromIterator;
 use std::iter::IntoIterator;
+use std::ops::Deref;
 
 use anyhow::anyhow;
 
@@ -296,6 +297,63 @@ impl<K: Ord + HasPrefix + Clone> Range<K> {
 
     pub fn adjacent(&self, other: &Range<K>) -> bool {
         self.lower == other.upper || self.upper == other.lower
+    }
+}
+
+impl<K: Deref<Target = [u8]>> Range<K> {
+    pub fn to_std_ops_bounds(
+        &self,
+        max_key_len: usize,
+    ) -> Option<(std::ops::Bound<Vec<u8>>, std::ops::Bound<Vec<u8>>)> {
+        let range_bounds = (
+            match &self.lower {
+                Bound::BeforeAll => std::ops::Bound::Unbounded,
+                Bound::Before(k) => std::ops::Bound::Included(k.to_vec()),
+                Bound::After(k) => std::ops::Bound::Excluded(k.to_vec()),
+                Bound::AfterPrefix(k) => std::ops::Bound::Excluded(
+                    k.iter()
+                        .cloned()
+                        .chain((0..max_key_len.saturating_sub(k.len())).map(|_| 0xFFu8))
+                        .collect(),
+                ),
+                Bound::AfterAll => {
+                    return None;
+                }
+            },
+            match &self.upper {
+                Bound::BeforeAll => {
+                    return None;
+                }
+                Bound::Before(k) => std::ops::Bound::Excluded(k.to_vec()),
+                Bound::After(k) => std::ops::Bound::Included(k.to_vec()),
+                Bound::AfterPrefix(k) => std::ops::Bound::Excluded(
+                    k.iter()
+                        .cloned()
+                        .chain((0..max_key_len.saturating_sub(k.len())).map(|_| 0xFFu8))
+                        .collect(),
+                ),
+                Bound::AfterAll => std::ops::Bound::Unbounded,
+            },
+        );
+
+        // BTreeMap panics in these situations because they're nonsense, but we only produce them
+        // when the range is in fact empty.
+        match (&range_bounds.0, &range_bounds.1) {
+            (std::ops::Bound::Excluded(s), std::ops::Bound::Excluded(e))
+                if s.deref() == e.deref() =>
+            {
+                return None;
+            }
+            (
+                std::ops::Bound::Included(s) | std::ops::Bound::Excluded(s),
+                std::ops::Bound::Included(e) | std::ops::Bound::Excluded(e),
+            ) if s.deref() > e.deref() => {
+                return None;
+            }
+            _ => {}
+        }
+
+        Some(range_bounds)
     }
 }
 
