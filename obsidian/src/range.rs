@@ -326,7 +326,7 @@ impl<K: Deref<Target = [u8]>> Range<K> {
                 }
                 Bound::Before(k) => std::ops::Bound::Excluded(k.to_vec()),
                 Bound::After(k) => std::ops::Bound::Included(k.to_vec()),
-                Bound::AfterPrefix(k) => std::ops::Bound::Excluded(
+                Bound::AfterPrefix(k) => std::ops::Bound::Included(
                     k.iter()
                         .cloned()
                         .chain((0..max_key_len.saturating_sub(k.len())).map(|_| 0xFFu8))

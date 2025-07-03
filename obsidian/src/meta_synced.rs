@@ -1,5 +1,4 @@
 use std::cmp;
-use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::TryFrom;
@@ -16,7 +15,6 @@ use crate::meta::MetaReader;
 use crate::obsidian::Router;
 use crate::obsidian::TabletId;
 use crate::range::Bound;
-use crate::util::hexlify;
 use crate::range::Range;
 use crate::range::RangeSet;
 use crate::router::StaticRouter;
@@ -24,6 +22,7 @@ use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::RevisionValue;
 use crate::types::Timestamp;
+use crate::util::hexlify;
 use crate::util::Background;
 use crate::util::Retry;
 use crate::util::WaitableTimestamp;
@@ -352,15 +351,19 @@ impl MetaSyncedInner {
 
 #[derive(Clone)]
 struct MetaSyncedSnapshot {
-    // TODO: This needs to be an im::OrdMap because we clone this so often.
-    m: BTreeMap<Vec<u8>, Vec<u8>>,
+    // We have to clone these a lot, im::OrdMap makes this cheap.
+    m: im::OrdMap<Vec<u8>, Vec<u8>>,
+    // Keeping track of the maximum key length that exists in m is necessary to transform
+    // Bound::AfterPrefix to a std::ops::Bound, since we need to be able to make an actual key
+    // that's at the end of the prefix, which is done by padding the prefix to the maximum length
+    // with 0xFF.
     max_key_len: usize,
 }
 
 impl MetaSyncedSnapshot {
     fn new() -> Self {
         Self {
-            m: BTreeMap::new(),
+            m: im::OrdMap::new(),
             max_key_len: 0,
         }
     }
