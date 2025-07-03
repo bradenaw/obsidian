@@ -11,8 +11,13 @@ use anyhow::anyhow;
 
 use crate::pb;
 use crate::util::binary_search_by_idx;
+use crate::util::hexlify;
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+pub(crate) trait Key: Deref<Target = [u8]> + Clone + Eq + Ord {}
+
+impl<T: Deref<Target = [u8]> + Clone + Eq + Ord> Key for T {}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub enum Bound<K> {
     BeforeAll,
     Before(K),
@@ -21,23 +26,7 @@ pub enum Bound<K> {
     AfterAll,
 }
 
-pub trait HasPrefix {
-    fn has_prefix(&self, pfx: &Self) -> bool;
-}
-
-impl<T: Eq> HasPrefix for Vec<T> {
-    fn has_prefix(&self, pfx: &Self) -> bool {
-        return self.starts_with(&pfx);
-    }
-}
-
-impl<T: Eq> HasPrefix for &[T] {
-    fn has_prefix(&self, pfx: &Self) -> bool {
-        return self.starts_with(&pfx);
-    }
-}
-
-impl<K> Bound<K> {
+impl<K: Key> Bound<K> {
     pub fn map<K2, F: FnOnce(K) -> K2>(self, f: F) -> Bound<K2> {
         match self {
             Bound::BeforeAll => Bound::BeforeAll,
@@ -49,8 +38,8 @@ impl<K> Bound<K> {
     }
 }
 
-impl<K> Bound<Vec<K>> {
-    pub fn borrow(&self) -> Bound<&[K]> {
+impl Bound<Vec<u8>> {
+    pub fn borrow(&self) -> Bound<&[u8]> {
         match self {
             Bound::BeforeAll => Bound::BeforeAll,
             Bound::Before(v) => Bound::Before(&v[..]),
@@ -61,13 +50,13 @@ impl<K> Bound<Vec<K>> {
     }
 }
 
-impl<K: Clone> Bound<&[K]> {
-    pub fn to_vec(&self) -> Bound<Vec<K>> {
+impl Bound<&[u8]> {
+    pub fn to_vec(&self) -> Bound<Vec<u8>> {
         self.clone().map(Vec::from)
     }
 }
 
-impl<K: Ord + HasPrefix> Bound<K> {
+impl<K: Key> Bound<K> {
     pub fn cmp_key(&self, other: &K) -> Ordering {
         match self {
             Bound::BeforeAll => Ordering::Less,
@@ -86,7 +75,7 @@ impl<K: Ord + HasPrefix> Bound<K> {
                 }
             }
             Bound::AfterPrefix(k) => {
-                if other.has_prefix(k) {
+                if other.starts_with(k) {
                     Ordering::Greater
                 } else {
                     k.cmp(other)
@@ -97,7 +86,7 @@ impl<K: Ord + HasPrefix> Bound<K> {
     }
 }
 
-impl<K: Ord + HasPrefix> Ord for Bound<K> {
+impl<K: Key> Ord for Bound<K> {
     fn cmp(&self, other: &Bound<K>) -> Ordering {
         match (self, other) {
             (Bound::BeforeAll, Bound::BeforeAll) => Ordering::Equal,
@@ -117,23 +106,23 @@ impl<K: Ord + HasPrefix> Ord for Bound<K> {
             (Bound::AfterPrefix(self_k), Bound::AfterPrefix(other_k)) => {
                 if self_k == other_k {
                     Ordering::Equal
-                } else if self_k.has_prefix(other_k) {
+                } else if self_k.starts_with(other_k) {
                     Ordering::Less
-                } else if other_k.has_prefix(self_k) {
+                } else if other_k.starts_with(self_k) {
                     Ordering::Greater
                 } else {
                     self_k.cmp(other_k)
                 }
             }
             (Bound::AfterPrefix(self_k), Bound::Before(other_k) | Bound::After(other_k)) => {
-                if other_k.has_prefix(self_k) {
+                if other_k.starts_with(self_k) {
                     Ordering::Greater
                 } else {
                     self_k.cmp(other_k)
                 }
             }
             (Bound::Before(self_k) | Bound::After(self_k), Bound::AfterPrefix(other_k)) => {
-                if self_k.has_prefix(other_k) {
+                if self_k.starts_with(other_k) {
                     Ordering::Less
                 } else {
                     self_k.cmp(other_k)
@@ -143,31 +132,19 @@ impl<K: Ord + HasPrefix> Ord for Bound<K> {
     }
 }
 
-impl<K: Ord + HasPrefix> PartialOrd for Bound<K> {
+impl<K: Key> PartialOrd for Bound<K> {
     fn partial_cmp(&self, other: &Bound<K>) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<K: Clone> Bound<&K> {
-    pub fn cloned(&self) -> Bound<K> {
-        match self {
-            Bound::BeforeAll => Bound::BeforeAll,
-            Bound::Before(k) => Bound::Before((*k).clone()),
-            Bound::After(k) => Bound::After((*k).clone()),
-            Bound::AfterPrefix(k) => Bound::AfterPrefix((*k).clone()),
-            Bound::AfterAll => Bound::AfterAll,
-        }
-    }
-}
-
-impl<K: Debug> Debug for Bound<K> {
+impl<K: Deref<Target = [u8]>> Debug for Bound<K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Bound::BeforeAll => write!(f, "before_all"),
-            Bound::Before(v) => write!(f, "before({:?})", v),
-            Bound::After(v) => write!(f, "after({:?})", v),
-            Bound::AfterPrefix(v) => write!(f, "after_prefix({:?})", v),
+            Bound::Before(v) => write!(f, "before({:?})", hexlify(v)),
+            Bound::After(v) => write!(f, "after({:?})", hexlify(v)),
+            Bound::AfterPrefix(v) => write!(f, "after_prefix({:?})", hexlify(v)),
             Bound::AfterAll => write!(f, "after_all"),
         }
     }
@@ -204,7 +181,7 @@ impl TryFrom<pb::Bound> for Bound<Vec<u8>> {
     }
 }
 
-#[derive(Eq, PartialEq, Clone, Debug)]
+#[derive(Eq, PartialEq, Clone)]
 pub enum KeyOrBound<K> {
     Key(K),
     Bound(Bound<K>),
@@ -219,7 +196,7 @@ impl<K> KeyOrBound<K> {
     }
 }
 
-impl<K: Ord + HasPrefix> Ord for KeyOrBound<K> {
+impl<K: Key> Ord for KeyOrBound<K> {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
             (KeyOrBound::Key(self_k), KeyOrBound::Key(other_k)) => self_k.cmp(other_k),
@@ -231,9 +208,19 @@ impl<K: Ord + HasPrefix> Ord for KeyOrBound<K> {
         }
     }
 }
-impl<K: Ord + HasPrefix> PartialOrd for KeyOrBound<K> {
+
+impl<K: Key> PartialOrd for KeyOrBound<K> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+impl<K: Deref<Target = [u8]>> Debug for KeyOrBound<K> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Key(k) => write!(f, "key({})", hexlify(k)),
+            Self::Bound(k) => write!(f, "bound({:?})", k),
+        }
     }
 }
 
@@ -243,7 +230,7 @@ pub struct Range<K> {
     pub upper: Bound<K>,
 }
 
-impl<K: Ord + HasPrefix> Range<K> {
+impl<K: Key> Range<K> {
     pub fn empty() -> Self {
         Self {
             lower: Bound::BeforeAll,
@@ -257,9 +244,7 @@ impl<K: Ord + HasPrefix> Range<K> {
             upper: Bound::AfterAll,
         }
     }
-}
 
-impl<K: Ord + HasPrefix + Clone> Range<K> {
     pub fn prefix(pfx: K) -> Self {
         Self {
             lower: Bound::Before(pfx.clone()),
@@ -298,9 +283,7 @@ impl<K: Ord + HasPrefix + Clone> Range<K> {
     pub fn adjacent(&self, other: &Range<K>) -> bool {
         self.lower == other.upper || self.upper == other.lower
     }
-}
 
-impl<K: Deref<Target = [u8]>> Range<K> {
     pub fn to_std_ops_bounds(
         &self,
         max_key_len: usize,
@@ -357,8 +340,8 @@ impl<K: Deref<Target = [u8]>> Range<K> {
     }
 }
 
-impl<K: Clone> Range<&[K]> {
-    pub fn to_vec(&self) -> Range<Vec<K>> {
+impl Range<&[u8]> {
+    pub fn to_vec(&self) -> Range<Vec<u8>> {
         Range {
             lower: self.lower.to_vec(),
             upper: self.upper.to_vec(),
@@ -366,8 +349,8 @@ impl<K: Clone> Range<&[K]> {
     }
 }
 
-impl<K> Range<Vec<K>> {
-    pub fn borrow(&self) -> Range<&[K]> {
+impl Range<Vec<u8>> {
+    pub fn borrow(&self) -> Range<&[u8]> {
         Range {
             lower: self.lower.borrow(),
             upper: self.upper.borrow(),
@@ -375,7 +358,7 @@ impl<K> Range<Vec<K>> {
     }
 }
 
-impl<K: Debug> Debug for Range<K> {
+impl<K: Deref<Target = [u8]>> Debug for Range<K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "({:?}, {:?})", self.lower, self.upper)
     }
@@ -403,46 +386,51 @@ impl TryFrom<pb::Range> for Range<Vec<u8>> {
     }
 }
 
-#[derive(Clone, Debug)]
-struct RangeByLowerBound<K: Ord + HasPrefix>(Range<K>);
-impl<K: Ord + HasPrefix> From<RangeByLowerBound<K>> for Range<K> {
+#[derive(Clone)]
+struct RangeByLowerBound<K>(Range<K>);
+impl<K: Key> From<RangeByLowerBound<K>> for Range<K> {
     fn from(r: RangeByLowerBound<K>) -> Self {
         r.0
     }
 }
-impl<K: Ord + HasPrefix> Eq for RangeByLowerBound<K> {}
-impl<K: Ord + HasPrefix> PartialEq for RangeByLowerBound<K> {
+impl<K: Key> Eq for RangeByLowerBound<K> {}
+impl<K: Key> PartialEq for RangeByLowerBound<K> {
     fn eq(&self, other: &RangeByLowerBound<K>) -> bool {
         self.0.lower == other.0.lower
     }
 }
-impl<K: Ord + HasPrefix> Ord for RangeByLowerBound<K> {
+impl<K: Key> Ord for RangeByLowerBound<K> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.0.lower.cmp(&other.0.lower)
     }
 }
-impl<K: Ord + HasPrefix> PartialOrd for RangeByLowerBound<K> {
+impl<K: Key> PartialOrd for RangeByLowerBound<K> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
-impl<K: Ord + HasPrefix> Borrow<Bound<K>> for RangeByLowerBound<K> {
+impl<K: Key> Borrow<Bound<K>> for RangeByLowerBound<K> {
     fn borrow(&self) -> &Bound<K> {
         &self.0.lower
     }
 }
-impl<K: Ord + HasPrefix> Borrow<Range<K>> for RangeByLowerBound<K> {
+impl<K: Key> Borrow<Range<K>> for RangeByLowerBound<K> {
     fn borrow(&self) -> &Range<K> {
         &self.0
     }
 }
+impl<K: Deref<Target = [u8]>> Debug for RangeByLowerBound<K> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
-#[derive(Clone, Debug)]
-pub struct RangeSet<K: Ord + HasPrefix> {
+#[derive(Clone)]
+pub struct RangeSet<K> {
     ranges: BTreeSet<RangeByLowerBound<K>>,
 }
 
-impl<K: Ord + HasPrefix + Clone> RangeSet<K> {
+impl<K: Key> RangeSet<K> {
     pub fn new() -> Self {
         Self {
             ranges: BTreeSet::new(),
@@ -640,7 +628,7 @@ impl<K: Ord + HasPrefix + Clone> RangeSet<K> {
     }
 }
 
-impl<K: Ord + HasPrefix + Clone> From<Range<K>> for RangeSet<K> {
+impl<K: Key> From<Range<K>> for RangeSet<K> {
     fn from(range: Range<K>) -> RangeSet<K> {
         let mut result = RangeSet::new();
         if !range.is_empty() {
@@ -652,7 +640,7 @@ impl<K: Ord + HasPrefix + Clone> From<Range<K>> for RangeSet<K> {
 
 impl<K> FromIterator<Range<K>> for RangeSet<K>
 where
-    K: Ord + HasPrefix + Clone,
+    K: Key,
 {
     fn from_iter<T>(iter: T) -> Self
     where
@@ -666,14 +654,28 @@ where
     }
 }
 
-struct Intersections<'a, K: Ord + HasPrefix> {
+impl<K: Deref<Target = [u8]>> Debug for RangeSet<K> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("{")?;
+        for (i, range) in self.ranges.iter().enumerate() {
+            if i != 0 {
+                f.write_str(", ")?;
+            }
+            range.fmt(f)?;
+        }
+        f.write_str("}")?;
+        Ok(())
+    }
+}
+
+struct Intersections<'a, K: Key> {
     a: &'a RangeSet<K>,
     a_cursor: Option<&'a Range<K>>,
     b: &'a RangeSet<K>,
     b_cursor: Option<&'a Range<K>>,
 }
 
-impl<'a, K: Ord + HasPrefix + Clone> Intersections<'a, K> {
+impl<'a, K: Key> Intersections<'a, K> {
     fn new(a: &'a RangeSet<K>, b: &'a RangeSet<K>) -> Self {
         Self {
             a,
@@ -684,7 +686,7 @@ impl<'a, K: Ord + HasPrefix + Clone> Intersections<'a, K> {
     }
 }
 
-impl<'a, K: Ord + HasPrefix + Clone> Iterator for Intersections<'a, K> {
+impl<'a, K: Key> Iterator for Intersections<'a, K> {
     type Item = Range<K>;
 
     fn next(&mut self) -> Option<Self::Item> {
