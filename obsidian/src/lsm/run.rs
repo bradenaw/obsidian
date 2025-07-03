@@ -40,7 +40,9 @@ pub(super) struct Run<R> {
     min_ts: Timestamp,
     max_ts: Timestamp,
 
-    index: PrefixCompressedKV<u32>,
+    // The run index is a map with one item per data block. The key is the minimum key that appears
+    // in that block, and the value is the file offset of the block trailer.
+    index: PrefixCompressedKV<Vec<u8>, u32>,
 
     min_key: Vec<u8>,
     max_key: Vec<u8>,
@@ -119,7 +121,7 @@ impl<R: FileReader> Run<R> {
                     (index_block_offset as u64) + (header.len() as u64) + (max_key_len as u64),
                 )
                 .await?;
-            PrefixCompressedKV::decode(index_bytes)
+            PrefixCompressedKV::open(index_bytes)
         };
 
         let min_key = index.get_key(0);
@@ -366,7 +368,8 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
             return Err(anyhow!("empty run"));
         }
 
-        let index_compressed = PrefixCompressedKV::encode(&self.index);
+        let mut encoded_index = Vec::new();
+        PrefixCompressedKV::<(), _>::write(&mut encoded_index, &self.index);
 
         let index_block_offset = self.bytes_written;
         let mut header = [0u8; INDEX_BLOCK_HEADER_SIZE];
@@ -376,10 +379,10 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
         LittleEndian::write_u64(&mut header[24..32], self.min_ts.as_nanos());
         LittleEndian::write_u64(&mut header[32..40], self.max_ts.as_nanos());
         LittleEndian::write_u32(&mut header[40..44], self.last_key.len() as u32);
-        LittleEndian::write_u32(&mut header[44..48], index_compressed.len() as u32);
+        LittleEndian::write_u32(&mut header[44..48], encoded_index.len() as u32);
         self.w.write_all(&header[..]).await?;
         self.w.write_all(&self.last_key[..]).await?;
-        self.w.write_all(&index_compressed).await?;
+        self.w.write_all(&encoded_index).await?;
 
         let mut index_block_offset_buf = [0u8; 4];
         LittleEndian::write_u32(&mut index_block_offset_buf[..], index_block_offset as u32);

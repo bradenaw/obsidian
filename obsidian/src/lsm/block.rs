@@ -1,5 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
+use std::ops::Deref;
 
 use anyhow::anyhow;
 use async_stream::try_stream;
@@ -8,6 +9,7 @@ use byteorder::LittleEndian;
 use futures::Stream;
 
 use crate::lsm::util::LsmRevision;
+use crate::lsm::util::PackedVec2;
 use crate::lsm::util::PrefixCompressedKV;
 use crate::range::KeyOrBound;
 use crate::range::Range;
@@ -17,31 +19,26 @@ use crate::types::HistoryRange;
 use crate::types::RevisionValue;
 use crate::types::Timestamp;
 use crate::util::binary_search_by_idx;
-use crate::util::byte_width;
 use crate::util::hexlify;
 use crate::util::IteratorEither;
 
 /// A Block is conceptually a BTreeMap<Vec<u8>, BTreeMap<Timestamp, RevisionValue>>, but it is
 /// compactly serialized and can be used as-is without fully deserializing.
 pub(super) struct Block<'a, R> {
-    values_len: usize,
-    n_versions: usize,
+    values_offset_in_file: u64,
+    values_len_bytes: u64,
     min_ts: Timestamp,
-    ts_bytes: usize,
-    offset_bytes: usize,
-    index: PrefixCompressedKV<u16>,
-    versions_bytes: Vec<u8>,
-    header_offset: u64,
+    key_index: PrefixCompressedKV<Vec<u8>, u16>,
+    version_index: BlockVersions<Vec<u8>>,
     reader: &'a R,
 }
 
-const BLOCK_INDEX_HEADER_SIZE: usize = 18;
+const BLOCK_TRAILER_SIZE: usize = 20;
 
 impl<'a, R> Block<'a, R> {
-    /// Assumes that kvs values are in reverse order by timestamp and that the total size of all
-    /// values is less than 64K.
+    /// Assumes that kvs values are in reverse order by timestamp.
     ///
-    /// Returns the encoded block and the offset of the header within the block.
+    /// Returns the encoded block and the offset of the trailer within the block.
     pub(super) fn encode(
         kvs: &BTreeMap<Vec<u8>, Vec<(Timestamp, RevisionValue)>>,
     ) -> anyhow::Result<(Vec<u8>, usize)> {
@@ -103,37 +100,20 @@ impl<'a, R> Block<'a, R> {
         //   key_offset  versions_offset
         //   0           0
         //   3           2
-        let (min_ts, max_ts, values_len) = kvs
-            .values()
-            .map(|versions| {
-                let min_ts = versions.last()?.0;
-                let max_ts = versions.first()?.0;
-                let values_len: usize = versions.iter().map(|(_, v)| v.len()).sum();
-                Some((min_ts, max_ts, values_len))
-            })
-            .flatten()
-            .reduce(
-                |(min_ts0, max_ts0, values_len0), (min_ts1, max_ts1, values_len1)| {
-                    (
-                        std::cmp::min(min_ts0, min_ts1),
-                        std::cmp::max(max_ts0, max_ts1),
-                        values_len0 + values_len1,
-                    )
-                },
-            )
-            .ok_or_else(|| anyhow!("malformed block"))?;
-        // Shift here for room for the tombstone bit.
-        let bytes_per_ts_offset =
-            std::cmp::max(byte_width((max_ts.as_nanos() - min_ts.as_nanos()) << 1), 1);
-        let bytes_per_value_offset = std::cmp::max(byte_width(values_len as u64), 1);
 
-        let mut index: BTreeMap<Vec<u8>, u16> = BTreeMap::new();
+        let min_ts = kvs
+            .values()
+            .map(|versions| Some(versions.last()?.0))
+            .flatten()
+            .min()
+            .ok_or_else(|| anyhow!("malformed block"))?;
+
+        let mut key_index: BTreeMap<Vec<u8>, u16> = BTreeMap::new();
         let mut block = vec![];
 
-        let mut n_versions = 0;
-        let mut versions = Vec::new();
+        let mut version_index = Vec::new();
         for (key, key_versions) in kvs {
-            index.insert(key.clone(), n_versions as u16);
+            key_index.insert(key.clone(), version_index.len() as u16);
             for (ts, value) in key_versions {
                 let value_offset = block.len();
                 let tombstone_bit = match value {
@@ -146,74 +126,77 @@ impl<'a, R> Block<'a, R> {
                 let ts_offset_and_tombstone =
                     ((ts.as_nanos() - min_ts.as_nanos()) << 1) | tombstone_bit;
 
-                let mut buf = [0u8; 16];
-                LittleEndian::write_u64(&mut buf[..], ts_offset_and_tombstone);
-                LittleEndian::write_u64(&mut buf[bytes_per_ts_offset..], value_offset as u64);
-                versions.extend_from_slice(&buf[..bytes_per_ts_offset + bytes_per_value_offset]);
+                version_index.push((ts_offset_and_tombstone, value_offset as u64));
             }
-            n_versions += key_versions.len();
         }
-        let values_len = block.len();
-        let encoded_index = PrefixCompressedKV::encode(&index);
 
-        let mut header = [0u8; BLOCK_INDEX_HEADER_SIZE];
-        LittleEndian::write_u32(&mut header[0..4], values_len as u32);
-        LittleEndian::write_u16(&mut header[4..6], n_versions as u16);
-        LittleEndian::write_u64(&mut header[6..14], min_ts.as_nanos());
-        LittleEndian::write_u16(&mut header[14..16], encoded_index.len() as u16);
-        header[16] = bytes_per_ts_offset as u8;
-        header[17] = bytes_per_value_offset as u8;
+        let key_index_offset_in_block = block.len();
+        PrefixCompressedKV::<(), _>::write(&mut block, &key_index);
+        let version_index_offset_in_block = block.len();
+        PackedVec2::<()>::write(&mut block, &version_index);
 
-        let header_idx = block.len();
-        block.extend_from_slice(&header[..]);
-        block.extend_from_slice(&encoded_index[..]);
-        block.extend_from_slice(&versions[..]);
+        let trailer_offset_in_block = block.len();
+        let mut trailer = [0u8; BLOCK_TRAILER_SIZE];
+        LittleEndian::write_u32(&mut trailer[0..4], key_index_offset_in_block as u32);
+        LittleEndian::write_u32(&mut trailer[4..8], version_index_offset_in_block as u32);
+        LittleEndian::write_u64(&mut trailer[8..16], min_ts.as_nanos());
+        LittleEndian::write_u32(
+            &mut trailer[16..20],
+            (block.len() + BLOCK_TRAILER_SIZE) as u32,
+        );
+        block.extend_from_slice(&trailer[..]);
 
-        Ok((block, header_idx))
+        Ok((block, trailer_offset_in_block))
     }
 }
 
 impl<'a, R: FileReader> Block<'a, R> {
-    pub(super) async fn open(reader: &'a R, header_offset: u64) -> anyhow::Result<Block<'a, R>> {
-        let mut header = [0u8; BLOCK_INDEX_HEADER_SIZE];
+    pub(super) async fn open(
+        reader: &'a R,
+        trailer_offset_in_file: u64,
+    ) -> anyhow::Result<Block<'a, R>> {
+        let mut trailer = [0u8; BLOCK_TRAILER_SIZE];
 
-        reader.read_exact_at(&mut header[..], header_offset).await?;
+        reader
+            .read_exact_at(&mut trailer[..], trailer_offset_in_file)
+            .await?;
 
-        let values_len = LittleEndian::read_u32(&header[0..4]) as usize;
-        let n_versions = LittleEndian::read_u16(&header[4..6]) as usize;
-        let min_ts = Timestamp::from_nanos(LittleEndian::read_u64(&header[6..14]));
-        let index_len = LittleEndian::read_u16(&header[14..16]) as usize;
-        let bytes_per_ts_offset = header[16] as usize;
-        let bytes_per_value_offset = header[17] as usize;
-        let versions_len = n_versions * (bytes_per_ts_offset + bytes_per_value_offset);
+        let key_index_offset_in_block = LittleEndian::read_u32(&trailer[0..4]) as u64;
+        let version_index_offset_in_block = LittleEndian::read_u32(&trailer[4..8]) as u64;
+        let min_ts = Timestamp::from_nanos(LittleEndian::read_u64(&trailer[8..16]));
+        let block_size = LittleEndian::read_u32(&trailer[16..20]) as u64;
 
-        let mut index_bytes = vec![0u8; index_len];
+        let block_offset_in_file =
+            trailer_offset_in_file + (BLOCK_TRAILER_SIZE as u64) - block_size;
+        let trailer_offset_in_block = trailer_offset_in_file - block_offset_in_file;
+
+        let key_index_len = (version_index_offset_in_block - key_index_offset_in_block) as usize;
+        let version_index_len = (trailer_offset_in_block - version_index_offset_in_block) as usize;
+
+        let mut key_index_and_version_index_bytes = vec![0u8; key_index_len + version_index_len];
         reader
             .read_exact_at(
-                &mut index_bytes[..],
-                header_offset + (BLOCK_INDEX_HEADER_SIZE as u64),
+                &mut key_index_and_version_index_bytes[..],
+                block_offset_in_file + key_index_offset_in_block,
             )
             .await?;
-        let index = PrefixCompressedKV::decode(index_bytes);
 
-        let mut versions_bytes = vec![0u8; versions_len];
-        reader
-            .read_exact_at(
-                &mut versions_bytes[..],
-                header_offset + (BLOCK_INDEX_HEADER_SIZE as u64) + (index_len as u64),
-            )
-            .await?;
+        let version_index_bytes = key_index_and_version_index_bytes.split_off(key_index_len);
+        let key_index_bytes = key_index_and_version_index_bytes;
+
+        let key_index = PrefixCompressedKV::open(key_index_bytes);
 
         Ok(Self {
+            values_offset_in_file: block_offset_in_file,
+            values_len_bytes: key_index_offset_in_block,
             reader,
-            values_len,
-            n_versions,
             min_ts,
-            index,
-            versions_bytes,
-            header_offset,
-            ts_bytes: bytes_per_ts_offset,
-            offset_bytes: bytes_per_value_offset,
+            key_index,
+            version_index: BlockVersions {
+                min_ts: min_ts,
+                end_offset: key_index_offset_in_block as usize,
+                encoded: PackedVec2::open(version_index_bytes),
+            },
         })
     }
 
@@ -222,7 +205,7 @@ impl<'a, R: FileReader> Block<'a, R> {
         ts: Timestamp,
         k: &[u8],
     ) -> anyhow::Result<Option<(Timestamp, RevisionValue)>> {
-        let key_idx = match self.index.search(k) {
+        let key_idx = match self.key_index.search(k) {
             Ok(idx) => idx,
             Err(_) => return Ok(None),
         };
@@ -254,18 +237,18 @@ impl<'a, R: FileReader> Block<'a, R> {
                 Direction::Asc => {
                     let lower_key_idx =
                         binary_search_by_idx(
-                            self.index.len(),
+                            self.key_index.len(),
                             KeyOrBound::Bound(range.lower.clone()),
-                            |idx| KeyOrBound::Key(self.index.get_key(idx)),
+                            |idx| KeyOrBound::Key(self.key_index.get_key(idx)),
                         )
                         .unwrap_or_else(core::convert::identity);
-                    IteratorEither::Left(lower_key_idx..self.index.len())
+                    IteratorEither::Left(lower_key_idx..self.key_index.len())
                 },
                 Direction::Desc => {
                     let upper_key_idx = binary_search_by_idx(
-                            self.index.len(),
+                            self.key_index.len(),
                             KeyOrBound::Bound(range.upper.clone()),
-                            |idx| KeyOrBound::Key(self.index.get_key(idx)),
+                            |idx| KeyOrBound::Key(self.key_index.get_key(idx)),
                         )
                         .unwrap_or_else(core::convert::identity);
 
@@ -274,7 +257,7 @@ impl<'a, R: FileReader> Block<'a, R> {
             };
 
             for j in key_idxs {
-                let key = self.index.get_key(j);
+                let key = self.key_index.get_key(j);
                 if !range.contains(&key) {
                     break;
                 }
@@ -303,14 +286,14 @@ impl<'a, R: FileReader> Block<'a, R> {
     ) -> impl Stream<Item = anyhow::Result<LsmRevision>> + '_ {
         try_stream! {
             let upper_key_idx = binary_search_by_idx(
-                    self.index.len(),
+                    self.key_index.len(),
                     KeyOrBound::Bound(range.upper.clone()),
-                    |idx| KeyOrBound::Key(self.index.get_key(idx)),
+                    |idx| KeyOrBound::Key(self.key_index.get_key(idx)),
                 )
                 .unwrap_or_else(core::convert::identity);
 
             for j in (0..upper_key_idx).rev() {
-                let key = self.index.get_key(j);
+                let key = self.key_index.get_key(j);
                 if !range.contains(&key) {
                     break;
                 }
@@ -340,7 +323,7 @@ impl<'a, R: FileReader> Block<'a, R> {
     ) -> impl Stream<Item = anyhow::Result<(Timestamp, RevisionValue)>> + 'b {
         let k_owned = k.to_vec();
         try_stream! {
-            let key_idx = match self.index.search(&k_owned) {
+            let key_idx = match self.key_index.search(&k_owned) {
                 Ok(idx) => idx,
                 Err(_) => {
                     return;
@@ -384,8 +367,8 @@ impl<'a, R: FileReader> Block<'a, R> {
     /// Reverse(ts)).
     pub(super) fn stream(&self) -> impl Stream<Item = anyhow::Result<LsmRevision>> + '_ {
         try_stream! {
-            for j in 0..self.index.len() {
-                let key = self.index.get_key(j);
+            for j in 0..self.key_index.len() {
+                let key = self.key_index.get_key(j);
                 let versions = self.versions_for_key(j);
                 for k in 0..versions.len() {
                     let ts = versions.ts(k);
@@ -396,42 +379,32 @@ impl<'a, R: FileReader> Block<'a, R> {
         }
     }
 
-    fn versions(&self) -> BlockVersions<'_> {
-        BlockVersions {
-            ts_bytes: self.ts_bytes,
-            offset_bytes: self.offset_bytes,
-            min_ts: self.min_ts,
-            end_offset: self.values_len,
-            b: &self.versions_bytes[..],
-        }
-    }
-
-    fn versions_for_key(&self, key_idx: usize) -> BlockVersions<'_> {
-        let start_idx = self.index.get_value(key_idx) as usize;
-        let end_idx = if key_idx == self.index.len() - 1 {
-            self.n_versions
+    fn versions_for_key(&self, key_idx: usize) -> BlockVersions<&[u8]> {
+        let start_idx = self.key_index.get_value(key_idx) as usize;
+        let end_idx = if key_idx == self.key_index.len() - 1 {
+            self.version_index.len()
         } else {
-            self.index.get_value(key_idx + 1) as usize
+            self.key_index.get_value(key_idx + 1) as usize
         };
-        self.versions().slice(start_idx, end_idx)
+        self.version_index.slice(start_idx, end_idx)
     }
 
     async fn value<'b>(
         &'b self,
-        versions: &BlockVersions<'b>,
+        versions: &BlockVersions<&'b [u8]>,
         idx: usize,
     ) -> anyhow::Result<RevisionValue> {
-        let (value_start, value_end) = match versions.value_offsets(idx) {
+        let (value_start_in_block, value_end_in_block) = match versions.value_offsets(idx) {
             Some(v) => v,
             None => return Ok(RevisionValue::Tombstone),
         };
-        let value_len = value_end - value_start;
+        let value_len = value_end_in_block - value_start_in_block;
 
         let mut value = vec![0u8; value_len];
         self.reader
             .read_exact_at(
                 &mut value[..],
-                self.header_offset - (self.values_len as u64) + (value_start as u64),
+                self.values_offset_in_file + (value_start_in_block as u64),
             )
             .await?;
 
@@ -439,49 +412,23 @@ impl<'a, R: FileReader> Block<'a, R> {
     }
 }
 
-struct BlockVersions<'a> {
-    ts_bytes: usize,
-    offset_bytes: usize,
+struct BlockVersions<B> {
     min_ts: Timestamp,
     end_offset: usize,
-    b: &'a [u8],
+    encoded: PackedVec2<B>,
 }
 
-impl<'a> BlockVersions<'a> {
+impl<B: Deref<Target = [u8]>> BlockVersions<B> {
     pub(super) fn len(&self) -> usize {
-        self.b.len() / (self.ts_bytes + self.offset_bytes)
+        self.encoded.len()
     }
 
     pub(super) fn elem(&self, idx: usize) -> (Timestamp, bool, usize) {
-        let width = self.ts_bytes + self.offset_bytes;
-        let elem = &self.b[width * idx..width * (idx + 1)];
-        let mut ts_offset_buf = [0u8; 8];
-        ts_offset_buf[..self.ts_bytes].copy_from_slice(&elem[..self.ts_bytes]);
-        let ts_offset_and_tombstone = LittleEndian::read_u64(&ts_offset_buf[..]);
+        let (ts_offset_and_tombstone, value_offset) = self.encoded.get(idx);
         let tombstone = ts_offset_and_tombstone & 1 == 1;
         let ts = Timestamp::from_nanos((ts_offset_and_tombstone >> 1) + self.min_ts.as_nanos());
 
-        let mut value_offset_buf = [0u8; 8];
-        value_offset_buf[..self.offset_bytes].copy_from_slice(&elem[self.ts_bytes..]);
-        let value_offset = LittleEndian::read_u64(&value_offset_buf[..]) as usize;
-        (ts, tombstone, value_offset)
-    }
-
-    fn slice(&self, start_idx: usize, end_idx: usize) -> BlockVersions<'a> {
-        let width = self.ts_bytes + self.offset_bytes;
-        let b = &self.b[start_idx * width..end_idx * width];
-        let end_offset = if end_idx == self.len() {
-            self.end_offset
-        } else {
-            self.elem(end_idx).2
-        };
-        BlockVersions {
-            ts_bytes: self.ts_bytes,
-            offset_bytes: self.offset_bytes,
-            min_ts: self.min_ts,
-            end_offset,
-            b,
-        }
+        (ts, tombstone, value_offset as usize)
     }
 
     pub(super) fn ts(&self, idx: usize) -> Timestamp {
@@ -500,22 +447,42 @@ impl<'a> BlockVersions<'a> {
         };
         Some((start, end))
     }
+
+    fn slice<'a>(&'a self, start_idx: usize, end_idx: usize) -> BlockVersions<&'a [u8]> {
+        let end_offset = if end_idx == self.len() {
+            self.end_offset
+        } else {
+            self.elem(end_idx).2
+        };
+        BlockVersions {
+            min_ts: self.min_ts,
+            end_offset,
+            encoded: self.encoded.slice(start_idx, end_idx),
+        }
+    }
+
+    fn borrow<'a>(&'a self) -> BlockVersions<&'a [u8]> {
+        BlockVersions {
+            min_ts: self.min_ts,
+            end_offset: self.end_offset,
+            encoded: self.encoded.borrow(),
+        }
+    }
 }
 
 pub(super) async fn dump_block<'a, R: FileReader>(block: &Block<'a, R>) -> anyhow::Result<()> {
-    println!("    n_keys: {}", block.index.len());
-    println!("    n_versions: {}", block.n_versions);
-    println!("    values_len: {}", block.values_len);
+    println!("    n_keys: {}", block.key_index.len());
+    println!("    n_versions: {}", block.version_index.len());
+    println!("    values_bytes: {}", block.values_len_bytes);
     println!("      == keys ======");
-    for i in 0..block.index.len() {
-        let key = block.index.get_key(i);
-        let versions_offset = block.index.get_value(i);
+    for i in 0..block.key_index.len() {
+        let key = block.key_index.get_key(i);
+        let versions_offset = block.key_index.get_value(i);
         println!("        [{}] {}", hexlify(&key), versions_offset);
     }
-    let versions = block.versions();
     println!("      == versions ======");
-    for i in 0..block.n_versions {
-        let value_str = match versions.value_offsets(i) {
+    for i in 0..block.version_index.len() {
+        let value_str = match block.version_index.value_offsets(i) {
             Some((value_start, value_end)) => format!("({}, {})", value_start, value_end),
             None => "<TOMBSTONE>".into(),
         };
@@ -523,9 +490,9 @@ pub(super) async fn dump_block<'a, R: FileReader>(block: &Block<'a, R>) -> anyho
         println!(
             "        {} {} {} {:?}",
             i,
-            versions.ts(i),
+            block.version_index.ts(i),
             value_str,
-            block.value(&versions, i).await?,
+            block.value(&block.version_index.borrow(), i).await?,
         );
     }
     Ok(())
@@ -577,10 +544,10 @@ mod test {
             );
             kvs
         };
-        let (encoded, header_offset) = Block::<()>::encode(&kvs)?;
+        let (encoded, trailer_offset) = Block::<()>::encode(&kvs)?;
 
         let f = TestFile::from(encoded);
-        let block = Block::open(&f, header_offset as u64).await?;
+        let block = Block::open(&f, trailer_offset as u64).await?;
 
         assert_eq!(
             block.get(Timestamp(279), &aa[..]).await?,
@@ -673,9 +640,9 @@ mod test {
             kvs.insert(key_str.into(), versions);
         }
 
-        let (encoded, header_offset) = Block::<()>::encode(&kvs)?;
+        let (encoded, trailer_offset) = Block::<()>::encode(&kvs)?;
         let f = TestFile::from(encoded);
-        let block = Block::open(&f, header_offset as u64).await?;
+        let block = Block::open(&f, trailer_offset as u64).await?;
 
         async fn check<'a, R: FileReader>(
             block: &Block<'a, R>,
@@ -780,9 +747,9 @@ mod test {
         ]
         .into_iter()
         .collect();
-        let (encoded, header_offset) = Block::<()>::encode(&kvs)?;
+        let (encoded, trailer_offset) = Block::<()>::encode(&kvs)?;
         let f = TestFile::from(encoded);
-        let block = Block::open(&f, header_offset as u64).await?;
+        let block = Block::open(&f, trailer_offset as u64).await?;
 
         assert_eq!(
             block

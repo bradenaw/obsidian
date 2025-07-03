@@ -1,7 +1,9 @@
+use std::cmp;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::marker::PhantomData;
+use std::ops::Deref;
 
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
@@ -51,19 +53,19 @@ impl Debug for LsmRevision {
 }
 
 #[derive(Clone)]
-pub(crate) struct PrefixCompressedKV<V> {
+pub(crate) struct PrefixCompressedKV<B, V> {
     v: PhantomData<V>,
     offset_width: usize,
     prefix_len: usize,
     n: usize,
     suffixes_len: usize,
-    data: Vec<u8>,
+    data: B,
 }
 
 const PREFIX_COMPRESSED_KV_HEADER_SIZE: usize = 9;
 
-impl<V: FixedSizeSerializable> PrefixCompressedKV<V> {
-    pub(super) fn encode(m: &BTreeMap<Vec<u8>, V>) -> Vec<u8> {
+impl<B, V: FixedSizeSerializable> PrefixCompressedKV<B, V> {
+    pub(super) fn write(out: &mut Vec<u8>, m: &BTreeMap<Vec<u8>, V>) {
         let prefix: Vec<u8> = match (m.first_key_value(), m.last_key_value()) {
             (Some((first_key, _)), Some((last_key, _))) => {
                 longest_shared_prefix(&first_key[..], &last_key[..])
@@ -98,19 +100,17 @@ impl<V: FixedSizeSerializable> PrefixCompressedKV<V> {
         LittleEndian::write_u16(&mut header[3..5], prefix.len() as u16);
         LittleEndian::write_u32(&mut header[5..9], suffixes.len() as u32);
 
-        let mut out = Vec::with_capacity(
-            header.len() + prefix.len() + offset_and_values.len() + suffixes.len(),
-        );
+        out.reserve(header.len() + prefix.len() + offset_and_values.len() + suffixes.len());
 
         out.extend_from_slice(&header[..]);
         out.extend_from_slice(&prefix[..]);
         out.extend_from_slice(&offset_and_values[..]);
         out.extend_from_slice(&suffixes[..]);
-
-        out
     }
+}
 
-    pub(super) fn decode(data: Vec<u8>) -> Self {
+impl<B: Deref<Target = [u8]>, V: FixedSizeSerializable> PrefixCompressedKV<B, V> {
+    pub(super) fn open(data: B) -> Self {
         let header = &data[0..PREFIX_COMPRESSED_KV_HEADER_SIZE];
         let offset_width = header[0] as usize;
         let n = LittleEndian::read_u16(&header[1..3]) as usize;
@@ -230,5 +230,142 @@ impl FixedSizeSerializable for u32 {
     }
     fn write(&self, b: &mut [u8]) {
         LittleEndian::write_u32(b, *self);
+    }
+}
+
+/// PackedVec2 encodes a sequence of `u64` such that each element is a fixed width, but each
+/// uses only the minumum number of bytes needed to store the largest value.
+pub(super) struct PackedVec<B> {
+    encoded: B,
+    width: usize,
+}
+
+impl<B: Deref<Target = [u8]>> PackedVec<B> {
+    fn open(encoded: B) -> Self {
+        let width = encoded[encoded.len() - 1] as usize;
+        Self {
+            encoded: encoded,
+            width,
+        }
+    }
+
+    fn write(out: &mut Vec<u8>, v: &Vec<u64>) {
+        let mut width = 1;
+        for item in v {
+            width = cmp::max(width, byte_width(*item));
+        }
+
+        out.reserve(v.len() * width + 1);
+
+        for item in v {
+            let mut buf = [0u8; 8];
+            LittleEndian::write_u64(&mut buf[..], *item);
+            out.extend_from_slice(&buf[..width]);
+        }
+
+        out.push(width as u8);
+    }
+
+    fn get(&self, i: usize) -> u64 {
+        let offset = i * self.width;
+        let mut b = [0u8; 8];
+        b[..self.width].copy_from_slice(&self.encoded[offset..offset + self.width]);
+        LittleEndian::read_u64(&b[..])
+    }
+
+    fn len(&self) -> usize {
+        (self.encoded.len() - 1) / self.width
+    }
+}
+
+/// PackedVec2 encodes a sequence of `(u64, u64)` such that each element is a fixed width, but each
+/// uses only the minumum number of bytes needed to store the largest value.
+pub(super) struct PackedVec2<B> {
+    encoded: B,
+    width_a: usize,
+    width_b: usize,
+}
+
+impl<B> PackedVec2<B> {
+    pub(super) fn write(out: &mut Vec<u8>, v: &Vec<(u64, u64)>) {
+        let mut width_a = 1;
+        let mut width_b = 1;
+        for (a, b) in v {
+            width_a = cmp::max(width_a, byte_width(*a));
+            width_b = cmp::max(width_b, byte_width(*b));
+        }
+
+        out.reserve(v.len() * (width_a + width_b) + 2);
+
+        for (a, b) in v {
+            let mut buf = [0u8; 8];
+            LittleEndian::write_u64(&mut buf[..], *a);
+            out.extend_from_slice(&buf[..width_a]);
+
+            let mut buf = [0u8; 8];
+            LittleEndian::write_u64(&mut buf[..], *b);
+            out.extend_from_slice(&buf[..width_b]);
+        }
+
+        out.push(width_a as u8);
+        out.push(width_b as u8);
+
+        println!(
+            "len = {}, width_a = {}, width_b = {}",
+            v.len(),
+            width_a,
+            width_b
+        );
+    }
+}
+
+impl<B: Deref<Target = [u8]>> PackedVec2<B> {
+    pub(super) fn open(encoded: B) -> Self {
+        let width_a = encoded[encoded.len() - 2] as usize;
+        let width_b = encoded[encoded.len() - 1] as usize;
+        Self {
+            encoded: encoded,
+            width_a,
+            width_b,
+        }
+    }
+
+    pub(super) fn get(&self, i: usize) -> (u64, u64) {
+        let offset_a = i * self.width();
+        let offset_b = i * self.width() + self.width_a;
+
+        let mut buf = [0u8; 8];
+        buf[..self.width_a].copy_from_slice(&self.encoded[offset_a..offset_a + self.width_a]);
+        let a = LittleEndian::read_u64(&buf[..]);
+
+        let mut buf = [0u8; 8];
+        buf[..self.width_b].copy_from_slice(&self.encoded[offset_b..offset_b + self.width_b]);
+        let b = LittleEndian::read_u64(&buf[..]);
+
+        (a, b)
+    }
+
+    pub(super) fn len(&self) -> usize {
+        (self.encoded.len() - 2) / (self.width_a + self.width_b)
+    }
+
+    pub(super) fn slice<'a>(&'a self, start_idx: usize, end_idx: usize) -> PackedVec2<&'a [u8]> {
+        PackedVec2 {
+            encoded: &self.encoded[start_idx * self.width()..end_idx * self.width() + 2],
+            width_a: self.width_a,
+            width_b: self.width_b,
+        }
+    }
+
+    pub(super) fn borrow<'a>(&'a self) -> PackedVec2<&'a [u8]> {
+        PackedVec2 {
+            encoded: self.encoded.deref(),
+            width_a: self.width_a,
+            width_b: self.width_b,
+        }
+    }
+
+    fn width(&self) -> usize {
+        self.width_a + self.width_b
     }
 }
