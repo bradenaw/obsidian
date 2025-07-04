@@ -341,6 +341,19 @@ pub(crate) fn assert_roundtrip<E: Encode + Decode + Debug + Eq>(e: &E) -> anyhow
     Ok(())
 }
 
+pub(crate) fn assert_roundtrip_pb<T, U>(x: T) -> anyhow::Result<()>
+where
+    T: Debug + Clone + Eq + TryFrom<U, Error = anyhow::Error>,
+    U: prost::Message + From<T> + Default,
+{
+    let encoded = U::from(x.clone()).encode_to_vec();
+    let decoded: T = U::decode(&encoded[..])?.try_into()?;
+
+    assert_eq!(x, decoded);
+
+    Ok(())
+}
+
 macro_rules! obsidian_test_suite {
     ($make:expr) => {
         mod obsidian_test_suite {

@@ -2,6 +2,9 @@ syntax = "proto3";
 
 package obsidian_internal;
 
+import "google/protobuf/empty.proto";
+
+import "internal/internal.proto";
 import "obsidian.proto";
 
 message MetaTx {
@@ -11,12 +14,4 @@ message MetaTx {
 message MetaTablet {
     repeated uint32 colo_group_ids = 1;
     repeated obsidian.Range ranges = 2;
-}
-
-message CompressedKeySet {
-    repeated obsidian.KeyspaceId keyspace_ids = 1;
-    repeated bytes key_fragments = 2;
-    repeated uint32 key_shared_prefixes = 3;
-    repeated uint32 key_keyspaces_counts = 4;
-    repeated uint32 key_keyspaces_refs = 5;
 }

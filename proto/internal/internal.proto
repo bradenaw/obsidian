@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package obsidian_internal;
+
+import "google/protobuf/empty.proto";
+
+import "obsidian.proto";
+
+message TxOutcomeRecord {
+    message Committed {
+        fixed64 ts = 1;
+        CompressedKeySet precond_keys = 2;
+        CompressedKeySet mut_keys = 3;
+    }
+
+    oneof outcome_type {
+        Committed committed = 1;
+        google.protobuf.Empty aborted = 2;
+    }
+}
+
+message CompressedKeySet {
+    repeated obsidian.KeyspaceId keyspace_ids = 1;
+    repeated bytes key_fragments = 2;
+    repeated uint32 key_shared_prefixes = 3;
+    repeated uint32 key_keyspaces_counts = 4;
+    repeated uint32 key_keyspaces_refs = 5;
+}
