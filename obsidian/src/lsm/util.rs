@@ -5,6 +5,7 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::ops::Deref;
 
+use anyhow::anyhow;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 
@@ -64,6 +65,7 @@ pub(crate) struct PrefixCompressedKV<B, V> {
 
 const PREFIX_COMPRESSED_KV_HEADER_SIZE: usize = 9;
 
+// TODO: This would actually be more efficient if the offsets were stored as PackedVec2.
 impl<B, V: FixedSizeSerializable> PrefixCompressedKV<B, V> {
     pub(super) fn write(out: &mut Vec<u8>, m: &BTreeMap<Vec<u8>, V>) {
         let prefix: Vec<u8> = match (m.first_key_value(), m.last_key_value()) {
@@ -241,12 +243,15 @@ pub(super) struct PackedVec<B> {
 }
 
 impl<B: Deref<Target = [u8]>> PackedVec<B> {
-    fn open(encoded: B) -> Self {
+    fn open(encoded: B) -> anyhow::Result<Self> {
+        if encoded.len() < 1 {
+            return Err(anyhow!("PackedVec too short: {} < {}", encoded.len(), 1));
+        }
         let width = encoded[encoded.len() - 1] as usize;
-        Self {
+        Ok(Self {
             encoded: encoded,
             width,
-        }
+        })
     }
 
     fn write(out: &mut Vec<u8>, v: &Vec<u64>) {
@@ -309,25 +314,21 @@ impl<B> PackedVec2<B> {
 
         out.push(width_a as u8);
         out.push(width_b as u8);
-
-        println!(
-            "len = {}, width_a = {}, width_b = {}",
-            v.len(),
-            width_a,
-            width_b
-        );
     }
 }
 
 impl<B: Deref<Target = [u8]>> PackedVec2<B> {
-    pub(super) fn open(encoded: B) -> Self {
+    pub(super) fn open(encoded: B) -> anyhow::Result<Self> {
+        if encoded.len() < 2 {
+            return Err(anyhow!("PackedVec2 too short: {} < {}", encoded.len(), 2));
+        }
         let width_a = encoded[encoded.len() - 2] as usize;
         let width_b = encoded[encoded.len() - 1] as usize;
-        Self {
+        Ok(Self {
             encoded: encoded,
             width_a,
             width_b,
-        }
+        })
     }
 
     pub(super) fn get(&self, i: usize) -> (u64, u64) {

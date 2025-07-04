@@ -41,7 +41,7 @@ pub(super) struct Run<R> {
     max_ts: Timestamp,
 
     // The run index is a map with one item per data block. The key is the minimum key that appears
-    // in that block, and the value is the file offset of the block trailer.
+    // in that block, and the value is the file offset of the _end_ of the block.
     index: PrefixCompressedKV<Vec<u8>, u32>,
 
     min_key: Vec<u8>,
@@ -76,64 +76,36 @@ impl<R> Run<R> {
 
 impl<R: FileReader> Run<R> {
     pub(super) async fn open(reader: R) -> anyhow::Result<Self> {
-        let file_len = reader.len().await?;
-        let mut index_block_offset_buf = [0u8; 4];
-        reader
-            .read_exact_at(&mut index_block_offset_buf[..], file_len - 4)
-            .await?;
-        let index_block_offset = LittleEndian::read_u32(&index_block_offset_buf[..]);
-
-        let mut header = [0u8; INDEX_BLOCK_HEADER_SIZE];
-        reader
-            .read_exact_at(&mut header[..], index_block_offset as u64)
-            .await?;
-
-        let id = {
-            let mut uuid_bytes = [0u8; 16];
-            uuid_bytes.copy_from_slice(&header[0..16]);
-            Uuid::from_bytes(uuid_bytes)
-        };
-        let keyspace_id = KeyspaceId(
-            ColoGroupId(LittleEndian::read_u32(&header[16..20])),
-            LittleEndian::read_u32(&header[20..24]),
-        );
-        let min_ts = Timestamp::from_nanos(LittleEndian::read_u64(&header[24..32]));
-        let max_ts = Timestamp::from_nanos(LittleEndian::read_u64(&header[32..40]));
-        let max_key_len = LittleEndian::read_u32(&header[40..44]);
-        let index_len = LittleEndian::read_u32(&header[44..48]);
+        let trailer = RunTrailer::open(&reader).await?;
 
         let max_key = {
-            let mut max_key = vec![0u8; max_key_len as usize];
+            let mut max_key = vec![0u8; trailer.max_key_len as usize];
             reader
-                .read_exact_at(
-                    &mut max_key[..],
-                    (index_block_offset as u64) + (header.len() as u64),
-                )
+                .read_exact_at(&mut max_key[..], trailer.max_key_offset)
                 .await?;
             max_key
         };
 
         let index = {
-            let mut index_bytes = vec![0u8; index_len as usize];
+            let mut index_bytes = vec![0u8; trailer.index_len as usize];
             reader
-                .read_exact_at(
-                    &mut index_bytes[..],
-                    (index_block_offset as u64) + (header.len() as u64) + (max_key_len as u64),
-                )
+                .read_exact_at(&mut index_bytes[..], trailer.index_offset)
                 .await?;
             PrefixCompressedKV::open(index_bytes)
         };
 
         let min_key = index.get_key(0);
+        let size = reader.len().await? as usize;
 
         Ok(Self {
             reader,
 
-            id,
-            size: file_len as usize,
-            keyspace_id,
-            min_ts,
-            max_ts,
+            id: trailer.id,
+            keyspace_id: trailer.keyspace_id,
+            min_ts: trailer.min_ts,
+            max_ts: trailer.max_ts,
+
+            size,
             index,
 
             min_key,
@@ -195,8 +167,8 @@ impl<R: FileReader> Run<R> {
             };
 
             for i in block_idxs {
-                let block_header_offset = self.index.get_value(i);
-                let block = Block::open(&self.reader, block_header_offset as u64).await?;
+                let block_end_offset = self.index.get_value(i);
+                let block = Block::open(&self.reader, block_end_offset as u64).await?;
                 let block_scan = block.scan(ts, range.clone(), direction);
                 pin_mut!(block_scan);
                 while let Some(revision) = block_scan.try_next().await? {
@@ -240,8 +212,8 @@ impl<R: FileReader> Run<R> {
     pub(super) fn stream(&self) -> impl Stream<Item = anyhow::Result<LsmRevision>> + '_ {
         try_stream! {
             for i in 0..self.index.len() {
-                let block_header_offset = self.index.get_value(i);
-                let block = Block::open(&self.reader, block_header_offset as u64).await?;
+                let block_end_offset = self.index.get_value(i);
+                let block = Block::open(&self.reader, block_end_offset as u64).await?;
                 let block_stream = block.stream();
                 pin_mut!(block_stream);
                 while let Some(revision) = block_stream.try_next().await? {
@@ -261,9 +233,9 @@ impl<R: FileReader> Run<R> {
                 idx - 1
             }
         };
-        let block_header_offset = self.index.get_value(block_header_idx);
+        let block_end_offset = self.index.get_value(block_header_idx);
         Ok(Some(
-            Block::open(&self.reader, block_header_offset as u64).await?,
+            Block::open(&self.reader, block_end_offset as u64).await?,
         ))
     }
 }
@@ -345,14 +317,14 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
             };
         self.last_key = last_key_.clone();
 
-        let (block, header_offset_in_block) = Block::<()>::encode(&self.buffer)?;
+        let block = Block::<()>::encode(&self.buffer)?;
         self.w.write_all(&block[..]).await?;
-
-        let header_offset_in_file = self.bytes_written + header_offset_in_block;
-        self.index
-            .insert(first_key.clone(), header_offset_in_file as u32);
-
         self.bytes_written += block.len();
+
+        let block_end_offset = self.bytes_written;
+        self.index
+            .insert(first_key.clone(), block_end_offset as u32);
+
         self.buffer.clear();
         self.buffer_size_estimate = 0;
 
@@ -368,25 +340,111 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
             return Err(anyhow!("empty run"));
         }
 
+        let index_offset = self.bytes_written;
         let mut encoded_index = Vec::new();
         PrefixCompressedKV::<(), _>::write(&mut encoded_index, &self.index);
 
-        let index_block_offset = self.bytes_written;
-        let mut header = [0u8; INDEX_BLOCK_HEADER_SIZE];
-        header[0..16].copy_from_slice(&self.id.as_bytes()[..]);
-        LittleEndian::write_u32(&mut header[16..20], self.keyspace_id.0 .0);
-        LittleEndian::write_u32(&mut header[20..24], self.keyspace_id.1);
-        LittleEndian::write_u64(&mut header[24..32], self.min_ts.as_nanos());
-        LittleEndian::write_u64(&mut header[32..40], self.max_ts.as_nanos());
-        LittleEndian::write_u32(&mut header[40..44], self.last_key.len() as u32);
-        LittleEndian::write_u32(&mut header[44..48], encoded_index.len() as u32);
-        self.w.write_all(&header[..]).await?;
-        self.w.write_all(&self.last_key[..]).await?;
         self.w.write_all(&encoded_index).await?;
+        self.bytes_written += encoded_index.len();
 
-        let mut index_block_offset_buf = [0u8; 4];
-        LittleEndian::write_u32(&mut index_block_offset_buf[..], index_block_offset as u32);
-        self.w.write_all(&index_block_offset_buf[..]).await?;
+        let max_key_offset = self.bytes_written;
+        self.w.write_all(&self.last_key).await?;
+        self.bytes_written += self.last_key.len();
+
+        let trailer_offset = self.bytes_written;
+
+        let trailer = RunTrailer {
+            id: self.id,
+            keyspace_id: self.keyspace_id,
+            min_ts: self.min_ts,
+            max_ts: self.max_ts,
+            max_key_offset: max_key_offset as u64,
+            max_key_len: self.last_key.len() as u32,
+            index_offset: index_offset as u64,
+            index_len: encoded_index.len() as u64,
+        };
+        trailer.write(&mut self.w, trailer_offset as u64).await?;
+
+        Ok(())
+    }
+}
+
+struct RunTrailer {
+    id: Uuid,
+    keyspace_id: KeyspaceId,
+    min_ts: Timestamp,
+    max_ts: Timestamp,
+    index_offset: u64,
+    index_len: u64,
+    max_key_offset: u64,
+    max_key_len: u32,
+}
+
+impl RunTrailer {
+    const ENCODED_LEN: usize = 68;
+
+    async fn open<R: FileReader>(reader: &R) -> anyhow::Result<Self> {
+        let file_len = reader.len().await?;
+        let mut trailer_offset_buf = [0u8; 4];
+        reader
+            .read_exact_at(&mut trailer_offset_buf[..], file_len - 4)
+            .await?;
+        let trailer_offset = LittleEndian::read_u32(&trailer_offset_buf[..]);
+
+        let mut trailer = [0u8; Self::ENCODED_LEN];
+        reader
+            .read_exact_at(&mut trailer[..], trailer_offset as u64)
+            .await?;
+
+        let id = {
+            let mut uuid_bytes = [0u8; 16];
+            uuid_bytes.copy_from_slice(&trailer[0..16]);
+            Uuid::from_bytes(uuid_bytes)
+        };
+        let keyspace_id = KeyspaceId(
+            ColoGroupId(LittleEndian::read_u32(&trailer[16..20])),
+            LittleEndian::read_u32(&trailer[20..24]),
+        );
+        let min_ts = Timestamp::from_nanos(LittleEndian::read_u64(&trailer[24..32]));
+        let max_ts = Timestamp::from_nanos(LittleEndian::read_u64(&trailer[32..40]));
+        let index_offset = LittleEndian::read_u64(&trailer[40..48]);
+        let index_len = LittleEndian::read_u64(&trailer[48..56]);
+        let max_key_offset = LittleEndian::read_u64(&trailer[56..64]);
+        let max_key_len = LittleEndian::read_u32(&trailer[64..68]);
+
+        Ok(Self {
+            id,
+            keyspace_id,
+            min_ts,
+            max_ts,
+            index_offset,
+            index_len,
+            max_key_offset,
+            max_key_len,
+        })
+    }
+
+    async fn write<W: AsyncWrite + Unpin>(
+        &self,
+        mut w: W,
+        trailer_offset: u64,
+    ) -> anyhow::Result<()> {
+        let mut trailer = [0u8; Self::ENCODED_LEN];
+
+        trailer[0..16].copy_from_slice(&self.id.as_bytes()[..]);
+        LittleEndian::write_u32(&mut trailer[16..20], self.keyspace_id.0 .0);
+        LittleEndian::write_u32(&mut trailer[20..24], self.keyspace_id.1);
+        LittleEndian::write_u64(&mut trailer[24..32], self.min_ts.as_nanos());
+        LittleEndian::write_u64(&mut trailer[32..40], self.max_ts.as_nanos());
+        LittleEndian::write_u64(&mut trailer[40..48], self.index_offset);
+        LittleEndian::write_u64(&mut trailer[48..56], self.index_len);
+        LittleEndian::write_u64(&mut trailer[56..64], self.max_key_offset);
+        LittleEndian::write_u32(&mut trailer[64..68], self.max_key_len);
+        w.write_all(&trailer[..]).await?;
+
+        let mut trailer_offset_buf = [0u8; 4];
+        LittleEndian::write_u32(&mut trailer_offset_buf[..], trailer_offset as u32);
+        w.write_all(&trailer_offset_buf[..]).await?;
 
         Ok(())
     }
@@ -407,9 +465,9 @@ pub(super) async fn dump_run<R: FileReader>(run: &Run<R>) -> anyhow::Result<()> 
     for i in 0..run.index.len() {
         println!("    == block {} ======", i);
         println!("    first key: [{}]", hexlify(&run.index.get_key(i)),);
-        println!("    header_offset: {}", run.index.get_value(i));
-        let header_offset = run.index.get_value(i);
-        let block = Block::open(&run.reader, header_offset as u64).await?;
+        println!("    block_end_offset: {}", run.index.get_value(i));
+        let block_end_offset = run.index.get_value(i);
+        let block = Block::open(&run.reader, block_end_offset as u64).await?;
         dump_block(&block).await?;
     }
     Ok(())

@@ -26,10 +26,8 @@ use crate::util::IteratorEither;
 /// compactly serialized and can be used as-is without fully deserializing.
 pub(super) struct Block<'a, R> {
     values_offset_in_file: u64,
-    values_len_bytes: u64,
-    min_ts: Timestamp,
     key_index: PrefixCompressedKV<Vec<u8>, u16>,
-    version_index: BlockVersions<Vec<u8>>,
+    version_index: BlockVersionIndex<Vec<u8>>,
     reader: &'a R,
 }
 
@@ -41,7 +39,7 @@ impl<'a, R> Block<'a, R> {
     /// Returns the encoded block and the offset of the trailer within the block.
     pub(super) fn encode(
         kvs: &BTreeMap<Vec<u8>, Vec<(Timestamp, RevisionValue)>>,
-    ) -> anyhow::Result<(Vec<u8>, usize)> {
+    ) -> anyhow::Result<Vec<u8>> {
         // For this example block:
         //
         // key       ts   value
@@ -72,7 +70,7 @@ impl<'a, R> Block<'a, R> {
         // Since timestamps in a block together will not differ by much from each other (usually
         // they're written around the same time) and tombstone is only one bit, we actually store
         // each 3-tuple as
-        //   (ts-block_min_ts)<<1 | tombstone, value_offset
+        //   ts-block_min_ts, value_offset<<1 | tombstone
         //
         // We compute up-front how many bytes we actually need to fit the largest of the first
         // values in the block, and encode all of them using only that many. That means they're
@@ -80,11 +78,11 @@ impl<'a, R> Block<'a, R> {
         //
         //   block_max_ts - block_min_ts       bytes needed for (timestamp, tombstone)
         //   =========================================================================
-        //   128us                             1
-        //   ~33ms                             2
-        //   ~2 hours                          3
-        //   ~24 days                          4
-        //   ~17 years                         5
+        //   256us                             1
+        //   ~66ms                             2
+        //   ~4 hours                          3
+        //   ~48 days                          4
+        //   ~34 years                         5
         //
         // Thus, very new blocks (which contain revisions written at similar times) will use 3-4
         // bytes and old blocks (which contain revisions from many different times compacted
@@ -101,13 +99,6 @@ impl<'a, R> Block<'a, R> {
         //   0           0
         //   3           2
 
-        let min_ts = kvs
-            .values()
-            .map(|versions| Some(versions.last()?.0))
-            .flatten()
-            .min()
-            .ok_or_else(|| anyhow!("malformed block"))?;
-
         let mut key_index: BTreeMap<Vec<u8>, u16> = BTreeMap::new();
         let mut block = vec![];
 
@@ -116,87 +107,66 @@ impl<'a, R> Block<'a, R> {
             key_index.insert(key.clone(), version_index.len() as u16);
             for (ts, value) in key_versions {
                 let value_offset = block.len();
-                let tombstone_bit = match value {
+
+                let is_tombstone = match value {
                     RevisionValue::Regular(value) => {
                         block.extend_from_slice(&value[..]);
-                        0
+                        false
                     }
-                    RevisionValue::Tombstone => 1,
+                    RevisionValue::Tombstone => true,
                 };
-                let ts_offset_and_tombstone =
-                    ((ts.as_nanos() - min_ts.as_nanos()) << 1) | tombstone_bit;
 
-                version_index.push((ts_offset_and_tombstone, value_offset as u64));
+                version_index.push((*ts, is_tombstone, value_offset as u32));
             }
         }
 
+        let values_len = block.len();
         let key_index_offset_in_block = block.len();
         PrefixCompressedKV::<(), _>::write(&mut block, &key_index);
+        let key_index_len = block.len() - key_index_offset_in_block;
+
         let version_index_offset_in_block = block.len();
-        PackedVec2::<()>::write(&mut block, &version_index);
+        BlockVersionIndex::<()>::write(&mut block, &version_index, values_len as u32);
+        let version_index_len = block.len() - version_index_offset_in_block;
 
-        let trailer_offset_in_block = block.len();
-        let mut trailer = [0u8; BLOCK_TRAILER_SIZE];
-        LittleEndian::write_u32(&mut trailer[0..4], key_index_offset_in_block as u32);
-        LittleEndian::write_u32(&mut trailer[4..8], version_index_offset_in_block as u32);
-        LittleEndian::write_u64(&mut trailer[8..16], min_ts.as_nanos());
-        LittleEndian::write_u32(
-            &mut trailer[16..20],
-            (block.len() + BLOCK_TRAILER_SIZE) as u32,
-        );
-        block.extend_from_slice(&trailer[..]);
+        let trailer = BlockTrailer {
+            key_index_offset_in_block: key_index_offset_in_block as u32,
+            key_index_len: key_index_len as u32,
+            version_index_offset_in_block: version_index_offset_in_block as u32,
+            version_index_len: version_index_len as u32,
+            block_size: (block.len() + BlockTrailer::ENCODED_LEN) as u32,
+        };
+        trailer.write(&mut block);
 
-        Ok((block, trailer_offset_in_block))
+        Ok(block)
     }
 }
 
 impl<'a, R: FileReader> Block<'a, R> {
-    pub(super) async fn open(
-        reader: &'a R,
-        trailer_offset_in_file: u64,
-    ) -> anyhow::Result<Block<'a, R>> {
-        let mut trailer = [0u8; BLOCK_TRAILER_SIZE];
+    pub(super) async fn open(reader: &'a R, block_end_offset: u64) -> anyhow::Result<Block<'a, R>> {
+        let trailer = BlockTrailer::open(reader, block_end_offset).await?;
 
-        reader
-            .read_exact_at(&mut trailer[..], trailer_offset_in_file)
-            .await?;
+        let block_offset_in_file = block_end_offset - (trailer.block_size as u64);
 
-        let key_index_offset_in_block = LittleEndian::read_u32(&trailer[0..4]) as u64;
-        let version_index_offset_in_block = LittleEndian::read_u32(&trailer[4..8]) as u64;
-        let min_ts = Timestamp::from_nanos(LittleEndian::read_u64(&trailer[8..16]));
-        let block_size = LittleEndian::read_u32(&trailer[16..20]) as u64;
-
-        let block_offset_in_file =
-            trailer_offset_in_file + (BLOCK_TRAILER_SIZE as u64) - block_size;
-        let trailer_offset_in_block = trailer_offset_in_file - block_offset_in_file;
-
-        let key_index_len = (version_index_offset_in_block - key_index_offset_in_block) as usize;
-        let version_index_len = (trailer_offset_in_block - version_index_offset_in_block) as usize;
-
-        let mut key_index_and_version_index_bytes = vec![0u8; key_index_len + version_index_len];
+        let mut key_index_and_version_index_bytes =
+            vec![0u8; (trailer.key_index_len + trailer.version_index_len) as usize];
         reader
             .read_exact_at(
                 &mut key_index_and_version_index_bytes[..],
-                block_offset_in_file + key_index_offset_in_block,
+                block_offset_in_file + (trailer.key_index_offset_in_block as u64),
             )
             .await?;
 
-        let version_index_bytes = key_index_and_version_index_bytes.split_off(key_index_len);
+        let version_index_bytes = key_index_and_version_index_bytes.split_off(trailer.key_index_len as usize);
         let key_index_bytes = key_index_and_version_index_bytes;
 
         let key_index = PrefixCompressedKV::open(key_index_bytes);
 
         Ok(Self {
             values_offset_in_file: block_offset_in_file,
-            values_len_bytes: key_index_offset_in_block,
             reader,
-            min_ts,
             key_index,
-            version_index: BlockVersions {
-                min_ts: min_ts,
-                end_offset: key_index_offset_in_block as usize,
-                encoded: PackedVec2::open(version_index_bytes),
-            },
+            version_index: BlockVersionIndex::open(version_index_bytes)?,
         })
     }
 
@@ -379,7 +349,7 @@ impl<'a, R: FileReader> Block<'a, R> {
         }
     }
 
-    fn versions_for_key(&self, key_idx: usize) -> BlockVersions<&[u8]> {
+    fn versions_for_key(&self, key_idx: usize) -> BlockVersionIndex<&[u8]> {
         let start_idx = self.key_index.get_value(key_idx) as usize;
         let end_idx = if key_idx == self.key_index.len() - 1 {
             self.version_index.len()
@@ -391,7 +361,7 @@ impl<'a, R: FileReader> Block<'a, R> {
 
     async fn value<'b>(
         &'b self,
-        versions: &BlockVersions<&'b [u8]>,
+        versions: &BlockVersionIndex<&'b [u8]>,
         idx: usize,
     ) -> anyhow::Result<RevisionValue> {
         let (value_start_in_block, value_end_in_block) = match versions.value_offsets(idx) {
@@ -400,7 +370,7 @@ impl<'a, R: FileReader> Block<'a, R> {
         };
         let value_len = value_end_in_block - value_start_in_block;
 
-        let mut value = vec![0u8; value_len];
+        let mut value = vec![0u8; value_len as usize];
         self.reader
             .read_exact_at(
                 &mut value[..],
@@ -412,68 +382,185 @@ impl<'a, R: FileReader> Block<'a, R> {
     }
 }
 
-struct BlockVersions<B> {
+struct BlockTrailer {
+    key_index_offset_in_block: u32,
+    key_index_len: u32,
+    version_index_offset_in_block: u32,
+    version_index_len: u32,
+    block_size: u32,
+}
+
+impl BlockTrailer {
+    const ENCODED_LEN: usize = 20;
+
+    fn write(&self, out: &mut Vec<u8>) {
+        let mut trailer = [0u8; Self::ENCODED_LEN];
+        LittleEndian::write_u32(&mut trailer[0..4], self.key_index_offset_in_block as u32);
+        LittleEndian::write_u32(&mut trailer[4..8], self.key_index_len as u32);
+        LittleEndian::write_u32(
+            &mut trailer[8..12],
+            self.version_index_offset_in_block as u32,
+        );
+        LittleEndian::write_u32(&mut trailer[12..16], self.version_index_len as u32);
+        LittleEndian::write_u32(&mut trailer[16..20], self.block_size);
+        out.extend_from_slice(&trailer[..]);
+    }
+
+    async fn open<R: FileReader>(reader: &R, block_end_offset: u64) -> anyhow::Result<Self> {
+        let mut trailer = [0u8; Self::ENCODED_LEN];
+        reader
+            .read_exact_at(
+                &mut trailer[..],
+                block_end_offset - (Self::ENCODED_LEN as u64),
+            )
+            .await?;
+
+        let key_index_offset_in_block = LittleEndian::read_u32(&trailer[0..4]);
+        let key_index_len = LittleEndian::read_u32(&trailer[4..8]);
+        let version_index_offset_in_block = LittleEndian::read_u32(&trailer[8..12]);
+        let version_index_len = LittleEndian::read_u32(&trailer[12..16]);
+        let block_size = LittleEndian::read_u32(&trailer[16..20]);
+
+        Ok(Self {
+            key_index_offset_in_block,
+            key_index_len,
+            version_index_offset_in_block,
+            version_index_len,
+            block_size,
+        })
+    }
+}
+
+struct BlockVersionIndex<B> {
     min_ts: Timestamp,
-    end_offset: usize,
+    values_len: u32,
     encoded: PackedVec2<B>,
 }
 
-impl<B: Deref<Target = [u8]>> BlockVersions<B> {
+impl<B> BlockVersionIndex<B> {
+    pub(super) fn write(out: &mut Vec<u8>, v: &[(Timestamp, bool, u32)], values_len: u32) {
+        let min_ts = v
+            .iter()
+            .map(|(ts, _, _)| ts)
+            .min()
+            .unwrap_or(&Timestamp::ZERO);
+
+        let packed: Vec<_> = v
+            .iter()
+            .map(|(ts, tombstone, value_offset)| {
+                let tombstone_bit = match tombstone {
+                    true => 1u64,
+                    false => 0u64,
+                };
+                (
+                    (ts.as_nanos() - min_ts.as_nanos()),
+                    (*value_offset as u64) << 1 | tombstone_bit,
+                )
+            })
+            .collect();
+
+        PackedVec2::<()>::write(out, &packed);
+        let mut footer = [0u8; 12];
+        LittleEndian::write_u64(&mut footer[..8], min_ts.as_nanos());
+        LittleEndian::write_u32(&mut footer[8..], values_len);
+        out.extend_from_slice(&footer[..])
+    }
+}
+
+impl<B: Deref<Target = [u8]> + Slice> BlockVersionIndex<B> {
+    pub(super) fn open(b: B) -> anyhow::Result<Self> {
+        if b.len() < 12 {
+            return Err(anyhow!("BlockVersionIndex too short: {} < {}", b.len(), 12));
+        }
+
+        let min_ts = Timestamp::from_nanos(LittleEndian::read_u64(&b[b.len() - 12..b.len() - 4]));
+        let values_len = LittleEndian::read_u32(&b[b.len() - 4..]);
+        let packed_end = b.len() - 12;
+
+        Ok(Self {
+            min_ts,
+            values_len,
+            encoded: PackedVec2::<B>::open(b.slice(0, packed_end))?,
+        })
+    }
+
     pub(super) fn len(&self) -> usize {
         self.encoded.len()
     }
 
-    pub(super) fn elem(&self, idx: usize) -> (Timestamp, bool, usize) {
-        let (ts_offset_and_tombstone, value_offset) = self.encoded.get(idx);
-        let tombstone = ts_offset_and_tombstone & 1 == 1;
-        let ts = Timestamp::from_nanos((ts_offset_and_tombstone >> 1) + self.min_ts.as_nanos());
+    pub(super) fn elem(&self, idx: usize) -> (Timestamp, bool, u32) {
+        let (ts_offset, value_offset_and_tombstone) = self.encoded.get(idx);
+        let ts = Timestamp::from_nanos(ts_offset + self.min_ts.as_nanos());
+        let tombstone = value_offset_and_tombstone & 1 == 1;
+        let value_offset = (value_offset_and_tombstone >> 1) as u32;
 
-        (ts, tombstone, value_offset as usize)
+        (ts, tombstone, value_offset)
     }
 
     pub(super) fn ts(&self, idx: usize) -> Timestamp {
         self.elem(idx).0
     }
 
-    pub(super) fn value_offsets(&self, idx: usize) -> Option<(usize, usize)> {
+    pub(super) fn value_offsets(&self, idx: usize) -> Option<(u32, u32)> {
         let (_, tombstone, start) = self.elem(idx);
         if tombstone {
             return None;
         }
         let end = if idx == self.len() - 1 {
-            self.end_offset
+            self.values_len
         } else {
             self.elem(idx + 1).2
         };
         Some((start, end))
     }
 
-    fn slice<'a>(&'a self, start_idx: usize, end_idx: usize) -> BlockVersions<&'a [u8]> {
-        let end_offset = if end_idx == self.len() {
-            self.end_offset
+    fn slice<'a>(&'a self, start_idx: usize, end_idx: usize) -> BlockVersionIndex<&'a [u8]> {
+        let values_len = if end_idx == self.len() {
+            self.values_len
         } else {
             self.elem(end_idx).2
         };
-        BlockVersions {
+        BlockVersionIndex {
             min_ts: self.min_ts,
-            end_offset,
+            values_len,
             encoded: self.encoded.slice(start_idx, end_idx),
         }
     }
 
-    fn borrow<'a>(&'a self) -> BlockVersions<&'a [u8]> {
-        BlockVersions {
+    fn borrow<'a>(&'a self) -> BlockVersionIndex<&'a [u8]> {
+        BlockVersionIndex {
             min_ts: self.min_ts,
-            end_offset: self.end_offset,
+            values_len: self.values_len,
             encoded: self.encoded.borrow(),
         }
+    }
+}
+
+trait Slice {
+    fn slice(self, start_idx: usize, end_idx: usize) -> Self;
+}
+
+impl Slice for Vec<u8> {
+    fn slice(mut self, start_idx: usize, end_idx: usize) -> Self {
+        if end_idx < self.len() {
+            self.truncate(end_idx);
+        }
+        if start_idx > 0 {
+            return self.split_off(start_idx);
+        }
+        return self;
+    }
+}
+
+impl Slice for &[u8] {
+    fn slice(self, start_idx: usize, end_idx: usize) -> Self {
+        &self[start_idx..end_idx]
     }
 }
 
 pub(super) async fn dump_block<'a, R: FileReader>(block: &Block<'a, R>) -> anyhow::Result<()> {
     println!("    n_keys: {}", block.key_index.len());
     println!("    n_versions: {}", block.version_index.len());
-    println!("    values_bytes: {}", block.values_len_bytes);
     println!("      == keys ======");
     for i in 0..block.key_index.len() {
         let key = block.key_index.get_key(i);
@@ -544,10 +631,10 @@ mod test {
             );
             kvs
         };
-        let (encoded, trailer_offset) = Block::<()>::encode(&kvs)?;
-
+        let encoded = Block::<()>::encode(&kvs)?;
+        let end_offset = encoded.len() as u64;
         let f = TestFile::from(encoded);
-        let block = Block::open(&f, trailer_offset as u64).await?;
+        let block = Block::open(&f, end_offset).await?;
 
         assert_eq!(
             block.get(Timestamp(279), &aa[..]).await?,
@@ -640,9 +727,10 @@ mod test {
             kvs.insert(key_str.into(), versions);
         }
 
-        let (encoded, trailer_offset) = Block::<()>::encode(&kvs)?;
+        let encoded = Block::<()>::encode(&kvs)?;
+        let end_offset = encoded.len() as u64;
         let f = TestFile::from(encoded);
-        let block = Block::open(&f, trailer_offset as u64).await?;
+        let block = Block::open(&f, end_offset).await?;
 
         async fn check<'a, R: FileReader>(
             block: &Block<'a, R>,
@@ -747,9 +835,10 @@ mod test {
         ]
         .into_iter()
         .collect();
-        let (encoded, trailer_offset) = Block::<()>::encode(&kvs)?;
+        let encoded = Block::<()>::encode(&kvs)?;
+        let end_offset = encoded.len() as u64;
         let f = TestFile::from(encoded);
-        let block = Block::open(&f, trailer_offset as u64).await?;
+        let block = Block::open(&f, end_offset).await?;
 
         assert_eq!(
             block
