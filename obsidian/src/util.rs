@@ -2,6 +2,7 @@ use std::cmp;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::future::Future;
 use std::io::Read;
 use std::io::Write;
@@ -325,19 +326,18 @@ impl Retry {
         self,
         f: &F,
     ) -> T {
-        let mut i = 0;
+        let mut delays = RetryDelay::new(self.min_delay, self.max_delay);
         loop {
             match f().await {
                 Ok(t) => {
                     return t;
                 }
                 Err(e) => {
-                    let delay = delay_for_retry(i, self.min_delay, self.max_delay);
+                    let delay = delays.next();
                     log::warn!("error, retrying in {:?}: {:?}", delay, e.deref());
                     tokio::time::sleep(delay).await;
                 }
             }
-            i = i.saturating_add(1);
         }
     }
 
@@ -352,7 +352,10 @@ impl Retry {
     ) -> anyhow::Result<T> {
         let start = std::time::Instant::now();
         let mut last_err = None;
-        for i in 0..self.n_attempts {
+
+        let mut delays = RetryDelay::new(self.min_delay, self.max_delay);
+
+        for _ in 0..self.n_attempts {
             match tokio::time::timeout(self.timeout - start.elapsed(), f()).await {
                 Ok(RetryResult::Ok(t)) => return Ok(t),
                 Ok(RetryResult::Retry(e)) => {
@@ -369,7 +372,8 @@ impl Retry {
                     anyhow::bail!("timed out")
                 }
             }
-            let delay = delay_for_retry(i, self.min_delay, self.max_delay);
+
+            let delay = delays.next();
             if delay > self.timeout - start.elapsed() {
                 // last_err can't be None here, if it were we would have already returned.
                 return Err(last_err.unwrap().into());
@@ -381,6 +385,49 @@ impl Retry {
             return Err(e.into());
         }
         anyhow::bail!("no attempts")
+    }
+}
+
+struct RetryDelay {
+    attempts: VecDeque<std::time::Instant>,
+    size: usize,
+    max_age: Duration,
+    min_delay: Duration,
+    max_delay: Duration,
+}
+
+impl RetryDelay {
+    fn new(min_delay: Duration, max_delay: Duration) -> Self {
+        // We only need this many for delay_for_retry to return the max value, so any more are
+        // pointless.
+        let size =
+            (max_delay.as_secs_f64().log2() - max_delay.as_secs_f64().log2()).ceil() as usize;
+        // If we were consistently picking the high end of the jitter on max_delay and failing
+        // immediately (the worst case), we'd need to keep around attempts for this long to keep
+        // delay_for_retry returning max_delay.
+        //
+        // We forget anything older because they're probably less relevant.
+        let max_age = Duration::from_secs_f64(max_delay.as_secs_f64() * (size as f64) * 1.5);
+
+        Self {
+            attempts: VecDeque::new(),
+            size,
+            max_age,
+            min_delay,
+            max_delay,
+        }
+    }
+
+    fn next(&mut self) -> Duration {
+        self.attempts.push_back(std::time::Instant::now());
+        while let Some(attempt) = self.attempts.front() {
+            if self.attempts.len() < self.size && attempt.elapsed() < self.max_age {
+                break;
+            }
+            self.attempts.pop_front();
+        }
+
+        delay_for_retry(self.attempts.len(), self.min_delay, self.max_delay)
     }
 }
 

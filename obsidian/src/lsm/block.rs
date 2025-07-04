@@ -157,7 +157,8 @@ impl<'a, R: FileReader> Block<'a, R> {
             )
             .await?;
 
-        let version_index_bytes = key_index_and_version_index_bytes.split_off(trailer.key_index_len as usize);
+        let version_index_bytes =
+            key_index_and_version_index_bytes.split_off(trailer.key_index_len as usize);
         let key_index_bytes = key_index_and_version_index_bytes;
 
         let key_index = PrefixCompressedKV::open(key_index_bytes)?;

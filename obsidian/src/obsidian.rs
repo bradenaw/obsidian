@@ -438,7 +438,7 @@ impl Frontend {
                             Ok(tablet_id) => tablet_id,
                             Err(e) => {
                                 return RetryResult::Err(InternalError::Other(e));
-                            },
+                            }
                         };
                         if txid.can_preempt(&other_txid) {
                             log::debug!("{:?} preempting {:?}", txid, other_txid);
