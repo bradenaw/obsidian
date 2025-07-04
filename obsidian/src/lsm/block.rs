@@ -26,7 +26,7 @@ use crate::util::IteratorEither;
 /// compactly serialized and can be used as-is without fully deserializing.
 pub(super) struct Block<'a, R> {
     values_offset_in_file: u64,
-    key_index: PrefixCompressedKV<Vec<u8>, u16>,
+    key_index: PrefixCompressedKV<Vec<u8>>,
     version_index: BlockVersionIndex<Vec<u8>>,
     reader: &'a R,
 }
@@ -99,12 +99,12 @@ impl<'a, R> Block<'a, R> {
         //   0           0
         //   3           2
 
-        let mut key_index: BTreeMap<Vec<u8>, u16> = BTreeMap::new();
+        let mut key_index: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
         let mut block = vec![];
 
         let mut version_index = Vec::new();
         for (key, key_versions) in kvs {
-            key_index.insert(key.clone(), version_index.len() as u16);
+            key_index.insert(key.clone(), version_index.len() as u64);
             for (ts, value) in key_versions {
                 let value_offset = block.len();
 
@@ -122,7 +122,7 @@ impl<'a, R> Block<'a, R> {
 
         let values_len = block.len();
         let key_index_offset_in_block = block.len();
-        PrefixCompressedKV::<(), _>::write(&mut block, &key_index);
+        PrefixCompressedKV::<()>::write(&mut block, &key_index);
         let key_index_len = block.len() - key_index_offset_in_block;
 
         let version_index_offset_in_block = block.len();
@@ -160,7 +160,7 @@ impl<'a, R: FileReader> Block<'a, R> {
         let version_index_bytes = key_index_and_version_index_bytes.split_off(trailer.key_index_len as usize);
         let key_index_bytes = key_index_and_version_index_bytes;
 
-        let key_index = PrefixCompressedKV::open(key_index_bytes);
+        let key_index = PrefixCompressedKV::open(key_index_bytes)?;
 
         Ok(Self {
             values_offset_in_file: block_offset_in_file,

@@ -42,7 +42,7 @@ pub(super) struct Run<R> {
 
     // The run index is a map with one item per data block. The key is the minimum key that appears
     // in that block, and the value is the file offset of the _end_ of the block.
-    index: PrefixCompressedKV<Vec<u8>, u32>,
+    index: PrefixCompressedKV<Vec<u8>>,
 
     min_key: Vec<u8>,
     max_key: Vec<u8>,
@@ -91,7 +91,7 @@ impl<R: FileReader> Run<R> {
             reader
                 .read_exact_at(&mut index_bytes[..], trailer.index_offset)
                 .await?;
-            PrefixCompressedKV::open(index_bytes)
+            PrefixCompressedKV::open(index_bytes)?
         };
 
         let min_key = index.get_key(0);
@@ -247,7 +247,7 @@ struct RunBuilder<W> {
     block_size_limit: u64,
 
     bytes_written: usize,
-    index: BTreeMap<Vec<u8>, u32>,
+    index: BTreeMap<Vec<u8>, u64>,
     last_key: Vec<u8>,
     buffer: BTreeMap<Vec<u8>, Vec<(Timestamp, RevisionValue)>>,
     buffer_size_estimate: u64,
@@ -323,7 +323,7 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
 
         let block_end_offset = self.bytes_written;
         self.index
-            .insert(first_key.clone(), block_end_offset as u32);
+            .insert(first_key.clone(), block_end_offset as u64);
 
         self.buffer.clear();
         self.buffer_size_estimate = 0;
@@ -342,7 +342,7 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
 
         let index_offset = self.bytes_written;
         let mut encoded_index = Vec::new();
-        PrefixCompressedKV::<(), _>::write(&mut encoded_index, &self.index);
+        PrefixCompressedKV::<()>::write(&mut encoded_index, &self.index);
 
         self.w.write_all(&encoded_index).await?;
         self.bytes_written += encoded_index.len();

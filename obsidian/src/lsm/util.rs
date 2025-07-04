@@ -2,7 +2,6 @@ use std::cmp;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
-use std::marker::PhantomData;
 use std::ops::Deref;
 
 use anyhow::anyhow;
@@ -53,21 +52,23 @@ impl Debug for LsmRevision {
     }
 }
 
+/// `PrefixCompressedKV` is like a `BTreeMap<Vec<u8>, u64>`, but packed much more tightly. Any
+/// prefix shared by all of the keys is only encoded once, and then we're left with a map from
+/// suffixes to values. Each value also only takes up as much space as the byte width of the
+/// largest value, so even though the values are constrained to u64 here, if all of the values fit
+/// into a u16 that's all that'll be used.
 #[derive(Clone)]
-pub(crate) struct PrefixCompressedKV<B, V> {
-    v: PhantomData<V>,
-    offset_width: usize,
-    prefix_len: usize,
+pub(crate) struct PrefixCompressedKV<B> {
     n: usize,
+    prefix_len: usize,
     suffixes_len: usize,
     data: B,
 }
 
-const PREFIX_COMPRESSED_KV_HEADER_SIZE: usize = 9;
+const PREFIX_COMPRESSED_KV_HEADER_SIZE: usize = 8;
 
-// TODO: This would actually be more efficient if the offsets were stored as PackedVec2.
-impl<B, V: FixedSizeSerializable> PrefixCompressedKV<B, V> {
-    pub(super) fn write(out: &mut Vec<u8>, m: &BTreeMap<Vec<u8>, V>) {
+impl<B> PrefixCompressedKV<B> {
+    pub(super) fn write(out: &mut Vec<u8>, m: &BTreeMap<Vec<u8>, u64>) {
         let prefix: Vec<u8> = match (m.first_key_value(), m.last_key_value()) {
             (Some((first_key, _)), Some((last_key, _))) => {
                 longest_shared_prefix(&first_key[..], &last_key[..])
@@ -76,57 +77,50 @@ impl<B, V: FixedSizeSerializable> PrefixCompressedKV<B, V> {
         };
         let suffixes_len: usize = m.keys().map(|k| k.len() - prefix.len()).sum();
 
-        let offset_width = std::cmp::max(byte_width(suffixes_len as u64), 1);
-
-        let offset_and_value_width = offset_width + V::size();
         let mut suffixes = Vec::with_capacity(suffixes_len);
-        let mut offset_and_values = Vec::with_capacity(m.len() * offset_and_value_width);
 
-        let mut offset_and_value = vec![0u8; std::cmp::max(4, offset_and_value_width)];
+        let mut suffix_offsets_and_values = Vec::with_capacity(m.len());
+
         for (k, v) in m {
             let offset = suffixes.len();
 
             suffixes.extend_from_slice(&k[prefix.len()..]);
 
-            for i in 0..offset_and_value.len() {
-                offset_and_value[i] = 0;
-            }
-            LittleEndian::write_u32(&mut offset_and_value[..], offset as u32);
-            v.write(&mut offset_and_value[offset_width..]);
-            offset_and_values.extend_from_slice(&offset_and_value[..offset_and_value_width]);
+            suffix_offsets_and_values.push((offset as u64, *v));
         }
 
         let mut header = [0u8; PREFIX_COMPRESSED_KV_HEADER_SIZE];
-        header[0] = offset_width as u8;
-        LittleEndian::write_u16(&mut header[1..3], m.len() as u16);
-        LittleEndian::write_u16(&mut header[3..5], prefix.len() as u16);
-        LittleEndian::write_u32(&mut header[5..9], suffixes.len() as u32);
+        LittleEndian::write_u16(&mut header[0..2], m.len() as u16);
+        LittleEndian::write_u16(&mut header[2..4], prefix.len() as u16);
+        LittleEndian::write_u32(&mut header[4..8], suffixes.len() as u32);
 
-        out.reserve(header.len() + prefix.len() + offset_and_values.len() + suffixes.len());
-
+        out.reserve(header.len() + prefix.len() + suffixes.len());
         out.extend_from_slice(&header[..]);
         out.extend_from_slice(&prefix[..]);
-        out.extend_from_slice(&offset_and_values[..]);
         out.extend_from_slice(&suffixes[..]);
+
+        PackedVec2::<()>::write(out, &suffix_offsets_and_values[..]);
     }
 }
 
-impl<B: Deref<Target = [u8]>, V: FixedSizeSerializable> PrefixCompressedKV<B, V> {
-    pub(super) fn open(data: B) -> Self {
+impl<B: Deref<Target = [u8]>> PrefixCompressedKV<B> {
+    pub(super) fn open(data: B) -> anyhow::Result<Self> {
         let header = &data[0..PREFIX_COMPRESSED_KV_HEADER_SIZE];
-        let offset_width = header[0] as usize;
-        let n = LittleEndian::read_u16(&header[1..3]) as usize;
-        let prefix_len = LittleEndian::read_u16(&header[3..5]) as usize;
-        let suffixes_len = LittleEndian::read_u32(&header[5..9]) as usize;
+        let n = LittleEndian::read_u16(&header[0..2]) as usize;
+        let prefix_len = LittleEndian::read_u16(&header[2..4]) as usize;
+        let suffixes_len = LittleEndian::read_u32(&header[4..8]) as usize;
 
-        Self {
-            offset_width,
+        // So we can just unwrap() it later.
+        _ = PackedVec2::open(
+            &data[PREFIX_COMPRESSED_KV_HEADER_SIZE + prefix_len + suffixes_len..],
+        )?;
+
+        Ok(Self {
             n,
             prefix_len,
             suffixes_len,
             data,
-            v: PhantomData,
-        }
+        })
     }
 
     pub(super) fn len(&self) -> usize {
@@ -139,16 +133,13 @@ impl<B: Deref<Target = [u8]>, V: FixedSizeSerializable> PrefixCompressedKV<B, V>
     }
 
     fn suffixes(&self) -> &[u8] {
-        let start = PREFIX_COMPRESSED_KV_HEADER_SIZE
-            + self.prefix_len
-            + self.n * (self.offset_width + V::size());
-        &self.data[start..]
+        let start = PREFIX_COMPRESSED_KV_HEADER_SIZE + self.prefix_len;
+        &self.data[start..start + self.suffixes_len]
     }
 
-    fn offset_and_values(&self) -> &[u8] {
-        let start = PREFIX_COMPRESSED_KV_HEADER_SIZE + self.prefix_len;
-        let end = start + self.n * (self.offset_width + V::size());
-        &self.data[start..end]
+    fn suffix_offset_and_values(&self) -> PackedVec2<&'_ [u8]> {
+        let start = PREFIX_COMPRESSED_KV_HEADER_SIZE + self.prefix_len + self.suffixes_len;
+        PackedVec2::open(&self.data[start..]).unwrap()
     }
 
     pub(super) fn search(&self, k: &[u8]) -> Result<usize, usize> {
@@ -165,17 +156,7 @@ impl<B: Deref<Target = [u8]>, V: FixedSizeSerializable> PrefixCompressedKV<B, V>
     }
 
     fn offset(&self, idx: usize) -> usize {
-        let width = self.offset_width + V::size();
-        let offset_start = idx * width;
-        let offset_end = offset_start + self.offset_width;
-        let mut offset: u32 = 0;
-        for (i, b) in self.offset_and_values()[offset_start..offset_end]
-            .iter()
-            .enumerate()
-        {
-            offset |= (*b as u32) << (i * 8);
-        }
-        offset as usize
+        self.suffix_offset_and_values().get(idx).0 as usize
     }
 
     fn get_suffix(&self, idx: usize) -> &[u8] {
@@ -197,41 +178,8 @@ impl<B: Deref<Target = [u8]>, V: FixedSizeSerializable> PrefixCompressedKV<B, V>
         k
     }
 
-    pub(super) fn get_value(&self, idx: usize) -> V {
-        let width = self.offset_width + V::size();
-        let offset_start = idx * width + self.offset_width;
-        let offset_end = offset_start + V::size();
-        V::read(&self.offset_and_values()[offset_start..offset_end])
-    }
-}
-
-pub(super) trait FixedSizeSerializable {
-    fn size() -> usize;
-    fn read(b: &[u8]) -> Self;
-    fn write(&self, b: &mut [u8]);
-}
-
-impl FixedSizeSerializable for u16 {
-    fn size() -> usize {
-        2
-    }
-    fn read(b: &[u8]) -> Self {
-        LittleEndian::read_u16(b)
-    }
-    fn write(&self, b: &mut [u8]) {
-        LittleEndian::write_u16(b, *self);
-    }
-}
-
-impl FixedSizeSerializable for u32 {
-    fn size() -> usize {
-        4
-    }
-    fn read(b: &[u8]) -> Self {
-        LittleEndian::read_u32(b)
-    }
-    fn write(&self, b: &mut [u8]) {
-        LittleEndian::write_u32(b, *self);
+    pub(super) fn get_value(&self, idx: usize) -> u64 {
+        self.suffix_offset_and_values().get(idx).1
     }
 }
 
@@ -254,7 +202,7 @@ impl<B: Deref<Target = [u8]>> PackedVec<B> {
         })
     }
 
-    fn write(out: &mut Vec<u8>, v: &Vec<u64>) {
+    fn write(out: &mut Vec<u8>, v: &[u64]) {
         let mut width = 1;
         for item in v {
             width = cmp::max(width, byte_width(*item));
@@ -292,7 +240,7 @@ pub(super) struct PackedVec2<B> {
 }
 
 impl<B> PackedVec2<B> {
-    pub(super) fn write(out: &mut Vec<u8>, v: &Vec<(u64, u64)>) {
+    pub(super) fn write(out: &mut Vec<u8>, v: &[(u64, u64)]) {
         let mut width_a = 1;
         let mut width_b = 1;
         for (a, b) in v {
