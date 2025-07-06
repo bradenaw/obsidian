@@ -200,12 +200,14 @@ mod tests {
     #[tokio::test]
     async fn test_write() -> anyhow::Result<()> {
         let obs = new_for_test(1).await?;
-        obs.create_colo_group(ColoGroupId(1), vec![] /*splits*/)
+        let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
+        obs.create_colo_group(keyspace_id.0, vec![] /*splits*/)
             .await?;
+        obs.create_keyspace(keyspace_id).await?;
 
         let client = spawn_server(obs).await?;
 
-        let key = (KeyspaceId(ColoGroupId(1), 1), b"abc".to_vec());
+        let key = (keyspace_id, b"abc".to_vec());
 
         let write_ts = client
             .write(

@@ -2,12 +2,16 @@ use std::cmp;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::TryFrom;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::RwLock;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use futures::FutureExt;
 use futures::Stream;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 use crate::meta::Meta;
 use crate::meta::MetaKey;
@@ -23,6 +27,7 @@ use crate::types::Direction;
 use crate::types::RevisionValue;
 use crate::types::Timestamp;
 use crate::util::hexlify;
+use crate::util::wait_all;
 use crate::util::Background;
 use crate::util::Retry;
 use crate::util::WaitableTimestamp;
@@ -32,9 +37,10 @@ pub(crate) struct MetaSynced {
     inner: Arc<RwLock<MetaSyncedInner>>,
 }
 
-pub(crate) enum SyncType<'a> {
+#[derive(Clone)]
+pub(crate) enum SyncType {
     Initial,
-    Tx(&'a HashSet<MetaKey>),
+    Tx(HashSet<MetaKey>),
 }
 
 struct MetaSyncedInner {
@@ -43,7 +49,10 @@ struct MetaSyncedInner {
     router: StaticRouter,
     owned_ranges: HashMap<TabletId, HashMap<ColoGroupId, RangeSet<Vec<u8>>>>,
 
-    subscribers: Vec<Box<dyn Fn(SyncType) + Send + Sync>>,
+    // For every change and the initial load, we'll send the update on each of these channels and
+    // expect the other side to use the oneshot to acknowledge that it has completed or been
+    // abandoned.
+    subscribers: Vec<mpsc::Sender<(SyncType, MetaSyncedSnapshot, oneshot::Sender<()>)>>,
 }
 
 impl MetaSynced {
@@ -88,33 +97,38 @@ impl MetaSynced {
 
     /// Subscribes to changes in `MetaSynced`. `f` will be called once, either immediately or when
     /// initial sync finishes, with `SyncType::Initial`. Every transaction that updates the
-    /// `MetaSynced` after that point will be given as a SyncType::Tx with the changed revisions.
+    /// `MetaSynced` after that point will be given as a `SyncType::Tx` with the changed keys.
     ///
     /// The synced timestamp (as observed by `wait()`) does not advance until all subscribers
     /// return, so that `wait()` also describes the log position that those subscribers are at.
     ///
     /// That also means it would be unwise to do anything terribly expensive inside f.
-    pub(crate) fn subscribe<F: Fn(SyncType) + Send + Sync + 'static>(&self, f: F) {
-        loop {
-            let need_initial = {
-                let inner = self.inner.read().unwrap();
-                inner.synced_ts.get() > Timestamp::ZERO
-            };
-            // Unfortunately important that we do this inline and not in a spawn, since
-            // subscriptions need to happen during the constructors for components (e.g. Tablet)
-            // and the initial sync needs to happen before any other part of the system can call
-            // wait().
-            if need_initial {
-                f(SyncType::Initial);
+    pub(crate) async fn subscribe<F, Fut>(&self, f: F)
+    where
+        F: Fn(SyncType, MetaSyncedSnapshot) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let (maybe_initial, mut rx) = {
+            let mut inner = self.inner.write().unwrap();
+            let (tx, rx) = mpsc::channel(1);
+            inner.subscribers.push(tx);
+
+            if inner.synced_ts.get() > Timestamp::ZERO {
+                (Some(inner.kv.clone()), rx)
+            } else {
+                (None, rx)
             }
-            {
-                let mut inner = self.inner.write().unwrap();
-                if !need_initial && inner.synced_ts.get() > Timestamp::ZERO {
-                    continue;
-                }
-                inner.subscribers.push(Box::new(f));
-                return;
-            }
+        };
+
+        if let Some(initial) = maybe_initial {
+            f(SyncType::Initial, initial).await;
+        }
+
+        while let Some((sync_type, snapshot, done)) = rx.recv().await {
+            f(sync_type, snapshot).await;
+            // This only errors if the other side hung up, which means they're gone and we don't
+            // care about them for the purposes of synced_ts.
+            let _ = done.send(());
         }
     }
 
@@ -204,22 +218,56 @@ impl MetaSyncedInner {
 
         let (router, owned_ranges) = Self::regen_router(kv.clone()).await?;
 
-        {
+        let snapshot = {
             let mut inner = inner_lock.write().unwrap();
-            inner.kv = kv;
+            inner.kv = kv.clone();
             inner.router = router;
             inner.owned_ranges = owned_ranges;
-        }
+            inner.kv.clone()
+        };
 
-        {
-            let inner = inner_lock.read().unwrap();
-            for subscriber in &inner.subscribers {
-                subscriber(SyncType::Initial);
-            }
-            inner.synced_ts.set(ts);
-        }
+        Self::notify_and_wait_subscribers(inner_lock, SyncType::Initial, snapshot).await;
 
         Ok(ts)
+    }
+
+    async fn notify_and_wait_subscribers(
+        inner_lock: &Arc<RwLock<Self>>,
+        sync_type: SyncType,
+        snapshot: MetaSyncedSnapshot,
+    ) {
+        // This looks a little odd but:
+        // a) this is only ever called from a single task
+        // b) we can't hold any lock on inner while waiting the futures
+        //
+        // But we want to mutate inner.subscribers during in order to remove subscribers that have
+        // already hung up.
+
+        let mut subscribers = {
+            let mut inner = inner_lock.write().unwrap();
+            inner.subscribers.split_off(0)
+        };
+
+        let mut futures = vec![];
+        let mut i = 0;
+        while i < subscribers.len() {
+            let (tx, rx) = oneshot::channel();
+            if let Err(_) = subscribers[i]
+                .send((sync_type.clone(), snapshot.clone(), tx))
+                .await
+            {
+                subscribers.swap_remove(i);
+                continue;
+            }
+            futures.push(rx.map(|_| ()));
+            i += 1;
+        }
+        wait_all(futures.into_iter()).await;
+
+        {
+            let mut inner = inner_lock.write().unwrap();
+            inner.subscribers.extend(subscribers.into_iter());
+        }
     }
 
     async fn incremental_sync_once<M: Meta>(
@@ -265,12 +313,8 @@ impl MetaSyncedInner {
             inner.kv.clone()
         };
 
-        {
-            let inner = inner_lock.read().unwrap();
-            for subscriber in &inner.subscribers {
-                subscriber(SyncType::Tx(&sync_items))
-            }
-        }
+        Self::notify_and_wait_subscribers(inner_lock, SyncType::Tx(sync_items), snapshot.clone())
+            .await;
 
         let (router, owned_ranges) = Self::regen_router(snapshot).await?;
 
@@ -350,7 +394,7 @@ impl MetaSyncedInner {
 }
 
 #[derive(Clone)]
-struct MetaSyncedSnapshot {
+pub(crate) struct MetaSyncedSnapshot {
     // We have to clone these a lot, im::OrdMap makes this cheap.
     m: im::OrdMap<Vec<u8>, Vec<u8>>,
     // Keeping track of the maximum key length that exists in m is necessary to transform

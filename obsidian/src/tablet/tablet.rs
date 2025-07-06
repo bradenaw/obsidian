@@ -23,7 +23,11 @@ use tokio::sync::mpsc;
 
 use crate::lsm::Lsm;
 use crate::meta::Meta;
+use crate::meta::MetaKey;
+use crate::meta::MetaReader;
 use crate::meta_synced::MetaSynced;
+use crate::meta_synced::MetaSyncedSnapshot;
+use crate::meta_synced::SyncType;
 use crate::obsidian::InternalError;
 use crate::obsidian::Router;
 use crate::obsidian::TabletId;
@@ -165,10 +169,12 @@ impl<S: Storage + Send + Sync + 'static> LsmTablet<S> {
 
         lsm.create_keyspace(KeyspaceId::TX_OUTCOMES).await?;
 
+        let meta_synced = Arc::new(MetaSynced::new(meta));
+
         let inner = Arc::new(LsmTabletInner::new(
             tablet_id,
             lsm,
-            MetaSynced::new(meta),
+            meta_synced,
             tablets,
             prepare_sender.clone(),
             commit_sender.clone(),
@@ -219,30 +225,26 @@ impl<S: Storage + Send + Sync + 'static> LsmTablet<S> {
             }
         });
 
+        bg.spawn({
+            let inner = inner.clone();
+            async move {
+                inner
+                    .meta_synced
+                    .subscribe(async |sync_type, snapshot: MetaSyncedSnapshot| {
+                        inner.sync_meta(sync_type, snapshot).await;
+                    })
+                    .await;
+            }
+        });
+
         Ok(Self { inner, bg })
-    }
-
-    pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
-        self.inner.lsm.create_keyspace(keyspace_id).await?;
-        if keyspace_id.is_userland() {
-            self.inner
-                .lsm
-                .create_keyspace(keyspace_id.pending().unwrap())
-                .await?;
-            self.inner
-                .lsm
-                .create_keyspace(keyspace_id.precond().unwrap())
-                .await?;
-        }
-
-        Ok(())
     }
 }
 
 struct LsmTabletInner<S: Storage> {
     tablet_id: TabletId,
     lsm: Lsm<S>,
-    meta_synced: MetaSynced,
+    meta_synced: Arc<MetaSynced>,
     tablets: Box<dyn Tablets + Sync + Send>,
     sequencer: Sequencer,
     lock_mgr: LockMgr,
@@ -256,7 +258,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
     fn new(
         tablet_id: TabletId,
         lsm: Lsm<S>,
-        meta_synced: MetaSynced,
+        meta_synced: Arc<MetaSynced>,
         tablets: Box<dyn Tablets + Sync + Send>,
         prepare_sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
         commit_sender: mpsc::Sender<(Txid, Timestamp, BTreeSet<Key>, BTreeSet<Key>)>,
@@ -1226,6 +1228,46 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
             return Err(anyhow!("{:?}/{:?} not owned", colo_group_id, key).into());
         }
         Ok(())
+    }
+
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        self.lsm.create_keyspace(keyspace_id).await?;
+        if keyspace_id.is_userland() {
+            self.lsm
+                .create_keyspace(keyspace_id.pending().unwrap())
+                .await?;
+            self.lsm
+                .create_keyspace(keyspace_id.precond().unwrap())
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn sync_meta(&self, sync_type: SyncType, snapshot: MetaSyncedSnapshot) {
+        Retry::new()
+            .indefinitely(&async || -> anyhow::Result<()> {
+                let sync_type = sync_type.clone();
+                match sync_type {
+                    SyncType::Initial => {
+                        for keyspace_id in snapshot.keyspace_ids().await? {
+                            self.create_keyspace(keyspace_id).await?;
+                        }
+                    }
+                    SyncType::Tx(meta_keys) => {
+                        for meta_key in meta_keys {
+                            match meta_key {
+                                MetaKey::Keyspace(keyspace_id) => {
+                                    self.create_keyspace(keyspace_id).await?;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .await;
     }
 }
 

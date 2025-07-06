@@ -748,6 +748,7 @@ mod tests {
     use crate::obsidian::Obsidian;
     use crate::range::Bound;
     use crate::types::ColoGroupId;
+    use crate::types::KeyspaceId;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_workload_append() -> anyhow::Result<()> {
@@ -760,6 +761,9 @@ mod tests {
             vec![Bound::Before(vec![2]), Bound::Before(vec![3])],
         )
         .await?;
+
+        fe.create_keyspace(KeyspaceId(ColoGroupId(1), 1)).await?;
+        fe.create_keyspace(KeyspaceId(ColoGroupId(1), 2)).await?;
 
         let wl = WorkloadAppend::new(fe);
 

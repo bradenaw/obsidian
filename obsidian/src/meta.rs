@@ -428,6 +428,19 @@ pub(crate) trait MetaReader {
         Ok(out)
     }
 
+    async fn keyspace_ids(&self) -> anyhow::Result<Vec<KeyspaceId>> {
+        let mut out = vec![];
+        let mut s = self.scan(MetaKey::keyspaces(), Direction::Asc);
+        while let Some((key, _)) = s.try_next().await? {
+            if let MetaKey::Keyspace(keyspace_id) = MetaKey::decode(&key[..])? {
+                out.push(keyspace_id);
+            } else {
+                return Err(anyhow!("invalid tablet key {}", hexlify(&key)));
+            }
+        }
+        Ok(out)
+    }
+
     async fn tablet_metadata(
         &self,
         tablet_id: TabletId,

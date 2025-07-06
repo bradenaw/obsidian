@@ -48,8 +48,6 @@ pub(super) struct Run<R> {
     max_key: Vec<u8>,
 }
 
-const INDEX_BLOCK_HEADER_SIZE: usize = 48;
-
 impl<R> Run<R> {
     // Assumes S is in (key, rev(ts)) order, and assumes termination at a reasonable size limit.
     pub(super) async fn write<
@@ -295,7 +293,13 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
             .map(|versions| versions.last())
             .flatten()
         {
-            assert!(prev_revision.0 > revision.ts);
+            assert!(
+                prev_revision.0 > revision.ts,
+                "got revisions for {} not in descending order: {:?} then {:?}",
+                hexlify(&revision.key[..]),
+                prev_revision.0,
+                revision.ts
+            );
         }
         self.buffer
             .entry(revision.key)

@@ -215,6 +215,14 @@ pub(crate) fn read_varint_from(mut r: impl Read) -> anyhow::Result<(u64, usize)>
     anyhow::bail!("invalid varint");
 }
 
+pub(crate) async fn wait_all<I: Iterator<Item: Future<Output = ()>>>(iter: I) {
+    let mut waits = futures::stream::FuturesUnordered::new();
+    for item in iter {
+        waits.push(item);
+    }
+    while let Some(_) = waits.next().await {}
+}
+
 pub(crate) async fn bounded_unordered_map<T, F: Fn(T) -> Fut, Fut: futures::Future<Output = ()>>(
     receiver: tokio::sync::mpsc::Receiver<T>,
     max_concurrent: usize,

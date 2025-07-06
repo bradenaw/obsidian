@@ -262,28 +262,26 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
         4,  // n_stripes
     ));
 
+    let meta_lsm = LsmBuilder::new(storage.clone())
+        .l0_max_size(256)
+        .run_target_size(65536)
+        .block_size(4096)
+        .build()
+        .await?;
+    meta_lsm.create_keyspace(KeyspaceId::META).await?;
+    meta_lsm
+        .create_keyspace(KeyspaceId::META.pending().unwrap())
+        .await?;
+
     let meta_tablet = Arc::new(
         LsmTablet::new(
             TabletId::META,
-            LsmBuilder::new(storage.clone())
-                .l0_max_size(256)
-                .run_target_size(65536)
-                .block_size(4096)
-                .build()
-                .await?,
+            meta_lsm,
             Box::new(meta_proxy.clone()),
             Box::new(tablets.clone()),
         )
         .await?,
     );
-    meta_tablet.create_keyspace(KeyspaceId::META).await?;
-    // TODO: remove when keyspace sync from meta works
-    meta_tablet
-        .create_keyspace(KeyspaceId(ColoGroupId(1), 1))
-        .await?;
-    meta_tablet
-        .create_keyspace(KeyspaceId(ColoGroupId(1), 2))
-        .await?;
     let meta = MetaImpl::new(meta_tablet.clone());
 
     {
@@ -296,18 +294,17 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
         let tablet_id = TabletId(ShardId(1), (i + 2) as u64);
         let tablet = LsmTablet::new(
             tablet_id,
-            LsmBuilder::new(storage.clone()).build().await?,
+            LsmBuilder::new(storage.clone())
+                // TODO: scan_page panics in compact_l0!
+                //.l0_max_size(256)
+                //.run_target_size(65536)
+                //.block_size(4096)
+                .build()
+                .await?,
             Box::new(meta_proxy.clone()),
             Box::new(tablets.clone()),
         )
         .await?;
-        // TODO: remove when keyspace sync from meta works
-        tablet
-            .create_keyspace(KeyspaceId(ColoGroupId(1), 1))
-            .await?;
-        tablet
-            .create_keyspace(KeyspaceId(ColoGroupId(1), 2))
-            .await?;
 
         let mut m = tablets.m.lock().unwrap();
         m.insert(tablet_id, Arc::new(tablet));
@@ -316,11 +313,13 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
 
     meta_proxy.put(meta);
 
-    Ok(Frontend::new(
+    let frontend = Frontend::new(
         Box::new(meta_proxy.clone()),
         MetaSynced::new(meta_proxy.clone()),
         Box::new(tablets),
-    ))
+    );
+
+    Ok(frontend)
 }
 
 pub(crate) fn single_byte_splits(n: usize) -> Vec<Bound<Vec<u8>>> {
@@ -418,6 +417,7 @@ macro_rules! obsidian_test_suite {
                         vec![Bound::Before(vec![2]), Bound::Before(vec![3])],
                     )
                     .await?;
+                    obs.create_keyspace(keyspace_id).await?;
 
                     let writes: [(Vec<u8>, _); 12] = [
                         //          ts=0123456789
