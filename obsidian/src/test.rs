@@ -264,8 +264,8 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
 
     let meta_lsm = LsmBuilder::new(storage.clone())
         .l0_max_size(256)
-        .run_target_size(65536)
-        .block_size(4096)
+        .run_size_target(65536)
+        .block_size_target(4096)
         .build()
         .await?;
     meta_lsm.create_keyspace(KeyspaceId::META).await?;
@@ -296,8 +296,8 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
             tablet_id,
             LsmBuilder::new(storage.clone())
                 .l0_max_size(256)
-                .run_target_size(65536)
-                .block_size(4096)
+                .run_size_target(65536)
+                .block_size_target(4096)
                 .build()
                 .await?,
             Box::new(meta_proxy.clone()),

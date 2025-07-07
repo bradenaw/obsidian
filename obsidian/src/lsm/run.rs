@@ -59,12 +59,12 @@ impl<R> Run<R> {
         w: &mut W,
         id: Uuid,
         keyspace_id: KeyspaceId,
-        block_size_limit: u64,
+        block_size_target: u64,
         s: S,
     ) -> anyhow::Result<()> {
         pin_mut!(s);
 
-        let mut b = RunBuilder::new(w, id, keyspace_id, block_size_limit);
+        let mut b = RunBuilder::new(w, id, keyspace_id, block_size_target);
         while let Some(revision) = s.next().await.transpose()? {
             b.push(revision).await?;
         }
@@ -244,7 +244,7 @@ struct RunBuilder<W> {
     w: W,
     id: Uuid,
     keyspace_id: KeyspaceId,
-    block_size_limit: u64,
+    block_size_target: u64,
 
     bytes_written: usize,
     index: BTreeMap<Vec<u8>, u64>,
@@ -255,12 +255,12 @@ struct RunBuilder<W> {
 }
 
 impl<W: AsyncWrite + Unpin> RunBuilder<W> {
-    fn new(w: W, id: Uuid, keyspace_id: KeyspaceId, block_size_limit: u64) -> Self {
+    fn new(w: W, id: Uuid, keyspace_id: KeyspaceId, block_size_target: u64) -> Self {
         Self {
             w,
             id,
             keyspace_id,
-            block_size_limit,
+            block_size_target,
             buffer: BlockBuilder::new(),
             bytes_written: 0,
             index: BTreeMap::new(),
@@ -281,7 +281,7 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
         };
 
         if !self.buffer.is_empty()
-            && (self.buffer.size_estimate() + revision_size_estimate) as u64 > self.block_size_limit
+            && (self.buffer.size_estimate() + revision_size_estimate) as u64 > self.block_size_target
             && !self.buffer.contains_key(&revision.key)
         {
             self.flush_block().await?;

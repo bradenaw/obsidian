@@ -57,8 +57,8 @@ use crate::wal;
 
 pub(crate) struct LsmBuilder<S> {
     l0_max_size: u64,
-    run_target_size: u64,
-    block_size: u64,
+    run_size_target: u64,
+    block_size_target: u64,
     wal: Option<Arc<wal::Wal<WalEntry>>>,
     storage: Arc<S>,
 }
@@ -67,8 +67,8 @@ impl<S: Storage + Send + Sync + 'static> LsmBuilder<S> {
     pub fn new(storage: Arc<S>) -> Self {
         LsmBuilder {
             l0_max_size: 8_000_000,
-            run_target_size: 64_000_000,
-            block_size: 32768,
+            run_size_target: 64_000_000,
+            block_size_target: 32768,
             wal: None,
             storage: storage,
         }
@@ -79,13 +79,13 @@ impl<S: Storage + Send + Sync + 'static> LsmBuilder<S> {
         self
     }
 
-    pub fn run_target_size(mut self, x: u64) -> Self {
-        self.run_target_size = x;
+    pub fn run_size_target(mut self, x: u64) -> Self {
+        self.run_size_target = x;
         self
     }
 
-    pub fn block_size(mut self, x: u64) -> Self {
-        self.block_size = x;
+    pub fn block_size_target(mut self, x: u64) -> Self {
+        self.block_size_target = x;
         self
     }
 
@@ -97,8 +97,8 @@ impl<S: Storage + Send + Sync + 'static> LsmBuilder<S> {
     pub async fn build(self) -> anyhow::Result<Lsm<S>> {
         Lsm::new(
             self.l0_max_size,
-            self.run_target_size,
-            self.block_size,
+            self.run_size_target,
+            self.block_size_target,
             self.wal
                 .unwrap_or_else(|| Arc::new(wal::Wal::new(16384, Duration::from_millis(5)))),
             self.storage,
@@ -109,8 +109,8 @@ impl<S: Storage + Send + Sync + 'static> LsmBuilder<S> {
 
 pub(crate) struct Lsm<S: Storage> {
     l0_max_size: u64,
-    run_target_size: u64,
-    block_size: u64,
+    run_size_target: u64,
+    block_size_target: u64,
 
     inner: Arc<AtomicArc<HashMap<KeyspaceId, Arc<LsmInner<S>>>>>,
     wal: Arc<wal::Wal<WalEntry>>,
@@ -123,8 +123,8 @@ pub(crate) struct Lsm<S: Storage> {
 impl<S: Storage + Send + Sync + 'static> Lsm<S> {
     pub async fn new(
         l0_max_size: u64,
-        run_target_size: u64,
-        block_size: u64,
+        run_size_target: u64,
+        block_size_target: u64,
         wal: Arc<wal::Wal<WalEntry>>,
         storage: Arc<S>,
     ) -> anyhow::Result<Self> {
@@ -139,8 +139,8 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
                     Arc::new(
                         LsmInner::new(
                             l0_max_size,
-                            run_target_size,
-                            block_size,
+                            run_size_target,
+                            block_size_target,
                             keyspace_id,
                             manifest,
                             wal.clone(),
@@ -167,8 +167,8 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
 
         Ok(Self {
             l0_max_size,
-            run_target_size,
-            block_size,
+            run_size_target,
+            block_size_target,
 
             inner,
             wal,
@@ -296,8 +296,8 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
             inner_new.entry(keyspace_id).or_insert(Arc::new(
                 LsmInner::new(
                     self.l0_max_size,
-                    self.run_target_size,
-                    self.block_size,
+                    self.run_size_target,
+                    self.block_size_target,
                     keyspace_id,
                     Manifest::new(7),
                     self.wal.clone(),
@@ -457,8 +457,8 @@ struct LsmInner<S: Storage> {
 impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
     pub async fn new(
         l0_max_size: u64,
-        run_target_size: u64,
-        block_size: u64,
+        run_size_target: u64,
+        block_size_target: u64,
         keyspace_id: KeyspaceId,
         manifest: Manifest<S::R>,
         wal: Arc<wal::Wal<WalEntry>>,
@@ -468,8 +468,8 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
         let (compacted_notify, compacted) = tokio::sync::broadcast::channel(1);
         let inner = Arc::new(LsmInnerInner::new(
             l0_max_size,
-            run_target_size,
-            block_size,
+            run_size_target,
+            block_size_target,
             manifest,
             l0_compact_notify,
         ));
@@ -477,8 +477,8 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
         let bg = Background::new();
         bg.spawn(Self::compaction_loop(
             l0_max_size,
-            run_target_size,
-            block_size,
+            run_size_target,
+            block_size_target,
             keyspace_id,
             inner.clone(),
             storage.clone(),
@@ -543,8 +543,8 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
 
     async fn compaction_loop(
         l0_max_size: u64,
-        run_target_size: u64,
-        block_size: u64,
+        run_size_target: u64,
+        block_size_target: u64,
         keyspace_id: KeyspaceId,
         inner: Arc<LsmInnerInner<S::R>>,
         storage: Arc<S>,
@@ -555,8 +555,8 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
         while let Some(_) = l0_compact_ready.recv().await {
             Self::compact(
                 l0_max_size,
-                run_target_size,
-                block_size,
+                run_size_target,
+                block_size_target,
                 keyspace_id,
                 inner.clone(),
                 storage.clone(),
@@ -570,8 +570,8 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
 
     async fn compact(
         l0_max_size: u64,
-        run_target_size: u64,
-        block_size: u64,
+        run_size_target: u64,
+        block_size_target: u64,
         keyspace_id: KeyspaceId,
         inner: Arc<LsmInnerInner<S::R>>,
         storage: Arc<S>,
@@ -582,8 +582,8 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
 
         while !manifest.l0_sealed.is_empty() {
             let (runs, remove_ids, seqno) = Self::compact_l0(
-                run_target_size,
-                block_size,
+                run_size_target,
+                block_size_target,
                 keyspace_id,
                 &manifest,
                 &storage,
@@ -624,8 +624,8 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
             'levels: for i in 1..manifest.levels.len() - 1 {
                 while manifest.levels[i].size() as u64 > l0_max_size * 10_u64.pow(i as u32) {
                     let (runs, remove_ids) = Self::compact_from(
-                        run_target_size,
-                        block_size,
+                        run_size_target,
+                        block_size_target,
                         keyspace_id,
                         &manifest,
                         &storage,
@@ -659,8 +659,8 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
     }
 
     async fn compact_l0(
-        run_target_size: u64,
-        block_size: u64,
+        run_size_target: u64,
+        block_size_target: u64,
         keyspace_id: KeyspaceId,
         manifest: &Manifest<S::R>,
         storage: &S,
@@ -679,8 +679,8 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
         let seqno = chosen_l0.max_seqno();
 
         let (new_runs, mut removes) = Self::compact_inner(
-            run_target_size,
-            block_size,
+            run_size_target,
+            block_size_target,
             keyspace_id,
             manifest,
             storage,
@@ -695,8 +695,8 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
     }
 
     async fn compact_from(
-        run_target_size: u64,
-        block_size: u64,
+        run_size_target: u64,
+        block_size_target: u64,
         keyspace_id: KeyspaceId,
         manifest: &Manifest<S::R>,
         storage: &S,
@@ -717,8 +717,8 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
         let run_id = run.id();
 
         let (new_runs, mut removes) = Self::compact_inner(
-            run_target_size,
-            block_size,
+            run_size_target,
+            block_size_target,
             keyspace_id,
             manifest,
             storage,
@@ -733,8 +733,8 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
     }
 
     async fn compact_inner(
-        run_target_size: u64,
-        block_size: u64,
+        run_size_target: u64,
+        block_size_target: u64,
         keyspace_id: KeyspaceId,
         manifest: &Manifest<S::R>,
         storage: &S,
@@ -785,7 +785,7 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
             future::try_join3(
                 storage.put(&id.to_string(), reader),
                 async {
-                    Run::<()>::write(&mut writer, id, keyspace_id, block_size, rx).await?;
+                    Run::<()>::write(&mut writer, id, keyspace_id, block_size_target, rx).await?;
                     drop(writer);
                     Ok(())
                 },
@@ -797,7 +797,7 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
                         let break_after = {
                             // All of the revisions for a single key need to end up in the same run, so once
                             // we've gone over the target size look for a break between keys.
-                            if curr_size > run_target_size {
+                            if curr_size > run_size_target {
                                 if let Some(Ok(next_revision)) = Pin::new(&mut sorted).peek().await
                                 {
                                     if revision.key != next_revision.key {
@@ -834,8 +834,8 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
 
 struct LsmInnerInner<R> {
     l0_max_size: u64,
-    run_target_size: u64,
-    block_size: u64,
+    run_size_target: u64,
+    block_size_target: u64,
 
     l0_compact_notify: tokio::sync::mpsc::Sender<()>,
     l0_active: AtomicArc<RwLock<MaybeActiveMemtable>>,
@@ -845,16 +845,16 @@ struct LsmInnerInner<R> {
 impl<R: FileReader + Clone + Sync> LsmInnerInner<R> {
     fn new(
         l0_max_size: u64,
-        run_target_size: u64,
-        block_size: u64,
+        run_size_target: u64,
+        block_size_target: u64,
         initial_manifest: Manifest<R>,
         l0_compact_notify: tokio::sync::mpsc::Sender<()>,
     ) -> Self {
         let l0_active = Arc::new(RwLock::new(MaybeActiveMemtable::Active(Memtable::new())));
         Self {
             l0_max_size,
-            run_target_size,
-            block_size,
+            run_size_target,
+            block_size_target,
             l0_compact_notify,
             l0_active: AtomicArc::new(l0_active.clone()),
             manifest: AtomicArc::new(Arc::new(initial_manifest.with_ingest_l0(l0_active))),
@@ -1639,8 +1639,8 @@ mod test {
     async fn test_compact_l0() -> anyhow::Result<()> {
         let lsm = LsmBuilder::new(Arc::new(MemStorage::new()))
             .l0_max_size(128)
-            .block_size(128)
-            .run_target_size(512)
+            .block_size_target(128)
+            .run_size_target(512)
             .build()
             .await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
@@ -1694,8 +1694,8 @@ mod test {
     async fn test_compact_l1() -> anyhow::Result<()> {
         let lsm = LsmBuilder::new(Arc::new(MemStorage::new()))
             .l0_max_size(128)
-            .block_size(128)
-            .run_target_size(512)
+            .block_size_target(128)
+            .run_size_target(512)
             .build()
             .await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
@@ -1758,8 +1758,8 @@ mod test {
 
         let lsm = LsmBuilder::new(storage.clone())
             .l0_max_size(128)
-            .block_size(128)
-            .run_target_size(512)
+            .block_size_target(128)
+            .run_size_target(512)
             .wal(wal.clone())
             .build()
             .await?;
@@ -1845,8 +1845,8 @@ mod test {
     async fn test_scan_page() -> anyhow::Result<()> {
         let lsm = LsmBuilder::new(Arc::new(MemStorage::new()))
             .l0_max_size(32)
-            .block_size(48)
-            .run_target_size(96)
+            .block_size_target(48)
+            .run_size_target(96)
             .build()
             .await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
@@ -2137,8 +2137,8 @@ mod test {
 
                 let lsm = LsmBuilder::new(Arc::new(MemStorage::new()))
                     .l0_max_size(128)
-                    .block_size(128)
-                    .run_target_size(512)
+                    .block_size_target(128)
+                    .run_size_target(512)
                     .build()
                     .await
                     .unwrap();
@@ -2484,7 +2484,7 @@ mod test {
                         &mut v,
                         Uuid::new_v4(),
                         KeyspaceId(ColoGroupId(1), 1),
-                        1024, // block_size
+                        1024, // block_size_target
                         futures::stream::iter(revisions.into_iter().map(|revision| Ok(revision))),
                     )
                     .await?;
