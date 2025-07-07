@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::cmp;
 
 use anyhow::anyhow;
 use async_stream::try_stream;
@@ -14,6 +15,7 @@ use uuid::Uuid;
 
 use crate::lsm::block::dump_block;
 use crate::lsm::block::Block;
+use crate::lsm::block::BlockBuilder;
 use crate::lsm::util::LsmRevision;
 use crate::lsm::util::PrefixCompressedKV;
 use crate::range::Bound;
@@ -247,8 +249,7 @@ struct RunBuilder<W> {
     bytes_written: usize,
     index: BTreeMap<Vec<u8>, u64>,
     last_key: Vec<u8>,
-    buffer: BTreeMap<Vec<u8>, Vec<(Timestamp, RevisionValue)>>,
-    buffer_size_estimate: u64,
+    buffer: BlockBuilder,
     min_ts: Timestamp,
     max_ts: Timestamp,
 }
@@ -260,9 +261,8 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
             id,
             keyspace_id,
             block_size_limit,
-            buffer: BTreeMap::new(),
+            buffer: BlockBuilder::new(),
             bytes_written: 0,
-            buffer_size_estimate: 0,
             index: BTreeMap::new(),
             min_ts: Timestamp::MAX,
             max_ts: Timestamp::ZERO,
@@ -275,54 +275,34 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
             let key_len = if self.buffer.contains_key(&revision.key) {
                 0
             } else {
-                (revision.key.len() as u64) + 4
+                revision.key.len() + 4
             };
-            (key_len as u64) + 10 + (revision.value.len() as u64)
+            key_len + 10 + revision.value.len()
         };
 
         if !self.buffer.is_empty()
-            && self.buffer_size_estimate + revision_size_estimate > self.block_size_limit
+            && (self.buffer.size_estimate() + revision_size_estimate) as u64 > self.block_size_limit
             && !self.buffer.contains_key(&revision.key)
         {
             self.flush_block().await?;
         }
 
-        if let Some(prev_revision) = self
-            .buffer
-            .get(&revision.key)
-            .map(|versions| versions.last())
-            .flatten()
-        {
-            if prev_revision.0 <= revision.ts {
-                return Err(anyhow!(
-                    "revisions for {} not in descending order: {:?} then {:?}",
-                    hexlify(&revision.key[..]),
-                    prev_revision.0,
-                    revision.ts
-                ));
-            }
-        }
-        self.buffer
-            .entry(revision.key)
-            .or_insert_with(Vec::new)
-            .push((revision.ts, revision.value));
-        self.buffer_size_estimate += revision_size_estimate;
-
-        self.min_ts = std::cmp::min(self.min_ts, revision.ts);
-        self.max_ts = std::cmp::max(self.max_ts, revision.ts);
+        self.min_ts = cmp::min(revision.ts, self.min_ts);
+        self.max_ts = cmp::max(revision.ts, self.max_ts);
+        self.buffer.push(revision)?;
 
         Ok(())
     }
 
     async fn flush_block(&mut self) -> anyhow::Result<()> {
-        let (first_key, last_key_) =
-            match (self.buffer.first_key_value(), self.buffer.last_key_value()) {
-                (Some((first_key, _)), Some((last_key, _))) => (first_key, last_key),
-                _ => anyhow::bail!("empty block"),
-            };
-        self.last_key = last_key_.clone();
+        let (first_key, last_key) = match (self.buffer.first_key(), self.buffer.last_key()) {
+            (Some(first_key), Some(last_key)) => (first_key, last_key),
+            _ => anyhow::bail!("empty block"),
+        };
 
-        let block = Block::<()>::encode(&self.buffer)?;
+        self.last_key = last_key.clone();
+
+        let block = self.buffer.encode()?;
         self.w.write_all(&block[..]).await?;
         self.bytes_written += block.len();
 
@@ -330,8 +310,7 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
         self.index
             .insert(first_key.clone(), block_end_offset as u64);
 
-        self.buffer.clear();
-        self.buffer_size_estimate = 0;
+        self.buffer = BlockBuilder::new();
 
         Ok(())
     }
@@ -619,20 +598,20 @@ mod test {
         let run = Run::open(TestFile::from(v)).await?;
 
         async fn check(
-            block: &Run<TestFile>,
+            run: &Run<TestFile>,
             ts: Timestamp,
             range: Range<Vec<u8>>,
             expected: Vec<(&str, usize, bool)>,
         ) -> anyhow::Result<()> {
             for direction in [Direction::Asc, Direction::Desc] {
-                let mut results: Vec<_> = block
-                    .scan(ts, range.clone(), direction)
-                    .try_collect()
-                    .await?;
+                let mut results: Vec<_> =
+                    run.scan(ts, range.clone(), direction).try_collect().await?;
 
                 if direction == Direction::Desc {
                     results.reverse();
                 }
+
+                dump_run(run).await?;
 
                 assert_eq!(
                     results,

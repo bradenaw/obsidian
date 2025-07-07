@@ -1,3 +1,4 @@
+use std::cmp;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::ops::Deref;
@@ -19,7 +20,9 @@ use crate::types::HistoryRange;
 use crate::types::RevisionValue;
 use crate::types::Timestamp;
 use crate::util::binary_search_by_idx;
+use crate::util::byte_width;
 use crate::util::hexlify;
+use crate::util::longest_shared_prefix_len;
 use crate::util::IteratorEither;
 
 /// A Block is conceptually a BTreeMap<Vec<u8>, BTreeMap<Timestamp, RevisionValue>>, but it is
@@ -40,6 +43,9 @@ impl<'a, R> Block<'a, R> {
     pub(super) fn encode(
         kvs: &BTreeMap<Vec<u8>, Vec<(Timestamp, RevisionValue)>>,
     ) -> anyhow::Result<Vec<u8>> {
+        if kvs.is_empty() {
+            return Err(anyhow!("empty block"));
+        }
         // For this example block:
         //
         // key       ts   value
@@ -380,6 +386,101 @@ impl<'a, R: FileReader> Block<'a, R> {
             .await?;
 
         Ok(RevisionValue::Regular(value))
+    }
+}
+
+pub(super) struct BlockBuilder {
+    buffer: BTreeMap<Vec<u8>, Vec<(Timestamp, RevisionValue)>>,
+    key_size_estimate: usize,
+    value_size: usize,
+    n_versions: usize,
+    min_ts: Timestamp,
+    max_ts: Timestamp,
+}
+
+impl BlockBuilder {
+    pub(super) fn new() -> Self {
+        Self {
+            buffer: BTreeMap::new(),
+            key_size_estimate: 0,
+            value_size: 0,
+            n_versions: 0,
+            min_ts: Timestamp::MAX,
+            max_ts: Timestamp::ZERO,
+        }
+    }
+
+    pub(super) fn push(&mut self, revision: LsmRevision) -> anyhow::Result<()> {
+        let key_len = if self.buffer.contains_key(&revision.key) {
+            0
+        } else if let Some((last_key, _)) = self.buffer.last_key_value() {
+            if &revision.key < last_key {
+                return Err(anyhow!(
+                    "entries for block not in ascending key order: {:?} then {:?}",
+                    hexlify(last_key),
+                    hexlify(&revision.key[..]),
+                ));
+            }
+            longest_shared_prefix_len(&revision.key[..], &last_key[..])
+        } else {
+            revision.key.len()
+        };
+
+        self.key_size_estimate += key_len;
+        self.value_size += revision.value.len();
+        self.n_versions += 1;
+        self.min_ts = cmp::min(revision.ts, self.min_ts);
+        self.max_ts = cmp::max(revision.ts, self.max_ts);
+
+        let key_revisions = self.buffer.entry(revision.key).or_insert_with(Vec::new);
+
+        if let Some((prev_ts, _)) = key_revisions.last() {
+            if *prev_ts <= revision.ts {
+                return Err(anyhow!(
+                    "revisions not in descending timestamp order: {:?} then {:?}",
+                    prev_ts,
+                    revision.ts
+                ));
+            }
+        }
+
+        key_revisions.push((revision.ts, revision.value));
+
+        Ok(())
+    }
+
+    pub(super) fn size_estimate(&self) -> usize {
+        let key_offset_size = byte_width(self.key_size_estimate as u64);
+        let version_offset_size = byte_width(self.n_versions as u64);
+        let value_offset_size = byte_width((self.value_size as u64) << 1);
+        let timestamp_size = byte_width(self.max_ts.as_nanos() - self.min_ts.as_nanos());
+        let n_keys = self.buffer.len();
+        self.key_size_estimate
+            + self.value_size
+            + ((key_offset_size + version_offset_size) * n_keys)
+            + ((value_offset_size + timestamp_size) * self.n_versions)
+    }
+
+    pub(super) fn first_key(&self) -> Option<&Vec<u8>> {
+        self.buffer
+            .first_key_value()
+            .map(|(first_key, _)| first_key)
+    }
+
+    pub(super) fn last_key(&self) -> Option<&Vec<u8>> {
+        self.buffer.last_key_value().map(|(last_key, _)| last_key)
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+
+    pub(super) fn contains_key(&self, key: &[u8]) -> bool {
+        self.buffer.contains_key(key)
+    }
+
+    pub(super) fn encode(&self) -> anyhow::Result<Vec<u8>> {
+        Block::<()>::encode(&self.buffer)
     }
 }
 

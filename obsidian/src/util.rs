@@ -126,7 +126,7 @@ pub(crate) fn longest_shared_prefix_len(a: &[u8], b: &[u8]) -> usize {
 // Returns the number of bytes needed to represent x.
 pub(crate) fn byte_width(x: u64) -> usize {
     let bits_needed = 64 - x.leading_zeros();
-    ((bits_needed + 7) / 8) as usize
+    cmp::max(bits_needed.div_ceil(8) as usize, 1)
 }
 
 pub(crate) struct AtomicArc<T> {
