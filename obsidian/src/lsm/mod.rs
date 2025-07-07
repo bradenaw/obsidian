@@ -620,6 +620,7 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
             // TODO: We can delete any files that don't appear in the above manifest here.
             wal.trim(seqno_ingested).await?;
 
+            // TODO: We need to compact lmax into itself sometimes for garbage collection.
             'levels: for i in 1..manifest.levels.len() - 1 {
                 while manifest.levels[i].size() as u64 > l0_max_size * 10_u64.pow(i as u32) {
                     let (runs, remove_ids) = Self::compact_from(
@@ -707,6 +708,11 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
         let idx = rand::thread_rng().gen_range(0..manifest.levels[level].runs.len());
         let run = &manifest.levels[level].runs[idx];
         let run_range = run.range();
+
+        // TODO: We could elide compaction and just promote the run directly when there are no
+        // overlapping runs in the next level and there isn't any possibility for an expired key -
+        // either min_ts is newer than the retention window or this is lmax and there aren't
+        // multiple versions of the same key, which we could write into the trailer.
 
         let run_id = run.id();
 
