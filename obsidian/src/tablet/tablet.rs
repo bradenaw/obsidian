@@ -25,9 +25,9 @@ use crate::lsm::Lsm;
 use crate::meta::Meta;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
-use crate::meta_synced::MetaSynced;
-use crate::meta_synced::MetaSyncedSnapshot;
-use crate::meta_synced::SyncType;
+use crate::meta::MetaSynced;
+use crate::meta::MetaSyncedSnapshot;
+use crate::meta::SyncType;
 use crate::obsidian::InternalError;
 use crate::obsidian::Router;
 use crate::obsidian::TabletId;
@@ -884,10 +884,14 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         let resolve_ts = match tx_outcome {
             TxOutcome::Committed(commit_ts) => {
                 if commit_ts <= pending_ts {
-                    return Err(anyhow!("commit_ts <= pending_ts: {} < {}", commit_ts, pending_ts));
+                    return Err(anyhow!(
+                        "commit_ts <= pending_ts: {} < {}",
+                        commit_ts,
+                        pending_ts
+                    ));
                 }
                 commit_ts
-            },
+            }
             TxOutcome::Aborted => Timestamp(pending_ts.0 + 1),
         };
         muts.insert((pending_keyspace_id, key.clone()), Mutation::Delete);

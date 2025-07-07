@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use crate::lsm::LsmBuilder;
 use crate::meta::Meta;
 use crate::meta::MetaImpl;
-use crate::meta_synced::MetaSynced;
+use crate::meta::MetaSynced;
 use crate::obsidian::Frontend;
 use crate::obsidian::InternalError;
 use crate::obsidian::Router;

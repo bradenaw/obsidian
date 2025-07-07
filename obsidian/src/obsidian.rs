@@ -23,7 +23,7 @@ use rand::Rng;
 use thiserror::Error;
 
 use crate::meta::Meta;
-use crate::meta_synced::MetaSynced;
+use crate::meta::MetaSynced;
 use crate::range::Bound;
 use crate::range::Range;
 use crate::tablet::Tablet;

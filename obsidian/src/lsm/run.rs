@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
 use std::cmp;
+use std::collections::BTreeMap;
 
 use anyhow::anyhow;
 use async_stream::try_stream;
@@ -281,7 +281,8 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
         };
 
         if !self.buffer.is_empty()
-            && (self.buffer.size_estimate() + revision_size_estimate) as u64 > self.block_size_target
+            && (self.buffer.size_estimate() + revision_size_estimate) as u64
+                > self.block_size_target
             && !self.buffer.contains_key(&revision.key)
         {
             self.flush_block().await?;
