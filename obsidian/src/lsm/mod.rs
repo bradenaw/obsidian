@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::fmt::Debug;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -421,6 +422,12 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
             match entry {
                 WalEntry::Write(ts, kvs) => {
                     for (keyspace_id, key, value) in kvs {
+                        log::trace!(
+                            "lsm processing write tx {:?} for {}/{}",
+                            ts,
+                            keyspace_id,
+                            hexlify(&key[..])
+                        );
                         inner
                             .load()
                             .get(&keyspace_id)
@@ -735,6 +742,28 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
 
         let existing_iter =
             futures::stream::iter(overlapping_runs.iter().map(Run::stream)).flatten();
+
+        let entries = entries.inspect(|entry| {
+            if let Ok(revision) = entry {
+                log::trace!(
+                    "compact from l{} {}@{}",
+                    into_level - 1,
+                    hexlify(&revision.key[..]),
+                    revision.ts
+                );
+            }
+        });
+
+        let existing_iter = existing_iter.inspect(|entry| {
+            if let Ok(revision) = entry {
+                log::trace!(
+                    "compact from l{} {}@{}",
+                    into_level,
+                    hexlify(&revision.key[..]),
+                    revision.ts
+                );
+            }
+        });
 
         let mut sorted = merge_sorted_streams(vec![existing_iter.boxed(), entries.boxed()])
             .boxed()
@@ -1250,6 +1279,13 @@ impl<R: FileReader + Clone> Manifest<R> {
 
     // TODO: Return an error if not all `remove`s appear in the manifest.
     fn with_ingest(&self, into_level: usize, mut add: Vec<Run<R>>, remove: HashSet<Uuid>) -> Self {
+        log::info!(
+            "compacted into l{}: {:?} -> {:?}",
+            into_level,
+            remove.iter().collect::<Vec<_>>(),
+            add.iter().map(|run| run.id()).collect::<Vec<_>>(),
+        );
+
         let mut levels = Vec::with_capacity(self.levels.len());
         for (i, old_level) in self.levels.iter().enumerate() {
             let filtered_old_level = old_level
@@ -1278,7 +1314,8 @@ impl<R: FileReader + Clone> Manifest<R> {
                 });
             }
         }
-        Self {
+
+        let new_manifest = Self {
             l0_active: self.l0_active.clone(),
             l0_sealed: self
                 .l0_sealed
@@ -1287,7 +1324,58 @@ impl<R: FileReader + Clone> Manifest<R> {
                 .cloned()
                 .collect(),
             levels,
+        };
+
+        log::debug!("manifest before compaction:\n{:?}", self);
+        log::debug!("manifest after compaction:\n{:?}", new_manifest);
+
+        new_manifest
+    }
+}
+
+impl<R: FileReader> Debug for Manifest<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "== manifest =====\n")?;
+        write!(f, "l0_active\n")?;
+        for (_, memtable_lock) in &self.l0_active {
+            let memtable = memtable_lock.read().unwrap();
+            write!(
+                f,
+                "  {} ({} bytes) {:?}\n",
+                memtable.id(),
+                memtable.size(),
+                memtable.range(),
+            )?;
         }
+        write!(f, "l0_sealed\n")?;
+        for memtable in &self.l0_sealed {
+            write!(
+                f,
+                "  {} ({} bytes) {:?}\n",
+                memtable.id(),
+                memtable.size(),
+                memtable.range(),
+            )?;
+        }
+        for (i, level) in self.levels[1..]
+            .iter()
+            .enumerate()
+            .map(|(i, level)| (i + 1, level))
+        {
+            write!(f, "l{} ({} bytes)\n", i, level.size())?;
+            for run in &level.runs {
+                write!(
+                    f,
+                    "  {} ({} bytes) {:?}\n",
+                    run.id(),
+                    run.size(),
+                    run.range()
+                )?;
+            }
+        }
+        write!(f, "============\n")?;
+
+        Ok(())
     }
 }
 

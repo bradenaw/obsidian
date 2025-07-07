@@ -882,7 +882,12 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
             RevisionValue::Tombstone => return Ok(()),
         };
         let resolve_ts = match tx_outcome {
-            TxOutcome::Committed(commit_ts) => commit_ts,
+            TxOutcome::Committed(commit_ts) => {
+                if commit_ts <= pending_ts {
+                    return Err(anyhow!("commit_ts <= pending_ts: {} < {}", commit_ts, pending_ts));
+                }
+                commit_ts
+            },
             TxOutcome::Aborted => Timestamp(pending_ts.0 + 1),
         };
         muts.insert((pending_keyspace_id, key.clone()), Mutation::Delete);

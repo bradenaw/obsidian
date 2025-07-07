@@ -10,6 +10,7 @@ use crate::types::Direction;
 use crate::types::HistoryRange;
 use crate::types::RevisionValue;
 use crate::types::Timestamp;
+use crate::util::hexlify;
 use crate::util::IteratorEither;
 use crate::wal;
 
@@ -62,6 +63,7 @@ impl Memtable {
         ts: Timestamp,
         v: RevisionValue,
     ) -> u64 {
+        log::trace!("memtable {}: insert {}@{}", self.id, hexlify(&k[..]), ts);
         self.size += (k.len() + v.len() + 8) as u64;
         self.max_key_len = std::cmp::max(k.len(), self.max_key_len);
         self.kvs

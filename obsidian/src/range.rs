@@ -142,9 +142,9 @@ impl<K: Deref<Target = [u8]>> Debug for Bound<K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Bound::BeforeAll => write!(f, "before_all"),
-            Bound::Before(v) => write!(f, "before({:?})", hexlify(v)),
-            Bound::After(v) => write!(f, "after({:?})", hexlify(v)),
-            Bound::AfterPrefix(v) => write!(f, "after_prefix({:?})", hexlify(v)),
+            Bound::Before(v) => write!(f, "before({})", hexlify(v)),
+            Bound::After(v) => write!(f, "after({})", hexlify(v)),
+            Bound::AfterPrefix(v) => write!(f, "after_prefix({})", hexlify(v)),
             Bound::AfterAll => write!(f, "after_all"),
         }
     }

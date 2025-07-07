@@ -293,13 +293,14 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
             .map(|versions| versions.last())
             .flatten()
         {
-            assert!(
-                prev_revision.0 > revision.ts,
-                "got revisions for {} not in descending order: {:?} then {:?}",
-                hexlify(&revision.key[..]),
-                prev_revision.0,
-                revision.ts
-            );
+            if prev_revision.0 <= revision.ts {
+                return Err(anyhow!(
+                    "revisions for {} not in descending order: {:?} then {:?}",
+                    hexlify(&revision.key[..]),
+                    prev_revision.0,
+                    revision.ts
+                ));
+            }
         }
         self.buffer
             .entry(revision.key)

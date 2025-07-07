@@ -295,10 +295,9 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
         let tablet = LsmTablet::new(
             tablet_id,
             LsmBuilder::new(storage.clone())
-                // TODO: scan_page panics in compact_l0!
-                //.l0_max_size(256)
-                //.run_target_size(65536)
-                //.block_size(4096)
+                .l0_max_size(256)
+                .run_target_size(65536)
+                .block_size(4096)
                 .build()
                 .await?,
             Box::new(meta_proxy.clone()),

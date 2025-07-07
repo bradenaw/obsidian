@@ -313,7 +313,9 @@ impl Obsidian for Frontend {
                 }
                 j += 1
             }
-            let commit_ts = max_prepare_ts;
+            // We have to commit at a _higher_ timestamp so that the resolution of the pending
+            // records is at a higher timestamp than the pending records themselves.
+            let commit_ts = max_prepare_ts.plus_one();
 
             match tablets
                 .get(&owner_tablet_id)
