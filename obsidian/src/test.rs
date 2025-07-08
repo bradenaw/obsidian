@@ -5,6 +5,7 @@ use std::fmt::Debug;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Weak;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -16,14 +17,16 @@ use crate::meta::MetaSynced;
 use crate::obsidian::Frontend;
 use crate::obsidian::InternalError;
 use crate::obsidian::Router;
+use crate::obsidian::Shard;
+use crate::obsidian::Shards;
 use crate::obsidian::TabletId;
-use crate::obsidian::Tablets;
 use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
 use crate::range::Bound;
 use crate::range::Range;
 use crate::storage::CachedStorage;
 use crate::storage::MemStorage;
+use crate::storage::Storage;
 use crate::tablet::LsmTablet;
 use crate::tablet::Tablet;
 use crate::types::ColoGroupId;
@@ -146,18 +149,153 @@ impl<T: Tablet + Send + Sync + ?Sized> Tablet for Arc<T> {
     }
 }
 
-struct StaticTablets {
-    m: Mutex<HashMap<TabletId, Arc<dyn Tablet + Send + Sync + 'static>>>,
+struct TestShards<S, M> {
+    storage: Arc<S>,
+    meta_proxy: Arc<MetaProxy<M>>,
+
+    m: Mutex<HashMap<ShardId, Arc<TestShard<S, M>>>>,
 }
 
-impl Tablets for Arc<StaticTablets> {
-    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Box<dyn Tablet + Send + Sync>> {
+impl<S, M> TestShards<S, M> {
+    fn new(storage: Arc<S>, meta_proxy: Arc<MetaProxy<M>>) -> Self {
+        Self {
+            storage,
+            meta_proxy,
+            m: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn create_shard(self: &Arc<Self>) -> ShardId {
+        let mut m = self.m.lock().unwrap();
+        let shard_id = ShardId((m.len() + 1) as u32);
+        m.insert(
+            shard_id,
+            Arc::new(TestShard::new(
+                shard_id,
+                self.storage.clone(),
+                self.meta_proxy.clone(),
+                Arc::downgrade(&self),
+            )),
+        );
+        shard_id
+    }
+}
+
+impl<S, M> Shards for Arc<TestShards<S, M>>
+where
+    S: Storage + Send + Sync + 'static,
+    M: Meta + Send + Sync + 'static,
+{
+    fn shard(&self, shard_id: ShardId) -> anyhow::Result<Box<dyn Shard + Send + Sync>> {
         let m = self.m.lock().unwrap();
-        let tablet_arc = m
+        let shard_arc = m
+            .get(&shard_id)
+            .ok_or_else(|| anyhow::anyhow!("{:?} does not exist", shard_id))?;
+
+        Ok(Box::new(shard_arc.clone()))
+    }
+
+    fn shards(&self) -> Vec<Box<dyn Shard + Sync + Send>> {
+        let m = self.m.lock().unwrap();
+        m.values()
+            .map(|shard| -> Box<dyn Shard + Sync + Send> { Box::new(shard.clone()) })
+            .collect()
+    }
+}
+
+struct TestShard<S, M> {
+    id: ShardId,
+    storage: Arc<S>,
+    meta_proxy: Arc<MetaProxy<M>>,
+    test_shards: Weak<TestShards<S, M>>,
+
+    inner: Mutex<TestShardInner>,
+}
+
+struct TestShardInner {
+    m: HashMap<TabletId, Arc<dyn Tablet + Send + Sync + 'static>>,
+    next_tablet_id: u64,
+}
+
+impl<S, M> TestShard<S, M> {
+    fn new(
+        id: ShardId,
+        storage: Arc<S>,
+        meta_proxy: Arc<MetaProxy<M>>,
+        test_shards: Weak<TestShards<S, M>>,
+    ) -> Self {
+        Self {
+            id,
+            storage,
+            meta_proxy,
+            test_shards,
+            inner: Mutex::new(TestShardInner {
+                m: HashMap::new(),
+                next_tablet_id: 1,
+            }),
+        }
+    }
+}
+
+#[async_trait]
+impl<S, M> Shard for Arc<TestShard<S, M>>
+where
+    S: Storage + Send + Sync + 'static,
+    M: Meta + Send + Sync + 'static,
+{
+    fn id(&self) -> ShardId {
+        self.id
+    }
+
+    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Box<dyn Tablet + Send + Sync>> {
+        let inner = self.inner.lock().unwrap();
+        let tablet_arc = inner
+            .m
             .get(&tablet_id)
             .ok_or_else(|| anyhow::anyhow!("no tablet for {}", tablet_id))?;
 
         Ok(Box::new(tablet_arc.clone()))
+    }
+
+    async fn create_tablet(
+        &self,
+        colo_group_id: ColoGroupId,
+        range: Range<Vec<u8>>,
+    ) -> anyhow::Result<TabletId> {
+        let tablet_id = {
+            let mut inner = self.inner.lock().unwrap();
+            let tablet_id = TabletId(self.id, inner.next_tablet_id);
+            inner.next_tablet_id += 1;
+            tablet_id
+        };
+
+        let lsm = LsmBuilder::new(self.storage.clone())
+            .l0_max_size(256)
+            .run_size_target(65536)
+            .block_size_target(4096)
+            .build()
+            .await?;
+
+        if tablet_id == TabletId::META {
+            lsm.create_keyspace(KeyspaceId::META).await?;
+            lsm.create_keyspace(KeyspaceId::META.pending().unwrap())
+                .await?;
+        }
+
+        let tablet = LsmTablet::new(
+            tablet_id,
+            lsm,
+            Box::new(self.meta_proxy.clone()),
+            Box::new(Weak::upgrade(&self.test_shards).ok_or_else(|| anyhow!("TestShards gone"))?),
+        )
+        .await?;
+
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.m.insert(tablet_id, Arc::new(tablet));
+        }
+
+        Ok(tablet_id)
     }
 }
 
@@ -248,13 +386,12 @@ impl<T: Meta + Send + Sync> Meta for Arc<MetaProxy<T>> {
     }
 }
 
-pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
-    let tablets = Arc::new(StaticTablets {
-        m: Mutex::new(HashMap::new()),
-    });
+pub(crate) async fn new_for_test(n_shards: usize) -> anyhow::Result<Frontend> {
+    if n_shards < 1 {
+        return Err(anyhow!("need at least one shard to host the meta tablet"));
+    }
 
     let meta_proxy = Arc::new(MetaProxy::new());
-
     let storage = Arc::new(CachedStorage::new(
         MemStorage::new(),
         64, // page_size
@@ -262,63 +399,111 @@ pub(crate) async fn new_for_test(n_tablets: usize) -> anyhow::Result<Frontend> {
         4,  // n_stripes
     ));
 
-    let meta_lsm = LsmBuilder::new(storage.clone())
-        .l0_max_size(256)
-        .run_size_target(65536)
-        .block_size_target(4096)
-        .build()
-        .await?;
-    meta_lsm.create_keyspace(KeyspaceId::META).await?;
-    meta_lsm
-        .create_keyspace(KeyspaceId::META.pending().unwrap())
-        .await?;
+    let shards = Arc::new(TestShards::new(storage.clone(), meta_proxy.clone()));
 
-    let meta_tablet = Arc::new(
-        LsmTablet::new(
-            TabletId::META,
-            meta_lsm,
-            Box::new(meta_proxy.clone()),
-            Box::new(tablets.clone()),
-        )
-        .await?,
-    );
-    let meta = MetaImpl::new(meta_tablet.clone());
-
-    {
-        let mut m = tablets.m.lock().unwrap();
-        m.insert(TabletId::META, meta_tablet);
+    for _ in 0..n_shards {
+        shards.create_shard();
     }
-    meta.add_tablet(TabletId::META).await?;
+    shards.shard(ShardId(1))?.create_tablet(ColoGroupId::META, Range::all()).await?;
 
-    for i in 0..(n_tablets - 1) {
-        let tablet_id = TabletId(ShardId(1), (i + 2) as u64);
-        let tablet = LsmTablet::new(
-            tablet_id,
-            LsmBuilder::new(storage.clone())
-                .l0_max_size(256)
-                .run_size_target(65536)
-                .block_size_target(4096)
-                .build()
-                .await?,
-            Box::new(meta_proxy.clone()),
-            Box::new(tablets.clone()),
-        )
-        .await?;
+    let meta_tablet = shards.tablet(TabletId::META)?;
+    let meta = MetaImpl::new(Box::new(shards.clone()), meta_tablet);
 
-        let mut m = tablets.m.lock().unwrap();
-        m.insert(tablet_id, Arc::new(tablet));
-        meta.add_tablet(tablet_id).await?;
-    }
 
     meta_proxy.put(meta);
 
     let frontend = Frontend::new(
         Box::new(meta_proxy.clone()),
-        MetaSynced::new(meta_proxy.clone()),
-        Box::new(tablets),
+        MetaSynced::new(meta_proxy),
+        Box::new(shards),
     );
 
     Ok(frontend)
+}
+
+#[async_trait]
+impl Tablet for Box<dyn Tablet + Send + Sync> {
+    async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
+        Ok(self.deref().get(ts, key).await?)
+    }
+
+    async fn get_latest(&self, key: Key) -> Result<(Timestamp, Option<Record>), InternalError> {
+        Ok(self.deref().get_latest(key).await?)
+    }
+
+    async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError> {
+        Ok(self.deref().latest_snapshot(keys).await?)
+    }
+
+    async fn scan_page(
+        &self,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        range: Range<&[u8]>,
+        direction: Direction,
+        limit: usize,
+    ) -> Result<(Vec<Record>, Option<Range<Vec<u8>>>), InternalError> {
+        Ok(self.deref().scan_page(ts, keyspace_id, range, direction, limit).await?)
+    }
+
+    async fn history_page(
+        &self,
+        key: Key,
+        range: HistoryRange,
+        direction: Direction,
+        limit: usize,
+    ) -> Result<(Vec<Revision>, Option<HistoryRange>), InternalError> {
+        Ok(self.deref().history_page(key, range, direction, limit).await?)
+    }
+
+    async fn write(
+        &self,
+        preconds: Vec<Precondition>,
+        muts: BTreeMap<Key, Mutation>,
+    ) -> Result<Timestamp, InternalError> {
+        Ok(self.deref().write(preconds, muts).await?)
+    }
+
+    async fn prepare(
+        &self,
+        txid: Txid,
+        preconds: Vec<Precondition>,
+        muts: BTreeMap<Key, Mutation>,
+    ) -> Result<Timestamp, InternalError> {
+        Ok(self.deref().prepare(txid, preconds, muts).await?)
+    }
+
+    async fn try_commit(
+        &self,
+        txid: Txid,
+        ts: Timestamp,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
+    ) -> anyhow::Result<TxOutcome> {
+        Ok(self.deref().try_commit(txid, ts, precond_keys, mut_keys).await?)
+    }
+
+    async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
+        Ok(self.deref().try_abort(txid).await?)
+    }
+
+    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
+        Ok(self.deref().wait(txid).await?)
+    }
+
+    async fn cleanup_committed(
+        &self,
+        txid: Txid,
+        ts: Timestamp,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
+    ) -> anyhow::Result<()> {
+        Ok(self.deref().cleanup_committed(txid, ts, precond_keys, mut_keys).await?)
+    }
+
+    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
+        Ok(self.deref().wait_meta_sync(ts).await?)
+    }
 }
 
 pub(crate) fn single_byte_splits(n: usize) -> Vec<Bound<Vec<u8>>> {

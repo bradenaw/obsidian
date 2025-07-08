@@ -445,6 +445,18 @@ pub enum WriteError {
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct ShardId(pub(crate) u32);
 
+impl Display for ShardId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Debug for ShardId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "shard:{}", self)
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub enum HistoryRange {
     All,

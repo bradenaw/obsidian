@@ -118,7 +118,7 @@ impl<T: Obsidian + Sync> ObsidianExt for T {
 pub(crate) struct Frontend {
     meta: Box<dyn Meta + Send + Sync>,
     meta_synced: MetaSynced,
-    tablets: Box<dyn Tablets + Send + Sync>,
+    shards: Box<dyn Shards + Send + Sync>,
 }
 
 const MAX_CONFLICT_RETRIES: usize = 10;
@@ -129,7 +129,7 @@ impl Obsidian for Frontend {
         let keyspace_id = key.0;
         self.with_resolve_conflicts(|| async move {
             let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key.1)?;
-            let tablet = self.tablets.tablet(tablet_id)?;
+            let tablet = self.shards.tablet(tablet_id)?;
             tablet.get(ts, key).await
         })
         .await
@@ -152,7 +152,7 @@ impl Obsidian for Frontend {
                 self.meta_synced
                     .tablet_id_for_bound(keyspace_id.0, start_bound, direction)?;
 
-            let tablet = self.tablets.tablet(tablet_id)?;
+            let tablet = self.shards.tablet(tablet_id)?;
             tablet
                 .scan_page(ts, keyspace_id, range, direction, limit)
                 .await
@@ -174,7 +174,7 @@ impl Obsidian for Frontend {
             // TODO: with a little more information, we could get away with at most *one* round of
             // conflict resolution.
             futures.push(self.with_resolve_conflicts(move || {
-                let tablet = self.tablets.tablet(tablet_id);
+                let tablet = self.shards.tablet(tablet_id);
                 let keys = keys.clone();
                 async move { tablet?.latest_snapshot(keys).await }
             }));
@@ -207,7 +207,7 @@ impl Obsidian for Frontend {
                 .with_resolve_conflicts(|| {
                     let preconds = preconds.clone();
                     let muts = muts.clone();
-                    async move { self.tablets.tablet(tablet_id)?.write(preconds, muts).await }
+                    async move { self.shards.tablet(tablet_id)?.write(preconds, muts).await }
                 })
                 .await
                 .map_err(|e| {
@@ -236,7 +236,7 @@ impl Obsidian for Frontend {
             let tablets = write_by_tablet
                 .keys()
                 .map(|tablet_id| {
-                    self.tablets
+                    self.shards
                         .tablet(*tablet_id)
                         .map(|tablet| (*tablet_id, tablet))
                 })
@@ -283,7 +283,7 @@ impl Obsidian for Frontend {
                 if !wait_conflicts.is_empty() {
                     future::try_join_all(wait_conflicts.iter().cloned().map(
                         |other_txid| async move {
-                            let tablet = self.tablets.tablet(other_txid.owner)?;
+                            let tablet = self.shards.tablet(other_txid.owner)?;
                             tablet.wait(other_txid).await
                         },
                     ))
@@ -297,7 +297,7 @@ impl Obsidian for Frontend {
                 if !preempt_conflicts.is_empty() {
                     future::try_join_all(preempt_conflicts.iter().cloned().map(
                         |other_txid| async move {
-                            let tablet = self.tablets.tablet(other_txid.owner)?;
+                            let tablet = self.shards.tablet(other_txid.owner)?;
                             tablet.try_abort(other_txid).await
                         },
                     ))
@@ -372,12 +372,12 @@ impl Frontend {
     pub(crate) fn new(
         meta: Box<dyn Meta + Send + Sync>,
         meta_synced: MetaSynced,
-        tablets: Box<dyn Tablets + Send + Sync>,
+        shards: Box<dyn Shards + Send + Sync>,
     ) -> Self {
         Self {
             meta,
             meta_synced,
-            tablets,
+            shards,
         }
     }
 
@@ -436,7 +436,7 @@ impl Frontend {
                             return RetryResult::Retry(InternalError::Conflict(other_txid));
                         }
 
-                        let other_txid_owner_tablet = match self.tablets.tablet(other_txid.owner) {
+                        let other_txid_owner_tablet = match self.shards.tablet(other_txid.owner) {
                             Ok(tablet_id) => tablet_id,
                             Err(e) => {
                                 return RetryResult::Err(InternalError::Other(e));
@@ -482,7 +482,7 @@ impl Frontend {
         futures::stream::iter(tablet_ids.into_iter())
             .map(|tablet_id| async move {
                 log::info!("wait_meta_sync({:?}) for {:?}", ts, tablet_id);
-                self.tablets.tablet(tablet_id)?.wait_meta_sync(ts).await?;
+                self.shards.tablet(tablet_id)?.wait_meta_sync(ts).await?;
                 log::info!("wait_meta_sync({:?}) for {:?} -> done", ts, tablet_id);
                 Ok::<_, anyhow::Error>(())
             })
@@ -562,7 +562,26 @@ pub(crate) trait Router {
     ) -> anyhow::Result<TabletId>;
 }
 
-pub(crate) trait Tablets {
+pub(crate) trait Shards {
+    fn shard(&self, shard_id: ShardId) -> anyhow::Result<Box<dyn Shard + Sync + Send>>;
+
+    fn shards(&self) -> Vec<Box<dyn Shard + Sync + Send>>;
+
+    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Box<dyn Tablet + Send + Sync>> {
+        self.shard(tablet_id.0)?.tablet(tablet_id)
+    }
+}
+
+#[async_trait]
+pub(crate) trait Shard {
+    fn id(&self) -> ShardId;
+
+    async fn create_tablet(
+        &self,
+        colo_group_id: ColoGroupId,
+        range: Range<Vec<u8>>,
+    ) -> anyhow::Result<TabletId>;
+
     fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Box<dyn Tablet + Send + Sync>>;
 }
 

@@ -31,7 +31,7 @@ use crate::meta::SyncType;
 use crate::obsidian::InternalError;
 use crate::obsidian::Router;
 use crate::obsidian::TabletId;
-use crate::obsidian::Tablets;
+use crate::obsidian::Shards;
 use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
 use crate::pb;
@@ -162,7 +162,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTablet<S> {
         tablet_id: TabletId,
         lsm: Lsm<S>,
         meta: Box<dyn Meta + Sync + Send + 'static>,
-        tablets: Box<dyn Tablets + Sync + Send>,
+        shards: Box<dyn Shards + Sync + Send>,
     ) -> anyhow::Result<Self> {
         let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
         let (commit_sender, commit_receiver) = mpsc::channel(128);
@@ -175,7 +175,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTablet<S> {
             tablet_id,
             lsm,
             meta_synced,
-            tablets,
+            shards,
             prepare_sender.clone(),
             commit_sender.clone(),
         ));
@@ -245,7 +245,7 @@ struct LsmTabletInner<S: Storage> {
     tablet_id: TabletId,
     lsm: Lsm<S>,
     meta_synced: Arc<MetaSynced>,
-    tablets: Box<dyn Tablets + Sync + Send>,
+    shards: Box<dyn Shards + Sync + Send>,
     sequencer: Sequencer,
     lock_mgr: LockMgr,
 
@@ -259,7 +259,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         tablet_id: TabletId,
         lsm: Lsm<S>,
         meta_synced: Arc<MetaSynced>,
-        tablets: Box<dyn Tablets + Sync + Send>,
+        shards: Box<dyn Shards + Sync + Send>,
         prepare_sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
         commit_sender: mpsc::Sender<(Txid, Timestamp, BTreeSet<Key>, BTreeSet<Key>)>,
     ) -> Self {
@@ -267,7 +267,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
             tablet_id,
             lsm,
             meta_synced,
-            tablets,
+            shards,
             prepare_sender,
             commit_sender,
             sequencer: Sequencer::new(),
@@ -984,7 +984,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         let tablets = by_tablet
             .keys()
             .map(|tablet_id| {
-                self.tablets
+                self.shards
                     .tablet(*tablet_id)
                     .map(|tablet| (*tablet_id, tablet))
             })
@@ -1020,7 +1020,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
             receiver,
             64,
             |(txid, keyspace_id, key, prepare_type)| async move {
-                let owner_tablet = self.tablets.tablet(txid.owner()).unwrap();
+                let owner_tablet = self.shards.tablet(txid.owner()).unwrap();
                 let tx_outcome = owner_tablet.wait(txid).await.unwrap();
                 // Commits get cleaned up by the owner tablet calling cleanup_committed. Ignore them
                 // here to avoid duplicating work.

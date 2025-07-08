@@ -9,7 +9,9 @@ use async_trait::async_trait;
 use futures::Stream;
 use futures::TryStreamExt;
 use prost::Message;
+use rand::seq::SliceRandom;
 
+use crate::obsidian::Shards;
 use crate::obsidian::TabletId;
 use crate::pb;
 use crate::range::Bound;
@@ -137,6 +139,7 @@ pub(crate) trait Meta {
 pub(crate) struct MetaImpl<T> {
     tablet: T,
     sync_key: Vec<u8>,
+    shards: Box<dyn Shards + Send + Sync>,
     ts: WaitableTimestamp,
 }
 
@@ -181,36 +184,35 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
             return Err(anyhow!("{:?} already exists", colo_group_id));
         }
 
-        let tablet_ids = snapshot.tablet_ids().await?;
-        let mut tablet_keys = Vec::with_capacity(tablet_ids.len());
-        let mut meta_tablets = Vec::with_capacity(tablet_ids.len());
-        for tablet_id in &tablet_ids {
-            let tablet_key = MetaKey::Tablet(*tablet_id);
-            let meta_tablet =
-                snapshot
-                    .get_meta_key(&tablet_key)
-                    .await?
-                    .unwrap_or(pb::internal::MetaTablet {
-                        colo_group_ids: vec![],
-                        ranges: vec![],
-                    });
-            tablet_keys.push(tablet_key);
-            meta_tablets.push(meta_tablet);
-        }
-
-        // Round-robin the created ranges among the tablets.
-        for (i, range) in ranges.into_iter().enumerate() {
-            let tablet_i = i % tablet_ids.len();
-            meta_tablets[tablet_i].colo_group_ids.push(colo_group_id.0);
-            meta_tablets[tablet_i].ranges.push(range.into());
-        }
+        let mut shard_ids: Vec<_> = self
+            .shards
+            .shards()
+            .iter()
+            .map(|shard| shard.id())
+            .collect();
+        shard_ids.shuffle(&mut rand::thread_rng());
 
         let mut muts = HashMap::from([(MetaKey::ColoGroup(colo_group_id), Mutation::Put(vec![]))]);
 
-        for (tablet_key, meta_tablet) in
-            Iterator::zip(tablet_keys.into_iter(), meta_tablets.into_iter())
-        {
-            muts.insert(tablet_key, Mutation::Put(meta_tablet.encode_to_vec()));
+        // Round-robin the created ranges among the shards.
+        for (i, range) in ranges.into_iter().enumerate() {
+            let shard_i = i % shard_ids.len();
+            let tablet_id = self
+                .shards
+                .shard(shard_ids[shard_i])?
+                .create_tablet(colo_group_id, range.clone())
+                .await?;
+
+            muts.insert(
+                MetaKey::Tablet(tablet_id),
+                Mutation::Put(
+                    pb::internal::MetaTablet {
+                        colo_group_ids: vec![colo_group_id.0],
+                        ranges: vec![range.into()],
+                    }
+                    .encode_to_vec(),
+                ),
+            );
         }
 
         let write_ts = self.write_syncable(snapshot, muts).await?;
@@ -321,8 +323,9 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
 }
 
 impl<T: Tablet + Sync + Send> MetaImpl<T> {
-    pub(crate) fn new(tablet: T) -> Self {
+    pub(crate) fn new(shards: Box<dyn Shards + Send + Sync>, tablet: T) -> Self {
         Self {
+            shards,
             tablet,
             sync_key: MetaKey::Sync.encode(),
             ts: WaitableTimestamp::new(),
