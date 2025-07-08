@@ -36,7 +36,6 @@ use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
 use crate::pb;
 use crate::range::Range;
-use crate::range::RangeSet;
 use crate::storage::Storage;
 use crate::tablet::lock_mgr::Guard;
 use crate::tablet::lock_mgr::LockMgr;
@@ -385,48 +384,21 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         }
         let limit = cmp::min(limit, 1000);
 
-        let owned_range_set = self
-            .meta_synced
-            .ranges_for_tablet(self.tablet_id, keyspace_id.0);
+        let intersecting_range = self.range.borrow().intersection(&range).clone();
 
-        let intersecting_range_set = owned_range_set
-            .intersection(&RangeSet::from(range.to_vec()))
-            .clone();
-
-        let scan_range = match direction {
-            Direction::Asc => intersecting_range_set.first(),
-            Direction::Desc => intersecting_range_set.last(),
-        }
-        .ok_or_else(|| {
-            anyhow!(
-                "misroute: {:?} owns no ranges of {:?} overlapping with {:?}, only owns {:?}",
+        if intersecting_range.is_empty() {
+            return Err(InternalError::Other(anyhow!(
+                "misroute: {:?}'s owned range {:?}/{:?} does not intersect with scan range {:?}",
                 self.tablet_id,
                 keyspace_id.0,
+                self.range,
                 range,
-                owned_range_set,
-            )
-        })?;
+            )));
+        }
 
         // range                          |-----------|
-        // owned_range_set          |---------|    |--------|
-        // intersecting_range_set         |---|    |--|
-        // scan_range                     |---|
-
-        // Make sure scan_range is actually the next range to look at for `range`.
-        let ok = match direction {
-            Direction::Asc => scan_range.lower.borrow() == range.lower,
-            Direction::Desc => scan_range.upper.borrow() == range.upper,
-        };
-        if !ok {
-            return Err(anyhow!(
-                "misroute: {:?} not the next tablet for {:?} {:?}, only owns {:?}",
-                self.tablet_id,
-                keyspace_id.0,
-                range,
-                owned_range_set,
-            )
-            .into());
-        }
+        // self.range               |---------|
+        // intersecting_range             |---|
 
         self.sequencer.wait_for_safe_read(ts).await?;
 
@@ -434,20 +406,20 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         // constrained range that we asked it for, not the entire range from the request.
         let (page, intersecting_continue_cursor) = self
             .lsm
-            .scan_page(ts, keyspace_id, scan_range.borrow(), direction, limit)
+            .scan_page(ts, keyspace_id, intersecting_range, direction, limit)
             .await?;
         let scanned_range = match intersecting_continue_cursor {
             Some(ref intersecting_continue_cursor) => match direction {
                 Direction::Asc => Range {
-                    lower: scan_range.lower.clone(),
+                    lower: intersecting_range.lower.to_vec(),
                     upper: intersecting_continue_cursor.lower.clone(),
                 },
                 Direction::Desc => Range {
                     lower: intersecting_continue_cursor.upper.clone(),
-                    upper: scan_range.upper.clone(),
+                    upper: intersecting_range.upper.to_vec(),
                 },
             },
-            None => scan_range.clone(),
+            None => intersecting_range.to_vec(),
         };
         let continue_cursor = match direction {
             Direction::Asc => Range {
@@ -1058,14 +1030,6 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         &self,
         sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
     ) {
-        // Below depends on knowning the ranges that this tablet owns before starting. Because
-        // meta_synced does not yet persist into the tablet, we have to wait for it to sync. It
-        // always currently syncs to latest, so wait(timestamp(1)) is the same as waiting for
-        // latest.
-        Retry::new()
-            .indefinitely(&async || self.meta_synced.wait(Timestamp(1)).await)
-            .await;
-
         for keyspace_id in self.lsm.keyspaces() {
             if !keyspace_id.is_pending() {
                 continue;
@@ -1073,31 +1037,25 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
 
             Retry::new()
                 .indefinitely(&async || -> anyhow::Result<()> {
-                    for range in self
-                        .meta_synced
-                        .ranges_for_tablet(self.tablet_id, keyspace_id.0)
-                        .into_iter()
-                    {
-                        let mut s = self
-                            .scan_all(
-                                self.sequencer.safe_read_ts(),
-                                keyspace_id,
-                                range,
-                                Direction::Asc,
-                            )
-                            .boxed();
-                        while let Some(record) = s.try_next().await? {
-                            let pending = PendingMutation::decode(&record.value)?;
+                    let mut s = self
+                        .scan_all(
+                            self.sequencer.safe_read_ts(),
+                            keyspace_id,
+                            self.range.clone(),
+                            Direction::Asc,
+                        )
+                        .boxed();
+                    while let Some(record) = s.try_next().await? {
+                        let pending = PendingMutation::decode(&record.value)?;
 
-                            let _ = sender
-                                .send((
-                                    pending.txid,
-                                    keyspace_id,
-                                    record.key.1,
-                                    PrepareType::Mutation,
-                                ))
-                                .await;
-                        }
+                        let _ = sender
+                            .send((
+                                pending.txid,
+                                keyspace_id,
+                                record.key.1,
+                                PrepareType::Mutation,
+                            ))
+                            .await;
                     }
                     Ok(())
                 })
@@ -1110,14 +1068,6 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         &self,
         sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
     ) {
-        // Below depends on knowning the ranges that this tablet owns before starting. Because
-        // meta_synced does not yet persist into the tablet, we have to wait for it to sync. It
-        // always currently syncs to latest, so wait(timestamp(1)) is the same as waiting for
-        // latest.
-        Retry::new()
-            .indefinitely(&async || self.meta_synced.wait(Timestamp(1)).await)
-            .await;
-
         for keyspace_id in self.lsm.keyspaces() {
             if !keyspace_id.is_precond() {
                 continue;
@@ -1125,31 +1075,25 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
 
             Retry::new()
                 .indefinitely(&async || -> anyhow::Result<()> {
-                    for range in self
-                        .meta_synced
-                        .ranges_for_tablet(self.tablet_id, keyspace_id.0)
-                        .into_iter()
-                    {
-                        let mut s = self
-                            .scan_all(
-                                self.sequencer.safe_read_ts(),
-                                keyspace_id,
-                                range,
-                                Direction::Asc,
-                            )
-                            .boxed();
-                        while let Some(record) = s.try_next().await? {
-                            let precond_locks = PrecondLocks::decode(&record.value)?;
-                            for txid in precond_locks.txids {
-                                let _ = sender
-                                    .send((
-                                        txid,
-                                        keyspace_id,
-                                        record.key.1.clone(),
-                                        PrepareType::Precondition,
-                                    ))
-                                    .await;
-                            }
+                    let mut s = self
+                        .scan_all(
+                            self.sequencer.safe_read_ts(),
+                            keyspace_id,
+                            self.range.clone(),
+                            Direction::Asc,
+                        )
+                        .boxed();
+                    while let Some(record) = s.try_next().await? {
+                        let precond_locks = PrecondLocks::decode(&record.value)?;
+                        for txid in precond_locks.txids {
+                            let _ = sender
+                                .send((
+                                    txid,
+                                    keyspace_id,
+                                    record.key.1.clone(),
+                                    PrepareType::Precondition,
+                                ))
+                                .await;
                         }
                     }
                     Ok(())

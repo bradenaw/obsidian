@@ -20,7 +20,6 @@ use crate::obsidian::Router;
 use crate::obsidian::TabletId;
 use crate::range::Bound;
 use crate::range::Range;
-use crate::range::RangeSet;
 use crate::router::StaticRouter;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
@@ -47,7 +46,7 @@ struct MetaSyncedInner {
     synced_ts: Arc<WaitableTimestamp>,
     kv: MetaSyncedSnapshot,
     router: StaticRouter,
-    owned_ranges: HashMap<TabletId, HashMap<ColoGroupId, RangeSet<Vec<u8>>>>,
+    owned_ranges: HashMap<TabletId, HashMap<ColoGroupId, Range<Vec<u8>>>>,
 
     // For every change and the initial load, we'll send the update on each of these channels and
     // expect the other side to use the oneshot to acknowledge that it has completed or been
@@ -75,16 +74,16 @@ impl MetaSynced {
         Self { bg, inner }
     }
 
-    pub(crate) fn ranges_for_tablet(
+    pub(crate) fn range_for_tablet(
         &self,
         tablet_id: TabletId,
         colo_group_id: ColoGroupId,
-    ) -> RangeSet<Vec<u8>> {
+    ) -> Range<Vec<u8>> {
         if colo_group_id == ColoGroupId::META && tablet_id == TabletId::META {
-            return RangeSet::from(Range::all());
+            return Range::all();
         }
         if colo_group_id == ColoGroupId::TABLET_META {
-            return RangeSet::from(Range::prefix(tablet_id.encode_fixed().to_vec()));
+            return Range::prefix(tablet_id.encode_fixed().to_vec());
         }
         let inner = self.inner.read().unwrap();
         if let Some(range_set_by_colo_group_id) = inner.owned_ranges.get(&tablet_id) {
@@ -92,7 +91,7 @@ impl MetaSynced {
                 return range_set.clone();
             }
         }
-        RangeSet::new()
+        Range::empty()
     }
 
     /// Subscribes to changes in `MetaSynced`. `f` will be called once, either immediately or when
@@ -342,7 +341,7 @@ impl MetaSyncedInner {
         snapshot: MetaSyncedSnapshot,
     ) -> anyhow::Result<(
         StaticRouter,
-        HashMap<TabletId, HashMap<ColoGroupId, RangeSet<Vec<u8>>>>,
+        HashMap<TabletId, HashMap<ColoGroupId, Range<Vec<u8>>>>,
     )> {
         let mut ranges_by_colo_group = HashMap::new();
         let mut tablet_map = HashMap::new();
@@ -364,9 +363,7 @@ impl MetaSyncedInner {
             tablet_map
                 .entry(tablet_id)
                 .or_insert_with(HashMap::new)
-                .entry(colo_group_id)
-                .or_insert_with(RangeSet::new)
-                .add_range(range);
+                .insert(colo_group_id, range);
         }
 
         let mut routing_map = HashMap::new();
