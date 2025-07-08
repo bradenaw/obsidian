@@ -319,10 +319,6 @@ impl<T> MetaProxy<T> {
 
 #[async_trait]
 impl<T: Meta + Send + Sync> Meta for Arc<MetaProxy<T>> {
-    async fn add_tablet(&self, _tablet_id: TabletId) -> anyhow::Result<()> {
-        todo!()
-    }
-
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,

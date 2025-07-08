@@ -449,8 +449,14 @@ impl Frontend {
                             }
                         } else {
                             log::debug!("{:?} waiting for {:?}", txid, other_txid);
-                            if let Err(e) = other_txid_owner_tablet.wait(other_txid).await {
-                                return RetryResult::Err(InternalError::Other(e.into()));
+                            match other_txid_owner_tablet.wait(other_txid).await {
+                                // TxOutcomeMissing happens if we raced with the cleanup that
+                                // removed it, but that means the pending/preconds are gone so
+                                // retrying will work.
+                                Ok(_) | Err(InternalError::TxOutcomeMissing) => {}
+                                Err(e) => {
+                                    return RetryResult::Err(e.into());
+                                }
                             }
                         }
 

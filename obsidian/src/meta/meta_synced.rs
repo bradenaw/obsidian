@@ -350,29 +350,23 @@ impl MetaSyncedInner {
         for tablet_id in snapshot.tablet_ids().await? {
             let tablet_metadata = snapshot.tablet_metadata(tablet_id).await?;
 
-            if tablet_metadata.colo_group_ids.len() != tablet_metadata.ranges.len() {
-                // TODO: log
-                return Err(anyhow!("corrupted MetaTablet"));
-            }
+            let colo_group_id = ColoGroupId(tablet_metadata.colo_group_id);
+            let range = Range::try_from(
+                tablet_metadata
+                    .range
+                    .ok_or_else(|| anyhow!("corrupted tablet metadata: missing range"))?,
+            )?;
 
-            for i in 0..tablet_metadata.ranges.len() {
-                let colo_group_id_pb = &tablet_metadata.colo_group_ids[i];
-                let colo_group_id = ColoGroupId(*colo_group_id_pb);
-                let range_pb = &tablet_metadata.ranges[i];
-
-                let range = Range::try_from(range_pb.clone())?;
-
-                ranges_by_colo_group
-                    .entry(colo_group_id)
-                    .or_insert_with(Vec::new)
-                    .push((range.clone(), tablet_id));
-                tablet_map
-                    .entry(tablet_id)
-                    .or_insert_with(HashMap::new)
-                    .entry(colo_group_id)
-                    .or_insert_with(RangeSet::new)
-                    .add_range(range);
-            }
+            ranges_by_colo_group
+                .entry(colo_group_id)
+                .or_insert_with(Vec::new)
+                .push((range.clone(), tablet_id));
+            tablet_map
+                .entry(tablet_id)
+                .or_insert_with(HashMap::new)
+                .entry(colo_group_id)
+                .or_insert_with(RangeSet::new)
+                .add_range(range);
         }
 
         let mut routing_map = HashMap::new();

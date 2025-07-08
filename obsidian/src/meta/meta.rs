@@ -53,7 +53,7 @@ impl MetaKey {
     // (PFX_KEYSPACES, keyspace_id) -> []
     const PFX_KEYSPACES: u64 = 3;
 
-    // (PFX_TABLETS, tablet_id) -> pb::internal::MetaTablet
+    // (PFX_TABLETS, tablet_id) -> pb::internal::TabletMetadata
     const PFX_TABLETS: u64 = 4;
 
     pub(crate) fn encode(&self) -> Vec<u8> {
@@ -116,7 +116,6 @@ impl MetaKey {
 
 #[async_trait]
 pub(crate) trait Meta {
-    async fn add_tablet(&self, tablet_id: TabletId) -> anyhow::Result<()>;
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,
@@ -145,32 +144,6 @@ pub(crate) struct MetaImpl<T> {
 
 #[async_trait]
 impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
-    async fn add_tablet(&self, tablet_id: TabletId) -> anyhow::Result<()> {
-        let snapshot = self.latest_snapshot_().await?;
-
-        let tablet_key = MetaKey::Tablet(tablet_id);
-
-        if snapshot.exists(&tablet_key).await? {
-            return Err(anyhow!("{:?} already exists", tablet_id));
-        }
-
-        let starting_meta_tablet_pb = pb::internal::MetaTablet {
-            colo_group_ids: vec![],
-            ranges: vec![],
-        };
-
-        self.write_syncable(
-            snapshot,
-            HashMap::from([(
-                tablet_key,
-                Mutation::Put(starting_meta_tablet_pb.encode_to_vec()),
-            )]),
-        )
-        .await?;
-
-        Ok(())
-    }
-
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,
@@ -206,9 +179,9 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
             muts.insert(
                 MetaKey::Tablet(tablet_id),
                 Mutation::Put(
-                    pb::internal::MetaTablet {
-                        colo_group_ids: vec![colo_group_id.0],
-                        ranges: vec![range.into()],
+                    pb::internal::TabletMetadata {
+                        colo_group_id: colo_group_id.0,
+                        range: Some(range.into()),
                     }
                     .encode_to_vec(),
                 ),
@@ -447,7 +420,7 @@ pub(crate) trait MetaReader {
     async fn tablet_metadata(
         &self,
         tablet_id: TabletId,
-    ) -> anyhow::Result<pb::internal::MetaTablet> {
+    ) -> anyhow::Result<pb::internal::TabletMetadata> {
         self.get_meta_key(&MetaKey::Tablet(tablet_id))
             .await?
             .ok_or_else(|| anyhow!("{:?} not found", tablet_id))
@@ -538,10 +511,6 @@ fn ranges_from_splits(splits: Vec<Bound<Vec<u8>>>) -> anyhow::Result<Vec<Range<V
 
 #[async_trait]
 impl<T: Meta + Sync + Send + ?Sized> Meta for Box<T> {
-    async fn add_tablet(&self, tablet_id: TabletId) -> anyhow::Result<()> {
-        T::add_tablet(self, tablet_id).await
-    }
-
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,

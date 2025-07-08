@@ -11,7 +11,7 @@ message MetaTx {
     CompressedKeySet keys = 1;
 }
 
-message MetaTablet {
-    repeated uint32 colo_group_ids = 1;
-    repeated obsidian.Range ranges = 2;
+message TabletMetadata {
+    uint32 colo_group_id = 1;
+    obsidian.Range range = 2;
 }
