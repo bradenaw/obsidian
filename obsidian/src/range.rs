@@ -57,28 +57,28 @@ impl Bound<&[u8]> {
 }
 
 impl<K: Key> Bound<K> {
-    pub fn cmp_key(&self, other: &K) -> Ordering {
+    pub fn cmp_key<K2: Key>(&self, other: &K2) -> Ordering {
         match self {
             Bound::BeforeAll => Ordering::Less,
             Bound::Before(k) => {
-                if k == other {
+                if k.deref() == other.deref() {
                     Ordering::Less
                 } else {
-                    k.cmp(other)
+                    k.deref().cmp(other.deref())
                 }
             }
             Bound::After(k) => {
-                if k == other {
+                if k.deref() == other.deref() {
                     Ordering::Greater
                 } else {
-                    k.cmp(other)
+                    k.deref().cmp(other.deref())
                 }
             }
             Bound::AfterPrefix(k) => {
                 if other.starts_with(k) {
                     Ordering::Greater
                 } else {
-                    k.cmp(other)
+                    k.deref().cmp(other.deref())
                 }
             }
             Bound::AfterAll => Ordering::Greater,
@@ -256,7 +256,7 @@ impl<K: Key> Range<K> {
         self.lower >= self.upper
     }
 
-    pub fn contains(&self, k: &K) -> bool {
+    pub fn contains<K2: Key>(&self, k: &K2) -> bool {
         self.lower.cmp_key(k) != Ordering::Greater && self.upper.cmp_key(k) != Ordering::Less
     }
 
@@ -453,7 +453,7 @@ impl<K: Key> RangeSet<K> {
 
     pub fn contains(&self, k: &K) -> bool {
         match self.last_less_or_equal(&Bound::Before(k.clone())) {
-            Some(range) => range.contains(&k),
+            Some(range) => range.contains(k),
             None => false,
         }
     }
@@ -832,7 +832,7 @@ mod tests {
     #[test]
     fn test_range_contains() {
         let empty: Vec<u8> = vec![];
-        assert!(!Range {
+        assert!(!Range::<&[u8]> {
             lower: Bound::BeforeAll,
             upper: Bound::BeforeAll,
         }

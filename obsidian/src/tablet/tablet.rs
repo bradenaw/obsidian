@@ -30,8 +30,8 @@ use crate::meta::MetaSyncedSnapshot;
 use crate::meta::SyncType;
 use crate::obsidian::InternalError;
 use crate::obsidian::Router;
-use crate::obsidian::TabletId;
 use crate::obsidian::Shards;
+use crate::obsidian::TabletId;
 use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
 use crate::pb;
@@ -160,6 +160,8 @@ impl<S: Storage + Send + Sync + 'static> Tablet for LsmTablet<S> {
 impl<S: Storage + Send + Sync + 'static> LsmTablet<S> {
     pub async fn new(
         tablet_id: TabletId,
+        colo_group_id: ColoGroupId,
+        range: Range<Vec<u8>>,
         lsm: Lsm<S>,
         meta: Box<dyn Meta + Sync + Send + 'static>,
         shards: Box<dyn Shards + Sync + Send>,
@@ -173,6 +175,8 @@ impl<S: Storage + Send + Sync + 'static> LsmTablet<S> {
 
         let inner = Arc::new(LsmTabletInner::new(
             tablet_id,
+            colo_group_id,
+            range,
             lsm,
             meta_synced,
             shards,
@@ -243,6 +247,9 @@ impl<S: Storage + Send + Sync + 'static> LsmTablet<S> {
 
 struct LsmTabletInner<S: Storage> {
     tablet_id: TabletId,
+    colo_group_id: ColoGroupId,
+    range: Range<Vec<u8>>,
+
     lsm: Lsm<S>,
     meta_synced: Arc<MetaSynced>,
     shards: Box<dyn Shards + Sync + Send>,
@@ -257,6 +264,8 @@ struct LsmTabletInner<S: Storage> {
 impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
     fn new(
         tablet_id: TabletId,
+        colo_group_id: ColoGroupId,
+        range: Range<Vec<u8>>,
         lsm: Lsm<S>,
         meta_synced: Arc<MetaSynced>,
         shards: Box<dyn Shards + Sync + Send>,
@@ -265,6 +274,8 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
     ) -> Self {
         Self {
             tablet_id,
+            colo_group_id,
+            range,
             lsm,
             meta_synced,
             shards,
@@ -1218,6 +1229,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         if colo_group_id == ColoGroupId::META && self.tablet_id == TabletId::META {
             return Ok(());
         }
+
         if colo_group_id == ColoGroupId::TABLET_META {
             if key.len() < 12 {
                 return Err(anyhow!(
@@ -1233,9 +1245,11 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
                 return Ok(());
             }
         }
-        if self.meta_synced.tablet_id_for_key(colo_group_id, &key)? != self.tablet_id {
+
+        if self.colo_group_id != colo_group_id || !self.range.contains(&key) {
             return Err(anyhow!("{:?}/{:?} not owned", colo_group_id, key).into());
         }
+
         Ok(())
     }
 

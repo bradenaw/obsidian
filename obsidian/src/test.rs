@@ -284,6 +284,8 @@ where
 
         let tablet = LsmTablet::new(
             tablet_id,
+            colo_group_id,
+            range,
             lsm,
             Box::new(self.meta_proxy.clone()),
             Box::new(Weak::upgrade(&self.test_shards).ok_or_else(|| anyhow!("TestShards gone"))?),
@@ -404,11 +406,13 @@ pub(crate) async fn new_for_test(n_shards: usize) -> anyhow::Result<Frontend> {
     for _ in 0..n_shards {
         shards.create_shard();
     }
-    shards.shard(ShardId(1))?.create_tablet(ColoGroupId::META, Range::all()).await?;
+    shards
+        .shard(ShardId(1))?
+        .create_tablet(ColoGroupId::META, Range::all())
+        .await?;
 
     let meta_tablet = shards.tablet(TabletId::META)?;
     let meta = MetaImpl::new(Box::new(shards.clone()), meta_tablet);
-
 
     meta_proxy.put(meta);
 
@@ -443,7 +447,10 @@ impl Tablet for Box<dyn Tablet + Send + Sync> {
         direction: Direction,
         limit: usize,
     ) -> Result<(Vec<Record>, Option<Range<Vec<u8>>>), InternalError> {
-        Ok(self.deref().scan_page(ts, keyspace_id, range, direction, limit).await?)
+        Ok(self
+            .deref()
+            .scan_page(ts, keyspace_id, range, direction, limit)
+            .await?)
     }
 
     async fn history_page(
@@ -453,7 +460,10 @@ impl Tablet for Box<dyn Tablet + Send + Sync> {
         direction: Direction,
         limit: usize,
     ) -> Result<(Vec<Revision>, Option<HistoryRange>), InternalError> {
-        Ok(self.deref().history_page(key, range, direction, limit).await?)
+        Ok(self
+            .deref()
+            .history_page(key, range, direction, limit)
+            .await?)
     }
 
     async fn write(
@@ -480,7 +490,10 @@ impl Tablet for Box<dyn Tablet + Send + Sync> {
         precond_keys: BTreeSet<Key>,
         mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<TxOutcome> {
-        Ok(self.deref().try_commit(txid, ts, precond_keys, mut_keys).await?)
+        Ok(self
+            .deref()
+            .try_commit(txid, ts, precond_keys, mut_keys)
+            .await?)
     }
 
     async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
@@ -498,7 +511,10 @@ impl Tablet for Box<dyn Tablet + Send + Sync> {
         precond_keys: BTreeSet<Key>,
         mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()> {
-        Ok(self.deref().cleanup_committed(txid, ts, precond_keys, mut_keys).await?)
+        Ok(self
+            .deref()
+            .cleanup_committed(txid, ts, precond_keys, mut_keys)
+            .await?)
     }
 
     async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
