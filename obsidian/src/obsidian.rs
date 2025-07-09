@@ -24,6 +24,7 @@ use thiserror::Error;
 
 use crate::meta::Meta;
 use crate::meta::MetaSynced;
+use crate::pb;
 use crate::range::Bound;
 use crate::range::Range;
 use crate::tablet::Tablet;
@@ -540,6 +541,23 @@ impl Decode for TabletId {
             ShardId(BigEndian::read_u32(&b[0..4])),
             BigEndian::read_u64(&b[4..12]),
         ));
+    }
+}
+
+impl From<TabletId> for pb::internal::TabletId {
+    fn from(value: TabletId) -> Self {
+        Self {
+            shard_id: value.0 .0,
+            id: value.1,
+        }
+    }
+}
+
+impl TryFrom<pb::internal::TabletId> for TabletId {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::internal::TabletId) -> Result<Self, Self::Error> {
+        Ok(Self(ShardId(value.shard_id), value.id))
     }
 }
 

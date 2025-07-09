@@ -176,6 +176,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitmask-enum"
+version = "2.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6cbbb8f56245b5a479b30a62cdc86d26e2f35c2b9f594bc4671654b03851380"
+dependencies = [
+ "quote",
+ "syn 2.0.31",
+]
+
+[[package]]
 name = "byteorder"
 version = "1.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -650,6 +660,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "bitmask-enum",
  "byteorder",
  "futures",
  "im",
