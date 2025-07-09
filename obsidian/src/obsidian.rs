@@ -716,6 +716,10 @@ pub(crate) enum InternalError {
     // cleaned everything up and removed the TxOutcome.
     #[error("TxOutcome missing")]
     TxOutcomeMissing,
+    #[error("tablet not currently readable")]
+    TabletNotReadable,
+    #[error("tablet not currently writable")]
+    TabletNotWriteable,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

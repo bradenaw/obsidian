@@ -159,7 +159,7 @@ impl TabletState {
         }
     }
 
-    fn properties(self) -> TabletStateProperties {
+    pub(crate) fn properties(self) -> TabletStateProperties {
         match self {
             TabletState::None => TabletStateProperties::none(),
             TabletState::Hydrating => TabletStateProperties::none(),

@@ -7,10 +7,12 @@ edition = "2021"
 
 [dependencies]
 anyhow = { version = "1.0.58", features = ["backtrace"] }
+arc-atomic = "0.1.0"
 async-stream = "0.3.3"
 async-trait = "0.1.57"
 bitmask-enum = "2.2.5"
 byteorder = "1.4.3"
+crossbeam = "0.8.4"
 futures = "0.3.23"
 im = "15.1.0"
 log = "^0.4"

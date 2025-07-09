@@ -384,7 +384,7 @@ impl<T: Tablet + Sync + Send> MetaImpl<T> {
         Ok(())
     }
 
-    async fn start_split(&self, src: TabletId, dsts: Vec<ShardId>) -> anyhow::Result<()> {
+    async fn start_split(&self, _src: TabletId, _dsts: Vec<ShardId>) -> anyhow::Result<()> {
         // ask tablet for ranges
         todo!();
     }

@@ -1,4 +1,5 @@
 mod lock_mgr;
+mod protected;
 mod sequencer;
 mod tablet;
 
