@@ -192,6 +192,10 @@ impl Obsidian for Frontend {
         preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, WriteError> {
+        if muts.is_empty() {
+            return Err(anyhow!("empty write").into());
+        }
+
         let write_by_tablet = self.split_write(preconds.clone(), muts.clone())?;
 
         let owner_tablet_id = write_by_tablet
