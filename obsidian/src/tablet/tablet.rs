@@ -22,13 +22,13 @@ use prost::Message;
 use tokio::sync::mpsc;
 
 use crate::lsm::Lsm;
-use crate::meta::Meta;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
-use crate::meta::MetaSynced;
 use crate::meta::MetaState;
+use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::meta::SyncType;
+use crate::meta::TabletState;
 use crate::obsidian::InternalError;
 use crate::obsidian::Router;
 use crate::obsidian::Shards;
@@ -68,6 +68,7 @@ const WAIT_ABORT_TIMEOUT: Duration = Duration::from_millis(1_000);
 
 pub(crate) struct LsmTablet<S: Storage> {
     inner: Arc<LsmTabletInner<S>>,
+    meta_synced: Arc<MetaSynced>,
 
     bg: Background,
 }
@@ -156,7 +157,7 @@ impl<S: Storage + Send + Sync + 'static> Tablet for LsmTablet<S> {
     }
 
     async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
-        self.inner.meta_synced.wait(ts).await
+        self.meta_synced.wait(ts).await
     }
 }
 
@@ -166,23 +167,19 @@ impl<S: Storage + Send + Sync + 'static> LsmTablet<S> {
         colo_group_id: ColoGroupId,
         range: Range<Vec<u8>>,
         lsm: Lsm<S>,
-        meta: Box<dyn Meta + Sync + Send + 'static>,
-        shards: Box<dyn Shards + Sync + Send>,
+        meta_synced: Arc<MetaSynced>,
+        shards: Arc<dyn Shards + Sync + Send>,
     ) -> anyhow::Result<Self> {
         let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
         let (commit_sender, commit_receiver) = mpsc::channel(128);
 
         lsm.create_keyspace(KeyspaceId::TX_OUTCOMES).await?;
 
-        let meta_synced = Arc::new(MetaSynced::new(meta));
-
         let inner = Arc::new(LsmTabletInner::new(
             tablet_id,
             colo_group_id,
             range,
-            lsm,
-            meta_synced,
-            shards,
+            ProtectedLsm::new(lsm, TabletState::None),
             prepare_sender.clone(),
             commit_sender.clone(),
         ));
@@ -191,15 +188,20 @@ impl<S: Storage + Send + Sync + 'static> LsmTablet<S> {
 
         bg.spawn({
             let inner = inner.clone();
+            let meta_synced = meta_synced.clone();
+            let shards = shards.clone();
             async move {
-                inner.cleanup_committed_outcomes(commit_receiver).await;
+                inner
+                    .cleanup_committed_outcomes(meta_synced, shards, commit_receiver)
+                    .await;
             }
         });
 
         bg.spawn({
             let inner = inner.clone();
+            let shards = shards.clone();
             async move {
-                inner.resolve_prepared(prepare_receiver).await;
+                inner.resolve_prepared(&shards, prepare_receiver).await;
             }
         });
 
@@ -234,9 +236,11 @@ impl<S: Storage + Send + Sync + 'static> LsmTablet<S> {
 
         bg.spawn({
             let inner = inner.clone();
+            let meta_synced = meta_synced.clone();
             async move {
-                inner
-                    .meta_synced
+                // XXX: Not correct, racy because we might not get around to calling susbcribe
+                // before new() ends.
+                meta_synced
                     .subscribe(async |sync_type, snapshot: MetaSyncedSnapshot| {
                         inner.sync_meta(sync_type, snapshot).await;
                     })
@@ -244,18 +248,20 @@ impl<S: Storage + Send + Sync + 'static> LsmTablet<S> {
             }
         });
 
-        Ok(Self { inner, bg })
+        Ok(Self {
+            inner,
+            meta_synced,
+            bg,
+        })
     }
 }
 
-struct LsmTabletInner<S: Storage> {
+pub(super) struct LsmTabletInner<S: Storage> {
     tablet_id: TabletId,
     colo_group_id: ColoGroupId,
     range: Range<Vec<u8>>,
 
     lsm: ProtectedLsm<S>,
-    meta_synced: Arc<MetaSynced>,
-    shards: Box<dyn Shards + Sync + Send>,
     sequencer: Sequencer,
     lock_mgr: LockMgr,
 
@@ -265,13 +271,11 @@ struct LsmTabletInner<S: Storage> {
 }
 
 impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
-    fn new(
+    pub(super) fn new(
         tablet_id: TabletId,
         colo_group_id: ColoGroupId,
         range: Range<Vec<u8>>,
-        lsm: Lsm<S>,
-        meta_synced: Arc<MetaSynced>,
-        shards: Box<dyn Shards + Sync + Send>,
+        lsm: ProtectedLsm<S>,
         prepare_sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
         commit_sender: mpsc::Sender<(Txid, Timestamp, BTreeSet<Key>, BTreeSet<Key>)>,
     ) -> Self {
@@ -279,9 +283,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
             tablet_id,
             colo_group_id,
             range,
-            lsm: ProtectedLsm::new(lsm),
-            meta_synced,
-            shards,
+            lsm: lsm,
             prepare_sender,
             commit_sender,
             sequencer: Sequencer::new(),
@@ -290,7 +292,11 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         }
     }
 
-    async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
+    pub(super) async fn get(
+        &self,
+        ts: Timestamp,
+        key: &Key,
+    ) -> Result<Option<Record>, InternalError> {
         let lsm_read = self.lsm.read()?;
 
         let keyspace_id = key.0;
@@ -328,7 +334,10 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         })
     }
 
-    async fn get_latest(&self, key: Key) -> Result<(Timestamp, Option<Record>), InternalError> {
+    pub(super) async fn get_latest(
+        &self,
+        key: Key,
+    ) -> Result<(Timestamp, Option<Record>), InternalError> {
         let lsm_read = self.lsm.read()?;
 
         let keyspace_id = key.0;
@@ -371,7 +380,10 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         })
     }
 
-    async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError> {
+    pub(super) async fn latest_snapshot(
+        &self,
+        keys: BTreeSet<Key>,
+    ) -> Result<Timestamp, InternalError> {
         // TODO: This doesn't require loading the values, so we could optimize here to do less
         // work.
         let mut result = Timestamp::ZERO;
@@ -382,7 +394,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         Ok(result)
     }
 
-    async fn scan_page(
+    pub(super) async fn scan_page(
         &self,
         ts: Timestamp,
         keyspace_id: KeyspaceId,
@@ -492,7 +504,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         ))
     }
 
-    async fn history_page(
+    pub(super) async fn history_page(
         &self,
         key: Key,
         range: HistoryRange,
@@ -559,7 +571,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         ))
     }
 
-    async fn write(
+    pub(super) async fn write(
         &self,
         preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
@@ -950,13 +962,22 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
 
     async fn cleanup_committed_outcomes(
         &self,
+        meta_synced: Arc<MetaSynced>,
+        shards: Arc<dyn Shards + Sync + Send>,
         mut r: mpsc::Receiver<(Txid, Timestamp, BTreeSet<Key>, BTreeSet<Key>)>,
     ) {
         while let Some((txid, ts, precond_keys, mut_keys)) = r.recv().await {
             Retry::new()
                 .indefinitely(&async || -> anyhow::Result<()> {
-                    self.cleanup_one_committed_outcome(txid, ts, &precond_keys, &mut_keys)
-                        .await?;
+                    self.cleanup_one_committed_outcome(
+                        &meta_synced,
+                        &shards,
+                        txid,
+                        ts,
+                        &precond_keys,
+                        &mut_keys,
+                    )
+                    .await?;
                     Ok::<_, anyhow::Error>(())
                 })
                 .await;
@@ -965,6 +986,8 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
 
     async fn cleanup_one_committed_outcome(
         &self,
+        meta_synced: &MetaSynced,
+        shards: &Arc<dyn Shards + Send + Sync>,
         txid: Txid,
         ts: Timestamp,
         precond_keys: &BTreeSet<Key>,
@@ -975,7 +998,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         let mut by_tablet = HashMap::new();
 
         for (keyspace_id, key) in precond_keys {
-            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
+            let tablet_id = meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
             by_tablet
                 .entry(tablet_id)
                 .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()))
@@ -983,7 +1006,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
                 .insert((*keyspace_id, key.clone()));
         }
         for (keyspace_id, key) in mut_keys {
-            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
+            let tablet_id = meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
             by_tablet
                 .entry(tablet_id)
                 .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()))
@@ -994,11 +1017,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         // Lifetime shenanigans.
         let tablets = by_tablet
             .keys()
-            .map(|tablet_id| {
-                self.shards
-                    .tablet(*tablet_id)
-                    .map(|tablet| (*tablet_id, tablet))
-            })
+            .map(|tablet_id| shards.tablet(*tablet_id).map(|tablet| (*tablet_id, tablet)))
             .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
         let mut futures = Vec::with_capacity(by_tablet.len());
         for (tablet_id, (precond_keys, mut_keys)) in by_tablet {
@@ -1026,13 +1045,14 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
 
     async fn resolve_prepared(
         &self,
+        shards: &Arc<dyn Shards + Send + Sync>,
         receiver: mpsc::Receiver<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
     ) {
         crate::util::bounded_unordered_map(
             receiver,
             64,
             |(txid, keyspace_id, key, prepare_type)| async move {
-                let owner_tablet = self.shards.tablet(txid.owner()).unwrap();
+                let owner_tablet = shards.tablet(txid.owner()).unwrap();
                 let tx_outcome = owner_tablet.wait(txid).await.unwrap();
                 // Commits get cleaned up by the owner tablet calling cleanup_committed. Ignore them
                 // here to avoid duplicating work.
@@ -1255,10 +1275,12 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
                             self.create_keyspace(keyspace_id).await?;
                         }
                         let tablet_metadata = snapshot.tablet_metadata(self.tablet_id).await?;
-                        self.lsm.set_state(match tablet_metadata.state {
-                            MetaState::Stable(state) => state,
-                            MetaState::Transitioning(_, next_state) => next_state,
-                        }).await;
+                        self.lsm
+                            .set_state(match tablet_metadata.state {
+                                MetaState::Stable(state) => state,
+                                MetaState::Transitioning(_, next_state) => next_state,
+                            })
+                            .await;
                     }
                     SyncType::Tx(meta_keys) => {
                         for meta_key in meta_keys {

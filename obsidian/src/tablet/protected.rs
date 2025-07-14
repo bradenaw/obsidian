@@ -35,10 +35,10 @@ impl<S> ProtectedLsm<S>
 where
     S: Storage + Send + Sync + 'static,
 {
-    pub(super) fn new(lsm: Lsm<S>) -> Self {
+    pub(super) fn new(lsm: Lsm<S>, initial: TabletState) -> Self {
         let (on_change, changed) = watch::channel(());
         Self {
-            state: InfrequentlyChanged::new(TabletStateProperties::none()),
+            state: InfrequentlyChanged::new(initial.properties()),
             changed,
             on_change,
             lsm,

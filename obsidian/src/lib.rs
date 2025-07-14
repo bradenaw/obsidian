@@ -2,6 +2,7 @@
 #![feature(assert_matches)]
 #![feature(coroutines)]
 
+mod coordinator;
 mod grpc;
 mod lsm;
 mod meta;
@@ -9,6 +10,7 @@ mod obsidian;
 mod range;
 mod router;
 mod rtest;
+mod shard;
 mod storage;
 mod tablet;
 mod tuple_encoding;

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::convert::TryFrom;
+use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_stream::try_stream;
@@ -11,15 +12,12 @@ use futures::TryStreamExt;
 use prost::Message;
 use rand::seq::SliceRandom;
 
-use crate::meta::transfer::TransferTabletTransition;
 use crate::meta::TabletState;
 use crate::meta::TransferState;
-use crate::obsidian::Shards;
 use crate::obsidian::TabletId;
 use crate::pb;
 use crate::range::Bound;
 use crate::range::Range;
-use crate::range::RangeSet;
 use crate::tablet::Tablet;
 use crate::tuple_encoding::tuple_decode;
 use crate::tuple_encoding::tuple_decode_prefix;
@@ -43,6 +41,7 @@ use crate::util::WaitableTimestamp;
 #[derive(Clone, Hash, Eq, PartialEq)]
 pub(crate) enum MetaKey {
     Sync,
+    Shard(ShardId),
     ColoGroup(ColoGroupId),
     Keyspace(KeyspaceId),
     Tablet(TabletId),
@@ -53,21 +52,25 @@ impl MetaKey {
     // (PFX_SYNC) -> pb::internal::MetaTx
     const PFX_SYNC: u64 = 1;
 
+    // (PFX_SHARDS, shard_id) => []
+    const PFX_SHARDS: u64 = 2;
+
     // (PFX_COLO_GROUPS, colo_group_id) -> []
-    const PFX_COLO_GROUPS: u64 = 2;
+    const PFX_COLO_GROUPS: u64 = 3;
 
     // (PFX_KEYSPACES, keyspace_id) -> []
-    const PFX_KEYSPACES: u64 = 3;
+    const PFX_KEYSPACES: u64 = 4;
 
     // (PFX_TABLETS, tablet_id) -> pb::internal::TabletMetadata
-    const PFX_TABLETS: u64 = 4;
+    const PFX_TABLETS: u64 = 5;
 
     // (PFX_TRANSFERS, transfer_id) -> pb::internal::TransferMetadata
-    const PFX_TRANSFERS: u64 = 5;
+    const PFX_TRANSFERS: u64 = 6;
 
     pub(crate) fn encode(&self) -> Vec<u8> {
         match self {
             Self::Sync => tuple_encode(&(Self::PFX_SYNC,)),
+            Self::Shard(shard_id) => tuple_encode(&(Self::PFX_SHARDS, shard_id.0 as u64)),
             Self::ColoGroup(colo_group_id) => {
                 tuple_encode(&(Self::PFX_COLO_GROUPS, colo_group_id.0 as u64))
             }
@@ -87,6 +90,10 @@ impl MetaKey {
         let prefix = tuple_decode_prefix::<(u64,)>(b)?.0;
         match prefix {
             Self::PFX_SYNC => Ok(Self::Sync),
+            Self::PFX_SHARDS => {
+                let (_, shard_id_raw): (u64, u64) = tuple_decode(b)?;
+                Ok(Self::Shard(ShardId(u32::try_from(shard_id_raw)?)))
+            }
             Self::PFX_COLO_GROUPS => {
                 let (_, colo_group_id_raw): (u64, u64) = tuple_decode(b)?;
                 Ok(Self::ColoGroup(ColoGroupId(u32::try_from(
@@ -111,6 +118,10 @@ impl MetaKey {
         }
     }
 
+    fn shards() -> Range<Vec<u8>> {
+        Range::prefix(tuple_encode(&(Self::PFX_SHARDS,)))
+    }
+
     fn colo_groups() -> Range<Vec<u8>> {
         Range::prefix(tuple_encode(&(Self::PFX_COLO_GROUPS,)))
     }
@@ -126,6 +137,7 @@ impl MetaKey {
 
 #[async_trait]
 pub(crate) trait Meta {
+    async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()>;
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,
@@ -148,12 +160,27 @@ pub(crate) trait Meta {
 pub(crate) struct MetaImpl<T> {
     tablet: T,
     sync_key: Vec<u8>,
-    shards: Box<dyn Shards + Send + Sync>,
     ts: WaitableTimestamp,
 }
 
 #[async_trait]
 impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
+    async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
+        let snapshot = self.latest_snapshot_().await?;
+
+        if snapshot.shard_exists(shard_id).await? {
+            return Err(anyhow!("{:?} already exists", shard_id));
+        }
+
+        self.write_syncable(
+            snapshot,
+            HashMap::from([(MetaKey::Shard(shard_id), Mutation::Put(vec![]))]),
+        )
+        .await?;
+
+        Ok(())
+    }
+
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,
@@ -167,24 +194,31 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
             return Err(anyhow!("{:?} already exists", colo_group_id));
         }
 
-        let mut shard_ids: Vec<_> = self
-            .shards
-            .shards()
-            .iter()
-            .map(|shard| shard.id())
-            .collect();
+        let mut shard_ids: Vec<_> = snapshot.shard_ids().await?;
         shard_ids.shuffle(&mut rand::thread_rng());
 
         let mut muts = HashMap::from([(MetaKey::ColoGroup(colo_group_id), Mutation::Put(vec![]))]);
 
+        let all_tablet_ids = snapshot.tablet_ids().await?;
+
+        let mut next_tablet_id_by_shard = BTreeMap::new();
+
+        for tablet_id in &all_tablet_ids {
+            if !next_tablet_id_by_shard.contains_key(&tablet_id.0) {
+                next_tablet_id_by_shard.insert(tablet_id.0, tablet_id.1 + 1);
+            }
+        }
+
         // Round-robin the created ranges among the shards.
         for (i, range) in ranges.into_iter().enumerate() {
-            let shard_i = i % shard_ids.len();
-            let tablet_id = self
-                .shards
-                .shard(shard_ids[shard_i])?
-                .create_tablet(colo_group_id, range.clone())
-                .await?;
+            let shard_id = shard_ids[i % shard_ids.len()];
+            let tablet_id = TabletId(
+                shard_id,
+                *next_tablet_id_by_shard.get(&shard_id).unwrap_or(&2),
+            );
+            next_tablet_id_by_shard.insert(shard_id, tablet_id.1 + 1);
+
+            // TODO: shard needs to actually make the tablet
 
             muts.insert(
                 MetaKey::Tablet(tablet_id),
@@ -308,16 +342,15 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
 }
 
 impl<T: Tablet + Sync + Send> MetaImpl<T> {
-    pub(crate) fn new(shards: Box<dyn Shards + Send + Sync>, tablet: T) -> Self {
+    pub(crate) fn new(tablet: T) -> Self {
         Self {
-            shards,
             tablet,
             sync_key: MetaKey::Sync.encode(),
             ts: WaitableTimestamp::new(),
         }
     }
 
-    async fn latest_snapshot_(&self) -> anyhow::Result<MetaSnapshot<'_, T>> {
+    pub(crate) async fn latest_snapshot_(&self) -> anyhow::Result<MetaSnapshot<'_, T>> {
         let ts = self.latest_snapshot().await?;
 
         Ok(MetaSnapshot {
@@ -334,7 +367,7 @@ impl<T: Tablet + Sync + Send> MetaImpl<T> {
     }
 
     /// Writes the given mutations if `Meta` has not changed since the given snapshot.
-    async fn write_syncable<'a>(
+    pub(crate) async fn write_syncable<'a>(
         &'a self,
         snapshot: MetaSnapshot<'a, T>,
         muts: HashMap<MetaKey, Mutation>,
@@ -373,377 +406,6 @@ impl<T: Tablet + Sync + Send> MetaImpl<T> {
         _ = self.ts.set(ts);
         Ok(ts)
     }
-
-    async fn start_move(&self, src: TabletId, dst: ShardId) -> anyhow::Result<()> {
-        let snapshot = self.latest_snapshot_().await?;
-        let src_metadata = snapshot.tablet_metadata(src).await?;
-
-        self.start_transfer(vec![src], vec![(dst, src_metadata.range)])
-            .await?;
-
-        Ok(())
-    }
-
-    async fn start_split(&self, _src: TabletId, _dsts: Vec<ShardId>) -> anyhow::Result<()> {
-        // ask tablet for ranges
-        todo!();
-    }
-
-    async fn start_merge(&self, srcs: Vec<TabletId>, dst: ShardId) -> anyhow::Result<()> {
-        let snapshot = self.latest_snapshot_().await?;
-        let mut src_range_set = RangeSet::new();
-        for src in &srcs {
-            let src_metadata = snapshot.tablet_metadata(*src).await?;
-            src_range_set.add_range(src_metadata.range);
-        }
-
-        let dst_range = src_range_set.contiguous().ok_or_else(|| {
-            anyhow!(
-                "can't start merge: source tablets not contiguous: {:?} own {:?}",
-                srcs,
-                src_range_set
-            )
-        })?;
-
-        self.start_transfer(srcs, vec![(dst, dst_range)]).await?;
-
-        Ok(())
-    }
-
-    async fn start_transfer(
-        &self,
-        srcs: Vec<TabletId>,
-        dsts: Vec<(ShardId, Range<Vec<u8>>)>,
-    ) -> anyhow::Result<()> {
-        let snapshot = self.latest_snapshot_().await?;
-
-        if !((srcs.len() == 1 && dsts.len() >= 1) || (srcs.len() >= 1 && dsts.len() == 1)) {
-            return Err(anyhow!(
-                "can't do m:n transfers, only 1:1 move, 1:n split, and n:1 merge"
-            ));
-        }
-
-        let transfer_id = TransferId::new();
-
-        let mut muts = HashMap::new();
-
-        let mut src_range_set = RangeSet::new();
-        let mut colo_group_id = None;
-        for src in &srcs {
-            let mut src_metadata = snapshot.tablet_metadata(*src).await?;
-
-            if let Some(existing_transfer_id) = src_metadata.transfer_id {
-                return Err(anyhow!(
-                    "can't start transfer: {:?} already participating in {:?}",
-                    src,
-                    existing_transfer_id,
-                ));
-            }
-            if let MetaState::Transitioning(_, _) = src_metadata.state {
-                return Err(anyhow!(
-                    "can't start transfer: {:?} already transitioning but not part of another transfer",
-                    src,
-                ));
-            }
-            src_range_set.add_range(src_metadata.range.clone());
-
-            src_metadata.transfer_id = Some(transfer_id);
-            muts.insert(
-                MetaKey::Tablet(*src),
-                Mutation::Put(src_metadata.clone().encode_to_vec()),
-            );
-
-            if let Some(colo_group_id) = colo_group_id {
-                if src_metadata.colo_group_id != colo_group_id {
-                    return Err(anyhow!(
-                        "can't start transfer: not all tablets from the same colo group: {:?} != {:?}",
-                        colo_group_id,
-                        src_metadata.colo_group_id,
-                    ));
-                }
-            }
-            colo_group_id = Some(src_metadata.colo_group_id);
-        }
-
-        let src_range = src_range_set.contiguous().ok_or_else(|| {
-            anyhow!(
-                "can't start transfer: can only merge contiguous ranges, requested {:?}",
-                src_range_set,
-            )
-        })?;
-
-        let mut dst_tablet_ids = vec![];
-        let dst_range_set = RangeSet::from_iter(dsts.iter().map(|(_, range)| range.clone()));
-        let dst_range = dst_range_set.contiguous().ok_or_else(|| {
-            anyhow!(
-                "can't start transfer: can only split into contiguous ranges, requested {:?}",
-                dst_range_set,
-            )
-        })?;
-
-        if src_range != dst_range {
-            return Err(anyhow!(
-                "can't start transfer: source and destination are different ranges: {:?} != {:?}",
-                src_range,
-                dst_range,
-            ));
-        }
-
-        for (dst_shard_id, dst_range) in &dsts {
-            let dst_shard = self.shards.shard(*dst_shard_id)?;
-            let dst_tablet_id = dst_shard
-                .create_tablet(colo_group_id.unwrap(), dst_range.clone())
-                .await?;
-            dst_tablet_ids.push(dst_tablet_id);
-            muts.insert(
-                MetaKey::Tablet(dst_tablet_id),
-                Mutation::Put(
-                    TabletMetadata {
-                        colo_group_id: colo_group_id.unwrap(),
-                        range: dst_range.clone(),
-                        state: MetaState::Stable(TabletState::Hydrating),
-                        transfer_id: None,
-                    }
-                    .encode_to_vec(),
-                ),
-            );
-        }
-
-        muts.insert(
-            MetaKey::Transfer(transfer_id),
-            Mutation::Put(
-                TransferMetadata {
-                    state: MetaState::Stable(TransferState::Copy),
-                    srcs: srcs,
-                    dsts: dst_tablet_ids,
-                }
-                .encode_to_vec(),
-            ),
-        );
-
-        self.write_syncable(snapshot, muts).await?;
-
-        // TODO: spawn a task to carry it out
-
-        Ok(())
-    }
-
-    async fn transfer_step(&self, transfer_id: TransferId) -> anyhow::Result<bool> {
-        let snapshot = self.latest_snapshot_().await?;
-        let transfer_metadata = snapshot.transfer_metadata(transfer_id).await?;
-
-        let transfer_state = match transfer_metadata.state {
-            MetaState::Transitioning(_, _) => {
-                self.roll_transition_forward(transfer_id).await?;
-                return Ok(true);
-            }
-            MetaState::Stable(state) => state,
-        };
-
-        match transfer_state {
-            TransferState::Copy => {
-                // wait for destinations to nearly finish
-
-                self.transition_transfer(snapshot, transfer_id, TransferState::Catchup)
-                    .await?;
-            }
-            TransferState::Catchup => {
-                // wait for sources to flush and destinations to fully catch up
-                //
-                // compare the source manifests and destination manifests
-                //
-                // if something is wrong then transition to aborting
-
-                self.transition_transfer(snapshot, transfer_id, TransferState::Synced)
-                    .await?;
-            }
-            TransferState::Synced => {
-                // No action, we just have to transit this.
-                self.transition_transfer(snapshot, transfer_id, TransferState::Handoff)
-                    .await?;
-            }
-            TransferState::Handoff => {
-                // No action, we just have to transit this.
-                self.transition_transfer(snapshot, transfer_id, TransferState::Complete)
-                    .await?;
-            }
-            TransferState::Complete => return Ok(false),
-
-            TransferState::Aborting => {
-                // No action, we just have to transit this.
-                self.transition_transfer(snapshot, transfer_id, TransferState::Aborted)
-                    .await?;
-            }
-            TransferState::Aborted => return Ok(false),
-        }
-
-        Ok(true)
-    }
-
-    async fn transition_transfer<'a>(
-        &'a self,
-        snapshot: MetaSnapshot<'a, T>,
-        transfer_id: TransferId,
-        next_state: TransferState,
-    ) -> anyhow::Result<()> {
-        let transfer_metadata = snapshot.transfer_metadata(transfer_id).await?;
-
-        let curr_state = match transfer_metadata.state {
-            MetaState::Stable(curr) => curr,
-            MetaState::Transitioning(curr, next) => {
-                return Err(anyhow!(
-                    "can't transition {:?}: already transitioning {:?} -> {:?}",
-                    transfer_id,
-                    curr,
-                    next
-                ));
-            }
-        };
-
-        let (tablet_ids_to_transition, next_tablet_state) =
-            match curr_state.tablet_transition(&next_state) {
-                Some(TransferTabletTransition::Srcs(srcs_next_state)) => {
-                    (&transfer_metadata.srcs, srcs_next_state)
-                }
-                Some(TransferTabletTransition::Dsts(dsts_next_state)) => {
-                    (&transfer_metadata.dsts, dsts_next_state)
-                }
-                None => {
-                    return Err(anyhow!(
-                        "can't transition {:?}: {:?} -> {:?} not allowed by state machine",
-                        transfer_id,
-                        curr_state,
-                        next_state
-                    ));
-                }
-            };
-
-        let mut muts = HashMap::new();
-        let next_transfer_metadata = {
-            let mut next_transfer_metadata = transfer_metadata.clone();
-            next_transfer_metadata.state = MetaState::Transitioning(curr_state, next_state);
-            next_transfer_metadata
-        };
-        muts.insert(
-            MetaKey::Transfer(transfer_id),
-            Mutation::Put(next_transfer_metadata.encode_to_vec()),
-        );
-
-        for tablet_id in tablet_ids_to_transition {
-            let mut tablet_metadata = snapshot.tablet_metadata(*tablet_id).await?;
-
-            let curr_tablet_state = match tablet_metadata.state {
-                MetaState::Stable(curr_state) => curr_state,
-                MetaState::Transitioning(_, _) => {
-                    return Err(anyhow!(
-                        "can't transition {:?}: participant {:?} already transitioning",
-                        transfer_id,
-                        tablet_id
-                    ));
-                }
-            };
-
-            tablet_metadata.state = MetaState::Transitioning(curr_tablet_state, next_tablet_state);
-
-            muts.insert(
-                MetaKey::Tablet(*tablet_id),
-                Mutation::Put(tablet_metadata.encode_to_vec()),
-            );
-        }
-
-        let _ = self.write_syncable(snapshot, muts).await?;
-
-        self.roll_transition_forward(transfer_id).await?;
-
-        Ok(())
-    }
-
-    async fn roll_transition_forward(&self, transfer_id: TransferId) -> anyhow::Result<()> {
-        let snapshot = self.latest_snapshot_().await?;
-        let transfer_metadata = snapshot.transfer_metadata(transfer_id).await?;
-
-        let (curr_state, next_state) = match transfer_metadata.state {
-            // Already done.
-            MetaState::Stable(_) => return Ok(()),
-            MetaState::Transitioning(curr_state, next_state) => (curr_state, next_state),
-        };
-
-        let (tablet_ids_to_transition, next_tablet_state) =
-            match curr_state.tablet_transition(&next_state) {
-                Some(TransferTabletTransition::Srcs(srcs_next_state)) => {
-                    (&transfer_metadata.srcs, srcs_next_state)
-                }
-                Some(TransferTabletTransition::Dsts(dsts_next_state)) => {
-                    (&transfer_metadata.dsts, dsts_next_state)
-                }
-                None => {
-                    return Err(anyhow!(
-                        "can't transition {:?}: {:?} -> {:?} not allowed by state machine",
-                        transfer_id,
-                        curr_state,
-                        next_state
-                    ));
-                }
-            };
-
-        // IMPORTANT: Must make sure that all of the participating tablets are aware of the
-        // transitioning state before continuing.
-        for tablet_id in tablet_ids_to_transition {
-            // This means they're at least aware of what we're seeing in `snapshot`, and
-            // `write_syncable` below will fail if it turns out we were out of date.
-            self.shards
-                .tablet(*tablet_id)?
-                .wait_meta_sync(snapshot.ts)
-                .await?;
-        }
-
-        let mut muts = HashMap::new();
-        let next_transfer_metadata = {
-            let mut next_transfer_metadata = transfer_metadata.clone();
-            next_transfer_metadata.state = MetaState::Stable(next_state);
-            next_transfer_metadata
-        };
-        muts.insert(
-            MetaKey::Transfer(transfer_id),
-            Mutation::Put(next_transfer_metadata.encode_to_vec()),
-        );
-
-        for tablet_id in tablet_ids_to_transition {
-            let mut tablet_metadata = snapshot.tablet_metadata(*tablet_id).await?;
-
-            match tablet_metadata.state {
-                MetaState::Stable(curr_state) => {
-                    return Err(anyhow!(
-                        "can't roll forward transition for {:?}: participant {:?} already stable in {:?}",
-                        transfer_id,
-                        tablet_id,
-                        curr_state,
-                    ));
-                }
-                MetaState::Transitioning(_, attempting_transition_to) => {
-                    if next_tablet_state != attempting_transition_to {
-                        return Err(anyhow!(
-                            "can't roll forward transition for {:?}: participant {:?} trying to transition to {:?} instead of {:?}",
-                            transfer_id,
-                            tablet_id,
-                            attempting_transition_to,
-                            next_tablet_state,
-                        ));
-                    }
-                }
-            }
-
-            tablet_metadata.state = MetaState::Stable(next_tablet_state);
-            muts.insert(
-                MetaKey::Tablet(*tablet_id),
-                Mutation::Put(tablet_metadata.encode_to_vec()),
-            );
-        }
-
-        let _ = self.write_syncable(snapshot, muts).await?;
-
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -758,6 +420,49 @@ pub(crate) trait MetaReader {
 
     async fn exists(&self, meta_key: &MetaKey) -> anyhow::Result<bool> {
         Ok(self.get(&meta_key.encode()).await?.is_some())
+    }
+
+    async fn empty(&self) -> anyhow::Result<bool> {
+        Ok(!(self.exists(&MetaKey::Sync).await?))
+    }
+
+    async fn shard_ids(&self) -> anyhow::Result<Vec<ShardId>> {
+        let mut out = vec![];
+        let mut s = self.scan(MetaKey::shards(), Direction::Asc);
+        while let Some((key, _)) = s.try_next().await? {
+            if let MetaKey::Shard(shard_id) = MetaKey::decode(&key[..])? {
+                out.push(shard_id);
+            } else {
+                return Err(anyhow!("invalid shard key {}", hexlify(&key)));
+            }
+        }
+        Ok(out)
+    }
+
+    async fn shard_exists(&self, shard_id: ShardId) -> anyhow::Result<bool> {
+        self.exists(&MetaKey::Shard(shard_id)).await
+    }
+
+    async fn next_tablet_id(&self, shard_id: ShardId) -> anyhow::Result<TabletId> {
+        let max_existing = self
+            .shard_tablet_ids(shard_id)
+            .await?
+            .iter()
+            .map(|tablet_id| tablet_id.1)
+            .max()
+            .unwrap_or(0);
+
+        Ok(TabletId(shard_id, max_existing + 1))
+    }
+
+    async fn shard_tablet_ids(&self, shard_id: ShardId) -> anyhow::Result<Vec<TabletId>> {
+        // TODO: Actually just scan the prefix.
+        Ok(self
+            .tablet_ids()
+            .await?
+            .into_iter()
+            .filter(|tablet_id| tablet_id.0 == shard_id)
+            .collect())
     }
 
     async fn colo_group_exists(&self, colo_group_id: ColoGroupId) -> anyhow::Result<bool> {
@@ -825,9 +530,15 @@ async fn get_meta_key<R: MetaReader, V: Value<PB = PB> + TryFrom<PB, Error = any
     Ok(None)
 }
 
-struct MetaSnapshot<'a, T> {
+pub(crate) struct MetaSnapshot<'a, T> {
     tablet: &'a T,
     ts: Timestamp,
+}
+
+impl<'a, T> MetaSnapshot<'a, T> {
+    pub(crate) fn ts(&self) -> Timestamp {
+        self.ts
+    }
 }
 
 #[async_trait]
@@ -866,7 +577,7 @@ impl<'a, T: Tablet + Sync> MetaReader for MetaSnapshot<'a, T> {
     }
 }
 
-trait Value {
+pub(crate) trait Value {
     type PB: prost::Message + Default;
 
     fn encode_to_vec(self) -> Vec<u8>
@@ -1073,6 +784,51 @@ fn ranges_from_splits(splits: Vec<Bound<Vec<u8>>>) -> anyhow::Result<Vec<Range<V
 
 #[async_trait]
 impl<T: Meta + Sync + Send + ?Sized> Meta for Box<T> {
+    async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
+        T::add_shard(self, shard_id).await
+    }
+    async fn create_colo_group(
+        &self,
+        colo_group_id: ColoGroupId,
+        initial_splits: Vec<Bound<Vec<u8>>>,
+    ) -> anyhow::Result<()> {
+        T::create_colo_group(self, colo_group_id, initial_splits).await
+    }
+
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        T::create_keyspace(self, keyspace_id).await
+    }
+
+    async fn latest_snapshot(&self) -> anyhow::Result<Timestamp> {
+        T::latest_snapshot(self).await
+    }
+
+    async fn wait_for_newer(&self, ts: Timestamp) -> anyhow::Result<()> {
+        T::wait_for_newer(self, ts).await
+    }
+
+    async fn scan_page(
+        &self,
+        ts: Timestamp,
+        range: Range<Vec<u8>>,
+    ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
+        T::scan_page(self, ts, range).await
+    }
+
+    async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Revision>, Timestamp)> {
+        T::sync(self, ts).await
+    }
+
+    async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
+        T::tablet_ids(self, ts).await
+    }
+}
+
+#[async_trait]
+impl<T: Meta + Sync + Send + ?Sized> Meta for Arc<T> {
+    async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
+        T::add_shard(self, shard_id).await
+    }
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,

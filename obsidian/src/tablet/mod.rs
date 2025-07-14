@@ -1,4 +1,5 @@
 mod lock_mgr;
+mod meta_tablet;
 mod protected;
 mod sequencer;
 mod tablet;
@@ -82,3 +83,5 @@ pub(crate) trait Tablet {
 
 #[allow(unused_imports)]
 pub(crate) use tablet::LsmTablet;
+#[allow(unused_imports)]
+pub(crate) use meta_tablet::MetaTablet;

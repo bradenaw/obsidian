@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::future::Future;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -591,7 +592,7 @@ pub(crate) trait Shards {
 
     fn shards(&self) -> Vec<Box<dyn Shard + Sync + Send>>;
 
-    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Box<dyn Tablet + Send + Sync>> {
+    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet + Send + Sync>> {
         self.shard(tablet_id.0)?.tablet(tablet_id)
     }
 }
@@ -600,13 +601,9 @@ pub(crate) trait Shards {
 pub(crate) trait Shard {
     fn id(&self) -> ShardId;
 
-    async fn create_tablet(
-        &self,
-        colo_group_id: ColoGroupId,
-        range: Range<Vec<u8>>,
-    ) -> anyhow::Result<TabletId>;
+    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet + Send + Sync>>;
 
-    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Box<dyn Tablet + Send + Sync>>;
+    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()>;
 }
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
