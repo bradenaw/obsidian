@@ -336,6 +336,8 @@ pub(crate) async fn new_for_test(n_shards: usize) -> anyhow::Result<Frontend> {
         return Err(anyhow!("need at least one shard to host the meta tablet"));
     }
 
+    log::info!("new_for_test");
+
     let meta_proxy = Arc::new(MetaProxy::new());
     let storage = Arc::new(CachedStorage::new(
         MemStorage::new(),
@@ -514,6 +516,8 @@ macro_rules! obsidian_test_suite {
 
             #[tokio::test]
             async fn test_2pc() -> anyhow::Result<()> {
+                let _ = pretty_env_logger::try_init();
+
                 let colo_group_id = ColoGroupId(1);
                 let keyspace_id = KeyspaceId(colo_group_id, 1);
 

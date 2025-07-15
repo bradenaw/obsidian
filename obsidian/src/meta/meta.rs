@@ -218,8 +218,6 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
             );
             next_tablet_id_by_shard.insert(shard_id, tablet_id.1 + 1);
 
-            // TODO: shard needs to actually make the tablet
-
             muts.insert(
                 MetaKey::Tablet(tablet_id),
                 Mutation::Put(

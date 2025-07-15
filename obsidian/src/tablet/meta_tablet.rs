@@ -59,7 +59,7 @@ where
                 TabletId::META,
                 ColoGroupId::META,
                 Range::all(),
-                ProtectedLsm::new(lsm, TabletState::Active),
+                ProtectedLsm::new(TabletId::META, lsm, TabletState::Active),
                 prepare_sender,
                 commit_sender,
             ),

@@ -102,8 +102,8 @@ impl MetaSynced {
     /// That also means it would be unwise to do anything terribly expensive inside f.
     pub(crate) async fn subscribe<F, Fut>(&self, f: F)
     where
-        F: Fn(SyncType, MetaSyncedSnapshot) -> Fut,
-        Fut: Future<Output = ()>,
+        F: Fn(SyncType, MetaSyncedSnapshot) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send,
     {
         let (maybe_initial, mut rx) = {
             let mut inner = self.inner.write().unwrap();
@@ -121,12 +121,19 @@ impl MetaSynced {
             f(SyncType::Initial, initial).await;
         }
 
-        while let Some((sync_type, snapshot, done)) = rx.recv().await {
-            f(sync_type, snapshot).await;
-            // This only errors if the other side hung up, which means they're gone and we don't
-            // care about them for the purposes of synced_ts.
-            let _ = done.send(());
-        }
+        self.bg.spawn(async move {
+            while let Some((sync_type, snapshot, done)) = rx.recv().await {
+                f(sync_type, snapshot).await;
+                // This only errors if the other side hung up, which means they're gone and we don't
+                // care about them for the purposes of synced_ts.
+                let _ = done.send(());
+            }
+        });
+    }
+
+    pub(crate) fn snapshot(&self) -> MetaSyncedSnapshot {
+        let inner = self.inner.read().unwrap();
+        inner.kv.clone()
     }
 
     pub(crate) async fn wait(&self, ts: Timestamp) -> anyhow::Result<()> {

@@ -11,6 +11,7 @@ use crate::lsm::Lsm;
 use crate::meta::TabletState;
 use crate::meta::TabletStateProperties;
 use crate::obsidian::InternalError;
+use crate::obsidian::TabletId;
 use crate::range::Range;
 use crate::storage::Storage;
 use crate::types::Direction;
@@ -25,6 +26,7 @@ use crate::types::Timestamp;
 use crate::types::WriteError;
 
 pub(super) struct ProtectedLsm<S: Storage> {
+    tablet_id: TabletId,
     state: InfrequentlyChanged<TabletStateProperties>,
     changed: watch::Receiver<()>,
     on_change: watch::Sender<()>,
@@ -35,9 +37,10 @@ impl<S> ProtectedLsm<S>
 where
     S: Storage + Send + Sync + 'static,
 {
-    pub(super) fn new(lsm: Lsm<S>, initial: TabletState) -> Self {
+    pub(super) fn new(tablet_id: TabletId, lsm: Lsm<S>, initial: TabletState) -> Self {
         let (on_change, changed) = watch::channel(());
         Self {
+            tablet_id,
             state: InfrequentlyChanged::new(initial.properties()),
             changed,
             on_change,
@@ -46,15 +49,27 @@ where
     }
 
     pub(super) async fn set_state(&self, state: TabletState) {
+        log::info!(
+            "{:?}: set_state({:?}) ({:?})...",
+            self.tablet_id,
+            state,
+            state.properties()
+        );
         self.state.store_and_wait(state.properties()).await;
         let _ = self.on_change.send(());
+        log::info!(
+            "{:?}: set_state({:?}) ({:?}) done",
+            self.tablet_id,
+            state,
+            state.properties()
+        );
     }
 
     pub(super) fn read<'a>(&'a self) -> Result<LsmReadGuard<'a, S>, InternalError> {
         let guard = self.state.load();
 
         if !guard.contains(TabletStateProperties::Readable) {
-            return Err(InternalError::TabletNotReadable);
+            return Err(InternalError::TabletNotReadable(self.tablet_id));
         }
 
         Ok(LsmReadGuard {
@@ -81,7 +96,7 @@ where
             });
         }
 
-        Err(InternalError::TabletNotWriteable)
+        Err(InternalError::TabletNotWriteable(self.tablet_id))
     }
 
     pub(super) async fn wait_read_write<'a>(&'a self) -> LsmReadWriteGuard<'a, S> {

@@ -179,7 +179,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTablet<S> {
             tablet_id,
             colo_group_id,
             range,
-            ProtectedLsm::new(lsm, TabletState::None),
+            ProtectedLsm::new(tablet_id, lsm, TabletState::None),
             prepare_sender.clone(),
             commit_sender.clone(),
         ));
@@ -234,19 +234,17 @@ impl<S: Storage + Send + Sync + 'static> LsmTablet<S> {
             }
         });
 
-        bg.spawn({
+        {
             let inner = inner.clone();
-            let meta_synced = meta_synced.clone();
-            async move {
-                // XXX: Not correct, racy because we might not get around to calling susbcribe
-                // before new() ends.
-                meta_synced
-                    .subscribe(async |sync_type, snapshot: MetaSyncedSnapshot| {
+            meta_synced
+                .subscribe(move |sync_type, snapshot: MetaSyncedSnapshot| {
+                    let inner = inner.clone();
+                    async move {
                         inner.sync_meta(sync_type, snapshot).await;
-                    })
-                    .await;
-            }
-        });
+                    }
+                })
+                .await;
+        }
 
         Ok(Self {
             inner,
@@ -260,6 +258,7 @@ pub(super) struct LsmTabletInner<S: Storage> {
     tablet_id: TabletId,
     colo_group_id: ColoGroupId,
     range: Range<Vec<u8>>,
+    tablet_meta_range: Range<Vec<u8>>,
 
     lsm: ProtectedLsm<S>,
     sequencer: Sequencer,
@@ -279,10 +278,15 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         prepare_sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
         commit_sender: mpsc::Sender<(Txid, Timestamp, BTreeSet<Key>, BTreeSet<Key>)>,
     ) -> Self {
+        let tablet_meta_range = {
+            let encoded_tablet_id = tablet_id.encode_fixed();
+            Range::prefix(&encoded_tablet_id[..]).to_vec()
+        };
         Self {
             tablet_id,
             colo_group_id,
             range,
+            tablet_meta_range,
             lsm: lsm,
             prepare_sender,
             commit_sender,
@@ -407,43 +411,33 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         }
         let limit = cmp::min(limit, 1000);
 
-        let intersecting_range = self.range.borrow().intersection(&range).clone();
-
-        if intersecting_range.is_empty() {
-            return Err(InternalError::Other(anyhow!(
-                "misroute: {:?}'s owned range {:?}/{:?} does not intersect with scan range {:?}",
-                self.tablet_id,
-                keyspace_id.0,
-                self.range,
-                range,
-            )));
-        }
+        let scan_range = self.scan_range(keyspace_id.0, range, direction)?;
 
         let lsm_read = self.lsm.read()?;
 
         // range                          |-----------|
         // self.range               |---------|
-        // intersecting_range             |---|
+        // scan_range                     |---|
 
         self.sequencer.wait_for_safe_read(ts).await?;
 
         // Ask the LSM for the page. Note that the returned continuation is in terms of the
         // constrained range that we asked it for, not the entire range from the request.
         let (page, intersecting_continue_cursor) = lsm_read
-            .scan_page(ts, keyspace_id, intersecting_range, direction, limit)
+            .scan_page(ts, keyspace_id, scan_range.borrow(), direction, limit)
             .await?;
         let scanned_range = match intersecting_continue_cursor {
             Some(ref intersecting_continue_cursor) => match direction {
                 Direction::Asc => Range {
-                    lower: intersecting_range.lower.to_vec(),
+                    lower: scan_range.lower,
                     upper: intersecting_continue_cursor.lower.clone(),
                 },
                 Direction::Desc => Range {
                     lower: intersecting_continue_cursor.upper.clone(),
-                    upper: intersecting_range.upper.to_vec(),
+                    upper: scan_range.upper,
                 },
             },
-            None => intersecting_range.to_vec(),
+            None => scan_range,
         };
         let continue_cursor = match direction {
             Direction::Asc => Range {
@@ -1221,6 +1215,54 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         }
     }
 
+    fn scan_range(
+        &self,
+        colo_group_id: ColoGroupId,
+        range: Range<&[u8]>,
+        direction: Direction,
+    ) -> anyhow::Result<Range<Vec<u8>>> {
+        let owned_range = if colo_group_id == ColoGroupId::TABLET_META {
+            self.tablet_meta_range.borrow()
+        } else if colo_group_id == self.colo_group_id {
+            self.range.borrow()
+        } else {
+            return Err(anyhow!(
+                "misroute: {:?} does not own any of {:?}",
+                self.tablet_id,
+                colo_group_id
+            ));
+        };
+
+        let intersection = owned_range.intersection(&range);
+        if intersection.is_empty() {
+            return Err(anyhow!(
+                "misroute: cannot scan {:?}/{:?}: {:?} owns {:?}",
+                colo_group_id,
+                range,
+                self.tablet_id,
+                owned_range,
+            ));
+        }
+
+        let is_next = match direction {
+            Direction::Asc => intersection.lower >= owned_range.lower,
+            Direction::Desc => intersection.upper <= owned_range.upper,
+        };
+
+        if !is_next {
+            return Err(anyhow!(
+                "misroute: cannot scan {:?}/{:?}: {:?} owns {:?}, which is not the next range for a {:?} scan",
+                colo_group_id,
+                range,
+                self.tablet_id,
+                owned_range,
+                direction,
+            ));
+        }
+
+        Ok(intersection.to_vec())
+    }
+
     fn check_key(&self, colo_group_id: ColoGroupId, key: &[u8]) -> anyhow::Result<()> {
         if colo_group_id == ColoGroupId::META && self.tablet_id == TabletId::META {
             return Ok(());
@@ -1271,9 +1313,6 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
                 let sync_type = sync_type.clone();
                 match sync_type {
                     SyncType::Initial => {
-                        for keyspace_id in snapshot.keyspace_ids().await? {
-                            self.create_keyspace(keyspace_id).await?;
-                        }
                         let tablet_metadata = snapshot.tablet_metadata(self.tablet_id).await?;
                         self.lsm
                             .set_state(match tablet_metadata.state {
@@ -1281,12 +1320,29 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
                                 MetaState::Transitioning(_, next_state) => next_state,
                             })
                             .await;
+                        for keyspace_id in snapshot.keyspace_ids().await? {
+                            self.create_keyspace(keyspace_id).await?;
+                        }
                     }
                     SyncType::Tx(meta_keys) => {
                         for meta_key in meta_keys {
                             match meta_key {
                                 MetaKey::Keyspace(keyspace_id) => {
                                     self.create_keyspace(keyspace_id).await?;
+                                }
+                                MetaKey::Tablet(tablet_id) => {
+                                    if tablet_id == self.tablet_id {
+                                        let tablet_metadata =
+                                            snapshot.tablet_metadata(self.tablet_id).await?;
+                                        self.lsm
+                                            .set_state(match tablet_metadata.state {
+                                                MetaState::Stable(state) => state,
+                                                MetaState::Transitioning(_, next_state) => {
+                                                    next_state
+                                                }
+                                            })
+                                            .await;
+                                    }
                                 }
                                 _ => {}
                             }

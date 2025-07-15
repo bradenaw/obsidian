@@ -68,16 +68,17 @@ where
 
         let bg = Background::new();
 
-        bg.spawn({
+        {
             let inner = inner.clone();
-            async move {
-                meta_synced
-                    .subscribe(async |sync_type, snapshot| {
+            meta_synced
+                .subscribe(move |sync_type, snapshot| {
+                    let inner = inner.clone();
+                    async move {
                         Self::sync_meta(inner.clone(), sync_type, snapshot).await;
-                    })
-                    .await;
-            }
-        });
+                    }
+                })
+                .await;
+        }
 
         Ok(Self { bg, inner })
     }
@@ -209,6 +210,20 @@ where
                 self.id
             ));
         }
+
+        {
+            let tablets = self.tablets.read().unwrap();
+            if tablets.contains_key(&tablet_id) {
+                return Ok(());
+            }
+        }
+
+        log::info!(
+            "creating {:?} for {:?}/{:?}",
+            tablet_id,
+            colo_group_id,
+            range
+        );
 
         let lsm = self.lsm_builder.clone().build().await?;
 

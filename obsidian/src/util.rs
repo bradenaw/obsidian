@@ -416,7 +416,7 @@ impl RetryDelay {
         // We only need this many for delay_for_retry to return the max value, so any more are
         // pointless.
         let size =
-            (max_delay.as_secs_f64().log2() - max_delay.as_secs_f64().log2()).ceil() as usize;
+            (max_delay.as_secs_f64().log2() - min_delay.as_secs_f64().log2()).ceil() as usize + 1;
         // If we were consistently picking the high end of the jitter on max_delay and failing
         // immediately (the worst case), we'd need to keep around attempts for this long to keep
         // delay_for_retry returning max_delay.

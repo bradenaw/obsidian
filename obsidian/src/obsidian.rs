@@ -24,6 +24,7 @@ use rand::Rng;
 use thiserror::Error;
 
 use crate::meta::Meta;
+use crate::meta::MetaReader;
 use crate::meta::MetaSynced;
 use crate::pb;
 use crate::range::Bound;
@@ -479,8 +480,15 @@ impl Frontend {
 
         self.meta_synced.wait(ts).await?;
 
+        let snapshot = self.meta_synced.snapshot();
+        let shard_ids = snapshot.shard_ids().await?;
+
+        for shard_id in shard_ids {
+            self.shards.shard(shard_id)?.wait_meta_sync(ts).await?;
+        }
+
         let tablet_ids = {
-            let mut tablet_ids = self.meta.tablet_ids(ts).await?;
+            let mut tablet_ids = snapshot.tablet_ids().await?;
             tablet_ids.shuffle(&mut rand::thread_rng());
             tablet_ids
         };
@@ -714,9 +722,9 @@ pub(crate) enum InternalError {
     #[error("TxOutcome missing")]
     TxOutcomeMissing,
     #[error("tablet not currently readable")]
-    TabletNotReadable,
+    TabletNotReadable(TabletId),
     #[error("tablet not currently writable")]
-    TabletNotWriteable,
+    TabletNotWriteable(TabletId),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
