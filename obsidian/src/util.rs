@@ -480,6 +480,39 @@ impl Drop for Background {
     }
 }
 
+pub(crate) struct WithBackground<T> {
+    inner: Arc<T>,
+    bg: Background,
+}
+
+impl<T> WithBackground<T> {
+    fn new(t: Arc<T>) -> Self {
+        Self {
+            inner: t,
+            bg: Background::new(),
+        }
+    }
+
+    fn spawn<F, Fut>(&self, f: F)
+    where
+        F: Fn(&T) -> Fut,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.bg.spawn({
+            let inner = self.inner.clone();
+            f(inner.deref())
+        });
+    }
+}
+
+impl<T> Deref for WithBackground<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.deref()
+    }
+}
+
 pub(crate) trait Encode {
     fn encoded_size_estimate(&self) -> usize;
     fn encode(&self, w: &mut Vec<u8>);
