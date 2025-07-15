@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::convert::TryFrom;
+use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_stream::try_stream;
@@ -11,7 +12,8 @@ use futures::TryStreamExt;
 use prost::Message;
 use rand::seq::SliceRandom;
 
-use crate::obsidian::Shards;
+use crate::meta::TabletState;
+use crate::meta::TransferState;
 use crate::obsidian::TabletId;
 use crate::pb;
 use crate::range::Bound;
@@ -32,33 +34,43 @@ use crate::types::Revision;
 use crate::types::RevisionValue;
 use crate::types::ShardId;
 use crate::types::Timestamp;
+use crate::types::TransferId;
 use crate::util::hexlify;
 use crate::util::WaitableTimestamp;
 
 #[derive(Clone, Hash, Eq, PartialEq)]
 pub(crate) enum MetaKey {
     Sync,
+    Shard(ShardId),
     ColoGroup(ColoGroupId),
     Keyspace(KeyspaceId),
     Tablet(TabletId),
+    Transfer(TransferId),
 }
 
 impl MetaKey {
     // (PFX_SYNC) -> pb::internal::MetaTx
     const PFX_SYNC: u64 = 1;
 
+    // (PFX_SHARDS, shard_id) => []
+    const PFX_SHARDS: u64 = 2;
+
     // (PFX_COLO_GROUPS, colo_group_id) -> []
-    const PFX_COLO_GROUPS: u64 = 2;
+    const PFX_COLO_GROUPS: u64 = 3;
 
     // (PFX_KEYSPACES, keyspace_id) -> []
-    const PFX_KEYSPACES: u64 = 3;
+    const PFX_KEYSPACES: u64 = 4;
 
     // (PFX_TABLETS, tablet_id) -> pb::internal::TabletMetadata
-    const PFX_TABLETS: u64 = 4;
+    const PFX_TABLETS: u64 = 5;
+
+    // (PFX_TRANSFERS, transfer_id) -> pb::internal::TransferMetadata
+    const PFX_TRANSFERS: u64 = 6;
 
     pub(crate) fn encode(&self) -> Vec<u8> {
         match self {
             Self::Sync => tuple_encode(&(Self::PFX_SYNC,)),
+            Self::Shard(shard_id) => tuple_encode(&(Self::PFX_SHARDS, shard_id.0 as u64)),
             Self::ColoGroup(colo_group_id) => {
                 tuple_encode(&(Self::PFX_COLO_GROUPS, colo_group_id.0 as u64))
             }
@@ -70,6 +82,7 @@ impl MetaKey {
             Self::Tablet(tablet_id) => {
                 tuple_encode(&(Self::PFX_TABLETS, tablet_id.0 .0 as u64, tablet_id.1))
             }
+            Self::Transfer(transfer_id) => tuple_encode(&(Self::PFX_TRANSFERS, transfer_id.0)),
         }
     }
 
@@ -77,6 +90,10 @@ impl MetaKey {
         let prefix = tuple_decode_prefix::<(u64,)>(b)?.0;
         match prefix {
             Self::PFX_SYNC => Ok(Self::Sync),
+            Self::PFX_SHARDS => {
+                let (_, shard_id_raw): (u64, u64) = tuple_decode(b)?;
+                Ok(Self::Shard(ShardId(u32::try_from(shard_id_raw)?)))
+            }
             Self::PFX_COLO_GROUPS => {
                 let (_, colo_group_id_raw): (u64, u64) = tuple_decode(b)?;
                 Ok(Self::ColoGroup(ColoGroupId(u32::try_from(
@@ -101,6 +118,10 @@ impl MetaKey {
         }
     }
 
+    fn shards() -> Range<Vec<u8>> {
+        Range::prefix(tuple_encode(&(Self::PFX_SHARDS,)))
+    }
+
     fn colo_groups() -> Range<Vec<u8>> {
         Range::prefix(tuple_encode(&(Self::PFX_COLO_GROUPS,)))
     }
@@ -116,6 +137,7 @@ impl MetaKey {
 
 #[async_trait]
 pub(crate) trait Meta {
+    async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()>;
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,
@@ -138,12 +160,27 @@ pub(crate) trait Meta {
 pub(crate) struct MetaImpl<T> {
     tablet: T,
     sync_key: Vec<u8>,
-    shards: Box<dyn Shards + Send + Sync>,
     ts: WaitableTimestamp,
 }
 
 #[async_trait]
 impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
+    async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
+        let snapshot = self.latest_snapshot_().await?;
+
+        if snapshot.shard_exists(shard_id).await? {
+            return Err(anyhow!("{:?} already exists", shard_id));
+        }
+
+        self.write_syncable(
+            snapshot,
+            HashMap::from([(MetaKey::Shard(shard_id), Mutation::Put(vec![]))]),
+        )
+        .await?;
+
+        Ok(())
+    }
+
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,
@@ -157,31 +194,38 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
             return Err(anyhow!("{:?} already exists", colo_group_id));
         }
 
-        let mut shard_ids: Vec<_> = self
-            .shards
-            .shards()
-            .iter()
-            .map(|shard| shard.id())
-            .collect();
+        let mut shard_ids: Vec<_> = snapshot.shard_ids().await?;
         shard_ids.shuffle(&mut rand::thread_rng());
 
         let mut muts = HashMap::from([(MetaKey::ColoGroup(colo_group_id), Mutation::Put(vec![]))]);
 
+        let all_tablet_ids = snapshot.tablet_ids().await?;
+
+        let mut next_tablet_id_by_shard = BTreeMap::new();
+
+        for tablet_id in &all_tablet_ids {
+            if !next_tablet_id_by_shard.contains_key(&tablet_id.0) {
+                next_tablet_id_by_shard.insert(tablet_id.0, tablet_id.1 + 1);
+            }
+        }
+
         // Round-robin the created ranges among the shards.
         for (i, range) in ranges.into_iter().enumerate() {
-            let shard_i = i % shard_ids.len();
-            let tablet_id = self
-                .shards
-                .shard(shard_ids[shard_i])?
-                .create_tablet(colo_group_id, range.clone())
-                .await?;
+            let shard_id = shard_ids[i % shard_ids.len()];
+            let tablet_id = TabletId(
+                shard_id,
+                *next_tablet_id_by_shard.get(&shard_id).unwrap_or(&2),
+            );
+            next_tablet_id_by_shard.insert(shard_id, tablet_id.1 + 1);
 
             muts.insert(
                 MetaKey::Tablet(tablet_id),
                 Mutation::Put(
-                    pb::internal::TabletMetadata {
-                        colo_group_id: colo_group_id.0,
-                        range: Some(range.into()),
+                    TabletMetadata {
+                        colo_group_id,
+                        range,
+                        state: MetaState::Stable(TabletState::Active),
+                        transfer_id: None,
                     }
                     .encode_to_vec(),
                 ),
@@ -296,16 +340,15 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
 }
 
 impl<T: Tablet + Sync + Send> MetaImpl<T> {
-    pub(crate) fn new(shards: Box<dyn Shards + Send + Sync>, tablet: T) -> Self {
+    pub(crate) fn new(tablet: T) -> Self {
         Self {
-            shards,
             tablet,
             sync_key: MetaKey::Sync.encode(),
             ts: WaitableTimestamp::new(),
         }
     }
 
-    async fn latest_snapshot_(&self) -> anyhow::Result<MetaSnapshot<'_, T>> {
+    pub(crate) async fn latest_snapshot_(&self) -> anyhow::Result<MetaSnapshot<'_, T>> {
         let ts = self.latest_snapshot().await?;
 
         Ok(MetaSnapshot {
@@ -322,7 +365,7 @@ impl<T: Tablet + Sync + Send> MetaImpl<T> {
     }
 
     /// Writes the given mutations if `Meta` has not changed since the given snapshot.
-    async fn write_syncable<'a>(
+    pub(crate) async fn write_syncable<'a>(
         &'a self,
         snapshot: MetaSnapshot<'a, T>,
         muts: HashMap<MetaKey, Mutation>,
@@ -373,18 +416,51 @@ pub(crate) trait MetaReader {
         direction: Direction,
     ) -> Box<dyn Stream<Item = anyhow::Result<(Vec<u8>, Vec<u8>)>> + Unpin + Send + '_>;
 
-    async fn get_meta_key<V: prost::Message + Default>(
-        &self,
-        meta_key: &MetaKey,
-    ) -> anyhow::Result<Option<V>> {
-        if let Some(value) = self.get(&meta_key.encode()).await? {
-            return Ok(Some(V::decode(&value[..])?));
-        }
-        Ok(None)
-    }
-
     async fn exists(&self, meta_key: &MetaKey) -> anyhow::Result<bool> {
         Ok(self.get(&meta_key.encode()).await?.is_some())
+    }
+
+    async fn empty(&self) -> anyhow::Result<bool> {
+        Ok(!(self.exists(&MetaKey::Sync).await?))
+    }
+
+    async fn shard_ids(&self) -> anyhow::Result<Vec<ShardId>> {
+        let mut out = vec![];
+        let mut s = self.scan(MetaKey::shards(), Direction::Asc);
+        while let Some((key, _)) = s.try_next().await? {
+            if let MetaKey::Shard(shard_id) = MetaKey::decode(&key[..])? {
+                out.push(shard_id);
+            } else {
+                return Err(anyhow!("invalid shard key {}", hexlify(&key)));
+            }
+        }
+        Ok(out)
+    }
+
+    async fn shard_exists(&self, shard_id: ShardId) -> anyhow::Result<bool> {
+        self.exists(&MetaKey::Shard(shard_id)).await
+    }
+
+    async fn next_tablet_id(&self, shard_id: ShardId) -> anyhow::Result<TabletId> {
+        let max_existing = self
+            .shard_tablet_ids(shard_id)
+            .await?
+            .iter()
+            .map(|tablet_id| tablet_id.1)
+            .max()
+            .unwrap_or(0);
+
+        Ok(TabletId(shard_id, max_existing + 1))
+    }
+
+    async fn shard_tablet_ids(&self, shard_id: ShardId) -> anyhow::Result<Vec<TabletId>> {
+        // TODO: Actually just scan the prefix.
+        Ok(self
+            .tablet_ids()
+            .await?
+            .into_iter()
+            .filter(|tablet_id| tablet_id.0 == shard_id)
+            .collect())
     }
 
     async fn colo_group_exists(&self, colo_group_id: ColoGroupId) -> anyhow::Result<bool> {
@@ -417,19 +493,50 @@ pub(crate) trait MetaReader {
         Ok(out)
     }
 
-    async fn tablet_metadata(
-        &self,
-        tablet_id: TabletId,
-    ) -> anyhow::Result<pb::internal::TabletMetadata> {
-        self.get_meta_key(&MetaKey::Tablet(tablet_id))
-            .await?
-            .ok_or_else(|| anyhow!("{:?} not found", tablet_id))
+    async fn tablet_metadata(&self, tablet_id: TabletId) -> anyhow::Result<TabletMetadata>
+    where
+        Self: Sized,
+    {
+        get_meta_key::<Self, TabletMetadata, pb::internal::TabletMetadata>(
+            self,
+            &MetaKey::Tablet(tablet_id),
+        )
+        .await?
+        .ok_or_else(|| anyhow!("{:?} not found", tablet_id))
+    }
+
+    async fn transfer_metadata(&self, transfer_id: TransferId) -> anyhow::Result<TransferMetadata>
+    where
+        Self: Sized,
+    {
+        get_meta_key::<Self, TransferMetadata, pb::internal::TransferMetadata>(
+            self,
+            &MetaKey::Transfer(transfer_id),
+        )
+        .await?
+        .ok_or_else(|| anyhow!("{:?} not found", transfer_id))
     }
 }
 
-struct MetaSnapshot<'a, T> {
+async fn get_meta_key<R: MetaReader, V: Value<PB = PB> + TryFrom<PB, Error = anyhow::Error>, PB>(
+    reader: &R,
+    meta_key: &MetaKey,
+) -> anyhow::Result<Option<V>> {
+    if let Some(value) = reader.get(&meta_key.encode()).await? {
+        return Ok(Some(V::decode(&value[..])?));
+    }
+    Ok(None)
+}
+
+pub(crate) struct MetaSnapshot<'a, T> {
     tablet: &'a T,
     ts: Timestamp,
+}
+
+impl<'a, T> MetaSnapshot<'a, T> {
+    pub(crate) fn ts(&self) -> Timestamp {
+        self.ts
+    }
 }
 
 #[async_trait]
@@ -465,6 +572,170 @@ impl<'a, T: Tablet + Sync> MetaReader for MetaSnapshot<'a, T> {
                 maybe_cursor = continue_cursor;
             }
         }))
+    }
+}
+
+pub(crate) trait Value {
+    type PB: prost::Message + Default;
+
+    fn encode_to_vec(self) -> Vec<u8>
+    where
+        Self: Into<Self::PB> + Sized,
+    {
+        Into::<Self::PB>::into(self).encode_to_vec()
+    }
+
+    fn decode(b: &[u8]) -> anyhow::Result<Self>
+    where
+        Self: TryFrom<Self::PB, Error = anyhow::Error> + Sized,
+    {
+        Ok(Self::try_from(Self::PB::decode(b)?)?)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum MetaState<T> {
+    Stable(T),
+    Transitioning(T, T),
+}
+
+impl<T> MetaState<T> {
+    fn current(&self) -> &T {
+        match self {
+            Self::Stable(curr) => curr,
+            Self::Transitioning(curr, _) => curr,
+        }
+    }
+
+    fn next(&self) -> Option<&T> {
+        match self {
+            Self::Stable(_) => None,
+            Self::Transitioning(_, next) => Some(next),
+        }
+    }
+}
+
+impl<T> From<(T, Option<T>)> for MetaState<T> {
+    fn from(value: (T, Option<T>)) -> Self {
+        match value.1 {
+            None => Self::Stable(value.0),
+            Some(next) => Self::Transitioning(value.0, next),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct TabletMetadata {
+    pub(crate) colo_group_id: ColoGroupId,
+    pub(crate) range: Range<Vec<u8>>,
+    pub(crate) state: MetaState<TabletState>,
+    pub(crate) transfer_id: Option<TransferId>,
+}
+
+impl Value for TabletMetadata {
+    type PB = pb::internal::TabletMetadata;
+}
+
+impl TryFrom<pb::internal::TabletMetadata> for TabletMetadata {
+    type Error = anyhow::Error;
+
+    fn try_from(value_pb: pb::internal::TabletMetadata) -> Result<Self, Self::Error> {
+        Ok(Self {
+            colo_group_id: ColoGroupId(value_pb.colo_group_id),
+            range: Range::try_from(value_pb.range.ok_or_else(|| anyhow!("missing range"))?)?,
+            state: MetaState::from((
+                TabletState::try_from(
+                    pb::internal::TabletState::from_i32(value_pb.state)
+                        .ok_or_else(|| anyhow!("missing state"))?,
+                )?,
+                match pb::internal::TabletState::from_i32(value_pb.next_state) {
+                    Some(pb::internal::TabletState::Unknown) => None,
+                    None => None,
+                    Some(state_pb) => Some(TabletState::try_from(state_pb)?),
+                },
+            )),
+            transfer_id: value_pb.transfer_id.map(TransferId::try_from).transpose()?,
+        })
+    }
+}
+
+impl From<TabletMetadata> for pb::internal::TabletMetadata {
+    fn from(value: TabletMetadata) -> Self {
+        Self {
+            colo_group_id: value.colo_group_id.0,
+            range: Some(value.range.into()),
+            state: pb::internal::TabletState::from(*value.state.current()) as i32,
+            next_state: value
+                .state
+                .next()
+                .map(|state| pb::internal::TabletState::from(*state) as i32)
+                .unwrap_or(0),
+            transfer_id: value.transfer_id.map(TransferId::into),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct TransferMetadata {
+    pub(crate) state: MetaState<TransferState>,
+    pub(crate) srcs: Vec<TabletId>,
+    pub(crate) dsts: Vec<TabletId>,
+}
+
+impl Value for TransferMetadata {
+    type PB = pb::internal::TransferMetadata;
+}
+
+impl TryFrom<pb::internal::TransferMetadata> for TransferMetadata {
+    type Error = anyhow::Error;
+
+    fn try_from(value_pb: pb::internal::TransferMetadata) -> Result<Self, Self::Error> {
+        Ok(Self {
+            state: MetaState::from((
+                TransferState::try_from(
+                    pb::internal::TransferState::from_i32(value_pb.state)
+                        .ok_or_else(|| anyhow!("missing state"))?,
+                )?,
+                match pb::internal::TransferState::from_i32(value_pb.next_state) {
+                    Some(pb::internal::TransferState::Unknown) => None,
+                    None => None,
+                    Some(state_pb) => Some(TransferState::try_from(state_pb)?),
+                },
+            )),
+            srcs: value_pb
+                .srcs
+                .into_iter()
+                .map(TabletId::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
+            dsts: value_pb
+                .dsts
+                .into_iter()
+                .map(TabletId::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+}
+
+impl From<TransferMetadata> for pb::internal::TransferMetadata {
+    fn from(value: TransferMetadata) -> Self {
+        Self {
+            state: pb::internal::TransferState::from(*value.state.current()) as i32,
+            next_state: value
+                .state
+                .next()
+                .map(|state| pb::internal::TransferState::from(*state) as i32)
+                .unwrap_or(0),
+            srcs: value
+                .srcs
+                .into_iter()
+                .map(pb::internal::TabletId::from)
+                .collect(),
+            dsts: value
+                .dsts
+                .into_iter()
+                .map(pb::internal::TabletId::from)
+                .collect(),
+        }
     }
 }
 
@@ -511,6 +782,51 @@ fn ranges_from_splits(splits: Vec<Bound<Vec<u8>>>) -> anyhow::Result<Vec<Range<V
 
 #[async_trait]
 impl<T: Meta + Sync + Send + ?Sized> Meta for Box<T> {
+    async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
+        T::add_shard(self, shard_id).await
+    }
+    async fn create_colo_group(
+        &self,
+        colo_group_id: ColoGroupId,
+        initial_splits: Vec<Bound<Vec<u8>>>,
+    ) -> anyhow::Result<()> {
+        T::create_colo_group(self, colo_group_id, initial_splits).await
+    }
+
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        T::create_keyspace(self, keyspace_id).await
+    }
+
+    async fn latest_snapshot(&self) -> anyhow::Result<Timestamp> {
+        T::latest_snapshot(self).await
+    }
+
+    async fn wait_for_newer(&self, ts: Timestamp) -> anyhow::Result<()> {
+        T::wait_for_newer(self, ts).await
+    }
+
+    async fn scan_page(
+        &self,
+        ts: Timestamp,
+        range: Range<Vec<u8>>,
+    ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
+        T::scan_page(self, ts, range).await
+    }
+
+    async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Revision>, Timestamp)> {
+        T::sync(self, ts).await
+    }
+
+    async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
+        T::tablet_ids(self, ts).await
+    }
+}
+
+#[async_trait]
+impl<T: Meta + Sync + Send + ?Sized> Meta for Arc<T> {
+    async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
+        T::add_shard(self, shard_id).await
+    }
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,

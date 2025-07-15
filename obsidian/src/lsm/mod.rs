@@ -107,6 +107,18 @@ impl<S: Storage + Send + Sync + 'static> LsmBuilder<S> {
     }
 }
 
+impl<S> Clone for LsmBuilder<S> {
+    fn clone(&self) -> Self {
+        Self {
+            l0_max_size: self.l0_max_size.clone(),
+            run_size_target: self.run_size_target.clone(),
+            block_size_target: self.block_size_target.clone(),
+            wal: self.wal.clone(),
+            storage: self.storage.clone(),
+        }
+    }
+}
+
 pub(crate) struct Lsm<S: Storage> {
     l0_max_size: u64,
     run_size_target: u64,

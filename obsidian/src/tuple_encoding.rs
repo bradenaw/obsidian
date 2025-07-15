@@ -1,6 +1,9 @@
 use std::cmp;
 
 use anyhow::anyhow;
+use byteorder::BigEndian;
+use byteorder::ByteOrder;
+use byteorder::WriteBytesExt;
 
 trait Element: Sized {
     fn encoded_size(&self) -> usize;
@@ -227,6 +230,24 @@ impl Element for Vec<u8> {
             return Err(anyhow!("didn't terminate"));
         }
         Ok((out, i))
+    }
+}
+
+impl Element for uuid::Uuid {
+    fn encoded_size(&self) -> usize {
+        16
+    }
+
+    fn encode(&self, mut w: &mut [u8]) {
+        // Only fails if not enough space, encoded_size() already guarantees.
+        w.write_u128::<BigEndian>(self.as_u128()).unwrap();
+    }
+
+    fn decode(b: &[u8]) -> anyhow::Result<(Self, usize)> {
+        if b.len() < 16 {
+            return Err(anyhow!("uuid too short: {} < 16", b.len()));
+        }
+        Ok((Self::from_u128(BigEndian::read_u128(b)), 16))
     }
 }
 

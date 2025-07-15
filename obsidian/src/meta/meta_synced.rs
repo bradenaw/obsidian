@@ -1,12 +1,10 @@
 use std::cmp;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::convert::TryFrom;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::FutureExt;
 use futures::Stream;
@@ -104,8 +102,8 @@ impl MetaSynced {
     /// That also means it would be unwise to do anything terribly expensive inside f.
     pub(crate) async fn subscribe<F, Fut>(&self, f: F)
     where
-        F: Fn(SyncType, MetaSyncedSnapshot) -> Fut,
-        Fut: Future<Output = ()>,
+        F: Fn(SyncType, MetaSyncedSnapshot) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send,
     {
         let (maybe_initial, mut rx) = {
             let mut inner = self.inner.write().unwrap();
@@ -123,12 +121,19 @@ impl MetaSynced {
             f(SyncType::Initial, initial).await;
         }
 
-        while let Some((sync_type, snapshot, done)) = rx.recv().await {
-            f(sync_type, snapshot).await;
-            // This only errors if the other side hung up, which means they're gone and we don't
-            // care about them for the purposes of synced_ts.
-            let _ = done.send(());
-        }
+        self.bg.spawn(async move {
+            while let Some((sync_type, snapshot, done)) = rx.recv().await {
+                f(sync_type, snapshot).await;
+                // This only errors if the other side hung up, which means they're gone and we don't
+                // care about them for the purposes of synced_ts.
+                let _ = done.send(());
+            }
+        });
+    }
+
+    pub(crate) fn snapshot(&self) -> MetaSyncedSnapshot {
+        let inner = self.inner.read().unwrap();
+        inner.kv.clone()
     }
 
     pub(crate) async fn wait(&self, ts: Timestamp) -> anyhow::Result<()> {
@@ -349,21 +354,14 @@ impl MetaSyncedInner {
         for tablet_id in snapshot.tablet_ids().await? {
             let tablet_metadata = snapshot.tablet_metadata(tablet_id).await?;
 
-            let colo_group_id = ColoGroupId(tablet_metadata.colo_group_id);
-            let range = Range::try_from(
-                tablet_metadata
-                    .range
-                    .ok_or_else(|| anyhow!("corrupted tablet metadata: missing range"))?,
-            )?;
-
             ranges_by_colo_group
-                .entry(colo_group_id)
+                .entry(tablet_metadata.colo_group_id)
                 .or_insert_with(Vec::new)
-                .push((range.clone(), tablet_id));
+                .push((tablet_metadata.range.clone(), tablet_id));
             tablet_map
                 .entry(tablet_id)
                 .or_insert_with(HashMap::new)
-                .insert(colo_group_id, range);
+                .insert(tablet_metadata.colo_group_id, tablet_metadata.range);
         }
 
         let mut routing_map = HashMap::new();

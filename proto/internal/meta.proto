@@ -14,4 +14,45 @@ message MetaTx {
 message TabletMetadata {
     uint32 colo_group_id = 1;
     obsidian.Range range = 2;
+    TabletState state = 3;
+    TabletState next_state = 4;
+    Uuid transfer_id = 5;
+}
+
+enum TabletState {
+    TABLET_STATE_UNKNOWN = 0;
+    TABLET_STATE_NONE = 1;
+    TABLET_STATE_HYDRATING = 2;
+    TABLET_STATE_PREPARED = 3;
+    TABLET_STATE_ACTIVE = 4;
+    TABLET_STATE_FROZEN = 5;
+}
+
+message TransferMetadata {
+    TransferState state = 1;
+    TransferState next_state = 2;
+    repeated TabletId srcs = 3;
+    repeated TabletId dsts = 4;
+}
+
+enum TransferState {
+    TRANSFER_STATE_UNKNOWN = 0;
+    TRANSFER_STATE_COPY = 1;
+    TRANSFER_STATE_CATCHUP = 2;
+    TRANSFER_STATE_SYNCED = 3;
+    TRANSFER_STATE_HANDOFF = 4;
+    TRANSFER_STATE_COMPLETE = 5;
+    TRANSFER_STATE_ABORTING = 6;
+    TRANSFER_STATE_ABORTED = 7;
+}
+
+message TabletId {
+    uint32 shard_id = 1;
+    uint64 id = 2;
+}
+
+message Uuid {
+    // Both in big-endian order.
+    fixed64 high = 1;
+    fixed64 low = 2;
 }

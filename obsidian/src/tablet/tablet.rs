@@ -22,12 +22,13 @@ use prost::Message;
 use tokio::sync::mpsc;
 
 use crate::lsm::Lsm;
-use crate::meta::Meta;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
+use crate::meta::MetaState;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::meta::SyncType;
+use crate::meta::TabletState;
 use crate::obsidian::InternalError;
 use crate::obsidian::Router;
 use crate::obsidian::Shards;
@@ -39,6 +40,9 @@ use crate::range::Range;
 use crate::storage::Storage;
 use crate::tablet::lock_mgr::Guard;
 use crate::tablet::lock_mgr::LockMgr;
+use crate::tablet::protected::LsmRead;
+use crate::tablet::protected::LsmReadWrite;
+use crate::tablet::protected::ProtectedLsm;
 use crate::tablet::sequencer::Sequencer;
 use crate::tablet::Tablet;
 use crate::types::ColoGroupId;
@@ -64,6 +68,7 @@ const WAIT_ABORT_TIMEOUT: Duration = Duration::from_millis(1_000);
 
 pub(crate) struct LsmTablet<S: Storage> {
     inner: Arc<LsmTabletInner<S>>,
+    meta_synced: Arc<MetaSynced>,
 
     bg: Background,
 }
@@ -152,7 +157,7 @@ impl<S: Storage + Send + Sync + 'static> Tablet for LsmTablet<S> {
     }
 
     async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
-        self.inner.meta_synced.wait(ts).await
+        self.meta_synced.wait(ts).await
     }
 }
 
@@ -162,23 +167,19 @@ impl<S: Storage + Send + Sync + 'static> LsmTablet<S> {
         colo_group_id: ColoGroupId,
         range: Range<Vec<u8>>,
         lsm: Lsm<S>,
-        meta: Box<dyn Meta + Sync + Send + 'static>,
-        shards: Box<dyn Shards + Sync + Send>,
+        meta_synced: Arc<MetaSynced>,
+        shards: Arc<dyn Shards + Sync + Send>,
     ) -> anyhow::Result<Self> {
         let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
         let (commit_sender, commit_receiver) = mpsc::channel(128);
 
         lsm.create_keyspace(KeyspaceId::TX_OUTCOMES).await?;
 
-        let meta_synced = Arc::new(MetaSynced::new(meta));
-
         let inner = Arc::new(LsmTabletInner::new(
             tablet_id,
             colo_group_id,
             range,
-            lsm,
-            meta_synced,
-            shards,
+            ProtectedLsm::new(tablet_id, lsm, TabletState::None),
             prepare_sender.clone(),
             commit_sender.clone(),
         ));
@@ -187,15 +188,20 @@ impl<S: Storage + Send + Sync + 'static> LsmTablet<S> {
 
         bg.spawn({
             let inner = inner.clone();
+            let meta_synced = meta_synced.clone();
+            let shards = shards.clone();
             async move {
-                inner.cleanup_committed_outcomes(commit_receiver).await;
+                inner
+                    .cleanup_committed_outcomes(meta_synced, shards, commit_receiver)
+                    .await;
             }
         });
 
         bg.spawn({
             let inner = inner.clone();
+            let shards = shards.clone();
             async move {
-                inner.resolve_prepared(prepare_receiver).await;
+                inner.resolve_prepared(&shards, prepare_receiver).await;
             }
         });
 
@@ -228,30 +234,33 @@ impl<S: Storage + Send + Sync + 'static> LsmTablet<S> {
             }
         });
 
-        bg.spawn({
+        {
             let inner = inner.clone();
-            async move {
-                inner
-                    .meta_synced
-                    .subscribe(async |sync_type, snapshot: MetaSyncedSnapshot| {
+            meta_synced
+                .subscribe(move |sync_type, snapshot: MetaSyncedSnapshot| {
+                    let inner = inner.clone();
+                    async move {
                         inner.sync_meta(sync_type, snapshot).await;
-                    })
-                    .await;
-            }
-        });
+                    }
+                })
+                .await;
+        }
 
-        Ok(Self { inner, bg })
+        Ok(Self {
+            inner,
+            meta_synced,
+            bg,
+        })
     }
 }
 
-struct LsmTabletInner<S: Storage> {
+pub(super) struct LsmTabletInner<S: Storage> {
     tablet_id: TabletId,
     colo_group_id: ColoGroupId,
     range: Range<Vec<u8>>,
+    tablet_meta_range: Range<Vec<u8>>,
 
-    lsm: Lsm<S>,
-    meta_synced: Arc<MetaSynced>,
-    shards: Box<dyn Shards + Sync + Send>,
+    lsm: ProtectedLsm<S>,
     sequencer: Sequencer,
     lock_mgr: LockMgr,
 
@@ -261,23 +270,24 @@ struct LsmTabletInner<S: Storage> {
 }
 
 impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
-    fn new(
+    pub(super) fn new(
         tablet_id: TabletId,
         colo_group_id: ColoGroupId,
         range: Range<Vec<u8>>,
-        lsm: Lsm<S>,
-        meta_synced: Arc<MetaSynced>,
-        shards: Box<dyn Shards + Sync + Send>,
+        lsm: ProtectedLsm<S>,
         prepare_sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
         commit_sender: mpsc::Sender<(Txid, Timestamp, BTreeSet<Key>, BTreeSet<Key>)>,
     ) -> Self {
+        let tablet_meta_range = {
+            let encoded_tablet_id = tablet_id.encode_fixed();
+            Range::prefix(&encoded_tablet_id[..]).to_vec()
+        };
         Self {
             tablet_id,
             colo_group_id,
             range,
-            lsm,
-            meta_synced,
-            shards,
+            tablet_meta_range,
+            lsm: lsm,
             prepare_sender,
             commit_sender,
             sequencer: Sequencer::new(),
@@ -286,15 +296,21 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         }
     }
 
-    async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
+    pub(super) async fn get(
+        &self,
+        ts: Timestamp,
+        key: &Key,
+    ) -> Result<Option<Record>, InternalError> {
+        let lsm_read = self.lsm.read()?;
+
         let keyspace_id = key.0;
 
         self.check_key(keyspace_id.0, &key.1)?;
         self.sequencer.wait_for_safe_read(ts).await?;
 
         let (maybe_record, maybe_pending_value) = future::try_join(
-            self.lsm.get(ts, keyspace_id, &key.1),
-            self.lsm.get(
+            lsm_read.get(ts, keyspace_id, &key.1),
+            lsm_read.get(
                 ts,
                 keyspace_id
                     .pending()
@@ -322,7 +338,12 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         })
     }
 
-    async fn get_latest(&self, key: Key) -> Result<(Timestamp, Option<Record>), InternalError> {
+    pub(super) async fn get_latest(
+        &self,
+        key: Key,
+    ) -> Result<(Timestamp, Option<Record>), InternalError> {
+        let lsm_read = self.lsm.read()?;
+
         let keyspace_id = key.0;
         self.check_key(keyspace_id.0, &key.1)?;
 
@@ -331,8 +352,9 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         let safe_read_ts = self.sequencer.safe_read_ts();
 
         let (maybe_record, maybe_pending_value) = future::try_join(
-            self.unsafe_get_latest_record(keyspace_id, &key.1),
-            self.unsafe_get_latest_record(
+            Self::unsafe_get_latest_record(&lsm_read, keyspace_id, &key.1),
+            Self::unsafe_get_latest_record(
+                &lsm_read,
                 keyspace_id
                     .pending()
                     .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?,
@@ -362,7 +384,12 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         })
     }
 
-    async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError> {
+    pub(super) async fn latest_snapshot(
+        &self,
+        keys: BTreeSet<Key>,
+    ) -> Result<Timestamp, InternalError> {
+        // TODO: This doesn't require loading the values, so we could optimize here to do less
+        // work.
         let mut result = Timestamp::ZERO;
         for key in keys {
             let (ts, _) = self.get_latest(key).await?;
@@ -371,7 +398,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         Ok(result)
     }
 
-    async fn scan_page(
+    pub(super) async fn scan_page(
         &self,
         ts: Timestamp,
         keyspace_id: KeyspaceId,
@@ -384,42 +411,33 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         }
         let limit = cmp::min(limit, 1000);
 
-        let intersecting_range = self.range.borrow().intersection(&range).clone();
+        let scan_range = self.scan_range(keyspace_id.0, range, direction)?;
 
-        if intersecting_range.is_empty() {
-            return Err(InternalError::Other(anyhow!(
-                "misroute: {:?}'s owned range {:?}/{:?} does not intersect with scan range {:?}",
-                self.tablet_id,
-                keyspace_id.0,
-                self.range,
-                range,
-            )));
-        }
+        let lsm_read = self.lsm.read()?;
 
         // range                          |-----------|
         // self.range               |---------|
-        // intersecting_range             |---|
+        // scan_range                     |---|
 
         self.sequencer.wait_for_safe_read(ts).await?;
 
         // Ask the LSM for the page. Note that the returned continuation is in terms of the
         // constrained range that we asked it for, not the entire range from the request.
-        let (page, intersecting_continue_cursor) = self
-            .lsm
-            .scan_page(ts, keyspace_id, intersecting_range, direction, limit)
+        let (page, intersecting_continue_cursor) = lsm_read
+            .scan_page(ts, keyspace_id, scan_range.borrow(), direction, limit)
             .await?;
         let scanned_range = match intersecting_continue_cursor {
             Some(ref intersecting_continue_cursor) => match direction {
                 Direction::Asc => Range {
-                    lower: intersecting_range.lower.to_vec(),
+                    lower: scan_range.lower,
                     upper: intersecting_continue_cursor.lower.clone(),
                 },
                 Direction::Desc => Range {
                     lower: intersecting_continue_cursor.upper.clone(),
-                    upper: intersecting_range.upper.to_vec(),
+                    upper: scan_range.upper,
                 },
             },
-            None => intersecting_range.to_vec(),
+            None => scan_range,
         };
         let continue_cursor = match direction {
             Direction::Asc => Range {
@@ -436,8 +454,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         if let Some(pending_keyspace_id) = keyspace_id.pending() {
             let mut maybe_cursor = Some(scanned_range.clone());
             while let Some(cursor) = maybe_cursor {
-                let (conflict_page, conflict_continue_cursor) = self
-                    .lsm
+                let (conflict_page, conflict_continue_cursor) = lsm_read
                     .scan_page(
                         ts,
                         pending_keyspace_id,
@@ -481,7 +498,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         ))
     }
 
-    async fn history_page(
+    pub(super) async fn history_page(
         &self,
         key: Key,
         range: HistoryRange,
@@ -492,6 +509,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         let keyspace_id = key.0;
 
         let _guard = self.lock_mgr.read_lock(&key.1).await;
+        let lsm_read = self.lsm.read()?;
 
         let range = match range {
             HistoryRange::Until(max) => {
@@ -512,19 +530,18 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
             }
         };
 
-        let (page, continue_cursor) = self
-            .lsm
+        let (page, continue_cursor) = lsm_read
             .history_page(keyspace_id, &key.1, range, direction, limit)
             .await?;
 
-        let maybe_pending = self
-            .unsafe_get_latest_record(
-                keyspace_id
-                    .pending()
-                    .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?,
-                &key.1,
-            )
-            .await?;
+        let maybe_pending = Self::unsafe_get_latest_record(
+            &lsm_read,
+            keyspace_id
+                .pending()
+                .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?,
+            &key.1,
+        )
+        .await?;
 
         if let Some((ts, RevisionValue::Regular(v))) = maybe_pending {
             if range.contains(ts) {
@@ -548,20 +565,22 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         ))
     }
 
-    async fn write(
+    pub(super) async fn write(
         &self,
         preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
         let _guard = self.acquire_write_locks(&preconds, &muts).await?;
 
-        if let Some(conflict_txid) = self.check_write_conflicts(&preconds, &muts).await? {
+        let lsm_rw = self.lsm.read_write()?;
+
+        if let Some(conflict_txid) = Self::check_write_conflicts(&lsm_rw, &preconds, &muts).await? {
             return Err(InternalError::Conflict(conflict_txid));
         }
 
         let ts = self.sequencer.start_write();
 
-        self.lsm
+        lsm_rw
             .write(*ts, preconds, muts)
             .await
             .map_err(|e| InternalError::Other(e.into()))?;
@@ -577,7 +596,9 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
     ) -> Result<Timestamp, InternalError> {
         let _guard = self.acquire_write_locks(&preconds, &muts).await?;
 
-        if let Some(conflict_txid) = self.check_write_conflicts(&preconds, &muts).await? {
+        let lsm_rw = self.lsm.read_write()?;
+
+        if let Some(conflict_txid) = Self::check_write_conflicts(&lsm_rw, &preconds, &muts).await? {
             return Err(InternalError::Conflict(conflict_txid));
         }
 
@@ -590,8 +611,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
                 .keyspace_id()
                 .precond()
                 .ok_or_else(|| anyhow::anyhow!("non-userland keyspace"))?;
-            let value = self
-                .unsafe_get_latest_record(keyspace_id, precond.key())
+            let value = Self::unsafe_get_latest_record(&lsm_rw, keyspace_id, precond.key())
                 .await
                 .map_err(|e| InternalError::Other(e.into()))?
                 .map(|(_, v)| match v {
@@ -627,7 +647,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
             );
         }
 
-        self.lsm
+        lsm_rw
             .write(*ts, preconds.clone(), actual_muts)
             .await
             .map_err(|e| InternalError::Other(e.into()))?;
@@ -677,14 +697,19 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
     }
 
     async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
+        // A small bummer to need read permissions in order to do this.
+        let lsm_read = self.lsm.read()?;
         loop {
             let tx_outcome_key = txid.encode_fixed();
             let wait = {
                 let _guard = self.lock_mgr.read_lock(&tx_outcome_key[..]).await;
 
-                match self
-                    .unsafe_get_latest_record(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
-                    .await?
+                match Self::unsafe_get_latest_record(
+                    &lsm_read,
+                    KeyspaceId::TX_OUTCOMES,
+                    &tx_outcome_key[..],
+                )
+                .await?
                 {
                     Some((_, RevisionValue::Regular(tx_outcome_bytes))) => {
                         let tx_outcome_record: TxOutcomeRecord =
@@ -716,12 +741,14 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()> {
         let tx_outcome = TxOutcome::Committed(ts);
+        let lsm_rw = self.lsm.read_write()?;
 
         for (keyspace_id, key) in precond_keys {
-            self.cleanup_precond_key(txid, keyspace_id, key).await?;
+            self.cleanup_precond_key(&lsm_rw, txid, keyspace_id, key)
+                .await?;
         }
         for (keyspace_id, key) in mut_keys {
-            self.cleanup_pending_key(txid, tx_outcome, keyspace_id, key)
+            self.cleanup_pending_key(&lsm_rw, txid, tx_outcome, keyspace_id, key)
                 .await?;
         }
 
@@ -729,12 +756,12 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
     }
 
     // TODO: make this take a lockmgr guard that proves the lock is held
-    async fn unsafe_get_latest_record(
-        &self,
+    async fn unsafe_get_latest_record<R: LsmRead>(
+        lsm_read: &R,
         keyspace_id: KeyspaceId,
         key: &[u8],
     ) -> anyhow::Result<Option<(Timestamp, RevisionValue)>> {
-        self.lsm.get(Timestamp(u64::MAX), keyspace_id, key).await
+        lsm_read.get(Timestamp(u64::MAX), keyspace_id, key).await
     }
 
     async fn acquire_write_locks<'a>(
@@ -758,8 +785,8 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
     }
 
     // TODO: make this take a lockmgr guard that proves the lock is held
-    async fn check_write_conflicts(
-        &self,
+    async fn check_write_conflicts<R: LsmRead>(
+        lsm_read: &R,
         preconds: &Vec<Precondition>,
         muts: &BTreeMap<Key, Mutation>,
     ) -> anyhow::Result<Option<Txid>> {
@@ -770,14 +797,14 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
             muts.keys()
                 .map(|(keyspace_id, key)| (*keyspace_id, &key[..])),
         ) {
-            if let Some((_, RevisionValue::Regular(value))) = self
-                .unsafe_get_latest_record(
-                    keyspace_id
-                        .pending()
-                        .ok_or_else(|| anyhow::anyhow!("non-userland keyspace"))?,
-                    key,
-                )
-                .await?
+            if let Some((_, RevisionValue::Regular(value))) = Self::unsafe_get_latest_record(
+                lsm_read,
+                keyspace_id
+                    .pending()
+                    .ok_or_else(|| anyhow::anyhow!("non-userland keyspace"))?,
+                key,
+            )
+            .await?
             {
                 let other_txid = Txid::decode(&value[..Txid::ENCODED_LEN])?;
                 return Ok(Some(other_txid));
@@ -794,8 +821,14 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         let tx_outcome_key = txid.encode_fixed();
         {
             let _guard = self.lock_mgr.write_lock(&tx_outcome_key[..]).await;
-            if let Some((_, RevisionValue::Regular(tx_outcome_bytes))) = self
-                .unsafe_get_latest_record(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
+            let lsm_rw = self.lsm.read_write()?;
+
+            if let Some((_, RevisionValue::Regular(tx_outcome_bytes))) =
+                Self::unsafe_get_latest_record(
+                    &lsm_rw,
+                    KeyspaceId::TX_OUTCOMES,
+                    &tx_outcome_key[..],
+                )
                 .await?
             {
                 let existing_tx_outcome_record: TxOutcomeRecord =
@@ -805,7 +838,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
 
             let tx_outcome_record_bytes =
                 pb::internal::TxOutcomeRecord::from(tx_outcome_record.clone()).encode_to_vec();
-            self.lsm
+            lsm_rw
                 .write(
                     Timestamp::ZERO,
                     vec![],
@@ -833,8 +866,9 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         Ok(tx_outcome)
     }
 
-    async fn cleanup_pending_key(
+    async fn cleanup_pending_key<RW: LsmReadWrite>(
         &self,
+        lsm_rw: &RW,
         txid: Txid,
         tx_outcome: TxOutcome,
         keyspace_id: KeyspaceId,
@@ -847,13 +881,11 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         let mut muts = BTreeMap::new();
         let _guard = self.lock_mgr.write_lock(&key[..]).await;
 
-        let (pending_ts, value) = match self
-            .unsafe_get_latest_record(pending_keyspace_id, &key)
-            .await?
-        {
-            Some((pending_ts, value)) => (pending_ts, value),
-            None => return Ok(()),
-        };
+        let (pending_ts, value) =
+            match Self::unsafe_get_latest_record(lsm_rw, pending_keyspace_id, &key).await? {
+                Some((pending_ts, value)) => (pending_ts, value),
+                None => return Ok(()),
+            };
         let m = match value {
             RevisionValue::Regular(v) => {
                 let pending_m = PendingMutation::decode(&v)?;
@@ -881,12 +913,13 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         if let TxOutcome::Committed(_) = tx_outcome {
             muts.insert((keyspace_id, key.clone()), m);
         }
-        self.lsm.write(resolve_ts, vec![], muts).await?;
+        lsm_rw.write(resolve_ts, vec![], muts).await?;
         Ok(())
     }
 
-    async fn cleanup_precond_key(
+    async fn cleanup_precond_key<RW: LsmReadWrite>(
         &self,
+        lsm_rw: &RW,
         txid: Txid,
         keyspace_id: KeyspaceId,
         key: Vec<u8>,
@@ -898,9 +931,8 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         let mut muts = BTreeMap::new();
         let _guard = self.lock_mgr.write_lock(&key[..]).await;
 
-        let (overwrite_ts, m) = if let Some((prepare_ts, RevisionValue::Regular(bytes))) = self
-            .unsafe_get_latest_record(precond_keyspace_id, &key)
-            .await?
+        let (overwrite_ts, m) = if let Some((prepare_ts, RevisionValue::Regular(bytes))) =
+            Self::unsafe_get_latest_record(lsm_rw, precond_keyspace_id, &key).await?
         {
             let mut precond_locks = PrecondLocks::decode(&bytes)?;
             if precond_locks.txids.remove(&txid) {
@@ -918,19 +950,28 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
             return Ok(());
         };
         muts.insert((precond_keyspace_id, key.clone()), m);
-        self.lsm.write(overwrite_ts, vec![], muts).await?;
+        lsm_rw.write(overwrite_ts, vec![], muts).await?;
         Ok(())
     }
 
     async fn cleanup_committed_outcomes(
         &self,
+        meta_synced: Arc<MetaSynced>,
+        shards: Arc<dyn Shards + Sync + Send>,
         mut r: mpsc::Receiver<(Txid, Timestamp, BTreeSet<Key>, BTreeSet<Key>)>,
     ) {
         while let Some((txid, ts, precond_keys, mut_keys)) = r.recv().await {
             Retry::new()
                 .indefinitely(&async || -> anyhow::Result<()> {
-                    self.cleanup_one_committed_outcome(txid, ts, &precond_keys, &mut_keys)
-                        .await?;
+                    self.cleanup_one_committed_outcome(
+                        &meta_synced,
+                        &shards,
+                        txid,
+                        ts,
+                        &precond_keys,
+                        &mut_keys,
+                    )
+                    .await?;
                     Ok::<_, anyhow::Error>(())
                 })
                 .await;
@@ -939,15 +980,19 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
 
     async fn cleanup_one_committed_outcome(
         &self,
+        meta_synced: &MetaSynced,
+        shards: &Arc<dyn Shards + Send + Sync>,
         txid: Txid,
         ts: Timestamp,
         precond_keys: &BTreeSet<Key>,
         mut_keys: &BTreeSet<Key>,
     ) -> anyhow::Result<()> {
+        let lsm_rw = self.lsm.read_write()?;
+
         let mut by_tablet = HashMap::new();
 
         for (keyspace_id, key) in precond_keys {
-            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
+            let tablet_id = meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
             by_tablet
                 .entry(tablet_id)
                 .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()))
@@ -955,7 +1000,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
                 .insert((*keyspace_id, key.clone()));
         }
         for (keyspace_id, key) in mut_keys {
-            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
+            let tablet_id = meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
             by_tablet
                 .entry(tablet_id)
                 .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()))
@@ -966,11 +1011,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         // Lifetime shenanigans.
         let tablets = by_tablet
             .keys()
-            .map(|tablet_id| {
-                self.shards
-                    .tablet(*tablet_id)
-                    .map(|tablet| (*tablet_id, tablet))
-            })
+            .map(|tablet_id| shards.tablet(*tablet_id).map(|tablet| (*tablet_id, tablet)))
             .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
         let mut futures = Vec::with_capacity(by_tablet.len());
         for (tablet_id, (precond_keys, mut_keys)) in by_tablet {
@@ -981,7 +1022,8 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
 
         // TODO: mutual exclusion
         let tx_outcome_key = txid.encode_fixed();
-        self.lsm
+        let _guard = self.lock_mgr.write_lock(&tx_outcome_key[..]);
+        lsm_rw
             .write(
                 Timestamp::ZERO.plus_one(),
                 vec![],
@@ -997,25 +1039,27 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
 
     async fn resolve_prepared(
         &self,
+        shards: &Arc<dyn Shards + Send + Sync>,
         receiver: mpsc::Receiver<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
     ) {
         crate::util::bounded_unordered_map(
             receiver,
             64,
             |(txid, keyspace_id, key, prepare_type)| async move {
-                let owner_tablet = self.shards.tablet(txid.owner()).unwrap();
+                let owner_tablet = shards.tablet(txid.owner()).unwrap();
                 let tx_outcome = owner_tablet.wait(txid).await.unwrap();
                 // Commits get cleaned up by the owner tablet calling cleanup_committed. Ignore them
                 // here to avoid duplicating work.
                 // TODO: retry instead of unwrap
                 if let TxOutcome::Aborted = tx_outcome {
+                    let lsm_rw = self.lsm.wait_read_write().await;
                     match prepare_type {
                         PrepareType::Precondition => self
-                            .cleanup_precond_key(txid, keyspace_id, key)
+                            .cleanup_precond_key(&lsm_rw, txid, keyspace_id, key)
                             .await
                             .unwrap(),
                         PrepareType::Mutation => self
-                            .cleanup_pending_key(txid, tx_outcome, keyspace_id, key)
+                            .cleanup_pending_key(&lsm_rw, txid, tx_outcome, keyspace_id, key)
                             .await
                             .unwrap(),
                     }
@@ -1030,7 +1074,8 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         &self,
         sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
     ) {
-        for keyspace_id in self.lsm.keyspaces() {
+        let keyspace_ids = self.lsm.wait_read().await.keyspaces();
+        for keyspace_id in keyspace_ids {
             if !keyspace_id.is_pending() {
                 continue;
             }
@@ -1068,7 +1113,8 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         &self,
         sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
     ) {
-        for keyspace_id in self.lsm.keyspaces() {
+        let keyspace_ids = self.lsm.wait_read().await.keyspaces();
+        for keyspace_id in keyspace_ids {
             if !keyspace_id.is_precond() {
                 continue;
             }
@@ -1169,6 +1215,54 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         }
     }
 
+    fn scan_range(
+        &self,
+        colo_group_id: ColoGroupId,
+        range: Range<&[u8]>,
+        direction: Direction,
+    ) -> anyhow::Result<Range<Vec<u8>>> {
+        let owned_range = if colo_group_id == ColoGroupId::TABLET_META {
+            self.tablet_meta_range.borrow()
+        } else if colo_group_id == self.colo_group_id {
+            self.range.borrow()
+        } else {
+            return Err(anyhow!(
+                "misroute: {:?} does not own any of {:?}",
+                self.tablet_id,
+                colo_group_id
+            ));
+        };
+
+        let intersection = owned_range.intersection(&range);
+        if intersection.is_empty() {
+            return Err(anyhow!(
+                "misroute: cannot scan {:?}/{:?}: {:?} owns {:?}",
+                colo_group_id,
+                range,
+                self.tablet_id,
+                owned_range,
+            ));
+        }
+
+        let is_next = match direction {
+            Direction::Asc => intersection.lower >= owned_range.lower,
+            Direction::Desc => intersection.upper <= owned_range.upper,
+        };
+
+        if !is_next {
+            return Err(anyhow!(
+                "misroute: cannot scan {:?}/{:?}: {:?} owns {:?}, which is not the next range for a {:?} scan",
+                colo_group_id,
+                range,
+                self.tablet_id,
+                owned_range,
+                direction,
+            ));
+        }
+
+        Ok(intersection.to_vec())
+    }
+
     fn check_key(&self, colo_group_id: ColoGroupId, key: &[u8]) -> anyhow::Result<()> {
         if colo_group_id == ColoGroupId::META && self.tablet_id == TabletId::META {
             return Ok(());
@@ -1197,13 +1291,15 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         Ok(())
     }
 
+    // TODO: remove?
     async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
-        self.lsm.create_keyspace(keyspace_id).await?;
+        let lsm_rw = self.lsm.read_write()?;
+        lsm_rw.create_keyspace(keyspace_id).await?;
         if keyspace_id.is_userland() {
-            self.lsm
+            lsm_rw
                 .create_keyspace(keyspace_id.pending().unwrap())
                 .await?;
-            self.lsm
+            lsm_rw
                 .create_keyspace(keyspace_id.precond().unwrap())
                 .await?;
         }
@@ -1217,6 +1313,13 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
                 let sync_type = sync_type.clone();
                 match sync_type {
                     SyncType::Initial => {
+                        let tablet_metadata = snapshot.tablet_metadata(self.tablet_id).await?;
+                        self.lsm
+                            .set_state(match tablet_metadata.state {
+                                MetaState::Stable(state) => state,
+                                MetaState::Transitioning(_, next_state) => next_state,
+                            })
+                            .await;
                         for keyspace_id in snapshot.keyspace_ids().await? {
                             self.create_keyspace(keyspace_id).await?;
                         }
@@ -1226,6 +1329,20 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
                             match meta_key {
                                 MetaKey::Keyspace(keyspace_id) => {
                                     self.create_keyspace(keyspace_id).await?;
+                                }
+                                MetaKey::Tablet(tablet_id) => {
+                                    if tablet_id == self.tablet_id {
+                                        let tablet_metadata =
+                                            snapshot.tablet_metadata(self.tablet_id).await?;
+                                        self.lsm
+                                            .set_state(match tablet_metadata.state {
+                                                MetaState::Stable(state) => state,
+                                                MetaState::Transitioning(_, next_state) => {
+                                                    next_state
+                                                }
+                                            })
+                                            .await;
+                                    }
                                 }
                                 _ => {}
                             }

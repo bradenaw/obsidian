@@ -27,7 +27,6 @@ use crate::range::Range;
 use crate::storage::CachedStorage;
 use crate::storage::MemStorage;
 use crate::storage::Storage;
-use crate::tablet::LsmTablet;
 use crate::tablet::Tablet;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
@@ -153,10 +152,14 @@ struct TestShards<S, M> {
     storage: Arc<S>,
     meta_proxy: Arc<MetaProxy<M>>,
 
-    m: Mutex<HashMap<ShardId, Arc<TestShard<S, M>>>>,
+    m: Mutex<HashMap<ShardId, Arc<crate::shard::Shard<S, Arc<MetaProxy<M>>>>>>,
 }
 
-impl<S, M> TestShards<S, M> {
+impl<S, M> TestShards<S, M>
+where
+    S: Storage + Send + Sync + 'static,
+    M: Meta + Send + Sync + 'static,
+{
     fn new(storage: Arc<S>, meta_proxy: Arc<MetaProxy<M>>) -> Self {
         Self {
             storage,
@@ -165,19 +168,26 @@ impl<S, M> TestShards<S, M> {
         }
     }
 
-    fn create_shard(self: &Arc<Self>) -> ShardId {
+    async fn create_shard(self: &Arc<Self>) -> anyhow::Result<ShardId> {
         let mut m = self.m.lock().unwrap();
         let shard_id = ShardId((m.len() + 1) as u32);
         m.insert(
             shard_id,
-            Arc::new(TestShard::new(
-                shard_id,
-                self.storage.clone(),
-                self.meta_proxy.clone(),
-                Arc::downgrade(&self),
-            )),
+            Arc::new(
+                crate::shard::Shard::new(
+                    shard_id,
+                    self.storage.clone(),
+                    Arc::new(self.meta_proxy.clone()),
+                    Arc::new(Arc::downgrade(&self)),
+                    LsmBuilder::new(self.storage.clone())
+                        .l0_max_size(256)
+                        .run_size_target(65536)
+                        .block_size_target(4096),
+                )
+                .await?,
+            ),
         );
-        shard_id
+        Ok(shard_id)
     }
 }
 
@@ -203,101 +213,30 @@ where
     }
 }
 
-struct TestShard<S, M> {
-    id: ShardId,
-    storage: Arc<S>,
-    meta_proxy: Arc<MetaProxy<M>>,
-    test_shards: Weak<TestShards<S, M>>,
-
-    inner: Mutex<TestShardInner>,
-}
-
-struct TestShardInner {
-    m: HashMap<TabletId, Arc<dyn Tablet + Send + Sync + 'static>>,
-    next_tablet_id: u64,
-}
-
-impl<S, M> TestShard<S, M> {
-    fn new(
-        id: ShardId,
-        storage: Arc<S>,
-        meta_proxy: Arc<MetaProxy<M>>,
-        test_shards: Weak<TestShards<S, M>>,
-    ) -> Self {
-        Self {
-            id,
-            storage,
-            meta_proxy,
-            test_shards,
-            inner: Mutex::new(TestShardInner {
-                m: HashMap::new(),
-                next_tablet_id: 1,
-            }),
-        }
-    }
-}
-
-#[async_trait]
-impl<S, M> Shard for Arc<TestShard<S, M>>
+impl<S, M> Shards for Weak<TestShards<S, M>>
 where
     S: Storage + Send + Sync + 'static,
     M: Meta + Send + Sync + 'static,
 {
-    fn id(&self) -> ShardId {
-        self.id
+    fn shard(&self, shard_id: ShardId) -> anyhow::Result<Box<dyn Shard + Send + Sync>> {
+        let shards = Weak::upgrade(self).ok_or_else(|| anyhow!(""))?;
+        let m = shards.m.lock().unwrap();
+        let shard_arc = m
+            .get(&shard_id)
+            .ok_or_else(|| anyhow::anyhow!("{:?} does not exist", shard_id))?;
+
+        Ok(Box::new(shard_arc.clone()))
     }
 
-    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Box<dyn Tablet + Send + Sync>> {
-        let inner = self.inner.lock().unwrap();
-        let tablet_arc = inner
-            .m
-            .get(&tablet_id)
-            .ok_or_else(|| anyhow::anyhow!("no tablet for {}", tablet_id))?;
-
-        Ok(Box::new(tablet_arc.clone()))
-    }
-
-    async fn create_tablet(
-        &self,
-        colo_group_id: ColoGroupId,
-        range: Range<Vec<u8>>,
-    ) -> anyhow::Result<TabletId> {
-        let tablet_id = {
-            let mut inner = self.inner.lock().unwrap();
-            let tablet_id = TabletId(self.id, inner.next_tablet_id);
-            inner.next_tablet_id += 1;
-            tablet_id
+    fn shards(&self) -> Vec<Box<dyn Shard + Sync + Send>> {
+        let shards = match Weak::upgrade(self) {
+            Some(shards) => shards,
+            None => return vec![],
         };
-
-        let lsm = LsmBuilder::new(self.storage.clone())
-            .l0_max_size(256)
-            .run_size_target(65536)
-            .block_size_target(4096)
-            .build()
-            .await?;
-
-        if tablet_id == TabletId::META {
-            lsm.create_keyspace(KeyspaceId::META).await?;
-            lsm.create_keyspace(KeyspaceId::META.pending().unwrap())
-                .await?;
-        }
-
-        let tablet = LsmTablet::new(
-            tablet_id,
-            colo_group_id,
-            range,
-            lsm,
-            Box::new(self.meta_proxy.clone()),
-            Box::new(Weak::upgrade(&self.test_shards).ok_or_else(|| anyhow!("TestShards gone"))?),
-        )
-        .await?;
-
-        {
-            let mut inner = self.inner.lock().unwrap();
-            inner.m.insert(tablet_id, Arc::new(tablet));
-        }
-
-        Ok(tablet_id)
+        let m = shards.m.lock().unwrap();
+        m.values()
+            .map(|shard| -> Box<dyn Shard + Sync + Send> { Box::new(shard.clone()) })
+            .collect()
     }
 }
 
@@ -319,6 +258,14 @@ impl<T> MetaProxy<T> {
 
 #[async_trait]
 impl<T: Meta + Send + Sync> Meta for Arc<MetaProxy<T>> {
+    async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
+        let inner = self.inner.load();
+        if let Some(inner) = inner.deref() {
+            return T::add_shard(inner, shard_id).await;
+        }
+        Err(anyhow!("MetaProxy not filled yet"))
+    }
+
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,
@@ -389,6 +336,8 @@ pub(crate) async fn new_for_test(n_shards: usize) -> anyhow::Result<Frontend> {
         return Err(anyhow!("need at least one shard to host the meta tablet"));
     }
 
+    log::info!("new_for_test");
+
     let meta_proxy = Arc::new(MetaProxy::new());
     let storage = Arc::new(CachedStorage::new(
         MemStorage::new(),
@@ -399,16 +348,17 @@ pub(crate) async fn new_for_test(n_shards: usize) -> anyhow::Result<Frontend> {
 
     let shards = Arc::new(TestShards::new(storage.clone(), meta_proxy.clone()));
 
+    let mut shard_ids = vec![];
     for _ in 0..n_shards {
-        shards.create_shard();
+        shard_ids.push(shards.create_shard().await?);
     }
-    shards
-        .shard(ShardId(1))?
-        .create_tablet(ColoGroupId::META, Range::all())
-        .await?;
 
     let meta_tablet = shards.tablet(TabletId::META)?;
-    let meta = MetaImpl::new(Box::new(shards.clone()), meta_tablet);
+    let meta = MetaImpl::new(meta_tablet);
+
+    for shard_id in shard_ids {
+        meta.add_shard(shard_id).await?;
+    }
 
     meta_proxy.put(meta);
 
@@ -566,6 +516,8 @@ macro_rules! obsidian_test_suite {
 
             #[tokio::test]
             async fn test_2pc() -> anyhow::Result<()> {
+                let _ = pretty_env_logger::try_init();
+
                 let colo_group_id = ColoGroupId(1);
                 let keyspace_id = KeyspaceId(colo_group_id, 1);
 

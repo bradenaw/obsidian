@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::future::Future;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -23,7 +24,9 @@ use rand::Rng;
 use thiserror::Error;
 
 use crate::meta::Meta;
+use crate::meta::MetaReader;
 use crate::meta::MetaSynced;
+use crate::pb;
 use crate::range::Bound;
 use crate::range::Range;
 use crate::tablet::Tablet;
@@ -481,8 +484,15 @@ impl Frontend {
 
         self.meta_synced.wait(ts).await?;
 
+        let snapshot = self.meta_synced.snapshot();
+        let shard_ids = snapshot.shard_ids().await?;
+
+        for shard_id in shard_ids {
+            self.shards.shard(shard_id)?.wait_meta_sync(ts).await?;
+        }
+
         let tablet_ids = {
-            let mut tablet_ids = self.meta.tablet_ids(ts).await?;
+            let mut tablet_ids = snapshot.tablet_ids().await?;
             tablet_ids.shuffle(&mut rand::thread_rng());
             tablet_ids
         };
@@ -547,6 +557,23 @@ impl Decode for TabletId {
     }
 }
 
+impl From<TabletId> for pb::internal::TabletId {
+    fn from(value: TabletId) -> Self {
+        Self {
+            shard_id: value.0 .0,
+            id: value.1,
+        }
+    }
+}
+
+impl TryFrom<pb::internal::TabletId> for TabletId {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::internal::TabletId) -> Result<Self, Self::Error> {
+        Ok(Self(ShardId(value.shard_id), value.id))
+    }
+}
+
 impl std::fmt::Display for TabletId {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         write!(f, "{}/{}", self.0 .0, self.1)
@@ -577,7 +604,7 @@ pub(crate) trait Shards {
 
     fn shards(&self) -> Vec<Box<dyn Shard + Sync + Send>>;
 
-    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Box<dyn Tablet + Send + Sync>> {
+    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet + Send + Sync>> {
         self.shard(tablet_id.0)?.tablet(tablet_id)
     }
 }
@@ -586,13 +613,9 @@ pub(crate) trait Shards {
 pub(crate) trait Shard {
     fn id(&self) -> ShardId;
 
-    async fn create_tablet(
-        &self,
-        colo_group_id: ColoGroupId,
-        range: Range<Vec<u8>>,
-    ) -> anyhow::Result<TabletId>;
+    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet + Send + Sync>>;
 
-    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Box<dyn Tablet + Send + Sync>>;
+    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()>;
 }
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
@@ -702,6 +725,10 @@ pub(crate) enum InternalError {
     // cleaned everything up and removed the TxOutcome.
     #[error("TxOutcome missing")]
     TxOutcomeMissing,
+    #[error("tablet not currently readable")]
+    TabletNotReadable(TabletId),
+    #[error("tablet not currently writable")]
+    TabletNotWriteable(TabletId),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
