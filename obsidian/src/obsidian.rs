@@ -596,7 +596,13 @@ impl TryFrom<pb::internal::TabletId> for TabletId {
 
 impl std::fmt::Display for TabletId {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        write!(f, "{}/{}", self.0 .0, self.1)
+        if *self == TabletId::META {
+            f.write_str("meta")
+        } else if self.1 == TabletId::SHARD_META_SEQ {
+            write!(f, "{}/shard_meta", self.0.0)
+        } else {
+            write!(f, "{}/{}", self.0 .0, self.1)
+        }
     }
 }
 
