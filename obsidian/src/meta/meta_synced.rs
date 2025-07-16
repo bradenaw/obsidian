@@ -80,8 +80,8 @@ impl MetaSynced {
         if colo_group_id == ColoGroupId::META && tablet_id == TabletId::META {
             return Range::all();
         }
-        if colo_group_id == ColoGroupId::TABLET_META {
-            return Range::prefix(tablet_id.encode_fixed().to_vec());
+        if colo_group_id == ColoGroupId::SHARD_META {
+            return TabletId::shard_meta_owned_range(tablet_id.0);
         }
         let inner = self.inner.read().unwrap();
         if let Some(range_set_by_colo_group_id) = inner.owned_ranges.get(&tablet_id) {

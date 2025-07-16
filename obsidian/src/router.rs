@@ -12,7 +12,6 @@ use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::ShardId;
 use crate::util::hexlify;
-use crate::util::Decode;
 
 pub(crate) struct StaticRouter {
     map: HashMap<ColoGroupId, (Vec<Bound<Vec<u8>>>, Vec<TabletId>)>,
@@ -37,17 +36,17 @@ impl Router for StaticRouter {
         if colo_group_id == ColoGroupId::META {
             return Ok(TabletId::META);
         }
-        if colo_group_id == ColoGroupId::TABLET_META {
-            if key.len() < 12 {
+        if colo_group_id == ColoGroupId::SHARD_META {
+            if key.len() < ShardId::ENCODED_LEN {
                 anyhow::bail!(
-                    "TABLET_META key must be 12 bytes or longer: {}",
-                    hexlify(key)
+                    "SHARD_META key must be {} bytes or longer to be prefixed with a shard ID: {}",
+                    ShardId::ENCODED_LEN,
+                    hexlify(key),
                 );
             }
-            return Ok(TabletId(
-                ShardId(BigEndian::read_u32(&key[0..4])),
-                BigEndian::read_u64(&key[4..12]),
-            ));
+            return Ok(TabletId::shard_meta(ShardId(BigEndian::read_u32(
+                &key[0..4],
+            ))));
         }
 
         let (splits, tablet_ids) = self
@@ -73,37 +72,41 @@ impl Router for StaticRouter {
         if colo_group_id == ColoGroupId::META {
             return Ok(TabletId::META);
         }
-        if colo_group_id == ColoGroupId::TABLET_META {
+        if colo_group_id == ColoGroupId::SHARD_META {
+            // TODO: It'd be nice to just jump over the gap to the next shard so that something
+            // like scan(Keyspace::TX_OUTCOMES, Range:all()) would work.
             let key = match bound {
                 Bound::BeforeAll | Bound::AfterAll => {
                     return Err(anyhow!("{}/{:?} not routeable", colo_group_id, bound))
                 }
                 Bound::Before(key) => {
-                    // key.len() == 12 means this is a tablet boundary, so can't scan off the edge
-                    // of it
-                    if direction == Direction::Desc && key.len() == 12 {
+                    // key.len() == ShardId::ENCODED_LEN means this is a tablet boundary, so can't
+                    // scan off the edge of it.
+                    if direction == Direction::Desc && key.len() == ShardId::ENCODED_LEN {
                         return Err(anyhow!("{}/{:?} not routeable", colo_group_id, bound));
                     }
                     key
                 }
                 Bound::After(key) => key,
                 Bound::AfterPrefix(key) => {
-                    // key.len() == 12 means this is a tablet boundary, so can't scan off the edge
-                    // of it
-                    if direction == Direction::Asc && key.len() == 12 {
+                    // key.len() == ShardId::ENCODED_LEN means this is a tablet boundary, so can't
+                    // scan off the edge of it.
+                    if direction == Direction::Asc && key.len() == ShardId::ENCODED_LEN {
                         return Err(anyhow!("{}/{:?} not routeable", colo_group_id, bound));
                     }
                     key
                 }
             };
 
-            if key.len() < 12 {
+            if key.len() < ShardId::ENCODED_LEN {
                 anyhow::bail!(
-                    "TABLET_META key must be 12 bytes or longer: {}",
-                    hexlify(key)
+                    "SHARD_META key must be {} bytes or longer: {}",
+                    ShardId::ENCODED_LEN,
+                    hexlify(key),
                 );
             }
-            return TabletId::decode(&key[..12]);
+            let shard_id = ShardId(BigEndian::read_u32(&key[..ShardId::ENCODED_LEN]));
+            return Ok(TabletId::shard_meta(shard_id));
         }
 
         let (splits, tablet_ids) = self
@@ -165,22 +168,22 @@ mod tests {
 
         assert_eq!(
             router.tablet_id_for_bound(ColoGroupId::META, Bound::Before(&[0]), Direction::Asc)?,
-            TabletId(ShardId(1), 1)
+            TabletId::META,
         );
 
         assert_eq!(
             router.tablet_id_for_bound(
-                ColoGroupId::TABLET_META,
+                ColoGroupId::SHARD_META,
                 Bound::Before(&encode(&TabletId(ShardId(1), 5))),
                 Direction::Asc,
             )?,
-            TabletId(ShardId(1), 5),
+            TabletId::shard_meta(ShardId(1)),
         );
 
         assert_matches!(
             router.tablet_id_for_bound(
-                ColoGroupId::TABLET_META,
-                Bound::Before(&[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 5]),
+                ColoGroupId::SHARD_META,
+                Bound::Before(&[0, 0, 0, 1]),
                 Direction::Desc,
             ),
             Err(_)
@@ -188,26 +191,26 @@ mod tests {
 
         assert_eq!(
             router.tablet_id_for_bound(
-                ColoGroupId::TABLET_META,
+                ColoGroupId::SHARD_META,
                 Bound::Before(&[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 5, 10]),
                 Direction::Desc,
             )?,
-            TabletId(ShardId(1), 5),
+            TabletId::shard_meta(ShardId(1)),
         );
 
         assert_eq!(
             router.tablet_id_for_bound(
-                ColoGroupId::TABLET_META,
-                Bound::AfterPrefix(&[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 5]),
+                ColoGroupId::SHARD_META,
+                Bound::AfterPrefix(&[0, 0, 0, 1]),
                 Direction::Desc,
             )?,
-            TabletId(ShardId(1), 5),
+            TabletId::shard_meta(ShardId(1)),
         );
 
         assert_matches!(
             router.tablet_id_for_bound(
-                ColoGroupId::TABLET_META,
-                Bound::AfterPrefix(&[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 5]),
+                ColoGroupId::SHARD_META,
+                Bound::AfterPrefix(&[0, 0, 0, 1]),
                 Direction::Asc,
             ),
             Err(_)

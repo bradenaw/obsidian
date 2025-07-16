@@ -518,15 +518,26 @@ impl Frontend {
 pub(crate) struct TabletId(pub ShardId, pub u64);
 
 impl TabletId {
-    pub(crate) const ENCODED_LEN: usize = 12;
-    pub(crate) const META: Self = TabletId(ShardId(1), 1);
-}
+    pub(crate) const ENCODED_LEN: usize = ShardId::ENCODED_LEN + 8;
+    pub(crate) const META: Self = TabletId(ShardId(1), u64::MAX);
+    pub(crate) const SHARD_META_SEQ: u64 = u64::MAX - 1;
 
-impl TabletId {
-    pub(crate) fn encode_fixed(&self) -> [u8; 12] {
-        let mut out = [0u8; 12];
-        BigEndian::write_u32(&mut out[..4], self.0 .0);
-        BigEndian::write_u64(&mut out[4..], self.1);
+    pub(crate) fn shard_meta(shard_id: ShardId) -> Self {
+        TabletId(shard_id, Self::SHARD_META_SEQ)
+    }
+
+    pub(crate) fn shard_meta_owned_range(shard_id: ShardId) -> Range<Vec<u8>> {
+        if shard_id == ShardId(0) {
+            return Range::empty();
+        }
+        Range::prefix(shard_id.encode_fixed().to_vec())
+    }
+
+    pub(crate) fn encode_fixed(&self) -> [u8; Self::ENCODED_LEN] {
+        let mut out = [0u8; Self::ENCODED_LEN];
+        let shard_id_encoded = self.0.encode_fixed();
+        (&mut out[..ShardId::ENCODED_LEN]).copy_from_slice(&shard_id_encoded[..]);
+        BigEndian::write_u64(&mut out[ShardId::ENCODED_LEN..], self.1);
         out
     }
 }

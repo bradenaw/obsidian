@@ -12,8 +12,6 @@ use std::time::Instant;
 use anyhow::anyhow;
 use async_stream::try_stream;
 use async_trait::async_trait;
-use byteorder::BigEndian;
-use byteorder::ByteOrder;
 use futures::future;
 use futures::Stream;
 use futures::StreamExt;
@@ -55,7 +53,6 @@ use crate::types::Precondition;
 use crate::types::Record;
 use crate::types::Revision;
 use crate::types::RevisionValue;
-use crate::types::ShardId;
 use crate::types::Timestamp;
 use crate::util::encode;
 use crate::util::Background;
@@ -308,17 +305,13 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         self.check_key(keyspace_id.0, &key.1)?;
         self.sequencer.wait_for_safe_read(ts).await?;
 
-        let (maybe_record, maybe_pending_value) = future::try_join(
-            lsm_read.get(ts, keyspace_id, &key.1),
-            lsm_read.get(
-                ts,
-                keyspace_id
-                    .pending()
-                    .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?,
-                &key.1,
-            ),
-        )
-        .await?;
+        let key_future = lsm_read.get(ts, keyspace_id, &key.1);
+        let (maybe_record, maybe_pending_value) = match keyspace_id.pending() {
+            Some(pending_keyspace_id) => {
+                future::try_join(key_future, lsm_read.get(ts, pending_keyspace_id, &key.1)).await?
+            }
+            None => (key_future.await?, None),
+        };
 
         if let Some((_, RevisionValue::Regular(bytes))) = maybe_pending_value {
             let pending_mut = PendingMutation::decode(&bytes)?;
@@ -351,17 +344,18 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
 
         let safe_read_ts = self.sequencer.safe_read_ts();
 
-        let (maybe_record, maybe_pending_value) = future::try_join(
-            Self::unsafe_get_latest_record(&lsm_read, keyspace_id, &key.1),
-            Self::unsafe_get_latest_record(
-                &lsm_read,
-                keyspace_id
-                    .pending()
-                    .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?,
-                &key.1,
-            ),
-        )
-        .await?;
+        let key_future = Self::unsafe_get_latest_record(&lsm_read, keyspace_id, &key.1);
+
+        let (maybe_record, maybe_pending_value) = match keyspace_id.pending() {
+            Some(pending_keyspace_id) => {
+                future::try_join(
+                    key_future,
+                    Self::unsafe_get_latest_record(&lsm_read, pending_keyspace_id, &key.1),
+                )
+                .await?
+            }
+            None => (key_future.await?, None),
+        };
 
         if let Some((_, RevisionValue::Regular(bytes))) = maybe_pending_value {
             let pending_mut = PendingMutation::decode(&bytes)?;
@@ -534,22 +528,18 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
             .history_page(keyspace_id, &key.1, range, direction, limit)
             .await?;
 
-        let maybe_pending = Self::unsafe_get_latest_record(
-            &lsm_read,
-            keyspace_id
-                .pending()
-                .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?,
-            &key.1,
-        )
-        .await?;
+        if let Some(pending_keyspace_id) = keyspace_id.pending() {
+            let maybe_pending =
+                Self::unsafe_get_latest_record(&lsm_read, pending_keyspace_id, &key.1).await?;
 
-        if let Some((ts, RevisionValue::Regular(v))) = maybe_pending {
-            if range.contains(ts) {
-                // TODO: we can constrain this a lot more - really we only need to surface a
-                // conflict if the page actually could have seen it, and we should be linearizing
-                // an unbounded upper just once on the first page
-                let pending_mut = PendingMutation::decode(&v)?;
-                return Err(InternalError::Conflict(pending_mut.txid));
+            if let Some((ts, RevisionValue::Regular(v))) = maybe_pending {
+                if range.contains(ts) {
+                    // TODO: we can constrain this a lot more - really we only need to surface a
+                    // conflict if the page actually could have seen it, and we should be linearizing
+                    // an unbounded upper just once on the first page
+                    let pending_mut = PendingMutation::decode(&v)?;
+                    return Err(InternalError::Conflict(pending_mut.txid));
+                }
             }
         }
 
@@ -607,10 +597,12 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         let mut actual_muts = BTreeMap::new();
 
         for precond in &preconds {
-            let keyspace_id = precond
-                .keyspace_id()
-                .precond()
-                .ok_or_else(|| anyhow::anyhow!("non-userland keyspace"))?;
+            let keyspace_id = precond.keyspace_id().precond().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "attempted prepare of non-data keyspace {:?}",
+                    precond.keyspace_id()
+                )
+            })?;
             let value = Self::unsafe_get_latest_record(&lsm_rw, keyspace_id, precond.key())
                 .await
                 .map_err(|e| InternalError::Other(e.into()))?
@@ -638,9 +630,9 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
 
             actual_muts.insert(
                 (
-                    keyspace_id
-                        .pending()
-                        .ok_or_else(|| anyhow::anyhow!("non-userland keyspace"))?,
+                    keyspace_id.pending().ok_or_else(|| {
+                        anyhow::anyhow!("attempted prepare of non-data keyspace {:?}", keyspace_id)
+                    })?,
                     key.clone(),
                 ),
                 Mutation::Put(value),
@@ -673,7 +665,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         Ok(*ts)
     }
 
-    async fn try_commit(
+    pub(super) async fn try_commit(
         &self,
         txid: Txid,
         ts: Timestamp,
@@ -691,13 +683,12 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         .await
     }
 
-    async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
+    pub(super) async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
         self.try_write_tx_outcome(txid, TxOutcomeRecord::Aborted)
             .await
     }
 
-    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
-        // A small bummer to need read permissions in order to do this.
+    pub(super) async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
         let lsm_read = self.lsm.read()?;
         loop {
             let tx_outcome_key = txid.encode_fixed();
@@ -797,17 +788,13 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
             muts.keys()
                 .map(|(keyspace_id, key)| (*keyspace_id, &key[..])),
         ) {
-            if let Some((_, RevisionValue::Regular(value))) = Self::unsafe_get_latest_record(
-                lsm_read,
-                keyspace_id
-                    .pending()
-                    .ok_or_else(|| anyhow::anyhow!("non-userland keyspace"))?,
-                key,
-            )
-            .await?
-            {
-                let other_txid = Txid::decode(&value[..Txid::ENCODED_LEN])?;
-                return Ok(Some(other_txid));
+            if let Some(pending_keyspace_id) = keyspace_id.pending() {
+                if let Some((_, RevisionValue::Regular(value))) =
+                    Self::unsafe_get_latest_record(lsm_read, pending_keyspace_id, key).await?
+                {
+                    let other_txid = Txid::decode(&value[..Txid::ENCODED_LEN])?;
+                    return Ok(Some(other_txid));
+                }
             }
         }
         Ok(None)
@@ -874,9 +861,9 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         keyspace_id: KeyspaceId,
         key: Vec<u8>,
     ) -> anyhow::Result<()> {
-        let pending_keyspace_id = keyspace_id
-            .pending()
-            .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?;
+        let pending_keyspace_id = keyspace_id.pending().ok_or_else(|| {
+            anyhow::anyhow!("attempted cleanup of non-data keyspace {:?}", keyspace_id)
+        })?;
 
         let mut muts = BTreeMap::new();
         let _guard = self.lock_mgr.write_lock(&key[..]).await;
@@ -924,9 +911,9 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         keyspace_id: KeyspaceId,
         key: Vec<u8>,
     ) -> anyhow::Result<()> {
-        let precond_keyspace_id = keyspace_id
-            .precond()
-            .ok_or_else(|| anyhow::anyhow!("not a userland keyspace"))?;
+        let precond_keyspace_id = keyspace_id.precond().ok_or_else(|| {
+            anyhow::anyhow!("attempted cleanup of non-data keyspace {:?}", keyspace_id)
+        })?;
 
         let mut muts = BTreeMap::new();
         let _guard = self.lock_mgr.write_lock(&key[..]).await;
@@ -954,7 +941,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         Ok(())
     }
 
-    async fn cleanup_committed_outcomes(
+    pub(super) async fn cleanup_committed_outcomes(
         &self,
         meta_synced: Arc<MetaSynced>,
         shards: Arc<dyn Shards + Sync + Send>,
@@ -1149,7 +1136,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
     }
 
     // Scans for committed outcomes that exist on disk already and delivers them to `sender`.
-    async fn scan_for_committed_outcomes(
+    pub(super) async fn scan_for_committed_outcomes(
         &self,
         sender: mpsc::Sender<(Txid, Timestamp, BTreeSet<Key>, BTreeSet<Key>)>,
     ) {
@@ -1221,17 +1208,14 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         range: Range<&[u8]>,
         direction: Direction,
     ) -> anyhow::Result<Range<Vec<u8>>> {
-        let owned_range = if colo_group_id == ColoGroupId::TABLET_META {
-            self.tablet_meta_range.borrow()
-        } else if colo_group_id == self.colo_group_id {
-            self.range.borrow()
-        } else {
+        if colo_group_id != self.colo_group_id {
             return Err(anyhow!(
                 "misroute: {:?} does not own any of {:?}",
                 self.tablet_id,
                 colo_group_id
             ));
-        };
+        }
+        let owned_range = self.range.borrow();
 
         let intersection = owned_range.intersection(&range);
         if intersection.is_empty() {
@@ -1264,26 +1248,6 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
     }
 
     fn check_key(&self, colo_group_id: ColoGroupId, key: &[u8]) -> anyhow::Result<()> {
-        if colo_group_id == ColoGroupId::META && self.tablet_id == TabletId::META {
-            return Ok(());
-        }
-
-        if colo_group_id == ColoGroupId::TABLET_META {
-            if key.len() < 12 {
-                return Err(anyhow!(
-                    "key {:?} too short for ColoGroupId::TABLET_META",
-                    key
-                ));
-            }
-            let tablet_id = TabletId(
-                ShardId(BigEndian::read_u32(&key[0..4])),
-                BigEndian::read_u64(&key[4..12]),
-            );
-            if self.tablet_id == tablet_id {
-                return Ok(());
-            }
-        }
-
         if self.colo_group_id != colo_group_id || !self.range.contains(&key) {
             return Err(anyhow!("{:?}/{:?} not owned", colo_group_id, key).into());
         }
@@ -1295,13 +1259,11 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
     async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
         let lsm_rw = self.lsm.read_write()?;
         lsm_rw.create_keyspace(keyspace_id).await?;
-        if keyspace_id.is_userland() {
-            lsm_rw
-                .create_keyspace(keyspace_id.pending().unwrap())
-                .await?;
-            lsm_rw
-                .create_keyspace(keyspace_id.precond().unwrap())
-                .await?;
+        if let Some(pending_keyspace_id) = keyspace_id.pending() {
+            lsm_rw.create_keyspace(pending_keyspace_id).await?;
+        }
+        if let Some(precond_keyspace_id) = keyspace_id.precond() {
+            lsm_rw.create_keyspace(precond_keyspace_id).await?;
         }
 
         Ok(())

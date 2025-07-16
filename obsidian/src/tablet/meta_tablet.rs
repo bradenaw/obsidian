@@ -27,13 +27,14 @@ use crate::types::Record;
 use crate::types::Revision;
 use crate::types::Timestamp;
 
-/// The meta tablet is special in two necessary ways:
+/// MetaTablets are special from LsmTablets in two necessary ways:
 ///
-/// 1. It always has TabletState::Active, and never transitions, because it can't participate in
-///    transfers. This is important because all other tablets default to having no RW permissions
-///    until they observe their own TabletMetadata. Obviously that doesn't work for the meta tablet
-///    because it needs to receive a write to make any TabletMetadata at all.
-/// 2. It doesn't participate in 2PC. For the sake of the simplicity of the interface, it
+/// 1. They always have TabletState::Active, and never transitions, because they can't participate
+///    in transfers. This is important because all other tablets default to having no RW
+///    permissions until they observe their own TabletMetadata. Obviously that doesn't work for the
+///    tablet hosting TabletId::META, because it needs to receive a write to make any
+///    TabletMetadata at all.
+/// 2. They cannot participate in 2PC. For the sake of the simplicity of the interface, it
 ///    implements those methods, but always errors.
 pub(crate) struct MetaTablet<S>
 where
@@ -48,8 +49,6 @@ where
 {
     pub(crate) async fn new(lsm: Lsm<S>) -> anyhow::Result<Self> {
         lsm.create_keyspace(KeyspaceId::META).await?;
-        // This never receives any writes but the read methods all look at it for conflicts.
-        lsm.create_keyspace(KeyspaceId::META.pending().unwrap()).await?;
 
         let (prepare_sender, _) = mpsc::channel(1024);
         let (commit_sender, _) = mpsc::channel(128);

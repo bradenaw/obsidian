@@ -5,6 +5,8 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use anyhow::anyhow;
+use byteorder::BigEndian;
+use byteorder::ByteOrder;
 use thiserror::Error;
 
 use crate::pb;
@@ -72,15 +74,15 @@ impl Debug for Timestamp {
 pub struct ColoGroupId(pub u32);
 
 impl ColoGroupId {
-    pub(crate) const META: Self = ColoGroupId(0xFFFFFFFF);
-    pub(crate) const TABLET_META: Self = ColoGroupId(0xFFFFFFFE);
+    pub(crate) const META: Self = ColoGroupId(u32::MAX);
+    pub(crate) const SHARD_META: Self = ColoGroupId(u32::MAX - 1);
 }
 
 impl Display for ColoGroupId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
             ColoGroupId::META => write!(f, "meta"),
-            ColoGroupId::TABLET_META => write!(f, "tablet_meta"),
+            ColoGroupId::SHARD_META => write!(f, "shard_meta"),
             _ => write!(f, "{}", self.0),
         }
     }
@@ -94,43 +96,61 @@ impl Debug for ColoGroupId {
 }
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
+/// Only the bottom 24 bits of the second item are usable by users.
 pub struct KeyspaceId(pub ColoGroupId, pub u32);
 
 impl KeyspaceId {
-    pub(crate) const META: Self = Self(ColoGroupId::META, 1);
-    pub(crate) const TX_OUTCOMES: Self = Self(ColoGroupId::TABLET_META, 2);
+    pub(crate) const META: Self = Self(ColoGroupId::META, 0xFF000000);
+    pub(crate) const TX_OUTCOMES: Self = Self(ColoGroupId::SHARD_META, 0xFF000000);
 
-    pub(crate) fn userland(&self) -> Option<KeyspaceId> {
+    /// If this is a pending or precond keyspace, returns the associated data keyspace.
+    pub(crate) fn data(&self) -> Option<KeyspaceId> {
         if !self.is_pending() && !self.is_precond() {
             return None;
         }
         Some(KeyspaceId(self.0, self.1 & 0x00FFFFFF))
     }
 
-    pub(crate) fn is_userland(&self) -> bool {
-        self.0 != ColoGroupId::TABLET_META && self.1 & 0xFF000000 == 0
+    pub(crate) fn is_data(&self) -> bool {
+        matches!(self.keyspace_type(), Ok(KeyspaceType::Data))
     }
 
+    /// If this is a data keyspace, returns the associated pending keyspace.
     pub(crate) fn pending(&self) -> Option<KeyspaceId> {
-        if !self.is_userland() {
+        if !self.is_data() {
             return None;
         }
         Some(KeyspaceId(self.0, self.1 | 0x01000000))
     }
 
     pub(crate) fn is_pending(&self) -> bool {
-        self.1 & 0xFF000000 == 0x01000000
+        matches!(self.keyspace_type(), Ok(KeyspaceType::Pending))
     }
 
+    /// If this is a data keyspace, returns the associated precond keyspace.
     pub(crate) fn precond(&self) -> Option<KeyspaceId> {
-        if !self.is_userland() {
+        if !self.is_data() {
             return None;
         }
         Some(KeyspaceId(self.0, self.1 | 0x02000000))
     }
 
     pub(crate) fn is_precond(&self) -> bool {
-        self.1 & 0xFF000000 == 0x02000000
+        matches!(self.keyspace_type(), Ok(KeyspaceType::Precond))
+    }
+
+    pub(crate) fn is_meta(&self) -> bool {
+        matches!(self.keyspace_type(), Ok(KeyspaceType::Meta))
+    }
+
+    pub(crate) fn keyspace_type(&self) -> anyhow::Result<KeyspaceType> {
+        match (self.1 & 0xFF000000) >> 24 {
+            0x00 => Ok(KeyspaceType::Data),
+            0x01 => Ok(KeyspaceType::Pending),
+            0x02 => Ok(KeyspaceType::Precond),
+            0xFF => Ok(KeyspaceType::Meta),
+            v => Err(anyhow!("unrecognized keyspace type {:02x}", v)),
+        }
     }
 }
 
@@ -145,12 +165,12 @@ impl Display for KeyspaceId {
             f.write_str("tx_outcomes")?;
             return Ok(());
         }
-        match self.userland() {
-            Some(userland_keyspace_id) => {
+        match self.data() {
+            Some(data_keyspace_id) => {
                 if self.is_precond() {
-                    write!(f, "precond({})", userland_keyspace_id.1)?;
+                    write!(f, "precond({})", data_keyspace_id.1)?;
                 } else if self.is_pending() {
-                    write!(f, "pending({})", userland_keyspace_id.1)?;
+                    write!(f, "pending({})", data_keyspace_id.1)?;
                 } else {
                     write!(f, "{}", self.1)?;
                 }
@@ -185,6 +205,20 @@ impl TryFrom<pb::KeyspaceId> for KeyspaceId {
     fn try_from(value: pb::KeyspaceId) -> Result<Self, Self::Error> {
         Ok(KeyspaceId(ColoGroupId(value.colo_group_id), value.id))
     }
+}
+
+pub(crate) enum KeyspaceType {
+    /// Data keyspaces hold the application data visible to the outside. Each data keyspace has an
+    /// associated pending and precond keyspace that holds intermediate records for 2PC writes in
+    /// progress.
+    Data,
+    /// Holds PendingMutation records for 2PC writes in progress to Data keyspaces.
+    Pending,
+    /// Holds PrecondLocks records for 2PC writes in progress to Data keyspaces.
+    Precond,
+    /// Metadata keyspaces can't participate in 2PC, so they do not have associated Pending/Precond
+    /// keyspaces.
+    Meta,
 }
 
 pub type Key = (KeyspaceId, Vec<u8>);
@@ -444,6 +478,16 @@ pub enum WriteError {
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct ShardId(pub(crate) u32);
+
+impl ShardId {
+    pub(crate) const ENCODED_LEN: usize = 4;
+
+    pub(crate) fn encode_fixed(&self) -> [u8; Self::ENCODED_LEN] {
+        let mut out = [0u8; Self::ENCODED_LEN];
+        BigEndian::write_u32(&mut out[..], self.0);
+        out
+    }
+}
 
 impl Display for ShardId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
