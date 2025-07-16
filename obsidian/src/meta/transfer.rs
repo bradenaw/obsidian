@@ -10,8 +10,6 @@ use crate::pb;
 // In a range transfer, the source tablet starts at Active and the destination starts at None. The
 // goal is to get the source to None and the destination to Active.
 //
-//
-// TODO: replace prepared with frozen
 //                                           ┌──────┐                                             //
 //                   ┌───────────────────────┤ None │<────────────────────────┐                   //
 //                   │                       └───┬──┘                         │                   //
@@ -20,64 +18,63 @@ use crate::pb;
 //                   │╴new colo group            v                            │                   //
 //                   │                     ┌───────────┐                      │                   //
 //                   │                     │ Hydrating ├──────────────────────┤                   //
-//                   │                     └─────┬─────┘           │          │                   //
-//                   │                           │               abort        │                   //
-//                   │                           │                            │                   //
-//                   │                           │╴src Frozen, all caught up  │                   //
-//                   │                           v                            │                   //
-//                   │                   ┌────────────────┐                   │                   //
-//                   │                   │ Prepared [c__] ├───────────────────┤                   //
-//                   │                   └───────┬────────┘        │          │                   //
-//                   │                           │               abort        │                   //
-//                   │                  src None╶│                            │                   //
+//                   │                     └─────┬─────┘                      │                   //
 //                   │                           │                            │                   //
 //                   │                           v                            │                   //
 //                   │                   ┌────────────────┐                   │                   //
-//                   └──────────────────>│ Active   [crw] │                   │                   //
-//                                       └────┬───────────┘                   │                   //
-//                                            │     ^                         │                   //
-//            dst Hydrating, nearly caught up╶│     │                         │                   //
-//                                            │     │                         │                   //
-//                                            │     │╴cancel transfer         │                   //
-//                                            v     │                         │                   //
-//                                       ┌──────────┴─────┐                   │                   //
-//                                       │ Frozen   [cr_] ├───────────────────┘                   //
-//                                       └────────────────┘         │                             //
-//                                                            dst Prepared                        //
+//                   │                   │ Frozen   [cr_] ├───────────────────┘                   //
+//                   │                   └────┬───────────┘                                       //
+//                   │                        │     ^                                             //
+//                   │                        │     │                                             //
+//                   │                        v     │                                             //
+//                   │                   ┌──────────┴─────┐                                       //
+//                   └──────────────────>│ Active   [crw] │                                       //
+//                                       └────────────────┘                                       //
 //
 //
-// And a state machine of the entire transfer, with souce on the left and destination on the right.
-// Note that there is always at least one [c**] tablet, and [**w] never exists alongside a separate
-// [c**].
+// And a state machine of the entire transfer, with source(s) on the left and destination(s) on the
+// right. Note that there is always at least one [c**] tablet, and [**w] never exists alongside a
+// separate [c**].
 //
-// TODO: replace prepared with frozen, add transfer states
 //            src         dst                                                                     //
 //       ┌─────────────────────┐                                                                  //
-//       │ Active [crw] │ None │                                                                  //
+//       │        None         │╴transfer state                                                   //
+//       ├─────────────────────┤                                                                  //
+//   src╶│ Active [crw] │ None │╴dst                                                              //
 //       └──────────┬──────────┘                                                                  //
 //                  │                                                                             //
 //                  v                                                                             //
 //    ┌──────────────────────────┐                                                                //
+//    │           Copy           │                                                                //
+//    ├──────────────────────────┤                                                                //
 //    │ Active [crw] │ Hydrating ├──────────────────────────────────────────┐                     //
 //    └──────────┬───────────────┘                                          │                     //
 //               │     ^                                                    │                     //
 //               v     │                                                    v                     //
 //    ┌────────────────┴─────────┐    ┌─────────────────────┐    ┌─────────────────────┐          //
+//    │         Catchup          │    │      Aborting       │    │       Aborted       │          //
+//    ├──────────────────────────┤    ├─────────────────────┤    ├─────────────────────┤          //
 //    │ Frozen [cr_] │ Hydrating ├───>│ Frozen [cr_] │ None ├───>│ Active [crw] │ None │          //
 //    └─────────────┬────────────┘    └─────────────────────┘    └─────────────────────┘          //
 //                  │                            ^                  (Transfer Aborted)            //
 //                  v                            │                                                //
-//  ┌───────────────────────────────┐            │                                                //
-//  │ Frozen [cr_] │ Prepared [c__] ├────────────┘                                                //
-//  └───────────────┬───────────────┘                                                             //
-//                  │                                                                             //
-//                  v                                                                             //
-//       ┌───────────────────────┐                                                                //
-//       │ None │ Prepared [c__] │    Once destination reaches None, it is no longer              //
-//       └──────────┬────────────┘    possible to abort                                           //
+//   ┌─────────────────────────────┐             │                                                //
+//   │            Synced           │             │                                                //
+//   ├─────────────────────────────┤             │                                                //
+//   │ Frozen [cr_] │ Frozen [cr_] ├─────────────┘                                                //
+//   └──────────────┬──────────────┘                                                              //
 //                  │                                                                             //
 //                  v                                                                             //
 //        ┌─────────────────────┐                                                                 //
+//        │      Handoff        │                                                                 //
+//        ├─────────────────────┤                                                                 //
+//        │ None │ Frozen [cr_] │    Once src reaches None, it is no longer                       //
+//        └─────────┬───────────┘    possible to abort                                            //
+//                  │                                                                             //
+//                  v                                                                             //
+//        ┌─────────────────────┐                                                                 //
+//        │      Complete       │                                                                 //
+//        ├─────────────────────┤                                                                 //
 //        │ None │ Active [crw] │                                                                 //
 //        └─────────────────────┘                                                                 //
 //        * Transfer Succeeded! *                                                                 //
