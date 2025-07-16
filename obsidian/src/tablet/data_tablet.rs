@@ -102,6 +102,7 @@ impl<S: Storage + Send + Sync + 'static> Tablet for DataTablet<S> {
     ) -> anyhow::Result<TxOutcome> {
         Err(anyhow!("DataTablet::try_commit not allowed").into())
     }
+
     async fn try_abort(&self, _txid: Txid) -> anyhow::Result<TxOutcome> {
         Err(anyhow!("DataTablet::try_abort not allowed").into())
     }

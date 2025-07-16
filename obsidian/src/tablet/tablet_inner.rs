@@ -500,8 +500,9 @@ where
 
     pub(super) async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
         let lsm_read = self.lsm.read()?;
+        let tx_outcome_key = txid.encode_fixed();
+        self.check_key(KeyspaceId::TX_OUTCOMES.0, &tx_outcome_key[..])?;
         loop {
-            let tx_outcome_key = txid.encode_fixed();
             let wait = {
                 let _guard = self.lock_mgr.read_lock(&tx_outcome_key[..]).await;
 
@@ -617,6 +618,8 @@ where
     ) -> anyhow::Result<TxOutcome> {
         let tx_outcome_key = txid.encode_fixed();
         {
+            self.check_key(KeyspaceId::TX_OUTCOMES.0, &tx_outcome_key[..])?;
+
             let _guard = self.lock_mgr.write_lock(&tx_outcome_key[..]).await;
             let lsm_rw = self.lsm.read_write()?;
 
