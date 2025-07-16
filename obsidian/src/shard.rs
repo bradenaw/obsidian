@@ -16,8 +16,9 @@ use crate::obsidian::Shards;
 use crate::obsidian::TabletId;
 use crate::range::Range;
 use crate::storage::Storage;
-use crate::tablet::LsmTablet;
+use crate::tablet::DataTablet;
 use crate::tablet::MetaTablet;
+use crate::tablet::ShardMetaTablet;
 use crate::tablet::Tablet;
 use crate::types::ColoGroupId;
 use crate::types::ShardId;
@@ -45,15 +46,27 @@ where
         let meta_synced = Arc::new(MetaSynced::new(Arc::clone(&meta)));
 
         let init_tablets: HashMap<TabletId, Arc<dyn Tablet + Send + Sync + 'static>> = {
+            let mut init_tablets = HashMap::new();
             if shard_id == TabletId::META.0 {
                 let meta_tablet = MetaTablet::new(lsm_builder.clone().build().await?).await?;
-                HashMap::from([(
+                init_tablets.insert(
                     TabletId::META,
                     Arc::new(meta_tablet) as Arc<dyn Tablet + Send + Sync>,
-                )])
-            } else {
-                HashMap::new()
+                );
             }
+
+            let shard_meta_tablet = ShardMetaTablet::new(
+                shard_id,
+                lsm_builder.clone().build().await?,
+                meta_synced.clone(),
+                shards.clone(),
+            ).await?;
+            init_tablets.insert(
+                TabletId::shard_meta(shard_id),
+                Arc::new(shard_meta_tablet) as Arc<dyn Tablet + Send + Sync>,
+            );
+
+            init_tablets
         };
 
         let inner = Arc::new(ShardInner {
@@ -227,7 +240,7 @@ where
 
         let lsm = self.lsm_builder.clone().build().await?;
 
-        let tablet = LsmTablet::new(
+        let tablet = DataTablet::new(
             tablet_id,
             colo_group_id,
             range,

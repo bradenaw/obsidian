@@ -3,7 +3,8 @@ mod meta_tablet;
 mod protected;
 mod sequencer;
 mod shard_meta_tablet;
-mod tablet;
+mod data_tablet;
+mod tablet_inner;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -83,7 +84,7 @@ pub(crate) trait Tablet {
 }
 
 #[allow(unused_imports)]
-pub(crate) use tablet::LsmTablet;
+pub(crate) use data_tablet::DataTablet;
 #[allow(unused_imports)]
 pub(crate) use meta_tablet::MetaTablet;
 #[allow(unused_imports)]

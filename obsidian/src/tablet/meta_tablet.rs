@@ -14,7 +14,7 @@ use crate::obsidian::Txid;
 use crate::range::Range;
 use crate::storage::Storage;
 use crate::tablet::protected::ProtectedLsm;
-use crate::tablet::tablet::LsmTabletInner;
+use crate::tablet::tablet_inner::TabletInner;
 use crate::tablet::Tablet;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
@@ -40,7 +40,7 @@ pub(crate) struct MetaTablet<S>
 where
     S: Storage + Send + Sync + 'static,
 {
-    inner: LsmTabletInner<S>,
+    inner: TabletInner<S>,
 }
 
 impl<S> MetaTablet<S>
@@ -54,7 +54,7 @@ where
         let (commit_sender, _) = mpsc::channel(128);
 
         Ok(Self {
-            inner: LsmTabletInner::new(
+            inner: TabletInner::new(
                 TabletId::META,
                 ColoGroupId::META,
                 Range::all(),

@@ -11,7 +11,6 @@ use std::time::Instant;
 
 use anyhow::anyhow;
 use async_stream::try_stream;
-use async_trait::async_trait;
 use futures::future;
 use futures::Stream;
 use futures::StreamExt;
@@ -19,14 +18,12 @@ use futures::TryStreamExt;
 use prost::Message;
 use tokio::sync::mpsc;
 
-use crate::lsm::Lsm;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
 use crate::meta::MetaState;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::meta::SyncType;
-use crate::meta::TabletState;
 use crate::obsidian::InternalError;
 use crate::obsidian::Router;
 use crate::obsidian::Shards;
@@ -42,7 +39,6 @@ use crate::tablet::protected::LsmRead;
 use crate::tablet::protected::LsmReadWrite;
 use crate::tablet::protected::ProtectedLsm;
 use crate::tablet::sequencer::Sequencer;
-use crate::tablet::Tablet;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::HistoryRange;
@@ -55,7 +51,6 @@ use crate::types::Revision;
 use crate::types::RevisionValue;
 use crate::types::Timestamp;
 use crate::util::encode;
-use crate::util::Background;
 use crate::util::Decode;
 use crate::util::Encode;
 use crate::util::Retry;
@@ -63,195 +58,7 @@ use crate::util::Retry;
 const MAX_PRECOND_VALUE_LEN: usize = 256;
 const WAIT_ABORT_TIMEOUT: Duration = Duration::from_millis(1_000);
 
-pub(crate) struct LsmTablet<S: Storage> {
-    inner: Arc<LsmTabletInner<S>>,
-    meta_synced: Arc<MetaSynced>,
-
-    bg: Background,
-}
-
-#[async_trait]
-impl<S: Storage + Send + Sync + 'static> Tablet for LsmTablet<S> {
-    async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
-        self.inner.get(ts, key).await
-    }
-
-    async fn get_latest(&self, key: Key) -> Result<(Timestamp, Option<Record>), InternalError> {
-        self.inner.get_latest(key).await
-    }
-
-    async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError> {
-        self.inner.latest_snapshot(keys).await
-    }
-
-    async fn scan_page(
-        &self,
-        ts: Timestamp,
-        keyspace_id: KeyspaceId,
-        range: Range<&[u8]>,
-        direction: Direction,
-        limit: usize,
-    ) -> Result<(Vec<Record>, Option<Range<Vec<u8>>>), InternalError> {
-        self.inner
-            .scan_page(ts, keyspace_id, range, direction, limit)
-            .await
-    }
-
-    async fn history_page(
-        &self,
-        key: Key,
-        range: HistoryRange,
-        direction: Direction,
-        limit: usize,
-    ) -> Result<(Vec<Revision>, Option<HistoryRange>), InternalError> {
-        self.inner.history_page(key, range, direction, limit).await
-    }
-
-    async fn write(
-        &self,
-        preconds: Vec<Precondition>,
-        muts: BTreeMap<Key, Mutation>,
-    ) -> Result<Timestamp, InternalError> {
-        self.inner.write(preconds, muts).await
-    }
-
-    async fn prepare(
-        &self,
-        txid: Txid,
-        preconds: Vec<Precondition>,
-        muts: BTreeMap<Key, Mutation>,
-    ) -> Result<Timestamp, InternalError> {
-        self.inner.prepare(txid, preconds, muts).await
-    }
-
-    async fn try_commit(
-        &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<Key>,
-        mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<TxOutcome> {
-        self.inner
-            .try_commit(txid, ts, precond_keys, mut_keys)
-            .await
-    }
-    async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
-        self.inner.try_abort(txid).await
-    }
-    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
-        self.inner.wait(txid).await
-    }
-    async fn cleanup_committed(
-        &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<Key>,
-        mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<()> {
-        self.inner
-            .cleanup_committed(txid, ts, precond_keys, mut_keys)
-            .await
-    }
-
-    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
-        self.meta_synced.wait(ts).await
-    }
-}
-
-impl<S: Storage + Send + Sync + 'static> LsmTablet<S> {
-    pub async fn new(
-        tablet_id: TabletId,
-        colo_group_id: ColoGroupId,
-        range: Range<Vec<u8>>,
-        lsm: Lsm<S>,
-        meta_synced: Arc<MetaSynced>,
-        shards: Arc<dyn Shards + Sync + Send>,
-    ) -> anyhow::Result<Self> {
-        let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
-        let (commit_sender, commit_receiver) = mpsc::channel(128);
-
-        lsm.create_keyspace(KeyspaceId::TX_OUTCOMES).await?;
-
-        let inner = Arc::new(LsmTabletInner::new(
-            tablet_id,
-            colo_group_id,
-            range,
-            ProtectedLsm::new(tablet_id, lsm, TabletState::None),
-            prepare_sender.clone(),
-            commit_sender.clone(),
-        ));
-
-        let bg = Background::new();
-
-        bg.spawn({
-            let inner = inner.clone();
-            let meta_synced = meta_synced.clone();
-            let shards = shards.clone();
-            async move {
-                inner
-                    .cleanup_committed_outcomes(meta_synced, shards, commit_receiver)
-                    .await;
-            }
-        });
-
-        bg.spawn({
-            let inner = inner.clone();
-            let shards = shards.clone();
-            async move {
-                inner.resolve_prepared(&shards, prepare_receiver).await;
-            }
-        });
-
-        bg.spawn({
-            let inner = inner.clone();
-            let prepare_sender = prepare_sender.clone();
-            async move {
-                inner.scan_for_pending_mutations(prepare_sender).await;
-            }
-        });
-
-        bg.spawn({
-            let inner = inner.clone();
-            async move {
-                inner.scan_for_precond_locks(prepare_sender).await;
-            }
-        });
-
-        bg.spawn({
-            let inner = inner.clone();
-            async move {
-                inner.scan_for_committed_outcomes(commit_sender).await;
-            }
-        });
-
-        bg.spawn({
-            let inner = inner.clone();
-            async move {
-                inner.abort_long_waits().await;
-            }
-        });
-
-        {
-            let inner = inner.clone();
-            meta_synced
-                .subscribe(move |sync_type, snapshot: MetaSyncedSnapshot| {
-                    let inner = inner.clone();
-                    async move {
-                        inner.sync_meta(sync_type, snapshot).await;
-                    }
-                })
-                .await;
-        }
-
-        Ok(Self {
-            inner,
-            meta_synced,
-            bg,
-        })
-    }
-}
-
-pub(super) struct LsmTabletInner<S: Storage> {
+pub(super) struct TabletInner<S: Storage> {
     tablet_id: TabletId,
     colo_group_id: ColoGroupId,
     range: Range<Vec<u8>>,
@@ -266,7 +73,10 @@ pub(super) struct LsmTabletInner<S: Storage> {
     waiters: Waiters,
 }
 
-impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
+impl<S> TabletInner<S>
+where
+    S: Storage + Send + Sync + 'static,
+{
     pub(super) fn new(
         tablet_id: TabletId,
         colo_group_id: ColoGroupId,
@@ -578,7 +388,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         Ok(*ts)
     }
 
-    async fn prepare(
+    pub(super) async fn prepare(
         &self,
         txid: Txid,
         preconds: Vec<Precondition>,
@@ -724,7 +534,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         }
     }
 
-    async fn cleanup_committed(
+    pub(super) async fn cleanup_committed(
         &self,
         txid: Txid,
         ts: Timestamp,
@@ -1024,7 +834,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         Ok(())
     }
 
-    async fn resolve_prepared(
+    pub(super) async fn resolve_prepared(
         &self,
         shards: &Arc<dyn Shards + Send + Sync>,
         receiver: mpsc::Receiver<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
@@ -1057,7 +867,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
     }
 
     // Scans for pending mutations that exist on disk already and delivers them to `sender`.
-    async fn scan_for_pending_mutations(
+    pub(super) async fn scan_for_pending_mutations(
         &self,
         sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
     ) {
@@ -1096,7 +906,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
     }
 
     // Scans for precond locks that exist on disk already and delivers them to `sender`.
-    async fn scan_for_precond_locks(
+    pub(super) async fn scan_for_precond_locks(
         &self,
         sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
     ) {
@@ -1190,7 +1000,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         )
     }
 
-    async fn abort_long_waits(&self) {
+    pub(super) async fn abort_long_waits(&self) {
         loop {
             let (instant, txid) = self.waiters.pop_oldest().await;
             let elapsed = instant.elapsed();
@@ -1255,7 +1065,6 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         Ok(())
     }
 
-    // TODO: remove?
     async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
         let lsm_rw = self.lsm.read_write()?;
         lsm_rw.create_keyspace(keyspace_id).await?;
@@ -1269,7 +1078,7 @@ impl<S: Storage + Send + Sync + 'static> LsmTabletInner<S> {
         Ok(())
     }
 
-    async fn sync_meta(&self, sync_type: SyncType, snapshot: MetaSyncedSnapshot) {
+    pub(super) async fn sync_meta(&self, sync_type: SyncType, snapshot: MetaSyncedSnapshot) {
         Retry::new()
             .indefinitely(&async || -> anyhow::Result<()> {
                 let sync_type = sync_type.clone();
@@ -1566,8 +1375,8 @@ impl Waiters {
 mod tests {
     use std::collections::BTreeSet;
 
+    use super::TxOutcomeRecord;
     use crate::pb;
-    use crate::tablet::tablet::TxOutcomeRecord;
     use crate::test::assert_roundtrip_pb;
     use crate::types::ColoGroupId;
     use crate::types::KeyspaceId;

@@ -17,7 +17,7 @@ use crate::obsidian::Txid;
 use crate::range::Range;
 use crate::storage::Storage;
 use crate::tablet::protected::ProtectedLsm;
-use crate::tablet::tablet::LsmTabletInner;
+use crate::tablet::tablet_inner::TabletInner;
 use crate::tablet::Tablet;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
@@ -44,7 +44,7 @@ pub(crate) struct ShardMetaTablet<S>
 where
     S: Storage + Send + Sync + 'static,
 {
-    inner: Arc<LsmTabletInner<S>>,
+    inner: Arc<TabletInner<S>>,
     bg: Background,
 }
 
@@ -59,16 +59,13 @@ where
         shards: Arc<dyn Shards + Sync + Send>,
     ) -> anyhow::Result<Self> {
         lsm.create_keyspace(KeyspaceId::TX_OUTCOMES).await?;
-        // This never receives any writes but the read methods all look at it for conflicts.
-        lsm.create_keyspace(KeyspaceId::TX_OUTCOMES.pending().unwrap())
-            .await?;
 
         let (prepare_sender, _) = mpsc::channel(1);
         let (commit_sender, commit_receiver) = mpsc::channel(128);
 
         let tablet_id = TabletId::shard_meta(shard_id);
 
-        let inner = Arc::new(LsmTabletInner::new(
+        let inner = Arc::new(TabletInner::new(
             tablet_id,
             ColoGroupId::SHARD_META,
             TabletId::shard_meta_owned_range(shard_id),

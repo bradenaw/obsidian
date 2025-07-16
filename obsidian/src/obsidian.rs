@@ -20,7 +20,6 @@ use futures::Stream;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use rand::seq::SliceRandom;
-use rand::Rng;
 use thiserror::Error;
 
 use crate::meta::Meta;
@@ -201,12 +200,11 @@ impl Obsidian for Frontend {
 
         let write_by_tablet = self.split_write(preconds.clone(), muts.clone())?;
 
-        let owner_tablet_id = write_by_tablet
-            .keys()
-            .skip(rand::thread_rng().gen_range(0..write_by_tablet.len()))
-            .next()
-            .unwrap();
-        let mut txid = Txid::new(*owner_tablet_id);
+        let owner_shard_id =
+            choose_shard(write_by_tablet.keys().copied()).ok_or_else(|| anyhow!("empty write"))?;
+        let owner_tablet_id = TabletId::shard_meta(owner_shard_id);
+
+        let mut txid = Txid::new(owner_tablet_id);
 
         if write_by_tablet.len() == 1 {
             let (tablet_id, (preconds, muts)) = write_by_tablet.into_iter().next().unwrap();
@@ -242,10 +240,12 @@ impl Obsidian for Frontend {
             let mut max_prepare_ts = Timestamp::ZERO;
             let tablets = write_by_tablet
                 .keys()
+                .copied()
+                .chain(std::iter::once(owner_tablet_id))
                 .map(|tablet_id| {
                     self.shards
-                        .tablet(*tablet_id)
-                        .map(|tablet| (*tablet_id, tablet))
+                        .tablet(tablet_id)
+                        .map(|tablet| (tablet_id, tablet))
                 })
                 .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
 
@@ -373,6 +373,15 @@ impl Obsidian for Frontend {
 
         Ok(())
     }
+}
+
+fn choose_shard<I: Iterator<Item = TabletId>>(iter: I) -> Option<ShardId> {
+    let mut shard_ids: Vec<_> = iter.map(|tablet_id| tablet_id.0).collect();
+
+    shard_ids.sort();
+    shard_ids.dedup();
+
+    shard_ids.choose(&mut rand::thread_rng()).copied()
 }
 
 impl Frontend {
