@@ -138,7 +138,7 @@ impl<S: Storage + Send + Sync + 'static> DataTablet<S> {
         shards: Arc<dyn Shards + Sync + Send>,
     ) -> anyhow::Result<Self> {
         let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
-        let (commit_sender, commit_receiver) = mpsc::channel(128);
+        let (commit_sender, _) = mpsc::channel(1);
 
         lsm.create_keyspace(KeyspaceId::TX_OUTCOMES).await?;
 
@@ -152,17 +152,6 @@ impl<S: Storage + Send + Sync + 'static> DataTablet<S> {
         ));
 
         let bg = Background::new();
-
-        bg.spawn({
-            let inner = inner.clone();
-            let meta_synced = meta_synced.clone();
-            let shards = shards.clone();
-            async move {
-                inner
-                    .cleanup_committed_outcomes(meta_synced, shards, commit_receiver)
-                    .await;
-            }
-        });
 
         bg.spawn({
             let inner = inner.clone();
