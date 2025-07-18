@@ -18,6 +18,7 @@ use crate::lsm::block::Block;
 use crate::lsm::block::BlockBuilder;
 use crate::lsm::util::LsmRevision;
 use crate::lsm::util::PrefixCompressedKV;
+use crate::lsm::RunId;
 use crate::range::Bound;
 use crate::range::KeyOrBound;
 use crate::range::Range;
@@ -36,7 +37,7 @@ use crate::util::IteratorEither;
 pub(super) struct Run<R> {
     reader: R,
 
-    id: Uuid,
+    id: RunId,
     size: usize,
     keyspace_id: KeyspaceId,
     min_ts: Timestamp,
@@ -52,16 +53,17 @@ pub(super) struct Run<R> {
 
 impl<R> Run<R> {
     // Assumes S is in (key, rev(ts)) order, and assumes termination at a reasonable size limit.
-    pub(super) async fn write<
-        W: AsyncWrite + Unpin,
-        S: Stream<Item = anyhow::Result<LsmRevision>>,
-    >(
+    pub(super) async fn write<W, S>(
         w: &mut W,
-        id: Uuid,
+        id: RunId,
         keyspace_id: KeyspaceId,
         block_size_target: u64,
         s: S,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<()>
+    where
+        W: AsyncWrite + Unpin,
+        S: Stream<Item = anyhow::Result<LsmRevision>>,
+    {
         pin_mut!(s);
 
         let mut b = RunBuilder::new(w, id, keyspace_id, block_size_target);
@@ -113,7 +115,7 @@ impl<R: FileReader> Run<R> {
         })
     }
 
-    pub(super) fn id(&self) -> Uuid {
+    pub(super) fn id(&self) -> RunId {
         self.id
     }
 
@@ -242,7 +244,7 @@ impl<R: FileReader> Run<R> {
 
 struct RunBuilder<W> {
     w: W,
-    id: Uuid,
+    id: RunId,
     keyspace_id: KeyspaceId,
     block_size_target: u64,
 
@@ -255,7 +257,7 @@ struct RunBuilder<W> {
 }
 
 impl<W: AsyncWrite + Unpin> RunBuilder<W> {
-    fn new(w: W, id: Uuid, keyspace_id: KeyspaceId, block_size_target: u64) -> Self {
+    fn new(w: W, id: RunId, keyspace_id: KeyspaceId, block_size_target: u64) -> Self {
         Self {
             w,
             id,
@@ -355,7 +357,7 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
 }
 
 struct RunTrailer {
-    id: Uuid,
+    id: RunId,
     keyspace_id: KeyspaceId,
     min_ts: Timestamp,
     max_ts: Timestamp,
@@ -384,7 +386,7 @@ impl RunTrailer {
         let id = {
             let mut uuid_bytes = [0u8; 16];
             uuid_bytes.copy_from_slice(&trailer[0..16]);
-            Uuid::from_bytes(uuid_bytes)
+            RunId(Uuid::from_bytes(uuid_bytes))
         };
         let keyspace_id = KeyspaceId(
             ColoGroupId(LittleEndian::read_u32(&trailer[16..20])),
@@ -416,7 +418,7 @@ impl RunTrailer {
     ) -> anyhow::Result<()> {
         let mut trailer = [0u8; Self::ENCODED_LEN];
 
-        trailer[0..16].copy_from_slice(&self.id.as_bytes()[..]);
+        trailer[0..16].copy_from_slice(&self.id.encode_fixed()[..]);
         LittleEndian::write_u32(&mut trailer[16..20], self.keyspace_id.0 .0);
         LittleEndian::write_u32(&mut trailer[20..24], self.keyspace_id.1);
         LittleEndian::write_u64(&mut trailer[24..32], self.min_ts.as_nanos());
@@ -466,13 +468,13 @@ mod test {
     use futures::TryStreamExt;
     use proptest::prelude::*;
     use rand::RngCore;
-    use uuid::Uuid;
 
     use super::dump_run;
     use super::Run;
     use super::RunBuilder;
     use crate::lsm::test::TestFile;
     use crate::lsm::util::LsmRevision;
+    use crate::lsm::RunId;
     use crate::range::Bound;
     use crate::range::Range;
     use crate::types::ColoGroupId;
@@ -518,7 +520,7 @@ mod test {
         let mut v = vec![];
         Run::<()>::write(
             &mut v,
-            Uuid::new_v4(),
+            RunId::new(),
             KeyspaceId(ColoGroupId(1), 1),
             32768,
             futures::stream::iter(revisions.iter().map(|revision| Ok(revision.clone()))),
@@ -570,7 +572,7 @@ mod test {
         let mut v = vec![];
         let mut b = RunBuilder::new(
             &mut v,
-            Uuid::new_v4(),
+            RunId::new(),
             KeyspaceId(ColoGroupId(1), 1),
             u64::MAX,
         );
@@ -732,7 +734,7 @@ mod test {
                 let mut v = vec![];
                 Run::<()>::write(
                     &mut v,
-                    Uuid::new_v4(),
+                    RunId::new(),
                     KeyspaceId(ColoGroupId(1), 1),
                     1024,
                     futures::stream::iter(revisions.iter().map(|revision| Ok(revision.clone()))),

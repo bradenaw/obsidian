@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fmt::Debug;
+use std::fmt::Display;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -345,13 +346,16 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
     async fn recovery(
         wal: &wal::Wal<WalEntry>,
         storage: &S,
-    ) -> anyhow::Result<(HashMap<KeyspaceId, LoadedManifest<S::R>>, Option<wal::SeqNo>)> {
+    ) -> anyhow::Result<(
+        HashMap<KeyspaceId, LoadedManifest<S::R>>,
+        Option<wal::SeqNo>,
+    )> {
         let oldest_seqno = wal.oldest_available();
         let mut newest_seqno = None;
         let mut wal_stream = wal.stream(oldest_seqno, false).boxed();
 
         let mut bufs = HashMap::new();
-        let mut manifest_uuids = HashMap::new();
+        let mut manifest_run_ids = HashMap::new();
 
         while let Some((seqno, entry)) = wal_stream.try_next().await? {
             match entry {
@@ -375,7 +379,7 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
                         .binary_search_by_key(&included_seqno, |(seqno, _, _)| *seqno)
                         .unwrap_or_else(core::convert::identity);
                     buf.drain(0..=trim_to_idx);
-                    manifest_uuids.insert(keyspace_id, levels);
+                    manifest_run_ids.insert(keyspace_id, levels);
                 }
             }
             newest_seqno = Some(seqno);
@@ -391,14 +395,14 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
             }
 
             // TODO: no unwrap by putting both in the same map
-            let keyspace_manifest_uuids = manifest_uuids.get(&keyspace_id).unwrap();
+            let keyspace_manifest_run_ids = manifest_run_ids.get(&keyspace_id).unwrap();
             let mut manifest = LoadedManifest::new(7);
             manifest.l0_sealed.push(Arc::new(memtable));
 
-            for i in 1..keyspace_manifest_uuids.len() {
-                let mut runs = Vec::with_capacity(keyspace_manifest_uuids[i].len());
-                for run_uuid in &keyspace_manifest_uuids[i] {
-                    let run = Run::open(storage.get(&run_uuid.to_string()).await?).await?;
+            for i in 1..keyspace_manifest_run_ids.len() {
+                let mut runs = Vec::with_capacity(keyspace_manifest_run_ids[i].len());
+                for run_run_ids in &keyspace_manifest_run_ids[i] {
+                    let run = Run::open(storage.get(&run_run_ids.to_string()).await?).await?;
                     runs.push(run);
                 }
                 runs.sort_by_key(|run| run.range().lower);
@@ -454,6 +458,34 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
             _ = wal_processed.send(seqno);
         }
         Ok(())
+    }
+}
+
+#[derive(Eq, PartialEq, Hash, Clone, Copy)]
+pub(crate) struct RunId(Uuid);
+
+impl RunId {
+    fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    fn encode_fixed(&self) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        out.copy_from_slice(self.0.as_bytes());
+        out
+    }
+}
+
+impl Display for RunId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self.0, f)
+    }
+}
+
+impl Debug for RunId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("run:")?;
+        Display::fmt(self, f)
     }
 }
 
@@ -676,7 +708,7 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
         keyspace_id: KeyspaceId,
         manifest: &LoadedManifest<S::R>,
         storage: &S,
-    ) -> anyhow::Result<(Vec<Run<S::R>>, HashSet<Uuid>, wal::SeqNo)> {
+    ) -> anyhow::Result<(Vec<Run<S::R>>, HashSet<RunId>, wal::SeqNo)> {
         // We must always compact the oldest l0, because get, etc. assume that everything in
         // memtables is newer than anything in any lower levels.
         let chosen_l0 = &manifest.l0_sealed[0];
@@ -713,7 +745,7 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
         manifest: &LoadedManifest<S::R>,
         storage: &S,
         level: usize,
-    ) -> anyhow::Result<(Vec<Run<S::R>>, HashSet<Uuid>)> {
+    ) -> anyhow::Result<(Vec<Run<S::R>>, HashSet<RunId>)> {
         if manifest.levels[level].runs.is_empty() {
             return Ok((vec![], HashSet::new()));
         }
@@ -753,7 +785,7 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
         into_level: usize,
         entries_range: Range<Vec<u8>>,
         entries: impl Stream<Item = anyhow::Result<LsmRevision>> + Send,
-    ) -> anyhow::Result<(Vec<Run<S::R>>, HashSet<Uuid>)> {
+    ) -> anyhow::Result<(Vec<Run<S::R>>, HashSet<RunId>)> {
         let overlapping_runs = manifest.levels[into_level].overlapping_runs(entries_range);
 
         let removes = overlapping_runs.iter().map(|run| run.id()).collect();
@@ -792,7 +824,7 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
             let mut curr_size = 0u64;
             let (mut tx, rx) = futures::channel::mpsc::channel(256);
 
-            let id = Uuid::new_v4();
+            let id = RunId::new();
             let (mut writer, reader) = tokio::io::duplex(16384);
             future::try_join3(
                 storage.put(&id.to_string(), reader),
@@ -1240,7 +1272,7 @@ impl MaybeActiveMemtable {
 // (b) l0_active memtables may swap from active to sealed.
 struct LoadedManifest<R> {
     // May still be receiving writes.
-    l0_active: Vec<(Uuid, Arc<RwLock<MaybeActiveMemtable>>)>,
+    l0_active: Vec<(RunId, Arc<RwLock<MaybeActiveMemtable>>)>,
     // Guaranteed to be read-only. In insertion order.
     l0_sealed: Vec<Arc<Memtable>>,
     levels: Vec<Level<R>>,
@@ -1255,7 +1287,7 @@ impl<R: FileReader + Clone> LoadedManifest<R> {
         }
     }
 
-    fn with_mark_sealed(&self, id: Uuid) -> Self {
+    fn with_mark_sealed(&self, id: RunId) -> Self {
         let mut l0_active = Vec::with_capacity(self.l0_active.len() - 1);
         let mut l0_sealed = self.l0_sealed.clone();
 
@@ -1296,7 +1328,7 @@ impl<R: FileReader + Clone> LoadedManifest<R> {
     }
 
     // TODO: Return an error if not all `remove`s appear in the manifest.
-    fn with_ingest(&self, into_level: usize, mut add: Vec<Run<R>>, remove: HashSet<Uuid>) -> Self {
+    fn with_ingest(&self, into_level: usize, mut add: Vec<Run<R>>, remove: HashSet<RunId>) -> Self {
         log::info!(
             "compacted into l{}: {:?} -> {:?}",
             into_level,
@@ -1449,7 +1481,7 @@ impl<R: FileReader> Level<R> {
 #[derive(Clone, Debug)]
 pub(crate) enum WalEntry {
     Write(Timestamp, Vec<(KeyspaceId, Vec<u8>, RevisionValue)>),
-    Manifest(KeyspaceId, wal::SeqNo, Vec<Vec<Uuid>>),
+    Manifest(KeyspaceId, wal::SeqNo, Vec<Vec<RunId>>),
 }
 
 impl wal::Entry for WalEntry {
@@ -1478,18 +1510,18 @@ mod test {
     use byteorder::ByteOrder;
     use futures::TryStreamExt;
     use proptest::prelude::*;
-    use uuid::Uuid;
 
     use super::Level;
+    use super::LoadedManifest;
     use super::Lsm;
     use super::LsmBuilder;
     use super::LsmInnerInner;
-    use super::LoadedManifest;
     use super::MaybeActiveMemtable;
     use crate::lsm::memtable::Memtable;
     use crate::lsm::run::dump_run;
     use crate::lsm::run::Run;
     use crate::lsm::util::LsmRevision;
+    use crate::lsm::RunId;
     use crate::range::Bound;
     use crate::range::Range;
     use crate::storage::FileReader;
@@ -2494,7 +2526,7 @@ mod test {
                     let mut v = vec![];
                     Run::<()>::write(
                         &mut v,
-                        Uuid::new_v4(),
+                        RunId::new(),
                         KeyspaceId(ColoGroupId(1), 1),
                         1024, // block_size_target
                         futures::stream::iter(revisions.into_iter().map(|revision| Ok(revision))),

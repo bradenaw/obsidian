@@ -1,9 +1,8 @@
 use std::cmp;
 use std::collections::BTreeMap;
 
-use uuid::Uuid;
-
 use crate::lsm::util::LsmRevision;
+use crate::lsm::RunId;
 use crate::range::Bound;
 use crate::range::Range;
 use crate::types::Direction;
@@ -21,7 +20,7 @@ impl Default for Memtable {
 }
 
 pub(crate) struct Memtable {
-    id: Uuid,
+    id: RunId,
     size: u64,
     max_seqno: wal::SeqNo,
     kvs: BTreeMap<Vec<u8>, BTreeMap<Timestamp, RevisionValue>>,
@@ -31,7 +30,7 @@ pub(crate) struct Memtable {
 impl Memtable {
     pub fn new() -> Self {
         Self {
-            id: Uuid::new_v4(),
+            id: RunId::new(),
             size: 0,
             kvs: BTreeMap::new(),
             max_key_len: 0,
@@ -39,7 +38,7 @@ impl Memtable {
         }
     }
 
-    pub fn id(&self) -> Uuid {
+    pub fn id(&self) -> RunId {
         self.id
     }
 
