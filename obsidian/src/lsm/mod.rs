@@ -311,7 +311,7 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
                     self.run_size_target,
                     self.block_size_target,
                     keyspace_id,
-                    Manifest::new(7),
+                    LoadedManifest::new(7),
                     self.wal.clone(),
                     self.storage.clone(),
                 )
@@ -345,7 +345,7 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
     async fn recovery(
         wal: &wal::Wal<WalEntry>,
         storage: &S,
-    ) -> anyhow::Result<(HashMap<KeyspaceId, Manifest<S::R>>, Option<wal::SeqNo>)> {
+    ) -> anyhow::Result<(HashMap<KeyspaceId, LoadedManifest<S::R>>, Option<wal::SeqNo>)> {
         let oldest_seqno = wal.oldest_available();
         let mut newest_seqno = None;
         let mut wal_stream = wal.stream(oldest_seqno, false).boxed();
@@ -392,7 +392,7 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
 
             // TODO: no unwrap by putting both in the same map
             let keyspace_manifest_uuids = manifest_uuids.get(&keyspace_id).unwrap();
-            let mut manifest = Manifest::new(7);
+            let mut manifest = LoadedManifest::new(7);
             manifest.l0_sealed.push(Arc::new(memtable));
 
             for i in 1..keyspace_manifest_uuids.len() {
@@ -472,7 +472,7 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
         run_size_target: u64,
         block_size_target: u64,
         keyspace_id: KeyspaceId,
-        manifest: Manifest<S::R>,
+        manifest: LoadedManifest<S::R>,
         wal: Arc<wal::Wal<WalEntry>>,
         storage: Arc<S>,
     ) -> anyhow::Result<Self> {
@@ -674,7 +674,7 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
         run_size_target: u64,
         block_size_target: u64,
         keyspace_id: KeyspaceId,
-        manifest: &Manifest<S::R>,
+        manifest: &LoadedManifest<S::R>,
         storage: &S,
     ) -> anyhow::Result<(Vec<Run<S::R>>, HashSet<Uuid>, wal::SeqNo)> {
         // We must always compact the oldest l0, because get, etc. assume that everything in
@@ -710,7 +710,7 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
         run_size_target: u64,
         block_size_target: u64,
         keyspace_id: KeyspaceId,
-        manifest: &Manifest<S::R>,
+        manifest: &LoadedManifest<S::R>,
         storage: &S,
         level: usize,
     ) -> anyhow::Result<(Vec<Run<S::R>>, HashSet<Uuid>)> {
@@ -748,7 +748,7 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
         run_size_target: u64,
         block_size_target: u64,
         keyspace_id: KeyspaceId,
-        manifest: &Manifest<S::R>,
+        manifest: &LoadedManifest<S::R>,
         storage: &S,
         into_level: usize,
         entries_range: Range<Vec<u8>>,
@@ -851,7 +851,7 @@ struct LsmInnerInner<R> {
 
     l0_compact_notify: tokio::sync::mpsc::Sender<()>,
     l0_active: AtomicArc<RwLock<MaybeActiveMemtable>>,
-    manifest: AtomicArc<Manifest<R>>,
+    manifest: AtomicArc<LoadedManifest<R>>,
 }
 
 impl<R: FileReader + Clone + Sync> LsmInnerInner<R> {
@@ -859,7 +859,7 @@ impl<R: FileReader + Clone + Sync> LsmInnerInner<R> {
         l0_max_size: u64,
         run_size_target: u64,
         block_size_target: u64,
-        initial_manifest: Manifest<R>,
+        initial_manifest: LoadedManifest<R>,
         l0_compact_notify: tokio::sync::mpsc::Sender<()>,
     ) -> Self {
         let l0_active = Arc::new(RwLock::new(MaybeActiveMemtable::Active(Memtable::new())));
@@ -1238,7 +1238,7 @@ impl MaybeActiveMemtable {
 // Mostly immutable, except that:
 // (a) memtables in l0_active may still be receiving writes.
 // (b) l0_active memtables may swap from active to sealed.
-struct Manifest<R> {
+struct LoadedManifest<R> {
     // May still be receiving writes.
     l0_active: Vec<(Uuid, Arc<RwLock<MaybeActiveMemtable>>)>,
     // Guaranteed to be read-only. In insertion order.
@@ -1246,7 +1246,7 @@ struct Manifest<R> {
     levels: Vec<Level<R>>,
 }
 
-impl<R: FileReader + Clone> Manifest<R> {
+impl<R: FileReader + Clone> LoadedManifest<R> {
     fn new(n_levels: usize) -> Self {
         Self {
             l0_active: vec![],
@@ -1351,7 +1351,7 @@ impl<R: FileReader + Clone> Manifest<R> {
     }
 }
 
-impl<R: FileReader> Debug for Manifest<R> {
+impl<R: FileReader> Debug for LoadedManifest<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "== manifest =====\n")?;
         write!(f, "l0_active\n")?;
@@ -1484,7 +1484,7 @@ mod test {
     use super::Lsm;
     use super::LsmBuilder;
     use super::LsmInnerInner;
-    use super::Manifest;
+    use super::LoadedManifest;
     use super::MaybeActiveMemtable;
     use crate::lsm::memtable::Memtable;
     use crate::lsm::run::dump_run;
@@ -2268,7 +2268,7 @@ mod test {
         Ok(())
     }
 
-    fn dump_manifest<R: FileReader + Clone>(manifest: &Manifest<R>) {
+    fn dump_manifest<R: FileReader + Clone>(manifest: &LoadedManifest<R>) {
         println!("== manifest =====");
         println!("l0_active");
         for (_, memtable_lock) in &manifest.l0_active {
@@ -2477,7 +2477,7 @@ mod test {
         }
         let mut l0_sealed = Memtable::new();
 
-        let mut manifest = Manifest::new(1);
+        let mut manifest = LoadedManifest::new(1);
         for x in (0..=x_max).rev().filter(|x| x % 2 == 1) {
             let mut level = Level::new();
             for y in (0..diagram.len()).filter(|y| y % 2 == 0) {
