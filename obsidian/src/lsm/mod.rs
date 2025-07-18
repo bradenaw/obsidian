@@ -343,6 +343,54 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         self.inner.load().keys().copied().collect()
     }
 
+    pub fn manifest(&self) -> Manifest {
+        let lsm_inner_by_keyspace = self.inner.load();
+        let mut by_keyspace = HashMap::new();
+        for (keyspace_id, lsm_inner) in lsm_inner_by_keyspace.iter() {
+            let mut l0 = Vec::new();
+            let loaded_manifest = lsm_inner.inner.manifest.load();
+            for (run_id, memtable_lock) in &loaded_manifest.l0_active {
+                let memtable = memtable_lock.read().unwrap();
+                if memtable.size() == 0 {
+                    continue;
+                }
+                l0.push(RunManifest {
+                    run_id: *run_id,
+                    key_range: memtable.range(),
+                });
+            }
+            for memtable in &loaded_manifest.l0_sealed {
+                l0.push(RunManifest {
+                    run_id: memtable.id(),
+                    key_range: memtable.range(),
+                });
+            }
+
+            let mut levels = Vec::new();
+            levels.push(LevelManifest { runs: l0 });
+
+            for i in 1..loaded_manifest.levels.len() {
+                let level = &loaded_manifest.levels[i];
+                levels.push(LevelManifest {
+                    runs: level
+                        .runs
+                        .iter()
+                        .map(|run| RunManifest {
+                            run_id: run.id(),
+                            key_range: run.range(),
+                        })
+                        .collect(),
+                });
+            }
+
+            by_keyspace.insert(*keyspace_id, levels);
+        }
+
+        Manifest {
+            keyspaces: by_keyspace,
+        }
+    }
+
     async fn recovery(
         wal: &wal::Wal<WalEntry>,
         storage: &S,
@@ -487,6 +535,20 @@ impl Debug for RunId {
         f.write_str("run:")?;
         Display::fmt(self, f)
     }
+}
+
+pub(crate) struct Manifest {
+    pub(crate) keyspaces: HashMap<KeyspaceId, Vec<LevelManifest>>,
+}
+
+pub(crate) struct LevelManifest {
+    // Except for L0, the ranges are in sorted order and non-overlapping.
+    pub(crate) runs: Vec<RunManifest>,
+}
+
+pub(crate) struct RunManifest {
+    pub(crate) run_id: RunId,
+    pub(crate) key_range: Range<Vec<u8>>,
 }
 
 struct LsmInner<S: Storage> {
@@ -1198,41 +1260,44 @@ impl<R: FileReader + Clone + Sync> LsmInnerInner<R> {
                 }
             };
             if overfilled {
-                let old_memtable_id = { l0_active.read().unwrap().id() };
-                // Make a new memtable.
-                let new_memtable =
-                    Arc::new(RwLock::new(MaybeActiveMemtable::Active(Memtable::new())));
-                // Add it to the manifest, so that by the time it receives any writes, it's
-                // also visible to readers.
-                loop {
-                    let manifest = self.manifest.load();
-                    if self.manifest.compare_and_swap(
-                        &manifest,
-                        Arc::new(manifest.with_ingest_l0(new_memtable.clone())),
-                    ) {
-                        break;
-                    }
-                }
-                // Swap the new memtable in for self.l0_active, so that's where all of the new
-                // writes go.
-                self.l0_active.compare_and_swap(&l0_active, new_memtable);
-
-                // Seal the old memtable and mark it as such in the manifest so it's eligible for
-                // compaction.
-                loop {
-                    let manifest = self.manifest.load();
-                    if self.manifest.compare_and_swap(
-                        &manifest,
-                        Arc::new(manifest.with_mark_sealed(old_memtable_id)),
-                    ) {
-                        break;
-                    }
-                }
-
-                let _ = self.l0_compact_notify.try_send(());
+                self.flush_l0(l0_active);
             }
             return;
         }
+    }
+
+    fn flush_l0(&self, l0_active: Arc<RwLock<MaybeActiveMemtable>>) {
+        let old_memtable_id = { l0_active.read().unwrap().id() };
+        // Make a new memtable.
+        let new_memtable = Arc::new(RwLock::new(MaybeActiveMemtable::Active(Memtable::new())));
+        // Add it to the manifest, so that by the time it receives any writes, it's
+        // also visible to readers.
+        loop {
+            let manifest = self.manifest.load();
+            if self.manifest.compare_and_swap(
+                &manifest,
+                Arc::new(manifest.with_ingest_l0(new_memtable.clone())),
+            ) {
+                break;
+            }
+        }
+        // Swap the new memtable in for self.l0_active, so that's where all of the new
+        // writes go.
+        self.l0_active.compare_and_swap(&l0_active, new_memtable);
+
+        // Seal the old memtable and mark it as such in the manifest so it's eligible for
+        // compaction.
+        loop {
+            let manifest = self.manifest.load();
+            if self.manifest.compare_and_swap(
+                &manifest,
+                Arc::new(manifest.with_mark_sealed(old_memtable_id)),
+            ) {
+                break;
+            }
+        }
+
+        let _ = self.l0_compact_notify.try_send(());
     }
 }
 
