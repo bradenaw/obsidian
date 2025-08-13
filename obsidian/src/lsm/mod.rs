@@ -435,7 +435,7 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
 
         let mut manifests = HashMap::new();
         for (keyspace_id, buf) in bufs {
-            let mut memtable = Memtable::new();
+            let memtable = Memtable::new();
             for (seqno, ts, kvs) in buf {
                 for (key, value) in kvs {
                     memtable.insert(seqno, key, ts, value);
@@ -2568,11 +2568,11 @@ mod test {
 
         let x_max = diagram[0].1.len() - 1;
         let l0_active_revisions = find_touching(&diagram[..], &mut visited, x_max, 0);
-        let mut l0_active = Memtable::new();
+        let l0_active = Memtable::new();
         for revision in l0_active_revisions {
             l0_active.insert(SeqNo(1), revision.key, revision.ts, revision.value);
         }
-        let mut l0_sealed = Memtable::new();
+        let l0_sealed = Memtable::new();
 
         let mut manifest = LoadedManifest::new(1);
         for x in (0..=x_max).rev().filter(|x| x % 2 == 1) {

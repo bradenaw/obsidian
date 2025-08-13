@@ -726,7 +726,7 @@ impl<'a, K: Key> Iterator for Intersections<'a, K> {
 
 #[derive(Clone)]
 pub(crate) struct RangeMap<K, V> {
-    // Keys are always non-overlapping.
+    // Ranges are always non-overlapping but may be adjacent.
     m: BTreeMap<RangeByLowerBound<K>, V>,
 }
 
