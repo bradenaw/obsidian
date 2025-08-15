@@ -1,5 +1,6 @@
 mod block;
 mod memtable;
+mod index;
 mod run;
 mod util;
 
@@ -383,7 +384,7 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
                 });
             }
 
-            by_keyspace.insert(*keyspace_id, levels);
+            by_keyspace.insert(*keyspace_id, KeyspaceManifest{ levels });
         }
 
         Manifest {
@@ -538,7 +539,11 @@ impl Debug for RunId {
 }
 
 pub(crate) struct Manifest {
-    pub(crate) keyspaces: HashMap<KeyspaceId, Vec<LevelManifest>>,
+    pub(crate) keyspaces: HashMap<KeyspaceId, KeyspaceManifest>,
+}
+
+pub(crate) struct KeyspaceManifest {
+    pub(crate) levels: Vec<LevelManifest>,
 }
 
 pub(crate) struct LevelManifest {

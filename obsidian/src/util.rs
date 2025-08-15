@@ -27,6 +27,18 @@ use crate::types::Key;
 use crate::types::KeyspaceId;
 use crate::types::Timestamp;
 
+pub(crate) fn merge_sorted2<'a, T, I0, I1>(i0: I0, i1: I1) -> impl Iterator<Item = T> + 'a
+where
+    T: Ord + 'a,
+    I0: Iterator<Item = T> + 'a,
+    I1: Iterator<Item = T> + 'a,
+{
+    merge_sorted(vec![
+        IteratorEither::Left(i0),
+        IteratorEither::Right(i1),
+    ])
+}
+
 pub(crate) fn merge_sorted<'a, T: Ord + 'a>(
     mut iters: Vec<impl Iterator<Item = T> + 'a>,
 ) -> impl Iterator<Item = T> + 'a {

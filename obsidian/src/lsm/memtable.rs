@@ -58,6 +58,10 @@ impl Memtable {
         self.stats.read().unwrap().size
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.kvs.len() == 0
+    }
+
     pub fn get(&self, ts: Timestamp, k: &[u8]) -> Option<(Timestamp, RevisionValue)> {
         let revisions = self.kvs.get(k)?;
         let entry = revisions.value().range(Timestamp::ZERO..=ts).next_back()?;
