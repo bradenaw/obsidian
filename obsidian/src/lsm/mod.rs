@@ -2,6 +2,7 @@ mod block;
 mod memtable;
 mod index;
 mod run;
+mod compactor;
 mod util;
 
 use std::cmp::Reverse;
