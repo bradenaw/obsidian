@@ -1,101 +1,407 @@
 use std::cmp;
 use std::collections::HashSet;
-use std::future::Future;
+use std::iter;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use anyhow::anyhow;
-use rand::Rng;
+use futures::future;
+use futures::stream::FuturesUnordered;
+use futures::FutureExt;
+use futures::SinkExt;
+use futures::Stream;
+use futures::StreamExt;
 
 use crate::lsm::index::Index;
+use crate::lsm::index::IndexSnapshot;
+use crate::lsm::LsmRevision;
 use crate::lsm::Memtable;
 use crate::lsm::Run;
+use crate::lsm::RunId;
 use crate::range::Bound;
 use crate::range::Range;
-use crate::storage::FileReader;
+use crate::storage::Storage;
+use crate::types::KeyspaceId;
+use crate::util::merge_sorted_streams;
+use crate::util::WithBackground;
 
-struct Compactor<R> {
-    index: Arc<Index<R>>,
+struct Compactor<S>(WithBackground<CompactorInner<S>>)
+where
+    S: Storage;
+
+impl<S> Compactor<S>
+where
+    S: Storage + Send + Sync + 'static,
+    S::R: 'static,
+{
+    fn new(
+        storage: S,
+        index: Arc<Index<S::R>>,
+        concurrency: usize,
+        run_size_target: u64,
+        block_size_target: u64,
+        keyspace_id: KeyspaceId,
+    ) -> Self {
+        let bg = WithBackground::new(Arc::new(CompactorInner {
+            index,
+            storage,
+            run_size_target,
+            block_size_target,
+            keyspace_id,
+        }));
+
+        bg.spawn(async move |inner| {
+            inner.schedule(concurrency).await;
+        });
+
+        Self(bg)
+    }
 }
 
-impl<R> Compactor<R>
+struct CompactorInner<S>
 where
-    R: FileReader + Clone,
+    S: Storage,
 {
-    async fn compact_l0<F, Fut>(&self, f: F) -> anyhow::Result<()>
-    where
-        F: FnOnce(&[&Memtable], &[&Run<R>]) -> Fut,
-        Fut: Future<Output = anyhow::Result<Vec<Run<R>>>>,
-    {
-        let snapshot = self.index.snapshot();
-        if snapshot.l0_sealed.is_empty() {
-            return Ok(());
+    index: Arc<Index<S::R>>,
+    storage: S,
+    run_size_target: u64,
+    block_size_target: u64,
+    keyspace_id: KeyspaceId,
+}
+
+impl<S> CompactorInner<S>
+where
+    S: Storage + Send + Sync + 'static,
+    S::R: 'static,
+{
+    async fn schedule(self: Arc<Self>, concurrency: usize) {
+        let mut compact_futures = FuturesUnordered::new();
+        let mut in_flight_from: HashSet<RunId> = HashSet::new();
+        let mut in_flight_into: HashSet<RunId> = HashSet::new();
+
+        loop {
+            let (snapshot, snapshot_changed) = self.index.snapshot_subscribe();
+
+            if compact_futures.len() < concurrency {
+                match self
+                    .schedule_next(snapshot, &in_flight_from, &in_flight_into)
+                    .await
+                {
+                    Some((compaction, join_handle)) => {
+                        in_flight_from.extend(compaction.from.iter());
+                        in_flight_into.extend(compaction.into.iter());
+                        compact_futures.push(join_handle.map(|_| compaction));
+                    }
+                    None => {}
+                }
+            }
+
+            tokio::select! {
+                maybe_compaction = compact_futures.next() => {
+                    if let Some(compaction) = maybe_compaction {
+                        for run_id in compaction.from {
+                            in_flight_from.remove(&run_id);
+                        }
+                        for run_id in compaction.into {
+                            in_flight_into.remove(&run_id);
+                        }
+                    }
+                },
+                // This happens when compactions 'finish', though the tasks might not be done yet,
+                // which we'll spuriously wake up for.
+                //
+                // But it also happens when l0 gets rotated, which might mean we need to spawn
+                // another compaction.
+                _ = snapshot_changed => {},
+            }
         }
-
-        let l0_sealed: Vec<_> = snapshot
-            .l0_sealed
-            .iter()
-            .map(|arc_memtable| &**arc_memtable)
-            .collect();
-
-        let memtable_bounding_range =
-            bounding_range(l0_sealed.iter().map(|memtable| memtable.range()));
-
-        let intersecting_runs = snapshot.levels[1].range(memtable_bounding_range);
-
-        let intersecting_runs_refs: Vec<&Run<_>> =
-            intersecting_runs.iter().map(|arc_run| &**arc_run).collect();
-
-        let add = f(&l0_sealed, &intersecting_runs_refs).await?;
-
-        let remove = l0_sealed.iter().map(|memtable| memtable.id()).collect();
-
-        self.index.replace(add, remove)?;
-
-        Ok(())
     }
 
-    async fn compact_from<F, Fut>(&self, level: usize, f: F) -> anyhow::Result<()>
-    where
-        F: FnOnce(&Run<R>, &[&Run<R>]) -> Fut,
-        Fut: Future<Output = anyhow::Result<Vec<Run<R>>>>,
-    {
-        let snapshot = self.index.snapshot();
+    async fn schedule_next(
+        self: &Arc<Self>,
+        snapshot: Arc<IndexSnapshot<S::R>>,
+        in_flight_from: &HashSet<RunId>,
+        in_flight_into: &HashSet<RunId>,
+    ) -> Option<(Compaction, tokio::task::JoinHandle<anyhow::Result<()>>)> {
+        let level_size_estimates = {
+            let mut level_size_estimates: Vec<_> =
+                snapshot.levels.iter().map(|level| level.size()).collect();
 
-        if level == 0 {
-            return Err(anyhow!("can't compact_from(0), use compact_l0()"));
-        }
-        if level >= snapshot.levels.len() {
-            return Err(anyhow!(
-                "can't compact_from a level past max levels: {} >= {}",
-                level,
-                snapshot.levels.len()
-            ));
-        }
+            for i in 1..snapshot.levels.len() - 1 {
+                for run in &snapshot.levels[i].runs {
+                    if in_flight_from.contains(&run.id()) {
+                        level_size_estimates[i] -= run.size();
+                        level_size_estimates[i + 1] += run.size();
+                    }
+                }
+            }
 
-        if snapshot.levels[level].runs.is_empty() {
-            // Nothing to compact out of this level.
-            return Ok(());
-        }
-
-        let idx = rand::thread_rng().gen_range(0..snapshot.levels[level].runs.len());
-        let chosen = &snapshot.levels[level].runs[idx];
-
-        let intersecting_runs = if level < snapshot.levels.len() - 1 {
-            snapshot.levels[level + 1].range(chosen.range())
-        } else {
-            &[][..]
+            level_size_estimates
         };
 
-        let intersecting_runs_refs: Vec<&Run<_>> =
-            intersecting_runs.iter().map(|arc_run| &**arc_run).collect();
+        // Prefer starting lower-level compactions first, since otherwise l0 compactions might
+        // regularly lock up all of l1 and we might never be able to compact from l1.
+        for i in (1..snapshot.levels.len() - 1).rev() {
+            if level_size_estimates[i] * 10 < level_size_estimates[i + 1] {
+                continue;
+            }
 
-        let add = f(chosen, &intersecting_runs_refs).await?;
+            // TODO: This will always choose lower-sorted-order runs before higher. Random might be
+            // better?
+            for run in &snapshot.levels[i].runs {
+                if in_flight_from.contains(&run.id()) {
+                    continue;
+                }
+                if in_flight_into.contains(&run.id()) {
+                    continue;
+                }
 
-        let remove = HashSet::from([chosen.id()]);
-        self.index.replace(add, remove)?;
+                let intersecting_runs = snapshot.levels[i + 1].range(run.range());
 
-        Ok(())
+                let into: HashSet<_> = intersecting_runs.iter().map(|run| run.id()).collect();
+                let conflict = into.iter().any(|run_id| {
+                    in_flight_from.contains(&run_id) || in_flight_into.contains(run_id)
+                });
+
+                if !conflict {
+                    return Some((
+                        Compaction {
+                            from_level: i,
+                            from: HashSet::from([run.id()]),
+                            into,
+                        },
+                        self.compact_from(&snapshot, i, run, intersecting_runs),
+                    ));
+                }
+            }
+        }
+
+        let l0_available: Vec<_> = snapshot
+            .l0_sealed
+            .iter()
+            .filter(|memtable| {
+                !in_flight_from.contains(&memtable.id()) && !in_flight_into.contains(&memtable.id())
+            })
+            .cloned()
+            .collect();
+        if !l0_available.is_empty() {
+            // With random inserts, we'll always be compacting all of l0 into all of l1, so it's
+            // all but guaranteed that all l0 compactions with conflict with each other.
+            //
+            // However, if inserts are mostly in sorted order, then we can compact multiple in
+            // parallel.
+            let l0_available_range =
+                bounding_range(l0_available.iter().map(|memtable| memtable.range()));
+            let l0_in_flight_range = bounding_range(
+                snapshot
+                    .l0_sealed
+                    .iter()
+                    .filter(|memtable| in_flight_from.contains(&memtable.id()))
+                    .map(|memtable| memtable.range()),
+            );
+
+            // 1) These would end up conflicting later anyway.
+            // 2) It would be incorrect to compact later writes for a single key into l1 before
+            //    earlier. No intersecting ranges guarantees this.
+            if l0_available_range
+                .intersection(&l0_in_flight_range)
+                .is_empty()
+            {
+                let intersecting_runs = snapshot.levels[1].range(l0_available_range);
+
+                let from: HashSet<_> = l0_available.iter().map(|memtable| memtable.id()).collect();
+                let into: HashSet<_> = intersecting_runs.iter().map(|run| run.id()).collect();
+
+                let conflict = Iterator::chain(from.iter(), into.iter()).any(|run_id| {
+                    in_flight_from.contains(run_id) || in_flight_into.contains(run_id)
+                });
+                if !conflict {
+                    return Some((
+                        Compaction {
+                            from_level: 0,
+                            from,
+                            into,
+                        },
+                        self.compact_l0(&l0_available[..], intersecting_runs),
+                    ));
+                }
+            }
+        }
+
+        // TODO: lmax compactions for garbage collection
+
+        None
     }
+
+    fn compact_l0(
+        self: &Arc<Self>,
+        from: &[Arc<Memtable>],
+        into: &[Arc<Run<S::R>>],
+    ) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+        let remove: HashSet<_> = Iterator::chain(
+            from.iter().map(|memtable| memtable.id()),
+            into.iter().map(|run| run.id()),
+        )
+        .collect();
+
+        tokio::spawn({
+            let self_ = Arc::clone(self);
+            let from = from.to_vec();
+            let into = into.to_vec();
+            async move {
+                let add = self_.merge_l0(&from[..], &into[..]).await?;
+                self_.index.replace(add, 1, remove)?;
+
+                Ok(())
+            }
+        })
+    }
+
+    async fn merge_l0(
+        &self,
+        memtables: &[Arc<Memtable>],
+        runs: &[Arc<Run<S::R>>],
+    ) -> anyhow::Result<Vec<Run<S::R>>> {
+        let streams = {
+            let mut streams = Vec::with_capacity(memtables.len() + 1);
+            for memtable in memtables {
+                streams.push(
+                    futures::stream::iter(memtable.iter().map(|revision| Ok(revision))).boxed(),
+                );
+            }
+            streams.push(
+                futures::stream::iter(runs.iter().map(|run| run.stream()))
+                    .flatten()
+                    .boxed(),
+            );
+
+            streams
+        };
+
+        self.runs_from_revisions(merge_sorted_streams(streams))
+            .await
+    }
+
+    fn compact_from(
+        self: &Arc<Self>,
+        snapshot: &Arc<IndexSnapshot<S::R>>,
+        from_level: usize,
+        from: &Arc<Run<S::R>>,
+        into: &[Arc<Run<S::R>>],
+    ) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+        if from_level == 0 {
+            panic!("can't compact_from(0), use compact_l0()");
+        }
+        if from_level >= snapshot.levels.len() - 1 {
+            panic!(
+                "can't compact_from a level past max levels: {} >= {}",
+                from_level,
+                snapshot.levels.len() - 1
+            );
+        }
+
+        let remove =
+            Iterator::chain(iter::once(from.id()), into.iter().map(|run| run.id())).collect();
+
+        tokio::spawn({
+            let from = Arc::clone(from);
+            let into = into.to_vec();
+            let self_ = Arc::clone(self);
+            async move {
+                let add = self_.merge_runs(&from, &into[..]).await?;
+                self_.index.replace(add, from_level + 1, remove)?;
+                Ok(())
+            }
+        })
+    }
+
+    async fn merge_runs(
+        &self,
+        a: &Run<S::R>,
+        b: &[Arc<Run<S::R>>],
+    ) -> anyhow::Result<Vec<Run<S::R>>> {
+        self.runs_from_revisions(merge_sorted_streams(vec![
+            a.stream().boxed(),
+            futures::stream::iter(b.iter().map(|run| run.stream()))
+                .flatten()
+                .boxed(),
+        ]))
+        .await
+    }
+
+    async fn runs_from_revisions(
+        &self,
+        entries: impl Stream<Item = anyhow::Result<LsmRevision>> + Send,
+    ) -> anyhow::Result<Vec<Run<S::R>>> {
+        let mut sorted = entries.boxed().peekable();
+
+        let mut runs = Vec::new();
+        while let Some(_) = Pin::new(&mut sorted).peek().await {
+            let mut curr_size = 0u64;
+            let (mut tx, rx) = futures::channel::mpsc::channel(256);
+
+            let id = RunId::new();
+            let (mut writer, reader) = tokio::io::duplex(16384);
+            future::try_join3(
+                self.storage.put(&id.to_string(), reader),
+                async {
+                    Run::<()>::write(
+                        &mut writer,
+                        id,
+                        self.keyspace_id,
+                        self.block_size_target,
+                        rx,
+                    )
+                    .await?;
+                    drop(writer);
+                    Ok(())
+                },
+                async {
+                    while let Some(revision) = sorted.next().await.transpose()? {
+                        let revision_size =
+                            (revision.key.len() as u64) + 8 + (revision.value.len() as u64);
+                        curr_size += revision_size;
+                        let break_after = {
+                            // All of the revisions for a single key need to end up in the same run, so once
+                            // we've gone over the target size look for a break between keys.
+                            if curr_size > self.run_size_target {
+                                if let Some(Ok(next_revision)) = Pin::new(&mut sorted).peek().await
+                                {
+                                    if revision.key != next_revision.key {
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        };
+                        tx.send(Ok(revision)).await?;
+                        if break_after {
+                            break;
+                        }
+                    }
+                    drop(tx);
+
+                    Ok(())
+                },
+            )
+            .await?;
+
+            let run = Run::open(self.storage.get(&id.to_string()).await?).await?;
+            runs.push(run);
+        }
+
+        Ok(runs)
+    }
+}
+
+struct Compaction {
+    from_level: usize,
+    from: HashSet<RunId>,
+    into: HashSet<RunId>,
 }
 
 fn bounding_range(ranges: impl Iterator<Item = Range<Vec<u8>>>) -> Range<Vec<u8>> {

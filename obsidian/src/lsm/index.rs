@@ -1,8 +1,10 @@
 use std::collections::HashSet;
+use std::future::Future;
 use std::sync::Arc;
 
 use anyhow::anyhow;
 use crossbeam::sync::ShardedLock;
+use tokio::sync::Notify;
 
 use crate::lsm::KeyspaceManifest;
 use crate::lsm::LevelManifest;
@@ -24,10 +26,7 @@ pub(super) struct Index<R> {
     // Given that IndexSnapshots are relatively small, it's probably worth just pre-cloning it a
     // bunch of times so that threads can clone off of any of the copies.
     current: ShardedLock<IndexSnapshot<R>>,
-
-    // TODO: This is obviously too heavy of a hammer, we only need compactions to conflict if
-    // they're messing with the same range, as long as we remove doing stuff by indices.
-    compaction_lock: tokio::sync::Mutex<()>,
+    updated: Notify,
 }
 
 impl<R> Index<R>
@@ -48,11 +47,11 @@ where
                 l0_sealed: Vec::new(),
                 levels,
             }),
-            compaction_lock: tokio::sync::Mutex::new(()),
+            updated: Notify::new(),
         }
     }
 
-    fn from_manifest(manifest: KeyspaceManifest) -> Self {
+    fn from_manifest(_manifest: KeyspaceManifest) -> Self {
         todo!();
     }
 
@@ -61,29 +60,44 @@ where
         Arc::new(self.current.read().unwrap().clone())
     }
 
+    pub(super) fn snapshot_subscribe(
+        &self,
+    ) -> (Arc<IndexSnapshot<R>>, impl Future<Output = ()> + '_) {
+        // TODO: lol
+        (
+            Arc::new(self.current.read().unwrap().clone()),
+            self.updated.notified(),
+        )
+    }
+
     pub(super) fn insert(&self, seqno: wal::SeqNo, k: Vec<u8>, ts: Timestamp, v: RevisionValue) {
         let curr = self.current.write().unwrap();
         curr.l0_active.insert(seqno, k, ts, v);
     }
 
     pub(super) fn rotate_l0(&self) {
-        let curr_snapshot = self.current.write().unwrap();
-        if curr_snapshot.l0_active.is_empty() {
+        let mut snapshot = self.current.write().unwrap();
+        if snapshot.l0_active.is_empty() {
             return;
         }
 
-        let mut new_snapshot = (*curr_snapshot).clone();
-        new_snapshot
-            .l0_sealed
-            .push(Arc::clone(&curr_snapshot.l0_active));
-        new_snapshot.l0_active = Arc::new(Memtable::new());
+        let memtable = Arc::clone(&snapshot.l0_active);
+        snapshot.l0_sealed.push(memtable);
+        snapshot.l0_active = Arc::new(Memtable::new());
+        self.updated.notify_waiters();
     }
 
-    pub(super) fn replace(&self, add: Vec<Run<R>>, remove: HashSet<RunId>) -> anyhow::Result<()> {
+    pub(super) fn replace(
+        &self,
+        add: Vec<Run<R>>,
+        min_level: usize,
+        remove: HashSet<RunId>,
+    ) -> anyhow::Result<()> {
         let mut current = self.current.write().unwrap();
         let mut new_snapshot = current.clone();
-        new_snapshot.replace(add, remove)?;
+        new_snapshot.replace(add, min_level, remove)?;
         *current = new_snapshot;
+        self.updated.notify_waiters();
 
         Ok(())
     }
@@ -122,7 +136,16 @@ where
         }
     }
 
-    fn replace(&mut self, add: Vec<Run<R>>, remove: HashSet<RunId>) -> anyhow::Result<()> {
+    fn replace(
+        &mut self,
+        add: Vec<Run<R>>,
+        min_level: usize,
+        remove: HashSet<RunId>,
+    ) -> anyhow::Result<()> {
+        if min_level == 0 {
+            return Err(anyhow!("min_level=0 implies adding to l0, which is not allowed"));
+        }
+
         let mut removed = HashSet::new();
 
         let mut l0_sealed = Vec::with_capacity(self.l0_sealed.len());
@@ -132,7 +155,7 @@ where
                 continue;
             }
 
-            l0_sealed.push(memtable);
+            l0_sealed.push(Arc::clone(memtable));
         }
 
         let mut levels_maps = Vec::new();
@@ -153,7 +176,7 @@ where
             let run_id = run.id();
             let run_range = run.range();
 
-            for level_map in (&mut levels_maps[1..]).iter_mut().rev() {
+            for level_map in (&mut levels_maps[min_level..]).iter_mut().rev() {
                 if level_map.intersecting_ranges(&run_range).next().is_none() {
                     level_map.insert(run_range.clone(), Arc::new(run));
                     added = true;
@@ -163,13 +186,29 @@ where
 
             if !added {
                 return Err(anyhow!(
-                    "no room for {:?} {:?}: all levels have intersecting ranges",
+                    "no room for {:?} {:?}: all levels {}.. have intersecting ranges",
                     run_id,
                     run_range,
+                    min_level,
                 ));
             }
         }
-        todo!();
+
+        if removed.len() != remove.len() {
+            return Err(anyhow!("not all runs to be removed were present"));
+        }
+
+        let levels = levels_maps
+            .into_iter()
+            .map(|level_map| Level {
+                runs: level_map.into_iter().map(|(_, v)| v).collect(),
+            })
+            .collect();
+
+        self.l0_sealed = l0_sealed;
+        self.levels = levels;
+
+        Ok(())
     }
 }
 
@@ -196,7 +235,7 @@ impl<R: FileReader> Level<R> {
         run.get(ts, k).await
     }
 
-    fn size(&self) -> usize {
+    pub(super) fn size(&self) -> usize {
         self.runs.iter().map(|run| run.size()).sum()
     }
 

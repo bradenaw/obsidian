@@ -820,6 +820,29 @@ where
     }
 }
 
+impl<K, V> IntoIterator for RangeMap<K, V> {
+    type Item = (Range<K>, V);
+    type IntoIter = RangeMapIntoIter<K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        RangeMapIntoIter {
+            inner: self.m.into_iter(),
+        }
+    }
+}
+
+pub(crate) struct RangeMapIntoIter<K, V> {
+    inner: std::collections::btree_map::IntoIter<RangeByLowerBound<K>, V>,
+}
+
+impl<K, V> Iterator for RangeMapIntoIter<K, V> {
+    type Item = (Range<K>, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|(k, v)| (k.0, v))
+    }
+}
+
 pub(crate) fn intersect_in_ranges_by_key<'a, T: 'a, F: Fn(&'a T) -> Range<Vec<u8>>>(
     range: Range<&[u8]>,
     ranges: &'a [T],
