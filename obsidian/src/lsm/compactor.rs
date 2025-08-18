@@ -1,5 +1,6 @@
 use std::cmp;
 use std::collections::HashSet;
+use std::future::Future;
 use std::iter;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -24,7 +25,7 @@ use crate::types::KeyspaceId;
 use crate::util::merge_sorted_streams;
 use crate::util::WithBackground;
 
-struct Compactor<S>(WithBackground<CompactorInner<S>>)
+pub(super) struct Compactor<S>(WithBackground<CompactorInner<S>>)
 where
     S: Storage;
 
@@ -33,7 +34,7 @@ where
     S: Storage + Send + Sync + 'static,
     S::R: 'static,
 {
-    fn new(
+    pub(super) fn new(
         storage: S,
         index: Arc<Index<S::R>>,
         concurrency: usize,
@@ -74,6 +75,7 @@ where
     S::R: 'static,
 {
     async fn schedule(self: Arc<Self>, concurrency: usize) {
+        // TODO: Need to abort the compaction tasks if we drop.
         let mut compact_futures = FuturesUnordered::new();
         let mut in_flight_from: HashSet<RunId> = HashSet::new();
         let mut in_flight_into: HashSet<RunId> = HashSet::new();
@@ -89,7 +91,9 @@ where
                     Some((compaction, join_handle)) => {
                         in_flight_from.extend(compaction.from.iter());
                         in_flight_into.extend(compaction.into.iter());
-                        compact_futures.push(join_handle.map(|_| compaction));
+
+                        compact_futures
+                            .push(AbortOnDrop(Pin::new(Box::new(join_handle))).map(|_| compaction));
                     }
                     None => {}
                 }
@@ -402,6 +406,25 @@ struct Compaction {
     from_level: usize,
     from: HashSet<RunId>,
     into: HashSet<RunId>,
+}
+
+struct AbortOnDrop<T>(Pin<Box<tokio::task::JoinHandle<T>>>);
+
+impl<T> Future for AbortOnDrop<T> {
+    type Output = Result<T, tokio::task::JoinError>;
+
+    fn poll(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        Pin::as_mut(&mut self.0).poll(cx)
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 fn bounding_range(ranges: impl Iterator<Item = Range<Vec<u8>>>) -> Range<Vec<u8>> {
