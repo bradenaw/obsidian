@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::array;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -21,11 +22,14 @@ use crate::types::Timestamp;
 use crate::util::binary_search_by_idx;
 use crate::wal;
 
+const N_STRIPES: usize = 32;
+
 pub(super) struct Index<R> {
-    // TODO: Readers are still going to contend a lot on the refcounts when cloning the snapshot.
-    // Given that IndexSnapshots are relatively small, it's probably worth just pre-cloning it a
-    // bunch of times so that threads can clone off of any of the copies.
-    current: ShardedLock<IndexSnapshot<R>>,
+    // All of the elements of this array are separate arcs with clones of the same data inside.
+    // Readers can choose any of them, writers must update all of them.
+    //
+    // This is done so that readers don't have to contend on the atomic inside the arc.
+    current: ShardedLock<[Arc<IndexSnapshot<R>>; N_STRIPES]>,
     updated: Notify,
 }
 
@@ -41,12 +45,13 @@ where
         for _ in 0..n_levels {
             levels.push(Level::new());
         }
+        let snapshot = IndexSnapshot {
+            l0_active: Arc::new(Memtable::new()),
+            l0_sealed: Vec::new(),
+            levels,
+        };
         Self {
-            current: ShardedLock::new(IndexSnapshot {
-                l0_active: Arc::new(Memtable::new()),
-                l0_sealed: Vec::new(),
-                levels,
-            }),
+            current: ShardedLock::new(array::from_fn(|_| Arc::new(snapshot.clone()))),
             updated: Notify::new(),
         }
     }
@@ -56,34 +61,34 @@ where
     }
 
     pub(super) fn snapshot(&self) -> Arc<IndexSnapshot<R>> {
-        // TODO: lol
-        Arc::new(self.current.read().unwrap().clone())
+        let thread_id = std::thread::current().id().as_u64().get() as usize;
+        Arc::clone(&self.current.read().unwrap()[thread_id % N_STRIPES])
     }
 
     pub(super) fn snapshot_subscribe(
         &self,
     ) -> (Arc<IndexSnapshot<R>>, impl Future<Output = ()> + '_) {
-        // TODO: lol
-        (
-            Arc::new(self.current.read().unwrap().clone()),
-            self.updated.notified(),
-        )
+        let notified = self.updated.notified();
+        (self.snapshot(), notified)
     }
 
     pub(super) fn insert(&self, seqno: wal::SeqNo, k: Vec<u8>, ts: Timestamp, v: RevisionValue) {
-        let curr = self.current.write().unwrap();
-        curr.l0_active.insert(seqno, k, ts, v);
+        let current = &self.current.write().unwrap()[0];
+        current.l0_active.insert(seqno, k, ts, v);
     }
 
     pub(super) fn rotate_l0(&self) {
-        let mut snapshot = self.current.write().unwrap();
+        let mut current = self.current.write().unwrap();
+        let snapshot = &current[0];
         if snapshot.l0_active.is_empty() {
             return;
         }
 
-        let memtable = Arc::clone(&snapshot.l0_active);
-        snapshot.l0_sealed.push(memtable);
-        snapshot.l0_active = Arc::new(Memtable::new());
+        let mut new_snapshot = (**snapshot).clone();
+        new_snapshot.l0_sealed.push(Arc::clone(&new_snapshot.l0_active));
+        new_snapshot.l0_active = Arc::new(Memtable::new());
+        *current = array::from_fn(|_| Arc::new(new_snapshot.clone()));
+
         self.updated.notify_waiters();
     }
 
@@ -94,9 +99,12 @@ where
         remove: HashSet<RunId>,
     ) -> anyhow::Result<()> {
         let mut current = self.current.write().unwrap();
-        let mut new_snapshot = current.clone();
+        let snapshot = &current[0];
+
+        let mut new_snapshot = (**snapshot).clone();
         new_snapshot.replace(add, min_level, remove)?;
-        *current = new_snapshot;
+        *current = array::from_fn(|_| Arc::new(new_snapshot.clone()));
+
         self.updated.notify_waiters();
 
         Ok(())
@@ -143,7 +151,9 @@ where
         remove: HashSet<RunId>,
     ) -> anyhow::Result<()> {
         if min_level == 0 {
-            return Err(anyhow!("min_level=0 implies adding to l0, which is not allowed"));
+            return Err(anyhow!(
+                "min_level=0 implies adding to l0, which is not allowed"
+            ));
         }
 
         let mut removed = HashSet::new();
