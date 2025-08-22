@@ -35,7 +35,7 @@ where
     S::R: 'static,
 {
     pub(super) fn new(
-        storage: S,
+        storage: Arc<S>,
         index: Arc<Index<S::R>>,
         concurrency: usize,
         run_size_target: u64,
@@ -63,7 +63,7 @@ where
     S: Storage,
 {
     index: Arc<Index<S::R>>,
-    storage: S,
+    storage: Arc<S>,
     run_size_target: u64,
     block_size_target: u64,
     keyspace_id: KeyspaceId,
@@ -75,7 +75,6 @@ where
     S::R: 'static,
 {
     async fn schedule(self: Arc<Self>, concurrency: usize) {
-        // TODO: Need to abort the compaction tasks if we drop.
         let mut compact_futures = FuturesUnordered::new();
         let mut in_flight_from: HashSet<RunId> = HashSet::new();
         let mut in_flight_into: HashSet<RunId> = HashSet::new();
@@ -95,19 +94,19 @@ where
                         compact_futures
                             .push(AbortOnDrop(Pin::new(Box::new(join_handle))).map(|_| compaction));
                     }
-                    None => {}
+                    None => {
+                        log::trace!("no new compactions to schedule");
+                    }
                 }
             }
 
             tokio::select! {
-                maybe_compaction = compact_futures.next() => {
-                    if let Some(compaction) = maybe_compaction {
-                        for run_id in compaction.from {
-                            in_flight_from.remove(&run_id);
-                        }
-                        for run_id in compaction.into {
-                            in_flight_into.remove(&run_id);
-                        }
+                Some(compaction) = compact_futures.next() => {
+                    for run_id in compaction.from {
+                        in_flight_from.remove(&run_id);
+                    }
+                    for run_id in compaction.into {
+                        in_flight_into.remove(&run_id);
                     }
                 },
                 // This happens when compactions 'finish', though the tasks might not be done yet,
@@ -247,6 +246,14 @@ where
         )
         .collect();
 
+        log::trace!(
+            "compacting l0 {:?} into {:?}",
+            from.iter()
+                .map(|memtable| memtable.id())
+                .collect::<Vec<_>>(),
+            into.iter().map(|run| run.id()).collect::<Vec<_>>(),
+        );
+
         tokio::spawn({
             let self_ = Arc::clone(self);
             let from = from.to_vec();
@@ -302,6 +309,13 @@ where
                 snapshot.levels.len() - 1
             );
         }
+
+        log::trace!(
+            "compacting l{} {:?} into {:?}",
+            from_level,
+            from.id(),
+            into.iter().map(|run| run.id()).collect::<Vec<_>>(),
+        );
 
         let remove =
             Iterator::chain(iter::once(from.id()), into.iter().map(|run| run.id())).collect();

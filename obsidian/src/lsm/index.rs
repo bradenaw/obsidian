@@ -1,5 +1,5 @@
-use std::collections::HashSet;
 use std::array;
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -17,6 +17,7 @@ use crate::range::KeyOrBound;
 use crate::range::Range;
 use crate::range::RangeMap;
 use crate::storage::FileReader;
+use crate::storage::Storage;
 use crate::types::RevisionValue;
 use crate::types::Timestamp;
 use crate::util::binary_search_by_idx;
@@ -37,7 +38,7 @@ impl<R> Index<R>
 where
     R: FileReader + Clone,
 {
-    fn new(n_levels: usize) -> Self {
+    pub(super) fn new(n_levels: usize) -> Self {
         if n_levels < 2 {
             panic!("not enough levels: {} < 2", n_levels);
         }
@@ -50,14 +51,27 @@ where
             l0_sealed: Vec::new(),
             levels,
         };
+
+        Self::from_snapshot(snapshot)
+    }
+
+    pub(super) fn from_snapshot(index_snapshot: IndexSnapshot<R>) -> Self {
         Self {
-            current: ShardedLock::new(array::from_fn(|_| Arc::new(snapshot.clone()))),
+            current: ShardedLock::new(array::from_fn(|_| Arc::new(index_snapshot.clone()))),
             updated: Notify::new(),
         }
     }
 
-    fn from_manifest(_manifest: KeyspaceManifest) -> Self {
-        todo!();
+    pub(super) async fn from_manifest<S>(
+        storage: &S,
+        manifest: KeyspaceManifest,
+    ) -> anyhow::Result<Self>
+    where
+        S: Storage<R = R>,
+    {
+        let index_snapshot = IndexSnapshot::from_manifest(storage, manifest).await?;
+
+        Ok(Self::from_snapshot(index_snapshot))
     }
 
     pub(super) fn snapshot(&self) -> Arc<IndexSnapshot<R>> {
@@ -85,7 +99,9 @@ where
         }
 
         let mut new_snapshot = (**snapshot).clone();
-        new_snapshot.l0_sealed.push(Arc::clone(&new_snapshot.l0_active));
+        new_snapshot
+            .l0_sealed
+            .push(Arc::clone(&new_snapshot.l0_active));
         new_snapshot.l0_active = Arc::new(Memtable::new());
         *current = array::from_fn(|_| Arc::new(new_snapshot.clone()));
 
@@ -115,6 +131,7 @@ where
 pub(super) struct IndexSnapshot<R> {
     pub(super) l0_active: Arc<Memtable>,
     pub(super) l0_sealed: Vec<Arc<Memtable>>,
+    // For ease of expression, levels[0] is always present but empty because it's represented above.
     pub(super) levels: Vec<Level<R>>,
 }
 
@@ -122,15 +139,57 @@ impl<R> IndexSnapshot<R>
 where
     R: FileReader + Clone,
 {
-    fn manifest(&self) -> KeyspaceManifest {
+    async fn from_manifest<S>(storage: &S, manifest: KeyspaceManifest) -> anyhow::Result<Self>
+    where
+        S: Storage<R = R>,
+    {
+        if !manifest.levels[0].runs.is_empty() {
+            panic!("manifest with non-empty l0");
+        }
+
+        let mut levels = Vec::with_capacity(manifest.levels.len());
+
+        for level_manifest in &manifest.levels {
+            let mut runs = Vec::with_capacity(level_manifest.runs.len());
+
+            for run_manifest in &level_manifest.runs {
+                let run = Run::open(storage.get(&run_manifest.run_id.0.to_string()).await?).await?;
+                runs.push(Arc::new(run));
+            }
+
+            levels.push(Level { runs });
+        }
+
+        Ok(Self {
+            l0_active: Arc::new(Memtable::new()),
+            l0_sealed: Vec::new(),
+            levels,
+        })
+    }
+
+    pub(super) fn manifest(&self) -> KeyspaceManifest {
         let mut level_manifests = Vec::with_capacity(self.levels.len());
-        for level in &self.levels {
+        {
+            let mut l0_runs = Vec::new();
+            for memtable in &self.l0_sealed {
+                l0_runs.push(RunManifest {
+                    run_id: memtable.id(),
+                });
+            }
+            if !self.l0_active.is_empty() {
+                l0_runs.push(RunManifest {
+                    run_id: self.l0_active.id(),
+                });
+            }
+            level_manifests.push(LevelManifest { runs: l0_runs });
+        }
+        for level in &self.levels[1..] {
             let mut run_manifests = Vec::with_capacity(level.runs.len());
 
             for run in &level.runs {
                 run_manifests.push(RunManifest {
                     run_id: run.id(),
-                    key_range: run.range(),
+                    //key_range: run.range(),
                 });
             }
 
@@ -182,25 +241,30 @@ where
         }
 
         for run in add.into_iter() {
-            let mut added = false;
             let run_id = run.id();
             let run_range = run.range();
 
-            for level_map in (&mut levels_maps[min_level..]).iter_mut().rev() {
-                if level_map.intersecting_ranges(&run_range).next().is_none() {
-                    level_map.insert(run_range.clone(), Arc::new(run));
-                    added = true;
-                    break;
-                }
-            }
-
-            if !added {
+            if levels_maps[min_level]
+                .intersecting_ranges(&run_range)
+                .next()
+                .is_some()
+            {
                 return Err(anyhow!(
-                    "no room for {:?} {:?}: all levels {}.. have intersecting ranges",
+                    "no room for {:?} {:?} in l{}",
                     run_id,
                     run_range,
                     min_level,
                 ));
+            }
+
+            // Insert into the highest level we can reach without running into any intersection.
+            for i in min_level..levels_maps.len() {
+                if i == levels_maps.len() - 1
+                    || levels_maps[i + 1].intersecting_ranges(&run_range).next().is_some()
+                {
+                    levels_maps[i].insert(run_range.clone(), Arc::new(run));
+                    break;
+                }
             }
         }
 
@@ -249,7 +313,7 @@ impl<R: FileReader> Level<R> {
         self.runs.iter().map(|run| run.size()).sum()
     }
 
-    fn run_for_key<'a>(&'a self, k: &[u8]) -> Option<&'a Run<R>> {
+    pub(super) fn run_for_key<'a>(&'a self, k: &[u8]) -> Option<&'a Run<R>> {
         let idx = self
             .runs
             .binary_search_by_key(&KeyOrBound::Key(k.to_vec()), |run| {
