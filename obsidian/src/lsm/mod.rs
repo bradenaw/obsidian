@@ -133,7 +133,7 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         wal: Arc<wal::Wal<WalEntry>>,
         storage: Arc<S>,
     ) -> anyhow::Result<Self> {
-        let (indexes, newest_seqno) = Self::recovery(&wal, &storage).await?;
+        let (indexes, newest_seqno) = Self::recovery(l0_max_size, &wal, &storage).await?;
 
         let lsms = {
             let mut lsms = HashMap::new();
@@ -282,22 +282,14 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
             ))
             .await?;
 
-        let mut wal_processed = self.wal_processed.clone();
-        while *wal_processed.borrow_and_update() < seqno {
-            wal_processed
-                .changed()
-                .await
-                .map_err(|_| WriteError::Other(anyhow!("wal processor missing")))?;
-        }
+        self.wait_processed(seqno).await?;
 
         Ok(())
     }
 
-    pub async fn create_keyspace(
-        &self,
-        keyspace_id: KeyspaceId,
-    ) -> anyhow::Result<()> {
-        self.create_keyspace_internal(keyspace_id, 7 /*depth*/).await
+    pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        self.create_keyspace_internal(keyspace_id, 7 /*depth*/)
+            .await
     }
 
     pub async fn create_keyspace_internal(
@@ -338,6 +330,34 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         .await;
     }
 
+    /// Flush ensures that all writes that have already completed are in runs committed to storage
+    /// (i.e. not in L0). Snapshots manifests into the WAL to speed recovery.
+    pub async fn flush(&self) -> anyhow::Result<()> {
+        let seqno = self.wal.append(WalEntry::NoOp).await?;
+        self.wait_processed(seqno).await?;
+
+        let lsm_inner_by_keyspace = self.inner.load();
+        for (_, lsm_inner) in lsm_inner_by_keyspace.iter() {
+            lsm_inner.index.rotate_l0();
+        }
+
+        self.pending_compactions().await;
+
+        for (keyspace_id, lsm_inner) in lsm_inner_by_keyspace.iter() {
+            let mut keyspace_manifest = lsm_inner.index.snapshot().manifest();
+            // These can't get rehydrated from anywhere because they haven't been stored yet, but
+            // we also don't care about them because anything here must have showed up after we
+            // started flush().
+            keyspace_manifest.levels[0].runs = Vec::new();
+
+            self.wal
+                .append(WalEntry::Manifest(*keyspace_id, seqno, keyspace_manifest))
+                .await?;
+        }
+
+        Ok(())
+    }
+
     // TODO: move up a layer to tablet, since we can store the keyspaces that exist in a known
     // keyspace for the tablet
     pub fn keyspaces(&self) -> Vec<KeyspaceId> {
@@ -358,7 +378,20 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         }
     }
 
+    /// Waits until at least the given sequence number has been processed.
+    async fn wait_processed(&self, seqno: wal::SeqNo) -> anyhow::Result<()> {
+        let mut wal_processed = self.wal_processed.clone();
+        while *wal_processed.borrow_and_update() < seqno {
+            wal_processed
+                .changed()
+                .await
+                .map_err(|_| WriteError::Other(anyhow!("wal processor missing")))?;
+        }
+        Ok(())
+    }
+
     async fn recovery(
+        l0_max_size: u64,
         wal: &wal::Wal<WalEntry>,
         storage: &S,
     ) -> anyhow::Result<(HashMap<KeyspaceId, Index<S::R>>, Option<wal::SeqNo>)> {
@@ -371,6 +404,7 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
 
         while let Some((seqno, entry)) = wal_stream.try_next().await? {
             match entry {
+                WalEntry::NoOp => {}
                 WalEntry::Write(ts, kvs) => {
                     let mut kvs_by_keyspace = HashMap::new();
                     for (keyspace_id, key, value) in kvs {
@@ -390,13 +424,28 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
                     let trim_to_idx = buf
                         .binary_search_by_key(&included_seqno, |(seqno, _, _)| *seqno)
                         .unwrap_or_else(core::convert::identity);
-                    buf.drain(0..=trim_to_idx);
+                    buf.drain(0..trim_to_idx);
 
                     let index = Index::from_manifest(storage, keyspace_manifest).await?;
                     indexes.insert(keyspace_id, index);
                 }
             }
             newest_seqno = Some(seqno);
+        }
+
+        for (keyspace_id, buf) in bufs {
+            let index = indexes.get(&keyspace_id).unwrap();
+            for (seqno, ts, kvs) in buf {
+                for (key, value) in kvs {
+                    // TODO: need to see if it's already present since the sequence number was a
+                    // lower bound
+                    index.insert(seqno, key, ts, value);
+
+                    if index.snapshot().l0_active.size() >= l0_max_size {
+                        index.rotate_l0();
+                    }
+                }
+            }
         }
 
         Ok((indexes, newest_seqno))
@@ -423,6 +472,7 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         let mut log = wal.stream(start, true).boxed();
         while let Some((seqno, entry)) = log.try_next().await? {
             match entry {
+                WalEntry::NoOp => {}
                 WalEntry::Write(ts, kvs) => {
                     for (keyspace_id, key, value) in kvs {
                         log::trace!(
@@ -563,10 +613,11 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
     pub async fn pending_compactions(&self) {
         loop {
             let (index_snapshot, changed) = self.index.snapshot_subscribe();
+            // TODO: Don't actually need to wait for empty, just for the ones we saw at the
+            // beginning to be gone.
             if index_snapshot.l0_active.is_empty() || index_snapshot.l0_sealed.is_empty() {
                 break;
             }
-            println!("we're waiting for an index change");
             changed.await;
         }
     }
@@ -875,13 +926,17 @@ where
 
 #[derive(Clone, Debug)]
 pub(crate) enum WalEntry {
+    NoOp,
     Write(Timestamp, Vec<(KeyspaceId, Vec<u8>, RevisionValue)>),
+    /// The given manifest contains at least all of the writes through this sequence number. It may
+    /// contain more.
     Manifest(KeyspaceId, wal::SeqNo, KeyspaceManifest),
 }
 
 impl wal::Entry for WalEntry {
     fn size(&self) -> u64 {
         match self {
+            WalEntry::NoOp => 0,
             WalEntry::Write(_, kvs) => {
                 8 + kvs.iter().map(|(_, k, v)| k.len() + v.len()).sum::<usize>() as u64
             }
@@ -987,7 +1042,8 @@ mod test {
         let not_k = b"def";
         let v = b"foo";
 
-        lsm.create_keyspace_internal(keyspace_id, 2 /*depth*/).await?;
+        lsm.create_keyspace_internal(keyspace_id, 2 /*depth*/)
+            .await?;
         lsm.write(
             Timestamp(5),
             vec![],
@@ -1018,7 +1074,8 @@ mod test {
         let ka = b"a";
         let kb = b"b";
 
-        lsm.create_keyspace_internal(keyspace_id, 2 /*depth*/).await?;
+        lsm.create_keyspace_internal(keyspace_id, 2 /*depth*/)
+            .await?;
         lsm.write(
             Timestamp(5),
             vec![],
@@ -1082,7 +1139,6 @@ mod test {
     #[tokio::test]
     async fn test_compact_l0() -> anyhow::Result<()> {
         _ = pretty_env_logger::try_init();
-        log::info!("just making sure");
         let lsm = LsmBuilder::new(Arc::new(MemStorage::new()))
             .l0_max_size(128)
             .block_size_target(128)
@@ -1090,7 +1146,8 @@ mod test {
             .build()
             .await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-        lsm.create_keyspace_internal(keyspace_id, 2 /*depth*/).await?;
+        lsm.create_keyspace_internal(keyspace_id, 2 /*depth*/)
+            .await?;
         let mut map = BTreeMap::new();
         let mut last_ts = Timestamp::ZERO;
         for _ in 0..10 {
@@ -1145,7 +1202,8 @@ mod test {
             .build()
             .await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-        lsm.create_keyspace_internal(keyspace_id, 3 /*depth*/).await?;
+        lsm.create_keyspace_internal(keyspace_id, 3 /*depth*/)
+            .await?;
         let mut map = BTreeMap::new();
         let mut last_ts = Timestamp::ZERO;
         let mut ctr = 1u32;
@@ -1211,7 +1269,8 @@ mod test {
             .await?;
 
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-        lsm.create_keyspace_internal(keyspace_id, 2 /*depth*/).await?;
+        lsm.create_keyspace_internal(keyspace_id, 2 /*depth*/)
+            .await?;
 
         let mut map = BTreeMap::new();
         let mut write_ts = 5;
@@ -1256,6 +1315,8 @@ mod test {
                 >= 1
         );
 
+        lsm.flush().await?;
+
         drop(lsm);
 
         // Rebuild the LSM from the same WAL and storage, this should recover everything.
@@ -1296,7 +1357,8 @@ mod test {
             .build()
             .await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-        lsm.create_keyspace_internal(keyspace_id, 3 /*depth*/).await?;
+        lsm.create_keyspace_internal(keyspace_id, 3 /*depth*/)
+            .await?;
 
         let writes = [
             //   ts=0123456789

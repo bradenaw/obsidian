@@ -144,7 +144,7 @@ where
         S: Storage<R = R>,
     {
         if !manifest.levels[0].runs.is_empty() {
-            panic!("manifest with non-empty l0");
+            return Err(anyhow!("manifest with non-empty l0"));
         }
 
         let mut levels = Vec::with_capacity(manifest.levels.len());
@@ -257,15 +257,17 @@ where
                 ));
             }
 
-            // Insert into the highest level we can reach without running into any intersection.
-            for i in min_level..levels_maps.len() {
-                if i == levels_maps.len() - 1
-                    || levels_maps[i + 1].intersecting_ranges(&run_range).next().is_some()
-                {
-                    levels_maps[i].insert(run_range.clone(), Arc::new(run));
-                    break;
-                }
-            }
+            levels_maps[min_level].insert(run_range.clone(), Arc::new(run));
+
+            // Insert into the lowest level we can reach without running into any intersection.
+            //for i in min_level..levels_maps.len() {
+            //    if i == levels_maps.len() - 1
+            //        || levels_maps[i + 1].intersecting_ranges(&run_range).next().is_some()
+            //    {
+            //        levels_maps[i].insert(run_range.clone(), Arc::new(run));
+            //        break;
+            //    }
+            //}
         }
 
         if removed.len() != remove.len() {
