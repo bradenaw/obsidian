@@ -435,16 +435,30 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
 
         for (keyspace_id, buf) in bufs {
             let index = indexes.get(&keyspace_id).unwrap();
+            let index_snapshot = index.snapshot();
             for (seqno, ts, kvs) in buf {
                 for (key, value) in kvs {
-                    // TODO: need to see if it's already present since the sequence number was a
-                    // lower bound
-                    index.insert(seqno, key, ts, value);
-
-                    if index.snapshot().l0_active.size() >= l0_max_size {
-                        index.rotate_l0();
+                    // It's possible that this revision is already present since the seqno in
+                    // WalEntry::Manifest is a lower bound, the manifest may already contain newer
+                    // writes.
+                    if let Some((existing_ts, existing_value)) =
+                        index_snapshot.l0_active.get(ts, &key[..])
+                    {
+                        if existing_ts == ts {
+                            if value != existing_value {
+                                return Err(anyhow!(""));
+                            }
+                            continue;
+                        }
                     }
+
+                    index.insert(seqno, key, ts, value);
                 }
+            }
+            // We're not _really_ respecting l0_max_size but it's not any "better" to have multiple
+            // l0_sealed over one.
+            if index.snapshot().l0_active.size() >= l0_max_size {
+                index.rotate_l0();
             }
         }
 

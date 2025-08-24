@@ -146,15 +146,19 @@ where
         // Prefer starting lower-level compactions first, since otherwise l0 compactions might
         // regularly lock up all of l1 and we might never be able to compact from l1.
         for i in (1..snapshot.levels.len() - 1).rev() {
+            let level = &snapshot.levels[i];
+            if level.runs.len() == 0 {
+                continue;
+            }
             if level_size_estimates[i] * 10 < level_size_estimates[i + 1] {
                 continue;
             }
 
             // Start at a random position so we don't always e.g. choose the lowest run in sorted
             // order.
-            let offset = rand::thread_rng().gen_range(0..snapshot.levels[i].runs.len());
-            for j in 0..snapshot.levels[i].runs.len() {
-                let run = &snapshot.levels[i].runs[(j + offset) % snapshot.levels[i].runs.len()];
+            let offset = rand::thread_rng().gen_range(0..level.runs.len());
+            for j in 0..level.runs.len() {
+                let run = &level.runs[(j + offset) % level.runs.len()];
 
                 if in_flight_from.contains(&run.id()) {
                     continue;
