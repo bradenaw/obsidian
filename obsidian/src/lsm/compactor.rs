@@ -26,6 +26,10 @@ use crate::types::KeyspaceId;
 use crate::util::merge_sorted_streams;
 use crate::util::WithBackground;
 
+/// The compactor's purpose is to mutate an `Index` to a more efficient physical represesentation,
+/// but with the same logical content, as well as persisting from memory (where new writes go in
+/// addition to the WAL) into storage so that tablets don't have to replay as much of the WAL on
+/// startup.
 pub(super) struct Compactor<S>(WithBackground<CompactorInner<S>>)
 where
     S: Storage;
@@ -272,7 +276,9 @@ where
 
                 log::trace!(
                     "compacted l0 {:?} + {:?}, producing {:?}",
-                    from.iter().map(|memtable| memtable.id()).collect::<Vec<_>>(),
+                    from.iter()
+                        .map(|memtable| memtable.id())
+                        .collect::<Vec<_>>(),
                     into.iter().map(|run| run.id()).collect::<Vec<_>>(),
                     add.iter().map(|run| run.id()).collect::<Vec<_>>(),
                 );
@@ -446,6 +452,17 @@ struct Compaction {
     into: HashSet<RunId>,
 }
 
+/// Wraps a JoinHandle, calling abort() on it when dropped.
+///
+/// tokio::spawn naturally just allows the task to keep running in the background indefinitely.
+///
+/// We want to use tokio::spawn for compaction tasks instead of placing the futures directly into a
+/// FuturesUnordered because FuturesUnordered would end up polling all of them from the same thread,
+/// meaning we don't get any parallelism of compute, only of I/O. tokio::spawn lets us use more
+/// cores.
+///
+/// However, if the Compactor gets dropped, we want to drop all of the compaction tasks on the floor
+/// too, which is what this wrapper is for.
 struct AbortOnDrop<T>(Pin<Box<tokio::task::JoinHandle<T>>>);
 
 impl<T> Future for AbortOnDrop<T> {
@@ -465,10 +482,14 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
+/// Like a "bounding box", returns the minimal range that contains all of the given ranges.
 fn bounding_range(ranges: impl Iterator<Item = Range<Vec<u8>>>) -> Range<Vec<u8>> {
     let mut lower = Bound::AfterAll;
     let mut upper = Bound::BeforeAll;
     for range in ranges {
+        if range.is_empty() {
+            continue;
+        }
         lower = cmp::min(lower, range.lower);
         upper = cmp::max(upper, range.upper);
     }
