@@ -11,6 +11,7 @@ use futures::FutureExt;
 use futures::SinkExt;
 use futures::Stream;
 use futures::StreamExt;
+use rand::Rng;
 
 use crate::lsm::index::Index;
 use crate::lsm::index::IndexSnapshot;
@@ -149,9 +150,12 @@ where
                 continue;
             }
 
-            // TODO: This will always choose lower-sorted-order runs before higher. Random might be
-            // better?
-            for run in &snapshot.levels[i].runs {
+            // Start at a random position so we don't always e.g. choose the lowest run in sorted
+            // order.
+            let offset = rand::thread_rng().gen_range(0..snapshot.levels[i].runs.len());
+            for j in 0..snapshot.levels[i].runs.len() {
+                let run = &snapshot.levels[i].runs[(j + offset) % snapshot.levels[i].runs.len()];
+
                 if in_flight_from.contains(&run.id()) {
                     continue;
                 }
