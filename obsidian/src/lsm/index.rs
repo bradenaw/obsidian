@@ -25,6 +25,17 @@ use crate::wal;
 
 const N_STRIPES: usize = 32;
 
+/// The LSM index holds the set of memtables and runs that make up the current state of the LSM.
+///
+/// It is mutable, in three ways:
+///
+/// 1. l0_active receives new writes.
+/// 2. rotate_l0() moves the current l0_active into l0_sealed and makes a new, empty l0_active.
+/// 3. compactions replace some set of memtables/runs with new runs.
+///
+/// Because memtables are interior-mutable, nothing actually prevents writes to l0_sealed. It's the
+/// caller's responsibility to guarantee (1) and (2), most easily by having the same thread
+/// responsible for both tasks.
 pub(super) struct Index<R> {
     // All of the elements of this array are separate arcs with clones of the same data inside.
     // Readers can choose any of them, writers must update all of them.
@@ -74,11 +85,14 @@ where
         Ok(Self::from_snapshot(index_snapshot))
     }
 
+    /// Returns the current snapshot of the index state.
     pub(super) fn snapshot(&self) -> Arc<IndexSnapshot<R>> {
         let thread_id = std::thread::current().id().as_u64().get() as usize;
         Arc::clone(&self.current.read().unwrap()[thread_id % N_STRIPES])
     }
 
+    /// Returns the current snapshot of the index state, and a future that will complete if the
+    /// snapshot changes.
     pub(super) fn snapshot_subscribe(
         &self,
     ) -> (Arc<IndexSnapshot<R>>, impl Future<Output = ()> + '_) {
@@ -87,10 +101,11 @@ where
     }
 
     pub(super) fn insert(&self, seqno: wal::SeqNo, k: Vec<u8>, ts: Timestamp, v: RevisionValue) {
-        let current = &self.current.write().unwrap()[0];
+        let current = &self.current.read().unwrap()[0];
         current.l0_active.insert(seqno, k, ts, v);
     }
 
+    /// Moves l0_active into l0_sealed and creates a new, empty l0_active.
     pub(super) fn rotate_l0(&self) {
         let mut current = self.current.write().unwrap();
         let snapshot = &current[0];
@@ -108,6 +123,7 @@ where
         self.updated.notify_waiters();
     }
 
+    /// Adds the given runs into the index and removes the runs/memtables with the given run_ids.
     pub(super) fn replace(
         &self,
         add: Vec<Run<R>>,
@@ -257,17 +273,18 @@ where
                 ));
             }
 
-            levels_maps[min_level].insert(run_range.clone(), Arc::new(run));
-
             // Insert into the lowest level we can reach without running into any intersection.
-            //for i in min_level..levels_maps.len() {
-            //    if i == levels_maps.len() - 1
-            //        || levels_maps[i + 1].intersecting_ranges(&run_range).next().is_some()
-            //    {
-            //        levels_maps[i].insert(run_range.clone(), Arc::new(run));
-            //        break;
-            //    }
-            //}
+            for i in min_level..levels_maps.len() {
+                if i == levels_maps.len() - 1
+                    || levels_maps[i + 1]
+                        .intersecting_ranges(&run_range)
+                        .next()
+                        .is_some()
+                {
+                    levels_maps[i].insert(run_range.clone(), Arc::new(run));
+                    break;
+                }
+            }
         }
 
         if removed.len() != remove.len() {

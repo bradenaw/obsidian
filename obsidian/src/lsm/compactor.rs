@@ -269,6 +269,14 @@ where
             let into = into.to_vec();
             async move {
                 let add = self_.merge_l0(&from[..], &into[..]).await?;
+
+                log::trace!(
+                    "compacted l0 {:?} + {:?}, producing {:?}",
+                    from.iter().map(|memtable| memtable.id()).collect::<Vec<_>>(),
+                    into.iter().map(|run| run.id()).collect::<Vec<_>>(),
+                    add.iter().map(|run| run.id()).collect::<Vec<_>>(),
+                );
+
                 self_.index.replace(add, 1, remove)?;
 
                 Ok(())
@@ -335,6 +343,13 @@ where
             let self_ = Arc::clone(self);
             async move {
                 let add = self_.merge_runs(&from, &into[..]).await?;
+                log::trace!(
+                    "compacted l{} {:?} + {:?}, producing {:?}",
+                    from_level,
+                    from.id(),
+                    into.iter().map(|run| run.id()).collect::<Vec<_>>(),
+                    add.iter().map(|run| run.id()).collect::<Vec<_>>(),
+                );
                 self_.index.replace(add, from_level + 1, remove)?;
                 Ok(())
             }

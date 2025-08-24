@@ -1209,6 +1209,8 @@ mod test {
 
     #[tokio::test]
     async fn test_compact_l1() -> anyhow::Result<()> {
+        _ = pretty_env_logger::try_init();
+
         let lsm = LsmBuilder::new(Arc::new(MemStorage::new()))
             .l0_max_size(128)
             .block_size_target(128)

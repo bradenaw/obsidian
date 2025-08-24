@@ -440,6 +440,7 @@ impl RunTrailer {
 pub(super) async fn dump_run<R: FileReader>(run: &Run<R>) -> anyhow::Result<()> {
     println!("    min_ts: {}", run.min_ts);
     println!("    max_ts: {}", run.max_ts);
+    println!("    range: {:?}", run.range());
     println!("    index");
     for i in 0..run.index.len() {
         println!(

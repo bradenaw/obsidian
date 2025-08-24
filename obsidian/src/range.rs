@@ -779,16 +779,21 @@ where
         let below = self
             .ranges_range(
                 std::ops::Bound::Unbounded,
-                std::ops::Bound::Included(&range.lower),
+                std::ops::Bound::Excluded(&range.lower),
             )
+            .rev()
             .take(1)
             .filter(|(other_range, _)| !range.intersection(other_range).is_empty());
         let above = self.ranges_range(
             std::ops::Bound::Included(&range.lower),
-            std::ops::Bound::Included(&range.upper),
+            std::ops::Bound::Excluded(&range.upper),
         );
 
         Iterator::chain(below, above)
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Range<K>, &V)> {
+        self.m.iter().map(|(range, value)| (&range.0, value))
     }
 
     fn ranges_range(
