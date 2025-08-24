@@ -82,9 +82,9 @@ where
         loop {
             let (snapshot, snapshot_changed) = self.index.snapshot_subscribe();
 
-            if compact_futures.len() < concurrency {
+            while compact_futures.len() < concurrency {
                 match self
-                    .schedule_next(snapshot, &in_flight_from, &in_flight_into)
+                    .schedule_next(&snapshot, &in_flight_from, &in_flight_into)
                     .await
                 {
                     Some((compaction, join_handle)) => {
@@ -96,6 +96,7 @@ where
                     }
                     None => {
                         log::trace!("no new compactions to schedule");
+                        break;
                     }
                 }
             }
@@ -121,7 +122,7 @@ where
 
     async fn schedule_next(
         self: &Arc<Self>,
-        snapshot: Arc<IndexSnapshot<S::R>>,
+        snapshot: &Arc<IndexSnapshot<S::R>>,
         in_flight_from: &HashSet<RunId>,
         in_flight_into: &HashSet<RunId>,
     ) -> Option<(Compaction, tokio::task::JoinHandle<anyhow::Result<()>>)> {
