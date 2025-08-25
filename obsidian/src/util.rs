@@ -27,6 +27,15 @@ use crate::types::Key;
 use crate::types::KeyspaceId;
 use crate::types::Timestamp;
 
+pub(crate) fn merge_sorted2<'a, T, I0, I1>(i0: I0, i1: I1) -> impl Iterator<Item = T> + 'a
+where
+    T: Ord + 'a,
+    I0: Iterator<Item = T> + 'a,
+    I1: Iterator<Item = T> + 'a,
+{
+    merge_sorted(vec![IteratorEither::Left(i0), IteratorEither::Right(i1)])
+}
+
 pub(crate) fn merge_sorted<'a, T: Ord + 'a>(
     mut iters: Vec<impl Iterator<Item = T> + 'a>,
 ) -> impl Iterator<Item = T> + 'a {
@@ -485,22 +494,27 @@ pub(crate) struct WithBackground<T> {
     bg: Background,
 }
 
-impl<T> WithBackground<T> {
-    fn new(t: Arc<T>) -> Self {
+impl<T> WithBackground<T>
+where
+    T: Send + Sync + 'static,
+{
+    pub(crate) fn new(t: Arc<T>) -> Self {
         Self {
             inner: t,
             bg: Background::new(),
         }
     }
 
-    fn spawn<F, Fut>(&self, f: F)
+    pub(crate) fn spawn<F, Fut>(&self, f: F)
     where
-        F: Fn(&T) -> Fut,
-        Fut: Future<Output = ()> + Send + 'static,
+        F: FnOnce(Arc<T>) -> Fut + Sync + Send + 'static,
+        Fut: Future<Output = ()> + Send,
     {
         self.bg.spawn({
             let inner = self.inner.clone();
-            f(inner.deref())
+            async move {
+                f(inner).await;
+            }
         });
     }
 }

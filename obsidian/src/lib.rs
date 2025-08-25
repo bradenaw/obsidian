@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![feature(assert_matches)]
 #![feature(coroutines)]
+#![feature(thread_id_value)]
 
 mod coordinator;
 mod grpc;

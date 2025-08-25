@@ -1,4 +1,6 @@
 mod block;
+mod compactor;
+mod index;
 mod memtable;
 mod run;
 mod util;
@@ -6,34 +8,25 @@ mod util;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::fmt::Display;
-use std::future::Future;
 use std::marker::PhantomData;
-use std::ops::Deref;
-use std::ops::DerefMut;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::RwLock;
 use std::time::Duration;
 
 use anyhow::anyhow;
 use futures::future;
-use futures::stream::Stream;
 use futures::stream::StreamExt;
-use futures::SinkExt;
 use futures::TryStreamExt;
-use rand::Rng;
 use uuid::Uuid;
 
+use crate::lsm::compactor::Compactor;
+use crate::lsm::index::Index;
 use crate::lsm::memtable::Memtable;
 use crate::lsm::run::Run;
 use crate::lsm::util::LsmRevision;
-use crate::range::intersect_in_ranges_by_key;
 use crate::range::Bound;
-use crate::range::KeyOrBound;
 use crate::range::Range;
 use crate::storage::FileReader;
 use crate::storage::Storage;
@@ -48,7 +41,6 @@ use crate::types::RevisionValue;
 use crate::types::Timestamp;
 use crate::types::WriteError;
 use crate::util::hexlify;
-use crate::util::merge_sorted;
 use crate::util::merge_sorted_streams;
 use crate::util::AtomicArc;
 use crate::util::Background;
@@ -141,12 +133,12 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         wal: Arc<wal::Wal<WalEntry>>,
         storage: Arc<S>,
     ) -> anyhow::Result<Self> {
-        let (manifests, newest_seqno) = Self::recovery(&wal, &storage).await?;
+        let (indexes, newest_seqno) = Self::recovery(l0_max_size, &wal, &storage).await?;
 
         let lsms = {
             let mut lsms = HashMap::new();
 
-            for (keyspace_id, manifest) in manifests {
+            for (keyspace_id, index) in indexes {
                 lsms.insert(
                     keyspace_id,
                     Arc::new(
@@ -155,8 +147,7 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
                             run_size_target,
                             block_size_target,
                             keyspace_id,
-                            manifest,
-                            wal.clone(),
+                            Arc::new(index),
                             storage.clone(),
                         )
                         .await?,
@@ -291,18 +282,21 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
             ))
             .await?;
 
-        let mut wal_processed = self.wal_processed.clone();
-        while *wal_processed.borrow_and_update() < seqno {
-            wal_processed
-                .changed()
-                .await
-                .map_err(|_| WriteError::Other(anyhow!("wal processor missing")))?;
-        }
+        self.wait_processed(seqno).await?;
 
         Ok(())
     }
 
     pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        self.create_keyspace_internal(keyspace_id, 7 /*depth*/)
+            .await
+    }
+
+    pub async fn create_keyspace_internal(
+        &self,
+        keyspace_id: KeyspaceId,
+        depth: usize,
+    ) -> anyhow::Result<()> {
         loop {
             let inner = self.inner.load();
             let mut inner_new = (*inner).clone();
@@ -312,8 +306,7 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
                     self.run_size_target,
                     self.block_size_target,
                     keyspace_id,
-                    LoadedManifest::new(7),
-                    self.wal.clone(),
+                    Arc::new(Index::new(depth)),
                     self.storage.clone(),
                 )
                 .await?,
@@ -337,6 +330,34 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         .await;
     }
 
+    /// Flush ensures that all writes that have already completed are in runs committed to storage
+    /// (i.e. not in L0). Snapshots manifests into the WAL to speed recovery.
+    pub async fn flush(&self) -> anyhow::Result<()> {
+        let seqno = self.wal.append(WalEntry::NoOp).await?;
+        self.wait_processed(seqno).await?;
+
+        let lsm_inner_by_keyspace = self.inner.load();
+        for (_, lsm_inner) in lsm_inner_by_keyspace.iter() {
+            lsm_inner.index.rotate_l0();
+        }
+
+        self.pending_compactions().await;
+
+        for (keyspace_id, lsm_inner) in lsm_inner_by_keyspace.iter() {
+            let mut keyspace_manifest = lsm_inner.index.snapshot().manifest();
+            // These can't get rehydrated from anywhere because they haven't been stored yet, but
+            // we also don't care about them because anything here must have showed up after we
+            // started flush().
+            keyspace_manifest.levels[0].runs = Vec::new();
+
+            self.wal
+                .append(WalEntry::Manifest(*keyspace_id, seqno, keyspace_manifest))
+                .await?;
+        }
+
+        Ok(())
+    }
+
     // TODO: move up a layer to tablet, since we can store the keyspaces that exist in a known
     // keyspace for the tablet
     pub fn keyspaces(&self) -> Vec<KeyspaceId> {
@@ -347,43 +368,9 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         let lsm_inner_by_keyspace = self.inner.load();
         let mut by_keyspace = HashMap::new();
         for (keyspace_id, lsm_inner) in lsm_inner_by_keyspace.iter() {
-            let mut l0 = Vec::new();
-            let loaded_manifest = lsm_inner.inner.manifest.load();
-            for (run_id, memtable_lock) in &loaded_manifest.l0_active {
-                let memtable = memtable_lock.read().unwrap();
-                if memtable.size() == 0 {
-                    continue;
-                }
-                l0.push(RunManifest {
-                    run_id: *run_id,
-                    key_range: memtable.range(),
-                });
-            }
-            for memtable in &loaded_manifest.l0_sealed {
-                l0.push(RunManifest {
-                    run_id: memtable.id(),
-                    key_range: memtable.range(),
-                });
-            }
+            let keyspace_manifest = lsm_inner.inner.index.snapshot().manifest();
 
-            let mut levels = Vec::new();
-            levels.push(LevelManifest { runs: l0 });
-
-            for i in 1..loaded_manifest.levels.len() {
-                let level = &loaded_manifest.levels[i];
-                levels.push(LevelManifest {
-                    runs: level
-                        .runs
-                        .iter()
-                        .map(|run| RunManifest {
-                            run_id: run.id(),
-                            key_range: run.range(),
-                        })
-                        .collect(),
-                });
-            }
-
-            by_keyspace.insert(*keyspace_id, levels);
+            by_keyspace.insert(*keyspace_id, keyspace_manifest);
         }
 
         Manifest {
@@ -391,22 +378,33 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         }
     }
 
+    /// Waits until at least the given sequence number has been processed.
+    async fn wait_processed(&self, seqno: wal::SeqNo) -> anyhow::Result<()> {
+        let mut wal_processed = self.wal_processed.clone();
+        while *wal_processed.borrow_and_update() < seqno {
+            wal_processed
+                .changed()
+                .await
+                .map_err(|_| WriteError::Other(anyhow!("wal processor missing")))?;
+        }
+        Ok(())
+    }
+
     async fn recovery(
+        l0_max_size: u64,
         wal: &wal::Wal<WalEntry>,
         storage: &S,
-    ) -> anyhow::Result<(
-        HashMap<KeyspaceId, LoadedManifest<S::R>>,
-        Option<wal::SeqNo>,
-    )> {
+    ) -> anyhow::Result<(HashMap<KeyspaceId, Index<S::R>>, Option<wal::SeqNo>)> {
         let oldest_seqno = wal.oldest_available();
         let mut newest_seqno = None;
         let mut wal_stream = wal.stream(oldest_seqno, false).boxed();
 
         let mut bufs = HashMap::new();
-        let mut manifest_run_ids = HashMap::new();
+        let mut indexes = HashMap::new();
 
         while let Some((seqno, entry)) = wal_stream.try_next().await? {
             match entry {
+                WalEntry::NoOp => {}
                 WalEntry::Write(ts, kvs) => {
                     let mut kvs_by_keyspace = HashMap::new();
                     for (keyspace_id, key, value) in kvs {
@@ -421,46 +419,50 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
                             .push_back((seqno, ts, keyspace_kvs));
                     }
                 }
-                WalEntry::Manifest(keyspace_id, included_seqno, levels) => {
+                WalEntry::Manifest(keyspace_id, included_seqno, keyspace_manifest) => {
                     let buf = bufs.entry(keyspace_id).or_insert_with(VecDeque::new);
                     let trim_to_idx = buf
                         .binary_search_by_key(&included_seqno, |(seqno, _, _)| *seqno)
                         .unwrap_or_else(core::convert::identity);
-                    buf.drain(0..=trim_to_idx);
-                    manifest_run_ids.insert(keyspace_id, levels);
+                    buf.drain(0..trim_to_idx);
+
+                    let index = Index::from_manifest(storage, keyspace_manifest).await?;
+                    indexes.insert(keyspace_id, index);
                 }
             }
             newest_seqno = Some(seqno);
         }
 
-        let mut manifests = HashMap::new();
         for (keyspace_id, buf) in bufs {
-            let memtable = Memtable::new();
+            let index = indexes.get(&keyspace_id).unwrap();
+            let index_snapshot = index.snapshot();
             for (seqno, ts, kvs) in buf {
                 for (key, value) in kvs {
-                    memtable.insert(seqno, key, ts, value);
+                    // It's possible that this revision is already present since the seqno in
+                    // WalEntry::Manifest is a lower bound, the manifest may already contain newer
+                    // writes.
+                    if let Some((existing_ts, existing_value)) =
+                        index_snapshot.l0_active.get(ts, &key[..])
+                    {
+                        if existing_ts == ts {
+                            if value != existing_value {
+                                return Err(anyhow!(""));
+                            }
+                            continue;
+                        }
+                    }
+
+                    index.insert(seqno, key, ts, value);
                 }
             }
-
-            // TODO: no unwrap by putting both in the same map
-            let keyspace_manifest_run_ids = manifest_run_ids.get(&keyspace_id).unwrap();
-            let mut manifest = LoadedManifest::new(7);
-            manifest.l0_sealed.push(Arc::new(memtable));
-
-            for i in 1..keyspace_manifest_run_ids.len() {
-                let mut runs = Vec::with_capacity(keyspace_manifest_run_ids[i].len());
-                for run_run_ids in &keyspace_manifest_run_ids[i] {
-                    let run = Run::open(storage.get(&run_run_ids.to_string()).await?).await?;
-                    runs.push(run);
-                }
-                runs.sort_by_key(|run| run.range().lower);
-                manifest.levels[i] = Level { runs };
+            // We're not _really_ respecting l0_max_size but it's not any "better" to have multiple
+            // l0_sealed over one.
+            if index.snapshot().l0_active.size() >= l0_max_size {
+                index.rotate_l0();
             }
-
-            manifests.insert(keyspace_id, manifest);
         }
 
-        Ok((manifests, newest_seqno))
+        Ok((indexes, newest_seqno))
     }
 
     async fn process_wal(
@@ -484,6 +486,7 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         let mut log = wal.stream(start, true).boxed();
         while let Some((seqno, entry)) = log.try_next().await? {
             match entry {
+                WalEntry::NoOp => {}
                 WalEntry::Write(ts, kvs) => {
                     for (keyspace_id, key, value) in kvs {
                         log::trace!(
@@ -538,24 +541,29 @@ impl Debug for RunId {
 }
 
 pub(crate) struct Manifest {
-    pub(crate) keyspaces: HashMap<KeyspaceId, Vec<LevelManifest>>,
+    pub(crate) keyspaces: HashMap<KeyspaceId, KeyspaceManifest>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct KeyspaceManifest {
+    pub(crate) levels: Vec<LevelManifest>,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct LevelManifest {
-    // Except for L0, the ranges are in sorted order and non-overlapping.
     pub(crate) runs: Vec<RunManifest>,
 }
 
+#[derive(Clone, Debug)]
 pub(crate) struct RunManifest {
     pub(crate) run_id: RunId,
-    pub(crate) key_range: Range<Vec<u8>>,
+    //pub(crate) key_range: Range<Vec<u8>>,
 }
 
 struct LsmInner<S: Storage> {
     inner: Arc<LsmInnerInner<S::R>>,
-
-    bg: Background,
-    compacted: tokio::sync::broadcast::Receiver<()>,
+    compactor: Compactor<S>,
+    index: Arc<Index<S::R>>,
 
     _phantom: std::marker::PhantomData<S>,
 }
@@ -566,37 +574,24 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
         run_size_target: u64,
         block_size_target: u64,
         keyspace_id: KeyspaceId,
-        manifest: LoadedManifest<S::R>,
-        wal: Arc<wal::Wal<WalEntry>>,
+        index: Arc<Index<S::R>>,
         storage: Arc<S>,
     ) -> anyhow::Result<Self> {
-        let (l0_compact_notify, l0_compact_ready) = tokio::sync::mpsc::channel::<()>(1);
-        let (compacted_notify, compacted) = tokio::sync::broadcast::channel(1);
-        let inner = Arc::new(LsmInnerInner::new(
-            l0_max_size,
-            run_size_target,
-            block_size_target,
-            manifest,
-            l0_compact_notify,
-        ));
+        let inner = Arc::new(LsmInnerInner::new(l0_max_size, Arc::clone(&index)));
 
-        let bg = Background::new();
-        bg.spawn(Self::compaction_loop(
-            l0_max_size,
+        let compactor = Compactor::new(
+            storage,
+            Arc::clone(&index),
+            1, // parallelism
             run_size_target,
             block_size_target,
             keyspace_id,
-            inner.clone(),
-            storage.clone(),
-            wal.clone(),
-            l0_compact_ready,
-            compacted_notify,
-        ));
+        );
 
         Ok(Self {
             inner,
-            bg,
-            compacted,
+            compactor,
+            index,
             _phantom: PhantomData::default(),
         })
     }
@@ -629,341 +624,33 @@ impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
         self.inner.history_page(key, range, direction, limit).await
     }
 
-    pub fn next_compaction(&self) -> impl Future<Output = ()> {
-        let mut compacted = self.compacted.resubscribe();
-        async move {
-            _ = compacted.recv().await;
-            ()
-        }
-    }
-
     pub async fn pending_compactions(&self) {
         loop {
-            let compacted = self.next_compaction();
-            if self.inner.manifest.load().l0_sealed.len() == 0 {
+            let (index_snapshot, changed) = self.index.snapshot_subscribe();
+            // TODO: Don't actually need to wait for empty, just for the ones we saw at the
+            // beginning to be gone.
+            if index_snapshot.l0_active.is_empty() || index_snapshot.l0_sealed.is_empty() {
                 break;
             }
-            compacted.await;
+            changed.await;
         }
-    }
-
-    async fn compaction_loop(
-        l0_max_size: u64,
-        run_size_target: u64,
-        block_size_target: u64,
-        keyspace_id: KeyspaceId,
-        inner: Arc<LsmInnerInner<S::R>>,
-        storage: Arc<S>,
-        wal: Arc<wal::Wal<WalEntry>>,
-        mut l0_compact_ready: tokio::sync::mpsc::Receiver<()>,
-        compacted_notify: tokio::sync::broadcast::Sender<()>,
-    ) {
-        while let Some(_) = l0_compact_ready.recv().await {
-            Self::compact(
-                l0_max_size,
-                run_size_target,
-                block_size_target,
-                keyspace_id,
-                inner.clone(),
-                storage.clone(),
-                &wal,
-                compacted_notify.clone(),
-            )
-            .await
-            .unwrap();
-        }
-    }
-
-    async fn compact(
-        l0_max_size: u64,
-        run_size_target: u64,
-        block_size_target: u64,
-        keyspace_id: KeyspaceId,
-        inner: Arc<LsmInnerInner<S::R>>,
-        storage: Arc<S>,
-        wal: &wal::Wal<WalEntry>,
-        compacted_notify: tokio::sync::broadcast::Sender<()>,
-    ) -> anyhow::Result<()> {
-        let mut manifest = inner.manifest.load();
-
-        while !manifest.l0_sealed.is_empty() {
-            let (runs, remove_ids, seqno) = Self::compact_l0(
-                run_size_target,
-                block_size_target,
-                keyspace_id,
-                &manifest,
-                &storage,
-            )
-            .await?;
-            if runs.is_empty() && remove_ids.is_empty() {
-                return Ok(());
-            }
-            loop {
-                let new_manifest =
-                    Arc::new(manifest.with_ingest(1, runs.clone(), remove_ids.clone()));
-                if inner
-                    .manifest
-                    .compare_and_swap(&manifest, new_manifest.clone())
-                {
-                    manifest = new_manifest;
-                    break;
-                }
-                manifest = inner.manifest.load();
-            }
-            // This seqno might be split across multiple memtables, so we can't trim the max seen
-            // yet.
-            let seqno_ingested = wal::SeqNo(seqno.0.saturating_sub(1));
-            wal.append(WalEntry::Manifest(
-                keyspace_id,
-                seqno_ingested,
-                manifest
-                    .levels
-                    .iter()
-                    .map(|level| level.runs.iter().map(|run| run.id()).collect::<Vec<_>>())
-                    .collect::<Vec<_>>(),
-            ))
-            .await?;
-            // TODO: We can delete any files that don't appear in the above manifest here.
-            wal.trim(seqno_ingested).await?;
-
-            // TODO: We need to compact lmax into itself sometimes for garbage collection.
-            'levels: for i in 1..manifest.levels.len() - 1 {
-                while manifest.levels[i].size() as u64 > l0_max_size * 10_u64.pow(i as u32) {
-                    let (runs, remove_ids) = Self::compact_from(
-                        run_size_target,
-                        block_size_target,
-                        keyspace_id,
-                        &manifest,
-                        &storage,
-                        i,
-                    )
-                    .await?;
-                    if runs.is_empty() && remove_ids.is_empty() {
-                        break 'levels;
-                    }
-                    loop {
-                        let new_manifest =
-                            Arc::new(manifest.with_ingest(i + 1, runs.clone(), remove_ids.clone()));
-                        if inner
-                            .manifest
-                            .compare_and_swap(&manifest, new_manifest.clone())
-                        {
-                            manifest = new_manifest;
-                            break;
-                        }
-                        manifest = inner.manifest.load();
-                    }
-                    // TODO: should probably write the manifest to WAL even though only l0
-                    // compactions can move seqno_ingested because otherwise we're throwing away a
-                    // bunch of our hard-earned compaction work
-                }
-            }
-            let _ = compacted_notify.send(());
-        }
-
-        Ok(())
-    }
-
-    async fn compact_l0(
-        run_size_target: u64,
-        block_size_target: u64,
-        keyspace_id: KeyspaceId,
-        manifest: &LoadedManifest<S::R>,
-        storage: &S,
-    ) -> anyhow::Result<(Vec<Run<S::R>>, HashSet<RunId>, wal::SeqNo)> {
-        // We must always compact the oldest l0, because get, etc. assume that everything in
-        // memtables is newer than anything in any lower levels.
-        let chosen_l0 = &manifest.l0_sealed[0];
-        let chosen_l0_id = chosen_l0.id();
-        let chosen_l0_range = chosen_l0.range();
-        if chosen_l0_range.is_empty() {
-            let mut removes = HashSet::new();
-            removes.insert(chosen_l0_id);
-            return Ok((vec![], removes, wal::SeqNo(0)));
-        }
-
-        let seqno = chosen_l0.max_seqno();
-
-        let (new_runs, mut removes) = Self::compact_inner(
-            run_size_target,
-            block_size_target,
-            keyspace_id,
-            manifest,
-            storage,
-            1,
-            chosen_l0_range,
-            futures::stream::iter(chosen_l0.iter().map(|revision| Ok(revision))),
-        )
-        .await?;
-        removes.insert(chosen_l0_id);
-
-        Ok((new_runs, removes, seqno))
-    }
-
-    async fn compact_from(
-        run_size_target: u64,
-        block_size_target: u64,
-        keyspace_id: KeyspaceId,
-        manifest: &LoadedManifest<S::R>,
-        storage: &S,
-        level: usize,
-    ) -> anyhow::Result<(Vec<Run<S::R>>, HashSet<RunId>)> {
-        if manifest.levels[level].runs.is_empty() {
-            return Ok((vec![], HashSet::new()));
-        }
-        let idx = rand::thread_rng().gen_range(0..manifest.levels[level].runs.len());
-        let run = &manifest.levels[level].runs[idx];
-        let run_range = run.range();
-
-        // TODO: We could elide compaction and just promote the run directly when there are no
-        // overlapping runs in the next level and there isn't any possibility for an expired key -
-        // either min_ts is newer than the retention window or this is lmax and there aren't
-        // multiple versions of the same key, which we could write into the trailer.
-
-        let run_id = run.id();
-
-        let (new_runs, mut removes) = Self::compact_inner(
-            run_size_target,
-            block_size_target,
-            keyspace_id,
-            manifest,
-            storage,
-            level + 1,
-            run_range,
-            run.stream(),
-        )
-        .await?;
-        removes.insert(run_id);
-
-        Ok((new_runs, removes))
-    }
-
-    async fn compact_inner(
-        run_size_target: u64,
-        block_size_target: u64,
-        keyspace_id: KeyspaceId,
-        manifest: &LoadedManifest<S::R>,
-        storage: &S,
-        into_level: usize,
-        entries_range: Range<Vec<u8>>,
-        entries: impl Stream<Item = anyhow::Result<LsmRevision>> + Send,
-    ) -> anyhow::Result<(Vec<Run<S::R>>, HashSet<RunId>)> {
-        let overlapping_runs = manifest.levels[into_level].overlapping_runs(entries_range);
-
-        let removes = overlapping_runs.iter().map(|run| run.id()).collect();
-
-        let existing_iter =
-            futures::stream::iter(overlapping_runs.iter().map(Run::stream)).flatten();
-
-        let entries = entries.inspect(|entry| {
-            if let Ok(revision) = entry {
-                log::trace!(
-                    "compact from l{} {}@{}",
-                    into_level - 1,
-                    hexlify(&revision.key[..]),
-                    revision.ts
-                );
-            }
-        });
-
-        let existing_iter = existing_iter.inspect(|entry| {
-            if let Ok(revision) = entry {
-                log::trace!(
-                    "compact from l{} {}@{}",
-                    into_level,
-                    hexlify(&revision.key[..]),
-                    revision.ts
-                );
-            }
-        });
-
-        let mut sorted = merge_sorted_streams(vec![existing_iter.boxed(), entries.boxed()])
-            .boxed()
-            .peekable();
-
-        let mut runs = Vec::new();
-        while let Some(_) = Pin::new(&mut sorted).peek().await {
-            let mut curr_size = 0u64;
-            let (mut tx, rx) = futures::channel::mpsc::channel(256);
-
-            let id = RunId::new();
-            let (mut writer, reader) = tokio::io::duplex(16384);
-            future::try_join3(
-                storage.put(&id.to_string(), reader),
-                async {
-                    Run::<()>::write(&mut writer, id, keyspace_id, block_size_target, rx).await?;
-                    drop(writer);
-                    Ok(())
-                },
-                async {
-                    while let Some(revision) = sorted.next().await.transpose()? {
-                        let revision_size =
-                            (revision.key.len() as u64) + 8 + (revision.value.len() as u64);
-                        curr_size += revision_size;
-                        let break_after = {
-                            // All of the revisions for a single key need to end up in the same run, so once
-                            // we've gone over the target size look for a break between keys.
-                            if curr_size > run_size_target {
-                                if let Some(Ok(next_revision)) = Pin::new(&mut sorted).peek().await
-                                {
-                                    if revision.key != next_revision.key {
-                                        true
-                                    } else {
-                                        false
-                                    }
-                                } else {
-                                    false
-                                }
-                            } else {
-                                false
-                            }
-                        };
-                        tx.send(Ok(revision)).await?;
-                        if break_after {
-                            break;
-                        }
-                    }
-                    drop(tx);
-
-                    Ok(())
-                },
-            )
-            .await?;
-
-            let run = Run::open(storage.get(&id.to_string()).await?).await?;
-            runs.push(run);
-        }
-
-        Ok((runs, removes))
     }
 }
 
 struct LsmInnerInner<R> {
     l0_max_size: u64,
-    run_size_target: u64,
-    block_size_target: u64,
 
-    l0_compact_notify: tokio::sync::mpsc::Sender<()>,
-    l0_active: AtomicArc<RwLock<MaybeActiveMemtable>>,
-    manifest: AtomicArc<LoadedManifest<R>>,
+    index: Arc<Index<R>>,
 }
 
-impl<R: FileReader + Clone + Sync> LsmInnerInner<R> {
-    fn new(
-        l0_max_size: u64,
-        run_size_target: u64,
-        block_size_target: u64,
-        initial_manifest: LoadedManifest<R>,
-        l0_compact_notify: tokio::sync::mpsc::Sender<()>,
-    ) -> Self {
-        let l0_active = Arc::new(RwLock::new(MaybeActiveMemtable::Active(Memtable::new())));
+impl<R> LsmInnerInner<R>
+where
+    R: FileReader + Clone + Sync + Send,
+{
+    fn new(l0_max_size: u64, initial_index: Arc<Index<R>>) -> Self {
         Self {
             l0_max_size,
-            run_size_target,
-            block_size_target,
-            l0_compact_notify,
-            l0_active: AtomicArc::new(l0_active.clone()),
-            manifest: AtomicArc::new(Arc::new(initial_manifest.with_ingest_l0(l0_active))),
+            index: initial_index,
         }
     }
 
@@ -972,27 +659,25 @@ impl<R: FileReader + Clone + Sync> LsmInnerInner<R> {
         ts: Timestamp,
         k: &[u8],
     ) -> anyhow::Result<Option<(Timestamp, RevisionValue)>> {
-        let manifest = self.manifest.load();
+        let index_snapshot = self.index.snapshot();
 
-        // Any memtable might have the latest for the key, so must check all of them.
-        let maybe_revision = Iterator::chain(
-            manifest
-                .l0_active
-                .iter()
-                .map(|(_, memtable)| memtable.read().unwrap().get(ts, k)),
-            manifest
-                .l0_sealed
-                .iter()
-                .map(|memtable| memtable.get(ts, k)),
-        )
-        .filter_map(core::convert::identity)
-        .max_by_key(|(ts, _)| *ts);
+        if let Some((revision_ts, v)) = index_snapshot.l0_active.get(ts, k) {
+            return Ok(Some((revision_ts, v)));
+        }
+        let maybe_revision = index_snapshot
+            .l0_sealed
+            .iter()
+            .map(|memtable| memtable.get(ts, k))
+            .filter_map(core::convert::identity)
+            .max_by_key(|(ts, _)| *ts);
         if let Some((revision_ts, v)) = maybe_revision {
             return Ok(Some((revision_ts, v)));
         }
-        for level in &manifest.levels {
-            if let Some((revision_ts, v)) = level.get(ts, k).await? {
-                return Ok(Some((revision_ts, v)));
+        for level in &index_snapshot.levels {
+            if let Some(run) = level.run_for_key(k) {
+                if let Some((revision_ts, v)) = run.get(ts, k).await? {
+                    return Ok(Some((revision_ts, v)));
+                }
             }
         }
         Ok(None)
@@ -1009,20 +694,22 @@ impl<R: FileReader + Clone + Sync> LsmInnerInner<R> {
             return Ok((vec![], None));
         }
 
-        let manifest = self.manifest.load();
+        let index_snapshot = self.index.snapshot();
 
         let mut streams = Vec::with_capacity(
-            manifest.l0_active.len() + manifest.l0_sealed.len() + manifest.levels.len(),
+            1  // l0_active
+                + index_snapshot.l0_sealed.len()
+                + index_snapshot.levels.len(),
         );
-        for l0_active in &manifest.l0_active {
-            let l0_run = l0_active.1.read().unwrap();
-            let revisions: Vec<_> = l0_run
+        {
+            let revisions: Vec<_> = index_snapshot
+                .l0_active
                 .scan(ts, range.clone(), direction)
                 .map(|revision| Ok(revision))
                 .collect();
             streams.push(futures::stream::iter(revisions.into_iter()).boxed());
         }
-        for l0_run in &manifest.l0_sealed {
+        for l0_run in &index_snapshot.l0_sealed {
             streams.push(
                 futures::stream::iter(
                     l0_run
@@ -1032,8 +719,8 @@ impl<R: FileReader + Clone + Sync> LsmInnerInner<R> {
                 .boxed(),
             );
         }
-        for i in 1..manifest.levels.len() {
-            let overlapping_runs = manifest.levels[i].overlapping_runs(range.to_vec());
+        for i in 1..index_snapshot.levels.len() {
+            let overlapping_runs = index_snapshot.levels[i].range(range.to_vec());
 
             if overlapping_runs.is_empty() {
                 continue;
@@ -1144,20 +831,19 @@ impl<R: FileReader + Clone + Sync> LsmInnerInner<R> {
         direction: Direction,
         limit: usize,
     ) -> anyhow::Result<(Vec<(Timestamp, RevisionValue)>, Option<HistoryRange>)> {
-        let manifest = self.manifest.load();
+        let index_snapshot = self.index.snapshot();
 
-        let mut streams = Vec::with_capacity(manifest.levels.len());
-        let mut l0_streams =
-            Vec::with_capacity(manifest.l0_active.len() + manifest.l0_sealed.len());
-        for l0_active in &manifest.l0_active {
-            let l0_run = l0_active.1.read().unwrap();
-            let revisions: Vec<_> = l0_run
+        let mut streams = Vec::with_capacity(index_snapshot.levels.len());
+        let mut l0_streams = Vec::with_capacity(1 + index_snapshot.l0_sealed.len());
+        {
+            let revisions: Vec<_> = index_snapshot
+                .l0_active
                 .history(key, range, direction)
                 .map(|revision| Ok(revision))
                 .collect();
             l0_streams.push(futures::stream::iter(revisions.into_iter()).boxed());
         }
-        for l0_run in &manifest.l0_sealed {
+        for l0_run in &index_snapshot.l0_sealed {
             l0_streams.push(
                 futures::stream::iter(
                     l0_run
@@ -1189,7 +875,7 @@ impl<R: FileReader + Clone + Sync> LsmInnerInner<R> {
             .boxed(),
         });
 
-        for level in &manifest.levels[1..] {
+        for level in &index_snapshot.levels[1..] {
             if let Some(run) = level.run_for_key(key) {
                 streams.push(run.history(key, range, direction).boxed());
             }
@@ -1245,318 +931,37 @@ impl<R: FileReader + Clone + Sync> LsmInnerInner<R> {
     }
 
     fn insert(&self, seqno: wal::SeqNo, k: Vec<u8>, ts: Timestamp, v: RevisionValue) {
-        loop {
-            let l0_active = self.l0_active.load();
-            let overfilled = {
-                let mut guard = l0_active.write().unwrap();
-                if let MaybeActiveMemtable::Active(memtable) = &mut *guard {
-                    let pre_size = memtable.size();
-                    let post_size = memtable.insert(seqno, k.clone(), ts, v.clone());
-                    pre_size < self.l0_max_size && post_size >= self.l0_max_size
-                } else {
-                    // Only happens if there's already a new one inserted into self.l0_active, so
-                    // just try again.
-                    continue;
-                }
-            };
-            if overfilled {
-                self.flush_l0(l0_active);
-            }
-            return;
+        self.index.insert(seqno, k, ts, v);
+        if self.index.snapshot().l0_active.size() > self.l0_max_size {
+            self.index.rotate_l0();
         }
-    }
-
-    fn flush_l0(&self, l0_active: Arc<RwLock<MaybeActiveMemtable>>) {
-        let old_memtable_id = { l0_active.read().unwrap().id() };
-        // Make a new memtable.
-        let new_memtable = Arc::new(RwLock::new(MaybeActiveMemtable::Active(Memtable::new())));
-        // Add it to the manifest, so that by the time it receives any writes, it's
-        // also visible to readers.
-        loop {
-            let manifest = self.manifest.load();
-            if self.manifest.compare_and_swap(
-                &manifest,
-                Arc::new(manifest.with_ingest_l0(new_memtable.clone())),
-            ) {
-                break;
-            }
-        }
-        // Swap the new memtable in for self.l0_active, so that's where all of the new
-        // writes go.
-        self.l0_active.compare_and_swap(&l0_active, new_memtable);
-
-        // Seal the old memtable and mark it as such in the manifest so it's eligible for
-        // compaction.
-        loop {
-            let manifest = self.manifest.load();
-            if self.manifest.compare_and_swap(
-                &manifest,
-                Arc::new(manifest.with_mark_sealed(old_memtable_id)),
-            ) {
-                break;
-            }
-        }
-
-        let _ = self.l0_compact_notify.try_send(());
-    }
-}
-
-enum MaybeActiveMemtable {
-    Active(Memtable),
-    Sealed(Arc<Memtable>),
-}
-
-impl Deref for MaybeActiveMemtable {
-    type Target = Memtable;
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            MaybeActiveMemtable::Active(memtable) => &memtable,
-            MaybeActiveMemtable::Sealed(arc_memtable) => &arc_memtable,
-        }
-    }
-}
-
-impl MaybeActiveMemtable {
-    fn seal(self) -> (Self, Arc<Memtable>) {
-        match self {
-            MaybeActiveMemtable::Active(memtable) => {
-                let arc = Arc::new(memtable);
-                (MaybeActiveMemtable::Sealed(arc.clone()), arc)
-            }
-            MaybeActiveMemtable::Sealed(ref arc_memtable) => {
-                let arc = arc_memtable.clone();
-                (self, arc)
-            }
-        }
-    }
-}
-
-// Mostly immutable, except that:
-// (a) memtables in l0_active may still be receiving writes.
-// (b) l0_active memtables may swap from active to sealed.
-struct LoadedManifest<R> {
-    // May still be receiving writes.
-    l0_active: Vec<(RunId, Arc<RwLock<MaybeActiveMemtable>>)>,
-    // Guaranteed to be read-only. In insertion order.
-    l0_sealed: Vec<Arc<Memtable>>,
-    levels: Vec<Level<R>>,
-}
-
-impl<R: FileReader + Clone> LoadedManifest<R> {
-    fn new(n_levels: usize) -> Self {
-        Self {
-            l0_active: vec![],
-            l0_sealed: vec![],
-            levels: (0..n_levels).map(|_| Level::new()).collect(),
-        }
-    }
-
-    fn with_mark_sealed(&self, id: RunId) -> Self {
-        let mut l0_active = Vec::with_capacity(self.l0_active.len() - 1);
-        let mut l0_sealed = self.l0_sealed.clone();
-
-        for (memtable_id, arc_rwlock_memtable) in &self.l0_active {
-            if *memtable_id == id {
-                let mut guard = arc_rwlock_memtable.write().unwrap();
-                let mut temp = MaybeActiveMemtable::Sealed(Arc::new(Memtable::new()));
-                // Awkward, but we need ownership, so we'd have to wrap with an Option and deal with it
-                // being missing or we have to make a temporary one that we'll destroy in a second.
-                std::mem::swap(guard.deref_mut(), &mut temp);
-                let (new_maybe_active_memtable, memtable) = temp.seal();
-                *guard = new_maybe_active_memtable;
-                l0_sealed.push(memtable);
-            } else {
-                l0_active.push((*memtable_id, arc_rwlock_memtable.clone()));
-            }
-        }
-
-        Self {
-            l0_active,
-            l0_sealed,
-            levels: self.levels.clone(),
-        }
-    }
-
-    fn with_ingest_l0(&self, memtable: Arc<RwLock<MaybeActiveMemtable>>) -> Self {
-        let id = memtable.read().unwrap().id();
-        Self {
-            l0_active: self
-                .l0_active
-                .iter()
-                .chain(std::iter::once(&(id, memtable)))
-                .map(|(id, table)| (id.clone(), table.clone()))
-                .collect(),
-            l0_sealed: self.l0_sealed.clone(),
-            levels: self.levels.clone(),
-        }
-    }
-
-    // TODO: Return an error if not all `remove`s appear in the manifest.
-    fn with_ingest(&self, into_level: usize, mut add: Vec<Run<R>>, remove: HashSet<RunId>) -> Self {
-        log::info!(
-            "compacted into l{}: {:?} -> {:?}",
-            into_level,
-            remove.iter().collect::<Vec<_>>(),
-            add.iter().map(|run| run.id()).collect::<Vec<_>>(),
-        );
-
-        let mut levels = Vec::with_capacity(self.levels.len());
-        for (i, old_level) in self.levels.iter().enumerate() {
-            let filtered_old_level = old_level
-                .runs
-                .iter()
-                .filter(|run| !remove.contains(&((*run).id())))
-                .cloned();
-            if i == into_level {
-                levels.push(Level {
-                    runs: merge_sorted(vec![
-                        IteratorEither::Left(
-                            filtered_old_level.map(|run| OrdEqByFirst(run.range().lower, run)),
-                        ),
-                        IteratorEither::Right(
-                            std::mem::take(&mut add)
-                                .into_iter()
-                                .map(|run| OrdEqByFirst(run.range().lower, run)),
-                        ),
-                    ])
-                    .map(|OrdEqByFirst(_, run)| run)
-                    .collect(),
-                });
-            } else {
-                levels.push(Level {
-                    runs: filtered_old_level.collect(),
-                });
-            }
-        }
-
-        let new_manifest = Self {
-            l0_active: self.l0_active.clone(),
-            l0_sealed: self
-                .l0_sealed
-                .iter()
-                .filter(|memtable| !remove.contains(&memtable.id()))
-                .cloned()
-                .collect(),
-            levels,
-        };
-
-        log::debug!("manifest before compaction:\n{:?}", self);
-        log::debug!("manifest after compaction:\n{:?}", new_manifest);
-
-        new_manifest
-    }
-}
-
-impl<R: FileReader> Debug for LoadedManifest<R> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "== manifest =====\n")?;
-        write!(f, "l0_active\n")?;
-        for (_, memtable_lock) in &self.l0_active {
-            let memtable = memtable_lock.read().unwrap();
-            write!(
-                f,
-                "  {} ({} bytes) {:?}\n",
-                memtable.id(),
-                memtable.size(),
-                memtable.range(),
-            )?;
-        }
-        write!(f, "l0_sealed\n")?;
-        for memtable in &self.l0_sealed {
-            write!(
-                f,
-                "  {} ({} bytes) {:?}\n",
-                memtable.id(),
-                memtable.size(),
-                memtable.range(),
-            )?;
-        }
-        for (i, level) in self.levels[1..]
-            .iter()
-            .enumerate()
-            .map(|(i, level)| (i + 1, level))
-        {
-            write!(f, "l{} ({} bytes)\n", i, level.size())?;
-            for run in &level.runs {
-                write!(
-                    f,
-                    "  {} ({} bytes) {:?}\n",
-                    run.id(),
-                    run.size(),
-                    run.range()
-                )?;
-            }
-        }
-        write!(f, "============\n")?;
-
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct Level<R> {
-    // In sorted order by range.
-    runs: Vec<Run<R>>,
-}
-
-impl<R: FileReader> Level<R> {
-    fn new() -> Self {
-        Self { runs: vec![] }
-    }
-
-    async fn get(
-        &self,
-        ts: Timestamp,
-        k: &[u8],
-    ) -> anyhow::Result<Option<(Timestamp, RevisionValue)>> {
-        let run = match self.run_for_key(k) {
-            Some(run) => run,
-            None => return Ok(None),
-        };
-        run.get(ts, k).await
-    }
-
-    fn size(&self) -> usize {
-        self.runs.iter().map(|run| run.size()).sum()
-    }
-
-    fn run_for_key<'a>(&'a self, k: &[u8]) -> Option<&'a Run<R>> {
-        let idx = self
-            .runs
-            .binary_search_by_key(&KeyOrBound::Key(k.to_vec()), |run| {
-                KeyOrBound::Bound(run.range().upper)
-            })
-            .unwrap_or_else(core::convert::identity);
-        if idx >= self.runs.len() {
-            return None;
-        }
-        let run = &self.runs[idx];
-        if !run.range().contains(&k.to_vec()) {
-            return None;
-        }
-        Some(run)
-    }
-
-    fn overlapping_runs(&self, range: Range<Vec<u8>>) -> &[Run<R>] {
-        intersect_in_ranges_by_key(range.borrow(), &self.runs, |run| run.range())
     }
 }
 
 #[derive(Clone, Debug)]
 pub(crate) enum WalEntry {
+    NoOp,
     Write(Timestamp, Vec<(KeyspaceId, Vec<u8>, RevisionValue)>),
-    Manifest(KeyspaceId, wal::SeqNo, Vec<Vec<RunId>>),
+    /// The given manifest contains at least all of the writes through this sequence number. It may
+    /// contain more.
+    Manifest(KeyspaceId, wal::SeqNo, KeyspaceManifest),
 }
 
 impl wal::Entry for WalEntry {
     fn size(&self) -> u64 {
         match self {
+            WalEntry::NoOp => 0,
             WalEntry::Write(_, kvs) => {
                 8 + kvs.iter().map(|(_, k, v)| k.len() + v.len()).sum::<usize>() as u64
             }
-            WalEntry::Manifest(_, _, levels) => {
-                16u64 + (levels.iter().map(|level| level.len() as u64).sum::<u64>() * 16u64)
+            WalEntry::Manifest(_, _, keyspace_manifest) => {
+                16u64
+                    + (keyspace_manifest
+                        .levels
+                        .iter()
+                        .map(|level| level.runs.len() as u64)
+                        .sum::<u64>()
+                        * 16u64)
             }
         }
     }
@@ -1567,7 +972,6 @@ mod test {
     use std::collections::BTreeMap;
     use std::collections::HashSet;
     use std::sync::Arc;
-    use std::sync::RwLock;
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -1576,12 +980,12 @@ mod test {
     use futures::TryStreamExt;
     use proptest::prelude::*;
 
-    use super::Level;
-    use super::LoadedManifest;
     use super::Lsm;
     use super::LsmBuilder;
     use super::LsmInnerInner;
-    use super::MaybeActiveMemtable;
+    use crate::lsm::index::Index;
+    use crate::lsm::index::IndexSnapshot;
+    use crate::lsm::index::Level;
     use crate::lsm::memtable::Memtable;
     use crate::lsm::run::dump_run;
     use crate::lsm::run::Run;
@@ -1652,7 +1056,8 @@ mod test {
         let not_k = b"def";
         let v = b"foo";
 
-        lsm.create_keyspace(keyspace_id).await?;
+        lsm.create_keyspace_internal(keyspace_id, 2 /*depth*/)
+            .await?;
         lsm.write(
             Timestamp(5),
             vec![],
@@ -1683,7 +1088,8 @@ mod test {
         let ka = b"a";
         let kb = b"b";
 
-        lsm.create_keyspace(keyspace_id).await?;
+        lsm.create_keyspace_internal(keyspace_id, 2 /*depth*/)
+            .await?;
         lsm.write(
             Timestamp(5),
             vec![],
@@ -1746,6 +1152,7 @@ mod test {
 
     #[tokio::test]
     async fn test_compact_l0() -> anyhow::Result<()> {
+        _ = pretty_env_logger::try_init();
         let lsm = LsmBuilder::new(Arc::new(MemStorage::new()))
             .l0_max_size(128)
             .block_size_target(128)
@@ -1753,7 +1160,8 @@ mod test {
             .build()
             .await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-        lsm.create_keyspace(keyspace_id).await?;
+        lsm.create_keyspace_internal(keyspace_id, 2 /*depth*/)
+            .await?;
         let mut map = BTreeMap::new();
         let mut last_ts = Timestamp::ZERO;
         for _ in 0..10 {
@@ -1788,8 +1196,8 @@ mod test {
                 .get(&keyspace_id)
                 .unwrap()
                 .inner
-                .manifest
-                .load()
+                .index
+                .snapshot()
                 .levels[1]
                 .runs
                 .len()
@@ -1801,6 +1209,8 @@ mod test {
 
     #[tokio::test]
     async fn test_compact_l1() -> anyhow::Result<()> {
+        _ = pretty_env_logger::try_init();
+
         let lsm = LsmBuilder::new(Arc::new(MemStorage::new()))
             .l0_max_size(128)
             .block_size_target(128)
@@ -1808,7 +1218,8 @@ mod test {
             .build()
             .await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-        lsm.create_keyspace(keyspace_id).await?;
+        lsm.create_keyspace_internal(keyspace_id, 3 /*depth*/)
+            .await?;
         let mut map = BTreeMap::new();
         let mut last_ts = Timestamp::ZERO;
         let mut ctr = 1u32;
@@ -1838,8 +1249,8 @@ mod test {
                     .get(&keyspace_id)
                     .unwrap()
                     .inner
-                    .manifest
-                    .load()
+                    .index
+                    .snapshot()
                     .levels[2]
                     .runs
                     .len()
@@ -1874,7 +1285,8 @@ mod test {
             .await?;
 
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-        lsm.create_keyspace(keyspace_id).await?;
+        lsm.create_keyspace_internal(keyspace_id, 2 /*depth*/)
+            .await?;
 
         let mut map = BTreeMap::new();
         let mut write_ts = 5;
@@ -1911,13 +1323,15 @@ mod test {
                 .get(&keyspace_id)
                 .unwrap()
                 .inner
-                .manifest
-                .load()
+                .index
+                .snapshot()
                 .levels[1]
                 .runs
                 .len()
                 >= 1
         );
+
+        lsm.flush().await?;
 
         drop(lsm);
 
@@ -1959,7 +1373,8 @@ mod test {
             .build()
             .await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-        lsm.create_keyspace(keyspace_id).await?;
+        lsm.create_keyspace_internal(keyspace_id, 3 /*depth*/)
+            .await?;
 
         let writes = [
             //   ts=0123456789
@@ -2169,8 +1584,6 @@ mod test {
             Ok(())
         }
 
-        dump_lsm_inner_inner(&lsm).await?;
-
         let all_b_versions = vec![
             (1, false),
             (3, true),
@@ -2252,7 +1665,7 @@ mod test {
                     .await
                     .unwrap();
                 let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-                lsm.create_keyspace(keyspace_id).await.unwrap();
+                lsm.create_keyspace_internal(keyspace_id, 3 /*depth*/).await.unwrap();
 
                 let mut write_ts = 5;
                 for (i, index) in write_indexes.iter().enumerate() {
@@ -2316,22 +1729,21 @@ mod test {
         let inner = lsm.inner.load();
         for (keyspace_id, lsm) in &*inner {
             println!("keyspace_id {:?}", keyspace_id);
-            dump_lsm_inner_inner(&lsm.inner).await?;
+            dump_keyspace(&lsm.inner.index.snapshot()).await?;
         }
 
         Ok(())
     }
 
-    async fn dump_lsm_inner_inner<R: FileReader + Clone>(
-        lsm: &LsmInnerInner<R>,
+    async fn dump_keyspace<R: FileReader + Clone>(
+        index_snapshot: &IndexSnapshot<R>,
     ) -> anyhow::Result<()> {
-        let manifest = lsm.manifest.load();
-        dump_manifest(&manifest);
+        dump_index_snapshot(&index_snapshot);
 
         println!("== kvs =====");
         println!("l0_active");
-        for (_, memtable_lock) in &manifest.l0_active {
-            let memtable = memtable_lock.read().unwrap();
+        {
+            let memtable = &index_snapshot.l0_active;
             println!(
                 "  {} ({} bytes) {:?}",
                 memtable.id(),
@@ -2341,7 +1753,7 @@ mod test {
             memtable.dump();
         }
         println!("l0_sealed");
-        for memtable in &manifest.l0_sealed {
+        for memtable in &index_snapshot.l0_sealed {
             println!(
                 "  {} ({} bytes) {:?}",
                 memtable.id(),
@@ -2350,7 +1762,7 @@ mod test {
             );
             memtable.dump();
         }
-        for (i, level) in manifest.levels[1..]
+        for (i, level) in index_snapshot.levels[1..]
             .iter()
             .enumerate()
             .map(|(i, level)| (i + 1, level))
@@ -2365,11 +1777,11 @@ mod test {
         Ok(())
     }
 
-    fn dump_manifest<R: FileReader + Clone>(manifest: &LoadedManifest<R>) {
+    fn dump_index_snapshot<R: FileReader + Clone>(index_snapshot: &IndexSnapshot<R>) {
         println!("== manifest =====");
         println!("l0_active");
-        for (_, memtable_lock) in &manifest.l0_active {
-            let memtable = memtable_lock.read().unwrap();
+        {
+            let memtable = &index_snapshot.l0_active;
             println!(
                 "  {} ({} bytes) {:?}",
                 memtable.id(),
@@ -2378,7 +1790,7 @@ mod test {
             );
         }
         println!("l0_sealed");
-        for memtable in &manifest.l0_sealed {
+        for memtable in &index_snapshot.l0_sealed {
             println!(
                 "  {} ({} bytes) {:?}",
                 memtable.id(),
@@ -2386,7 +1798,7 @@ mod test {
                 memtable.range(),
             );
         }
-        for (i, level) in manifest.levels[1..]
+        for (i, level) in index_snapshot.levels[1..]
             .iter()
             .enumerate()
             .map(|(i, level)| (i + 1, level))
@@ -2414,8 +1826,7 @@ mod test {
         ];
 
         let lsm = lsm_from_diagram(diagram).await?;
-        let manifest = lsm.manifest.load();
-        let l0_active_guard = manifest.l0_active[0].1.write().unwrap();
+        let index_snapshot = lsm.index.snapshot();
 
         let a = "a";
         let b = "b";
@@ -2423,14 +1834,14 @@ mod test {
         let d = "d";
 
         assert_eq!(
-            l0_active_guard.iter().collect::<Vec<_>>(),
+            index_snapshot.l0_active.iter().collect::<Vec<_>>(),
             vec![
                 lsm_diagram_revision(b.as_bytes(), 9, false),
                 lsm_diagram_revision(d.as_bytes(), 9, false),
             ],
         );
         assert_eq!(
-            manifest.l0_sealed[0].iter().collect::<Vec<_>>(),
+            index_snapshot.l0_sealed[0].iter().collect::<Vec<_>>(),
             vec![
                 lsm_diagram_revision(a.as_bytes(), 9, false),
                 lsm_diagram_revision(a.as_bytes(), 8, false),
@@ -2441,7 +1852,7 @@ mod test {
         );
 
         assert_eq!(
-            manifest.levels[1..]
+            index_snapshot.levels[1..]
                 .iter()
                 .map(|level| {
                     level
@@ -2572,20 +1983,27 @@ mod test {
         for revision in l0_active_revisions {
             l0_active.insert(SeqNo(1), revision.key, revision.ts, revision.value);
         }
-        let l0_sealed = Memtable::new();
-
-        let mut manifest = LoadedManifest::new(1);
+        let mut index_snapshot = IndexSnapshot {
+            l0_active: Arc::new(l0_active),
+            l0_sealed: vec![Arc::new(Memtable::new())],
+            levels: vec![Level { runs: Vec::new() }],
+        };
         for x in (0..=x_max).rev().filter(|x| x % 2 == 1) {
-            let mut level = Level::new();
+            let mut level = Level { runs: Vec::new() };
             for y in (0..diagram.len()).filter(|y| y % 2 == 0) {
                 let revisions = find_touching(&diagram[..], &mut visited, x, y);
                 if revisions.is_empty() {
                     continue;
                 }
 
-                if l0_sealed.size() == 0 {
+                if index_snapshot.l0_sealed[0].is_empty() {
                     for revision in revisions {
-                        l0_sealed.insert(SeqNo(1), revision.key, revision.ts, revision.value);
+                        index_snapshot.l0_sealed[0].insert(
+                            SeqNo(1),
+                            revision.key,
+                            revision.ts,
+                            revision.value,
+                        );
                     }
                 } else {
                     let mut v = vec![];
@@ -2598,7 +2016,7 @@ mod test {
                     )
                     .await?;
                     let run = Run::open(TestFile::from(v)).await?;
-                    level.runs.push(run);
+                    level.runs.push(Arc::new(run));
                 }
             }
 
@@ -2606,17 +2024,10 @@ mod test {
                 continue;
             }
 
-            manifest.levels.push(level);
+            index_snapshot.levels.push(level);
         }
 
-        manifest.l0_active = vec![(
-            l0_active.id(),
-            Arc::new(RwLock::new(MaybeActiveMemtable::Active(l0_active))),
-        )];
-        manifest.l0_sealed = vec![Arc::new(l0_sealed)];
-
-        let (l0_compact_notify, _) = tokio::sync::mpsc::channel::<()>(1);
-        let lsm = LsmInnerInner::new(64_000_000, 64_000_000, 32768, manifest, l0_compact_notify);
+        let lsm = LsmInnerInner::new(32768, Arc::new(Index::from_snapshot(index_snapshot)));
 
         Ok(lsm)
     }

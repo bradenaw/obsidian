@@ -779,16 +779,21 @@ where
         let below = self
             .ranges_range(
                 std::ops::Bound::Unbounded,
-                std::ops::Bound::Included(&range.lower),
+                std::ops::Bound::Excluded(&range.lower),
             )
+            .rev()
             .take(1)
             .filter(|(other_range, _)| !range.intersection(other_range).is_empty());
         let above = self.ranges_range(
             std::ops::Bound::Included(&range.lower),
-            std::ops::Bound::Included(&range.upper),
+            std::ops::Bound::Excluded(&range.upper),
         );
 
         Iterator::chain(below, above)
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Range<K>, &V)> {
+        self.m.iter().map(|(range, value)| (&range.0, value))
     }
 
     fn ranges_range(
@@ -817,6 +822,29 @@ where
             std::ops::Bound::Unbounded,
         )
         .next()
+    }
+}
+
+impl<K, V> IntoIterator for RangeMap<K, V> {
+    type Item = (Range<K>, V);
+    type IntoIter = RangeMapIntoIter<K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        RangeMapIntoIter {
+            inner: self.m.into_iter(),
+        }
+    }
+}
+
+pub(crate) struct RangeMapIntoIter<K, V> {
+    inner: std::collections::btree_map::IntoIter<RangeByLowerBound<K>, V>,
+}
+
+impl<K, V> Iterator for RangeMapIntoIter<K, V> {
+    type Item = (Range<K>, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|(k, v)| (k.0, v))
     }
 }
 
