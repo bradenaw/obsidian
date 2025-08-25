@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::future;
+use futures::future::Either;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::SinkExt;
@@ -24,6 +25,7 @@ use crate::range::Range;
 use crate::storage::Storage;
 use crate::types::KeyspaceId;
 use crate::util::merge_sorted_streams;
+use crate::util::spawn_owned;
 use crate::util::WithBackground;
 
 /// The compactor's purpose is to mutate an `Index` to a more efficient physical represesentation,
@@ -96,8 +98,12 @@ where
                         in_flight_from.extend(compaction.from.iter());
                         in_flight_into.extend(compaction.into.iter());
 
-                        compact_futures
-                            .push(AbortOnDrop(Pin::new(Box::new(join_handle))).map(|_| compaction));
+                        compact_futures.push(join_handle.map(|result| {
+                            if let Err(e) = result {
+                                log::error!("error in compaction: {}", e);
+                            }
+                            compaction
+                        }));
                     }
                     None => {
                         log::trace!("no new compactions to schedule");
@@ -130,7 +136,7 @@ where
         snapshot: &Arc<IndexSnapshot<S::R>>,
         in_flight_from: &HashSet<RunId>,
         in_flight_into: &HashSet<RunId>,
-    ) -> Option<(Compaction, tokio::task::JoinHandle<anyhow::Result<()>>)> {
+    ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
         let level_size_estimates = {
             let mut level_size_estimates: Vec<_> =
                 snapshot.levels.iter().map(|level| level.size()).collect();
@@ -185,7 +191,7 @@ where
                             from: HashSet::from([run.id()]),
                             into,
                         },
-                        self.compact_from(&snapshot, i, run, intersecting_runs),
+                        Either::Left(self.compact_from(&snapshot, i, run, intersecting_runs)),
                     ));
                 }
             }
@@ -237,7 +243,7 @@ where
                             from,
                             into,
                         },
-                        self.compact_l0(&l0_available[..], intersecting_runs),
+                        Either::Right(self.compact_l0(&l0_available[..], intersecting_runs)),
                     ));
                 }
             }
@@ -252,7 +258,7 @@ where
         self: &Arc<Self>,
         from: &[Arc<Memtable>],
         into: &[Arc<Run<S::R>>],
-    ) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+    ) -> impl Future<Output = anyhow::Result<()>> {
         let remove: HashSet<_> = Iterator::chain(
             from.iter().map(|memtable| memtable.id()),
             into.iter().map(|run| run.id()),
@@ -267,7 +273,7 @@ where
             into.iter().map(|run| run.id()).collect::<Vec<_>>(),
         );
 
-        tokio::spawn({
+        spawn_owned({
             let self_ = Arc::clone(self);
             let from = from.to_vec();
             let into = into.to_vec();
@@ -321,7 +327,7 @@ where
         from_level: usize,
         from: &Arc<Run<S::R>>,
         into: &[Arc<Run<S::R>>],
-    ) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+    ) -> impl Future<Output = anyhow::Result<()>> {
         if from_level == 0 {
             panic!("can't compact_from(0), use compact_l0()");
         }
@@ -343,7 +349,7 @@ where
         let remove =
             Iterator::chain(iter::once(from.id()), into.iter().map(|run| run.id())).collect();
 
-        tokio::spawn({
+        spawn_owned({
             let from = Arc::clone(from);
             let into = into.to_vec();
             let self_ = Arc::clone(self);
@@ -450,36 +456,6 @@ struct Compaction {
     from_level: usize,
     from: HashSet<RunId>,
     into: HashSet<RunId>,
-}
-
-/// Wraps a JoinHandle, calling abort() on it when dropped.
-///
-/// tokio::spawn naturally just allows the task to keep running in the background indefinitely.
-///
-/// We want to use tokio::spawn for compaction tasks instead of placing the futures directly into a
-/// FuturesUnordered because FuturesUnordered would end up polling all of them from the same thread,
-/// meaning we don't get any parallelism of compute, only of I/O. tokio::spawn lets us use more
-/// cores.
-///
-/// However, if the Compactor gets dropped, we want to drop all of the compaction tasks on the floor
-/// too, which is what this wrapper is for.
-struct AbortOnDrop<T>(Pin<Box<tokio::task::JoinHandle<T>>>);
-
-impl<T> Future for AbortOnDrop<T> {
-    type Output = Result<T, tokio::task::JoinError>;
-
-    fn poll(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        Pin::as_mut(&mut self.0).poll(cx)
-    }
-}
-
-impl<T> Drop for AbortOnDrop<T> {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
 }
 
 /// Like a "bounding box", returns the minimal range that contains all of the given ranges.
