@@ -11,18 +11,18 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::fmt::Display;
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use futures::future;
 use futures::stream::StreamExt;
 use futures::TryStreamExt;
 use uuid::Uuid;
 
 use crate::lsm::compactor::Compactor;
 use crate::lsm::index::Index;
+use crate::lsm::index::IndexSnapshot;
+use crate::lsm::index::Keyspace;
 use crate::lsm::memtable::Memtable;
 use crate::lsm::run::Run;
 use crate::lsm::util::LsmRevision;
@@ -42,7 +42,6 @@ use crate::types::Timestamp;
 use crate::types::WriteError;
 use crate::util::hexlify;
 use crate::util::merge_sorted_streams;
-use crate::util::AtomicArc;
 use crate::util::Background;
 use crate::util::IteratorEither;
 use crate::util::OrdEqByFirst;
@@ -117,8 +116,9 @@ pub(crate) struct Lsm<S: Storage> {
     run_size_target: u64,
     block_size_target: u64,
 
-    inner: Arc<AtomicArc<HashMap<KeyspaceId, Arc<LsmInner<S>>>>>,
     wal: Arc<wal::Wal<WalEntry>>,
+    index: Arc<Index<S::R>>,
+    compactor: Compactor<S>,
     storage: Arc<S>,
 
     bg: Background,
@@ -133,48 +133,35 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         wal: Arc<wal::Wal<WalEntry>>,
         storage: Arc<S>,
     ) -> anyhow::Result<Self> {
-        let (indexes, newest_seqno) = Self::recovery(l0_max_size, &wal, &storage).await?;
+        let (index, newest_seqno) = Self::recovery(l0_max_size, &wal, &storage).await?;
 
-        let lsms = {
-            let mut lsms = HashMap::new();
-
-            for (keyspace_id, index) in indexes {
-                lsms.insert(
-                    keyspace_id,
-                    Arc::new(
-                        LsmInner::new(
-                            l0_max_size,
-                            run_size_target,
-                            block_size_target,
-                            keyspace_id,
-                            Arc::new(index),
-                            storage.clone(),
-                        )
-                        .await?,
-                    ),
-                );
-            }
-
-            lsms
-        };
-
-        let inner = Arc::new(AtomicArc::new(Arc::new(lsms)));
+        let index_arc = Arc::new(index);
 
         let bg = Background::new();
         let (wal_processed_send, wal_processed_recv) = tokio::sync::watch::channel(wal::SeqNo(0));
         bg.spawn(Self::process_wal(
-            inner.clone(),
-            wal.clone(),
+            Arc::clone(&index_arc),
+            Arc::clone(&wal),
             newest_seqno.unwrap_or(wal::SeqNo(0)),
             wal_processed_send,
+            l0_max_size,
         ));
+
+        let compactor = Compactor::new(
+            Arc::clone(&storage),
+            Arc::clone(&index_arc),
+            1, // parallelism
+            run_size_target,
+            block_size_target,
+        );
 
         Ok(Self {
             l0_max_size,
             run_size_target,
             block_size_target,
 
-            inner,
+            compactor,
+            index: index_arc,
             wal,
             storage,
             bg,
@@ -188,10 +175,8 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         keyspace_id: KeyspaceId,
         key: &[u8],
     ) -> anyhow::Result<Option<(Timestamp, RevisionValue)>> {
-        self.inner
-            .load()
-            .get(&keyspace_id)
-            .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?
+        let index_snapshot = self.index.snapshot();
+        Self::keyspace(&index_snapshot, keyspace_id)?
             .get(ts, key)
             .await
     }
@@ -204,11 +189,8 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         direction: Direction,
         limit: usize,
     ) -> anyhow::Result<(Vec<Revision>, Option<Range<Vec<u8>>>)> {
-        let (page, continue_cursor) = self
-            .inner
-            .load()
-            .get(&keyspace_id)
-            .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?
+        let index_snapshot = self.index.snapshot();
+        let (page, continue_cursor) = Self::keyspace(&index_snapshot, keyspace_id)?
             .scan_page(ts, range, direction, limit)
             .await?;
 
@@ -232,10 +214,8 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         direction: Direction,
         limit: usize,
     ) -> anyhow::Result<(Vec<(Timestamp, RevisionValue)>, Option<HistoryRange>)> {
-        self.inner
-            .load()
-            .get(&keyspace_id)
-            .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?
+        let index_snapshot = self.index.snapshot();
+        Self::keyspace(&index_snapshot, keyspace_id)?
             .history_page(key, range, direction, limit)
             .await
     }
@@ -246,13 +226,10 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<(), WriteError> {
-        let keyspaces = self.inner.load();
+        let index_snapshot = self.index.snapshot();
 
         for precond in preconds {
-            let res = keyspaces
-                .get(&precond.keyspace_id())
-                .ok_or_else(|| anyhow!("{:?} not found", precond.keyspace_id()))?
-                .inner
+            let res = Self::keyspace(&index_snapshot, precond.keyspace_id())?
                 .get(ts, precond.key())
                 .await?;
             match precond {
@@ -288,46 +265,32 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
     }
 
     pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
-        self.create_keyspace_internal(keyspace_id, 7 /*depth*/)
+        self.create_keyspace_with_depth(keyspace_id, 7 /*depth*/)
             .await
     }
 
-    pub async fn create_keyspace_internal(
+    async fn create_keyspace_with_depth(
         &self,
         keyspace_id: KeyspaceId,
         depth: usize,
     ) -> anyhow::Result<()> {
-        loop {
-            let inner = self.inner.load();
-            let mut inner_new = (*inner).clone();
-            inner_new.entry(keyspace_id).or_insert(Arc::new(
-                LsmInner::new(
-                    self.l0_max_size,
-                    self.run_size_target,
-                    self.block_size_target,
-                    keyspace_id,
-                    Arc::new(Index::new(depth)),
-                    self.storage.clone(),
-                )
-                .await?,
-            ));
-
-            if self.inner.compare_and_swap(&inner, Arc::new(inner_new)) {
-                break;
-            }
-        }
-
-        Ok(())
+        self.index.create_keyspace(keyspace_id, depth)
     }
 
     pub async fn pending_compactions(&self) {
-        let inner = self.inner.load();
-        future::join_all(
-            inner
-                .values()
-                .map(|keyspace_lsm| keyspace_lsm.pending_compactions()),
-        )
-        .await;
+        loop {
+            let (index_snapshot, changed) = self.index.snapshot_subscribe();
+            // TODO: Don't actually need to wait for empty, just for the ones we saw at the
+            // beginning to be gone.
+            if index_snapshot
+                .keyspaces
+                .iter()
+                .all(|(_, keyspace)| keyspace.l0_active.is_empty() || keyspace.l0_sealed.is_empty())
+            {
+                break;
+            }
+            changed.await;
+        }
     }
 
     /// Flush ensures that all writes that have already completed are in runs committed to storage
@@ -336,46 +299,43 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         let seqno = self.wal.append(WalEntry::NoOp).await?;
         self.wait_processed(seqno).await?;
 
-        let lsm_inner_by_keyspace = self.inner.load();
-        for (_, lsm_inner) in lsm_inner_by_keyspace.iter() {
-            lsm_inner.index.rotate_l0();
+        let index_snapshot = self.index.snapshot();
+        for keyspace_id in index_snapshot.keyspaces.keys() {
+            self.index.rotate_l0(*keyspace_id)?;
         }
 
         self.pending_compactions().await;
 
-        for (keyspace_id, lsm_inner) in lsm_inner_by_keyspace.iter() {
-            let mut keyspace_manifest = lsm_inner.index.snapshot().manifest();
-            // These can't get rehydrated from anywhere because they haven't been stored yet, but
-            // we also don't care about them because anything here must have showed up after we
-            // started flush().
-            keyspace_manifest.levels[0].runs = Vec::new();
-
-            self.wal
-                .append(WalEntry::Manifest(*keyspace_id, seqno, keyspace_manifest))
-                .await?;
+        let mut manifest = self.index.snapshot().manifest();
+        // Anything in l0 must already be present in the WAL. We can't write the run IDs here
+        // because there's nothing for recovery to open.
+        for keyspace in manifest.keyspaces.values_mut() {
+            keyspace.levels[0].runs = Vec::new();
         }
+
+        self.wal.append(WalEntry::Manifest(seqno, manifest)).await?;
 
         Ok(())
     }
 
-    // TODO: move up a layer to tablet, since we can store the keyspaces that exist in a known
-    // keyspace for the tablet
     pub fn keyspaces(&self) -> Vec<KeyspaceId> {
-        self.inner.load().keys().copied().collect()
+        self.index.snapshot().keyspaces.keys().copied().collect()
     }
 
     pub fn manifest(&self) -> Manifest {
-        let lsm_inner_by_keyspace = self.inner.load();
-        let mut by_keyspace = HashMap::new();
-        for (keyspace_id, lsm_inner) in lsm_inner_by_keyspace.iter() {
-            let keyspace_manifest = lsm_inner.inner.index.snapshot().manifest();
+        self.index.snapshot().manifest()
+    }
 
-            by_keyspace.insert(*keyspace_id, keyspace_manifest);
-        }
-
-        Manifest {
-            keyspaces: by_keyspace,
-        }
+    fn keyspace(
+        snapshot: &IndexSnapshot<S::R>,
+        keyspace_id: KeyspaceId,
+    ) -> anyhow::Result<KeyspaceReader<'_, S::R>> {
+        Ok(KeyspaceReader(
+            snapshot
+                .keyspaces
+                .get(&keyspace_id)
+                .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?,
+        ))
     }
 
     /// Waits until at least the given sequence number has been processed.
@@ -394,94 +354,89 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         l0_max_size: u64,
         wal: &wal::Wal<WalEntry>,
         storage: &S,
-    ) -> anyhow::Result<(HashMap<KeyspaceId, Index<S::R>>, Option<wal::SeqNo>)> {
+    ) -> anyhow::Result<(Index<S::R>, Option<wal::SeqNo>)> {
         let oldest_seqno = wal.oldest_available();
         let mut newest_seqno = None;
         let mut wal_stream = wal.stream(oldest_seqno, false).boxed();
 
-        let mut bufs = HashMap::new();
-        let mut indexes = HashMap::new();
+        let mut entries = VecDeque::new();
+        let mut index = Index::new();
 
         while let Some((seqno, entry)) = wal_stream.try_next().await? {
             match entry {
                 WalEntry::NoOp => {}
                 WalEntry::Write(ts, kvs) => {
-                    let mut kvs_by_keyspace = HashMap::new();
-                    for (keyspace_id, key, value) in kvs {
-                        kvs_by_keyspace
-                            .entry(keyspace_id)
-                            .or_insert_with(Vec::new)
-                            .push((key, value));
-                    }
-                    for (keyspace_id, keyspace_kvs) in kvs_by_keyspace {
-                        bufs.entry(keyspace_id)
-                            .or_insert_with(VecDeque::new)
-                            .push_back((seqno, ts, keyspace_kvs));
-                    }
+                    entries.push_back((seqno, ts, kvs));
                 }
-                WalEntry::Manifest(keyspace_id, included_seqno, keyspace_manifest) => {
-                    let buf = bufs.entry(keyspace_id).or_insert_with(VecDeque::new);
-                    let trim_to_idx = buf
+                WalEntry::Manifest(included_seqno, manifest) => {
+                    let trim_to_idx = entries
                         .binary_search_by_key(&included_seqno, |(seqno, _, _)| *seqno)
                         .unwrap_or_else(core::convert::identity);
-                    buf.drain(0..trim_to_idx);
+                    entries.drain(0..trim_to_idx);
 
-                    let index = Index::from_manifest(storage, keyspace_manifest).await?;
-                    indexes.insert(keyspace_id, index);
+                    index = Index::from_manifest(storage, manifest).await?;
                 }
             }
             newest_seqno = Some(seqno);
         }
 
-        for (keyspace_id, buf) in bufs {
-            let index = indexes.get(&keyspace_id).unwrap();
-            let index_snapshot = index.snapshot();
-            for (seqno, ts, kvs) in buf {
-                for (key, value) in kvs {
-                    // It's possible that this revision is already present since the seqno in
-                    // WalEntry::Manifest is a lower bound, the manifest may already contain newer
-                    // writes.
-                    if let Some((existing_ts, existing_value)) =
-                        index_snapshot.l0_active.get(ts, &key[..])
-                    {
-                        if existing_ts == ts {
-                            if value != existing_value {
-                                return Err(anyhow!(""));
-                            }
-                            continue;
+        let index_snapshot = index.snapshot();
+        for (seqno, ts, kvs) in entries {
+            for (keyspace_id, key, value) in kvs {
+                // It's possible that this revision is already present since the seqno in
+                // WalEntry::Manifest is a lower bound, the manifest may already contain newer
+                // writes.
+                if let Some((existing_ts, existing_value)) = index_snapshot
+                    .keyspaces
+                    .get(&keyspace_id)
+                    .map(|keyspace| keyspace.l0_active.get(ts, &key[..]))
+                    .flatten()
+                {
+                    if existing_ts == ts {
+                        if value != existing_value {
+                            return Err(anyhow!(
+                                "duplicate revision for {}@{} with differing values",
+                                hexlify(&key[..]),
+                                ts,
+                            ));
                         }
+                        continue;
                     }
-
-                    index.insert(seqno, key, ts, value);
                 }
+
+                index.insert(keyspace_id, seqno, key, ts, value)?;
             }
-            // We're not _really_ respecting l0_max_size but it's not any "better" to have multiple
+        }
+        for (keyspace_id, keyspace) in &index.snapshot().keyspaces {
+            // We're not _really_ respecting l0_max_size but it's not any better to have multiple
             // l0_sealed over one.
-            if index.snapshot().l0_active.size() >= l0_max_size {
-                index.rotate_l0();
+            if keyspace.l0_active.size() >= l0_max_size {
+                index.rotate_l0(*keyspace_id)?;
             }
         }
 
-        Ok((indexes, newest_seqno))
+        Ok((index, newest_seqno))
     }
 
     async fn process_wal(
-        inner: Arc<AtomicArc<HashMap<KeyspaceId, Arc<LsmInner<S>>>>>,
+        index: Arc<Index<S::R>>,
         wal: Arc<wal::Wal<WalEntry>>,
         start: wal::SeqNo,
         wal_processed: tokio::sync::watch::Sender<wal::SeqNo>,
+        l0_max_size: u64,
     ) {
         // TODO: retry
-        Self::process_wal_once(inner, wal, start, wal_processed)
+        Self::process_wal_once(&index, &wal, start, wal_processed, l0_max_size)
             .await
             .unwrap();
     }
 
     async fn process_wal_once(
-        inner: Arc<AtomicArc<HashMap<KeyspaceId, Arc<LsmInner<S>>>>>,
-        wal: Arc<wal::Wal<WalEntry>>,
+        index: &Index<S::R>,
+        wal: &wal::Wal<WalEntry>,
         start: wal::SeqNo,
         wal_processed: tokio::sync::watch::Sender<wal::SeqNo>,
+        l0_max_size: u64,
     ) -> anyhow::Result<()> {
         let mut log = wal.stream(start, true).boxed();
         while let Some((seqno, entry)) = log.try_next().await? {
@@ -495,16 +450,14 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
                             keyspace_id,
                             hexlify(&key[..])
                         );
-                        inner
-                            .load()
-                            .get(&keyspace_id)
-                            .unwrap()
-                            // TODO, just pull up a level so we don't have to reach down to inner here
-                            .inner
-                            .insert(seqno, key, ts, value);
+
+                        let new_size = index.insert(keyspace_id, seqno, key, ts, value)?;
+                        if new_size > l0_max_size {
+                            index.rotate_l0(keyspace_id)?;
+                        }
                     }
                 }
-                WalEntry::Manifest(_, _, _) => {}
+                WalEntry::Manifest(_, _) => {}
             }
             _ = wal_processed.send(seqno);
         }
@@ -540,6 +493,7 @@ impl Debug for RunId {
     }
 }
 
+#[derive(Clone, Debug)]
 pub(crate) struct Manifest {
     pub(crate) keyspaces: HashMap<KeyspaceId, KeyspaceManifest>,
 }
@@ -560,111 +514,22 @@ pub(crate) struct RunManifest {
     //pub(crate) key_range: Range<Vec<u8>>,
 }
 
-struct LsmInner<S: Storage> {
-    inner: Arc<LsmInnerInner<S::R>>,
-    compactor: Compactor<S>,
-    index: Arc<Index<S::R>>,
+struct KeyspaceReader<'a, R>(&'a Keyspace<R>);
 
-    _phantom: std::marker::PhantomData<S>,
-}
-
-impl<S: Storage + Send + Sync + 'static> LsmInner<S> {
-    pub async fn new(
-        l0_max_size: u64,
-        run_size_target: u64,
-        block_size_target: u64,
-        keyspace_id: KeyspaceId,
-        index: Arc<Index<S::R>>,
-        storage: Arc<S>,
-    ) -> anyhow::Result<Self> {
-        let inner = Arc::new(LsmInnerInner::new(l0_max_size, Arc::clone(&index)));
-
-        let compactor = Compactor::new(
-            storage,
-            Arc::clone(&index),
-            1, // parallelism
-            run_size_target,
-            block_size_target,
-            keyspace_id,
-        );
-
-        Ok(Self {
-            inner,
-            compactor,
-            index,
-            _phantom: PhantomData::default(),
-        })
-    }
-
-    pub async fn get(
-        &self,
-        ts: Timestamp,
-        key: &[u8],
-    ) -> anyhow::Result<Option<(Timestamp, RevisionValue)>> {
-        self.inner.get(ts, key).await
-    }
-
-    pub async fn scan_page(
-        &self,
-        ts: Timestamp,
-        range: Range<&[u8]>,
-        direction: Direction,
-        limit: usize,
-    ) -> anyhow::Result<(Vec<LsmRevision>, Option<Range<Vec<u8>>>)> {
-        self.inner.scan_page(ts, range, direction, limit).await
-    }
-
-    pub async fn history_page(
-        &self,
-        key: &[u8],
-        range: HistoryRange,
-        direction: Direction,
-        limit: usize,
-    ) -> anyhow::Result<(Vec<(Timestamp, RevisionValue)>, Option<HistoryRange>)> {
-        self.inner.history_page(key, range, direction, limit).await
-    }
-
-    pub async fn pending_compactions(&self) {
-        loop {
-            let (index_snapshot, changed) = self.index.snapshot_subscribe();
-            // TODO: Don't actually need to wait for empty, just for the ones we saw at the
-            // beginning to be gone.
-            if index_snapshot.l0_active.is_empty() || index_snapshot.l0_sealed.is_empty() {
-                break;
-            }
-            changed.await;
-        }
-    }
-}
-
-struct LsmInnerInner<R> {
-    l0_max_size: u64,
-
-    index: Arc<Index<R>>,
-}
-
-impl<R> LsmInnerInner<R>
+impl<'a, R> KeyspaceReader<'a, R>
 where
     R: FileReader + Clone + Sync + Send,
 {
-    fn new(l0_max_size: u64, initial_index: Arc<Index<R>>) -> Self {
-        Self {
-            l0_max_size,
-            index: initial_index,
-        }
-    }
-
     async fn get(
         &self,
         ts: Timestamp,
         k: &[u8],
     ) -> anyhow::Result<Option<(Timestamp, RevisionValue)>> {
-        let index_snapshot = self.index.snapshot();
-
-        if let Some((revision_ts, v)) = index_snapshot.l0_active.get(ts, k) {
+        if let Some((revision_ts, v)) = self.0.l0_active.get(ts, k) {
             return Ok(Some((revision_ts, v)));
         }
-        let maybe_revision = index_snapshot
+        let maybe_revision = self
+            .0
             .l0_sealed
             .iter()
             .map(|memtable| memtable.get(ts, k))
@@ -673,7 +538,7 @@ where
         if let Some((revision_ts, v)) = maybe_revision {
             return Ok(Some((revision_ts, v)));
         }
-        for level in &index_snapshot.levels {
+        for level in &self.0.levels {
             if let Some(run) = level.run_for_key(k) {
                 if let Some((revision_ts, v)) = run.get(ts, k).await? {
                     return Ok(Some((revision_ts, v)));
@@ -694,22 +559,21 @@ where
             return Ok((vec![], None));
         }
 
-        let index_snapshot = self.index.snapshot();
-
         let mut streams = Vec::with_capacity(
             1  // l0_active
-                + index_snapshot.l0_sealed.len()
-                + index_snapshot.levels.len(),
+                + self.0.l0_sealed.len()
+                + self.0.levels.len(),
         );
         {
-            let revisions: Vec<_> = index_snapshot
+            let revisions: Vec<_> = self
+                .0
                 .l0_active
                 .scan(ts, range.clone(), direction)
                 .map(|revision| Ok(revision))
                 .collect();
             streams.push(futures::stream::iter(revisions.into_iter()).boxed());
         }
-        for l0_run in &index_snapshot.l0_sealed {
+        for l0_run in &self.0.l0_sealed {
             streams.push(
                 futures::stream::iter(
                     l0_run
@@ -719,8 +583,8 @@ where
                 .boxed(),
             );
         }
-        for i in 1..index_snapshot.levels.len() {
-            let overlapping_runs = index_snapshot.levels[i].range(range.to_vec());
+        for i in 1..self.0.levels.len() {
+            let overlapping_runs = self.0.levels[i].range(range.to_vec());
 
             if overlapping_runs.is_empty() {
                 continue;
@@ -831,19 +695,18 @@ where
         direction: Direction,
         limit: usize,
     ) -> anyhow::Result<(Vec<(Timestamp, RevisionValue)>, Option<HistoryRange>)> {
-        let index_snapshot = self.index.snapshot();
-
-        let mut streams = Vec::with_capacity(index_snapshot.levels.len());
-        let mut l0_streams = Vec::with_capacity(1 + index_snapshot.l0_sealed.len());
+        let mut streams = Vec::with_capacity(self.0.levels.len());
+        let mut l0_streams = Vec::with_capacity(1 + self.0.l0_sealed.len());
         {
-            let revisions: Vec<_> = index_snapshot
+            let revisions: Vec<_> = self
+                .0
                 .l0_active
                 .history(key, range, direction)
                 .map(|revision| Ok(revision))
                 .collect();
             l0_streams.push(futures::stream::iter(revisions.into_iter()).boxed());
         }
-        for l0_run in &index_snapshot.l0_sealed {
+        for l0_run in &self.0.l0_sealed {
             l0_streams.push(
                 futures::stream::iter(
                     l0_run
@@ -875,7 +738,7 @@ where
             .boxed(),
         });
 
-        for level in &index_snapshot.levels[1..] {
+        for level in &self.0.levels[1..] {
             if let Some(run) = level.run_for_key(key) {
                 streams.push(run.history(key, range, direction).boxed());
             }
@@ -929,13 +792,6 @@ where
 
         Ok((page, continue_cursor))
     }
-
-    fn insert(&self, seqno: wal::SeqNo, k: Vec<u8>, ts: Timestamp, v: RevisionValue) {
-        self.index.insert(seqno, k, ts, v);
-        if self.index.snapshot().l0_active.size() > self.l0_max_size {
-            self.index.rotate_l0();
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -944,7 +800,7 @@ pub(crate) enum WalEntry {
     Write(Timestamp, Vec<(KeyspaceId, Vec<u8>, RevisionValue)>),
     /// The given manifest contains at least all of the writes through this sequence number. It may
     /// contain more.
-    Manifest(KeyspaceId, wal::SeqNo, KeyspaceManifest),
+    Manifest(wal::SeqNo, Manifest),
 }
 
 impl wal::Entry for WalEntry {
@@ -954,14 +810,20 @@ impl wal::Entry for WalEntry {
             WalEntry::Write(_, kvs) => {
                 8 + kvs.iter().map(|(_, k, v)| k.len() + v.len()).sum::<usize>() as u64
             }
-            WalEntry::Manifest(_, _, keyspace_manifest) => {
+            WalEntry::Manifest(_, manifest) => {
                 16u64
-                    + (keyspace_manifest
-                        .levels
-                        .iter()
-                        .map(|level| level.runs.len() as u64)
+                    + manifest
+                        .keyspaces
+                        .values()
+                        .map(|keyspace_manifest| {
+                            keyspace_manifest
+                                .levels
+                                .iter()
+                                .map(|level| level.runs.len() as u64)
+                                .sum::<u64>()
+                                * 16u64
+                        })
                         .sum::<u64>()
-                        * 16u64)
             }
         }
     }
@@ -980,11 +842,10 @@ mod test {
     use futures::TryStreamExt;
     use proptest::prelude::*;
 
+    use super::KeyspaceReader;
     use super::Lsm;
     use super::LsmBuilder;
-    use super::LsmInnerInner;
-    use crate::lsm::index::Index;
-    use crate::lsm::index::IndexSnapshot;
+    use crate::lsm::index::Keyspace;
     use crate::lsm::index::Level;
     use crate::lsm::memtable::Memtable;
     use crate::lsm::run::dump_run;
@@ -1056,7 +917,7 @@ mod test {
         let not_k = b"def";
         let v = b"foo";
 
-        lsm.create_keyspace_internal(keyspace_id, 2 /*depth*/)
+        lsm.create_keyspace_with_depth(keyspace_id, 2 /*depth*/)
             .await?;
         lsm.write(
             Timestamp(5),
@@ -1088,7 +949,7 @@ mod test {
         let ka = b"a";
         let kb = b"b";
 
-        lsm.create_keyspace_internal(keyspace_id, 2 /*depth*/)
+        lsm.create_keyspace_with_depth(keyspace_id, 2 /*depth*/)
             .await?;
         lsm.write(
             Timestamp(5),
@@ -1160,7 +1021,7 @@ mod test {
             .build()
             .await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-        lsm.create_keyspace_internal(keyspace_id, 2 /*depth*/)
+        lsm.create_keyspace_with_depth(keyspace_id, 2 /*depth*/)
             .await?;
         let mut map = BTreeMap::new();
         let mut last_ts = Timestamp::ZERO;
@@ -1191,13 +1052,11 @@ mod test {
 
         // Make sure we actually did ever do a compaction.
         assert!(
-            lsm.inner
-                .load()
+            lsm.index
+                .snapshot()
+                .keyspaces
                 .get(&keyspace_id)
                 .unwrap()
-                .inner
-                .index
-                .snapshot()
                 .levels[1]
                 .runs
                 .len()
@@ -1218,7 +1077,7 @@ mod test {
             .build()
             .await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-        lsm.create_keyspace_internal(keyspace_id, 3 /*depth*/)
+        lsm.create_keyspace_with_depth(keyspace_id, 3 /*depth*/)
             .await?;
         let mut map = BTreeMap::new();
         let mut last_ts = Timestamp::ZERO;
@@ -1244,13 +1103,11 @@ mod test {
 
                 lsm.pending_compactions().await;
                 if lsm
-                    .inner
-                    .load()
-                    .get(&keyspace_id)
-                    .unwrap()
-                    .inner
                     .index
                     .snapshot()
+                    .keyspaces
+                    .get(&keyspace_id)
+                    .unwrap()
                     .levels[2]
                     .runs
                     .len()
@@ -1285,7 +1142,7 @@ mod test {
             .await?;
 
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-        lsm.create_keyspace_internal(keyspace_id, 2 /*depth*/)
+        lsm.create_keyspace_with_depth(keyspace_id, 2 /*depth*/)
             .await?;
 
         let mut map = BTreeMap::new();
@@ -1318,13 +1175,11 @@ mod test {
 
         // Make sure we actually did ever do a compaction.
         assert!(
-            lsm.inner
-                .load()
+            lsm.index
+                .snapshot()
+                .keyspaces
                 .get(&keyspace_id)
                 .unwrap()
-                .inner
-                .index
-                .snapshot()
                 .levels[1]
                 .runs
                 .len()
@@ -1373,7 +1228,7 @@ mod test {
             .build()
             .await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-        lsm.create_keyspace_internal(keyspace_id, 3 /*depth*/)
+        lsm.create_keyspace_with_depth(keyspace_id, 3 /*depth*/)
             .await?;
 
         let writes = [
@@ -1529,10 +1384,10 @@ mod test {
             ("d", b"     o|o o|x o| |o  "),
         ];
 
-        let lsm = lsm_from_diagram(diagram).await?;
+        let keyspace = keyspace_from_diagram(diagram).await?;
 
         async fn check<R: FileReader + Clone + Send + Sync>(
-            lsm: &LsmInnerInner<R>,
+            keyspace: &Keyspace<R>,
             key: &[u8],
             range: HistoryRange,
             expected: &[(usize, bool)],
@@ -1542,8 +1397,9 @@ mod test {
                     let mut maybe_cursor = Some(range.clone());
                     let mut results = vec![];
                     while let Some(cursor) = maybe_cursor {
-                        let (page, continue_cursor) =
-                            lsm.history_page(key, cursor, direction, page_size).await?;
+                        let (page, continue_cursor) = KeyspaceReader(keyspace)
+                            .history_page(key, cursor, direction, page_size)
+                            .await?;
 
                         println!(
                             "history_page(key = {:?}, cursor = {:?}, direction={:?}, page_size={}) -> ({:?}, {:?})",
@@ -1594,10 +1450,10 @@ mod test {
             (9, false),
         ];
 
-        check(&lsm, b"b", HistoryRange::All, &all_b_versions).await?;
+        check(&keyspace, b"b", HistoryRange::All, &all_b_versions).await?;
 
         check(
-            &lsm,
+            &keyspace,
             b"b",
             HistoryRange::Between(Timestamp(1), Timestamp(9)),
             &all_b_versions,
@@ -1605,7 +1461,7 @@ mod test {
         .await?;
 
         check(
-            &lsm,
+            &keyspace,
             b"b",
             HistoryRange::Until(Timestamp(9)),
             &all_b_versions,
@@ -1613,7 +1469,7 @@ mod test {
         .await?;
 
         check(
-            &lsm,
+            &keyspace,
             b"b",
             HistoryRange::Since(Timestamp(1)),
             &all_b_versions,
@@ -1665,7 +1521,7 @@ mod test {
                     .await
                     .unwrap();
                 let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-                lsm.create_keyspace_internal(keyspace_id, 3 /*depth*/).await.unwrap();
+                lsm.create_keyspace_with_depth(keyspace_id, 3 /*depth*/).await.unwrap();
 
                 let mut write_ts = 5;
                 for (i, index) in write_indexes.iter().enumerate() {
@@ -1726,24 +1582,52 @@ mod test {
     }
 
     async fn dump_lsm<S: Storage>(lsm: &Lsm<S>) -> anyhow::Result<()> {
-        let inner = lsm.inner.load();
-        for (keyspace_id, lsm) in &*inner {
+        let index_snapshot = lsm.index.snapshot();
+        for (keyspace_id, keyspace) in &index_snapshot.keyspaces {
             println!("keyspace_id {:?}", keyspace_id);
-            dump_keyspace(&lsm.inner.index.snapshot()).await?;
+            dump_keyspace(&keyspace).await?;
         }
 
         Ok(())
     }
 
-    async fn dump_keyspace<R: FileReader + Clone>(
-        index_snapshot: &IndexSnapshot<R>,
-    ) -> anyhow::Result<()> {
-        dump_index_snapshot(&index_snapshot);
+    async fn dump_keyspace<R: FileReader + Clone>(keyspace: &Keyspace<R>) -> anyhow::Result<()> {
+        println!("== manifest =====");
+        println!("l0_active");
+        {
+            let memtable = &keyspace.l0_active;
+            println!(
+                "  {} ({} bytes) {:?}",
+                memtable.id(),
+                memtable.size(),
+                memtable.range(),
+            );
+        }
+        println!("l0_sealed");
+        for memtable in &keyspace.l0_sealed {
+            println!(
+                "  {} ({} bytes) {:?}",
+                memtable.id(),
+                memtable.size(),
+                memtable.range(),
+            );
+        }
+        for (i, level) in keyspace.levels[1..]
+            .iter()
+            .enumerate()
+            .map(|(i, level)| (i + 1, level))
+        {
+            println!("l{} ({} bytes)", i, level.size());
+            for run in &level.runs {
+                println!("  {} ({} bytes) {:?}", run.id(), run.size(), run.range());
+            }
+        }
+        println!("============");
 
         println!("== kvs =====");
         println!("l0_active");
         {
-            let memtable = &index_snapshot.l0_active;
+            let memtable = &keyspace.l0_active;
             println!(
                 "  {} ({} bytes) {:?}",
                 memtable.id(),
@@ -1753,7 +1637,7 @@ mod test {
             memtable.dump();
         }
         println!("l0_sealed");
-        for memtable in &index_snapshot.l0_sealed {
+        for memtable in &keyspace.l0_sealed {
             println!(
                 "  {} ({} bytes) {:?}",
                 memtable.id(),
@@ -1762,7 +1646,7 @@ mod test {
             );
             memtable.dump();
         }
-        for (i, level) in index_snapshot.levels[1..]
+        for (i, level) in keyspace.levels[1..]
             .iter()
             .enumerate()
             .map(|(i, level)| (i + 1, level))
@@ -1777,42 +1661,8 @@ mod test {
         Ok(())
     }
 
-    fn dump_index_snapshot<R: FileReader + Clone>(index_snapshot: &IndexSnapshot<R>) {
-        println!("== manifest =====");
-        println!("l0_active");
-        {
-            let memtable = &index_snapshot.l0_active;
-            println!(
-                "  {} ({} bytes) {:?}",
-                memtable.id(),
-                memtable.size(),
-                memtable.range(),
-            );
-        }
-        println!("l0_sealed");
-        for memtable in &index_snapshot.l0_sealed {
-            println!(
-                "  {} ({} bytes) {:?}",
-                memtable.id(),
-                memtable.size(),
-                memtable.range(),
-            );
-        }
-        for (i, level) in index_snapshot.levels[1..]
-            .iter()
-            .enumerate()
-            .map(|(i, level)| (i + 1, level))
-        {
-            println!("l{} ({} bytes)", i, level.size());
-            for run in &level.runs {
-                println!("  {} ({} bytes) {:?}", run.id(), run.size(), run.range());
-            }
-        }
-        println!("============");
-    }
-
     #[tokio::test]
-    async fn test_lsm_from_diagram() -> anyhow::Result<()> {
+    async fn test_keyspace_from_diagram() -> anyhow::Result<()> {
         let diagram = vec![
             //                         1
             //   ts= 1 2 3 4 5 6 7 8 9 0
@@ -1825,8 +1675,7 @@ mod test {
             ("d", b"     o|o o|x o| |o  "),
         ];
 
-        let lsm = lsm_from_diagram(diagram).await?;
-        let index_snapshot = lsm.index.snapshot();
+        let keyspace = keyspace_from_diagram(diagram).await?;
 
         let a = "a";
         let b = "b";
@@ -1834,14 +1683,14 @@ mod test {
         let d = "d";
 
         assert_eq!(
-            index_snapshot.l0_active.iter().collect::<Vec<_>>(),
+            keyspace.l0_active.iter().collect::<Vec<_>>(),
             vec![
                 lsm_diagram_revision(b.as_bytes(), 9, false),
                 lsm_diagram_revision(d.as_bytes(), 9, false),
             ],
         );
         assert_eq!(
-            index_snapshot.l0_sealed[0].iter().collect::<Vec<_>>(),
+            keyspace.l0_sealed[0].iter().collect::<Vec<_>>(),
             vec![
                 lsm_diagram_revision(a.as_bytes(), 9, false),
                 lsm_diagram_revision(a.as_bytes(), 8, false),
@@ -1852,7 +1701,7 @@ mod test {
         );
 
         assert_eq!(
-            index_snapshot.levels[1..]
+            keyspace.levels[1..]
                 .iter()
                 .map(|level| {
                     level
@@ -1920,9 +1769,9 @@ mod test {
         }
     }
 
-    async fn lsm_from_diagram(
+    async fn keyspace_from_diagram(
         diagram: Vec<(&str, &[u8])>,
-    ) -> anyhow::Result<LsmInnerInner<TestFile>> {
+    ) -> anyhow::Result<Keyspace<TestFile>> {
         fn find_touching(
             diagram: &[(&str, &[u8])],
             visited: &mut HashSet<(usize, usize)>,
@@ -1983,7 +1832,7 @@ mod test {
         for revision in l0_active_revisions {
             l0_active.insert(SeqNo(1), revision.key, revision.ts, revision.value);
         }
-        let mut index_snapshot = IndexSnapshot {
+        let mut keyspace = Keyspace {
             l0_active: Arc::new(l0_active),
             l0_sealed: vec![Arc::new(Memtable::new())],
             levels: vec![Level { runs: Vec::new() }],
@@ -1996,9 +1845,9 @@ mod test {
                     continue;
                 }
 
-                if index_snapshot.l0_sealed[0].is_empty() {
+                if keyspace.l0_sealed[0].is_empty() {
                     for revision in revisions {
-                        index_snapshot.l0_sealed[0].insert(
+                        keyspace.l0_sealed[0].insert(
                             SeqNo(1),
                             revision.key,
                             revision.ts,
@@ -2024,11 +1873,9 @@ mod test {
                 continue;
             }
 
-            index_snapshot.levels.push(level);
+            keyspace.levels.push(level);
         }
 
-        let lsm = LsmInnerInner::new(32768, Arc::new(Index::from_snapshot(index_snapshot)));
-
-        Ok(lsm)
+        Ok(keyspace)
     }
 }

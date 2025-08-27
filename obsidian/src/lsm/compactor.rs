@@ -16,6 +16,7 @@ use rand::Rng;
 
 use crate::lsm::index::Index;
 use crate::lsm::index::IndexSnapshot;
+use crate::lsm::index::Keyspace;
 use crate::lsm::LsmRevision;
 use crate::lsm::Memtable;
 use crate::lsm::Run;
@@ -47,14 +48,12 @@ where
         concurrency: usize,
         run_size_target: u64,
         block_size_target: u64,
-        keyspace_id: KeyspaceId,
     ) -> Self {
         let bg = WithBackground::new(Arc::new(CompactorInner {
             index,
             storage,
             run_size_target,
             block_size_target,
-            keyspace_id,
         }));
 
         bg.spawn(async move |inner| {
@@ -73,7 +72,6 @@ where
     storage: Arc<S>,
     run_size_target: u64,
     block_size_target: u64,
-    keyspace_id: KeyspaceId,
 }
 
 impl<S> CompactorInner<S>
@@ -137,12 +135,30 @@ where
         in_flight_from: &HashSet<RunId>,
         in_flight_into: &HashSet<RunId>,
     ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
+        for (keyspace_id, keyspace) in &snapshot.keyspaces {
+            if let Some(out) = self
+                .schedule_next_keyspace(*keyspace_id, keyspace, in_flight_from, in_flight_into)
+                .await
+            {
+                return Some(out);
+            }
+        }
+        None
+    }
+
+    async fn schedule_next_keyspace(
+        self: &Arc<Self>,
+        keyspace_id: KeyspaceId,
+        keyspace: &Keyspace<S::R>,
+        in_flight_from: &HashSet<RunId>,
+        in_flight_into: &HashSet<RunId>,
+    ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
         let level_size_estimates = {
             let mut level_size_estimates: Vec<_> =
-                snapshot.levels.iter().map(|level| level.size()).collect();
+                keyspace.levels.iter().map(|level| level.size()).collect();
 
-            for i in 1..snapshot.levels.len() - 1 {
-                for run in &snapshot.levels[i].runs {
+            for i in 1..keyspace.levels.len() - 1 {
+                for run in &keyspace.levels[i].runs {
                     if in_flight_from.contains(&run.id()) {
                         level_size_estimates[i] -= run.size();
                         level_size_estimates[i + 1] += run.size();
@@ -155,8 +171,8 @@ where
 
         // Prefer starting lower-level compactions first, since otherwise l0 compactions might
         // regularly lock up all of l1 and we might never be able to compact from l1.
-        for i in (1..snapshot.levels.len() - 1).rev() {
-            let level = &snapshot.levels[i];
+        for i in (1..keyspace.levels.len() - 1).rev() {
+            let level = &keyspace.levels[i];
             if level.runs.len() == 0 {
                 continue;
             }
@@ -177,7 +193,7 @@ where
                     continue;
                 }
 
-                let intersecting_runs = snapshot.levels[i + 1].range(run.range());
+                let intersecting_runs = keyspace.levels[i + 1].range(run.range());
 
                 let into: HashSet<_> = intersecting_runs.iter().map(|run| run.id()).collect();
                 let conflict = into.iter().any(|run_id| {
@@ -187,17 +203,18 @@ where
                 if !conflict {
                     return Some((
                         Compaction {
+                            keyspace_id,
                             from_level: i,
                             from: HashSet::from([run.id()]),
                             into,
                         },
-                        Either::Left(self.compact_from(&snapshot, i, run, intersecting_runs)),
+                        Either::Left(self.compact_from(keyspace_id, i, run, intersecting_runs)),
                     ));
                 }
             }
         }
 
-        let l0_available: Vec<_> = snapshot
+        let l0_available: Vec<_> = keyspace
             .l0_sealed
             .iter()
             .filter(|memtable| {
@@ -214,7 +231,7 @@ where
             let l0_available_range =
                 bounding_range(l0_available.iter().map(|memtable| memtable.range()));
             let l0_in_flight_range = bounding_range(
-                snapshot
+                keyspace
                     .l0_sealed
                     .iter()
                     .filter(|memtable| in_flight_from.contains(&memtable.id()))
@@ -228,7 +245,7 @@ where
                 .intersection(&l0_in_flight_range)
                 .is_empty()
             {
-                let intersecting_runs = snapshot.levels[1].range(l0_available_range);
+                let intersecting_runs = keyspace.levels[1].range(l0_available_range);
 
                 let from: HashSet<_> = l0_available.iter().map(|memtable| memtable.id()).collect();
                 let into: HashSet<_> = intersecting_runs.iter().map(|run| run.id()).collect();
@@ -239,11 +256,16 @@ where
                 if !conflict {
                     return Some((
                         Compaction {
+                            keyspace_id,
                             from_level: 0,
                             from,
                             into,
                         },
-                        Either::Right(self.compact_l0(&l0_available[..], intersecting_runs)),
+                        Either::Right(self.compact_l0(
+                            keyspace_id,
+                            &l0_available[..],
+                            intersecting_runs,
+                        )),
                     ));
                 }
             }
@@ -256,6 +278,7 @@ where
 
     fn compact_l0(
         self: &Arc<Self>,
+        keyspace_id: KeyspaceId,
         from: &[Arc<Memtable>],
         into: &[Arc<Run<S::R>>],
     ) -> impl Future<Output = anyhow::Result<()>> {
@@ -278,7 +301,7 @@ where
             let from = from.to_vec();
             let into = into.to_vec();
             async move {
-                let add = self_.merge_l0(&from[..], &into[..]).await?;
+                let add = self_.merge_l0(keyspace_id, &from[..], &into[..]).await?;
 
                 log::trace!(
                     "compacted l0 {:?} + {:?}, producing {:?}",
@@ -289,7 +312,7 @@ where
                     add.iter().map(|run| run.id()).collect::<Vec<_>>(),
                 );
 
-                self_.index.replace(add, 1, remove)?;
+                self_.index.replace(keyspace_id, add, 1, remove)?;
 
                 Ok(())
             }
@@ -298,6 +321,7 @@ where
 
     async fn merge_l0(
         &self,
+        keyspace_id: KeyspaceId,
         memtables: &[Arc<Memtable>],
         runs: &[Arc<Run<S::R>>],
     ) -> anyhow::Result<Vec<Run<S::R>>> {
@@ -317,28 +341,17 @@ where
             streams
         };
 
-        self.runs_from_revisions(merge_sorted_streams(streams))
+        self.runs_from_revisions(keyspace_id, merge_sorted_streams(streams))
             .await
     }
 
     fn compact_from(
         self: &Arc<Self>,
-        snapshot: &Arc<IndexSnapshot<S::R>>,
+        keyspace_id: KeyspaceId,
         from_level: usize,
         from: &Arc<Run<S::R>>,
         into: &[Arc<Run<S::R>>],
     ) -> impl Future<Output = anyhow::Result<()>> {
-        if from_level == 0 {
-            panic!("can't compact_from(0), use compact_l0()");
-        }
-        if from_level >= snapshot.levels.len() - 1 {
-            panic!(
-                "can't compact_from a level past max levels: {} >= {}",
-                from_level,
-                snapshot.levels.len() - 1
-            );
-        }
-
         log::trace!(
             "compacting l{} {:?} into {:?}",
             from_level,
@@ -354,7 +367,7 @@ where
             let into = into.to_vec();
             let self_ = Arc::clone(self);
             async move {
-                let add = self_.merge_runs(&from, &into[..]).await?;
+                let add = self_.merge_runs(keyspace_id, &from, &into[..]).await?;
                 log::trace!(
                     "compacted l{} {:?} + {:?}, producing {:?}",
                     from_level,
@@ -362,7 +375,9 @@ where
                     into.iter().map(|run| run.id()).collect::<Vec<_>>(),
                     add.iter().map(|run| run.id()).collect::<Vec<_>>(),
                 );
-                self_.index.replace(add, from_level + 1, remove)?;
+                self_
+                    .index
+                    .replace(keyspace_id, add, from_level + 1, remove)?;
                 Ok(())
             }
         })
@@ -370,10 +385,11 @@ where
 
     async fn merge_runs(
         &self,
+        keyspace_id: KeyspaceId,
         a: &Run<S::R>,
         b: &[Arc<Run<S::R>>],
     ) -> anyhow::Result<Vec<Run<S::R>>> {
-        self.runs_from_revisions(merge_sorted_streams(vec![
+        self.runs_from_revisions(keyspace_id, merge_sorted_streams(vec![
             a.stream().boxed(),
             futures::stream::iter(b.iter().map(|run| run.stream()))
                 .flatten()
@@ -384,6 +400,7 @@ where
 
     async fn runs_from_revisions(
         &self,
+        keyspace_id: KeyspaceId,
         entries: impl Stream<Item = anyhow::Result<LsmRevision>> + Send,
     ) -> anyhow::Result<Vec<Run<S::R>>> {
         let mut sorted = entries.boxed().peekable();
@@ -401,7 +418,7 @@ where
                     Run::<()>::write(
                         &mut writer,
                         id,
-                        self.keyspace_id,
+                        keyspace_id,
                         self.block_size_target,
                         rx,
                     )
@@ -453,6 +470,7 @@ where
 }
 
 struct Compaction {
+    keyspace_id: KeyspaceId,
     from_level: usize,
     from: HashSet<RunId>,
     into: HashSet<RunId>,

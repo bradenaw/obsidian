@@ -1,4 +1,5 @@
 use std::array;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
@@ -9,6 +10,7 @@ use tokio::sync::Notify;
 
 use crate::lsm::KeyspaceManifest;
 use crate::lsm::LevelManifest;
+use crate::lsm::Manifest;
 use crate::lsm::Memtable;
 use crate::lsm::Run;
 use crate::lsm::RunId;
@@ -18,6 +20,7 @@ use crate::range::Range;
 use crate::range::RangeMap;
 use crate::storage::FileReader;
 use crate::storage::Storage;
+use crate::types::KeyspaceId;
 use crate::types::RevisionValue;
 use crate::types::Timestamp;
 use crate::util::binary_search_by_idx;
@@ -49,21 +52,10 @@ impl<R> Index<R>
 where
     R: FileReader + Clone,
 {
-    pub(super) fn new(n_levels: usize) -> Self {
-        if n_levels < 2 {
-            panic!("not enough levels: {} < 2", n_levels);
-        }
-        let mut levels = Vec::with_capacity(n_levels);
-        for _ in 0..n_levels {
-            levels.push(Level::new());
-        }
-        let snapshot = IndexSnapshot {
-            l0_active: Arc::new(Memtable::new()),
-            l0_sealed: Vec::new(),
-            levels,
-        };
-
-        Self::from_snapshot(snapshot)
+    pub(super) fn new() -> Self {
+        Self::from_snapshot(IndexSnapshot {
+            keyspaces: HashMap::new(),
+        })
     }
 
     pub(super) fn from_snapshot(index_snapshot: IndexSnapshot<R>) -> Self {
@@ -73,10 +65,7 @@ where
         }
     }
 
-    pub(super) async fn from_manifest<S>(
-        storage: &S,
-        manifest: KeyspaceManifest,
-    ) -> anyhow::Result<Self>
+    pub(super) async fn from_manifest<S>(storage: &S, manifest: Manifest) -> anyhow::Result<Self>
     where
         S: Storage<R = R>,
     {
@@ -100,41 +89,96 @@ where
         (self.snapshot(), notified)
     }
 
-    pub(super) fn insert(&self, seqno: wal::SeqNo, k: Vec<u8>, ts: Timestamp, v: RevisionValue) {
-        let current = &self.current.read().unwrap()[0];
-        current.l0_active.insert(seqno, k, ts, v);
+    pub(super) fn insert(
+        &self,
+        keyspace_id: KeyspaceId,
+        seqno: wal::SeqNo,
+        k: Vec<u8>,
+        ts: Timestamp,
+        v: RevisionValue,
+    ) -> anyhow::Result<u64> {
+        let snapshot = &self.current.read().unwrap()[0];
+        Ok(snapshot
+            .keyspaces
+            .get(&keyspace_id)
+            .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?
+            .l0_active
+            .insert(seqno, k, ts, v))
     }
 
     /// Moves l0_active into l0_sealed and creates a new, empty l0_active.
-    pub(super) fn rotate_l0(&self) {
-        let mut current = self.current.write().unwrap();
-        let snapshot = &current[0];
-        if snapshot.l0_active.is_empty() {
-            return;
+    pub(super) fn rotate_l0(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        self.update(|snapshot| {
+            let keyspace = snapshot
+                .keyspaces
+                .get_mut(&keyspace_id)
+                .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?;
+
+            if keyspace.l0_active.is_empty() {
+                return Ok(());
+            }
+
+            keyspace.l0_sealed.push(Arc::clone(&keyspace.l0_active));
+            keyspace.l0_active = Arc::new(Memtable::new());
+
+            Ok(())
+        })
+    }
+
+    pub(super) fn create_keyspace(
+        &self,
+        keyspace_id: KeyspaceId,
+        n_levels: usize,
+    ) -> anyhow::Result<()> {
+        if n_levels < 2 {
+            return Err(anyhow!("not enough levels: {} < 2", n_levels));
         }
 
-        let mut new_snapshot = (**snapshot).clone();
-        new_snapshot
-            .l0_sealed
-            .push(Arc::clone(&new_snapshot.l0_active));
-        new_snapshot.l0_active = Arc::new(Memtable::new());
-        *current = array::from_fn(|_| Arc::new(new_snapshot.clone()));
-
-        self.updated.notify_waiters();
+        self.update(|snapshot| {
+            if snapshot.keyspaces.contains_key(&keyspace_id) {
+                return Ok(());
+            }
+            let mut levels: Vec<Level<R>> = Vec::with_capacity(n_levels);
+            for _ in 0..n_levels {
+                levels.push(Level::new());
+            }
+            let keyspace = Keyspace {
+                l0_active: Arc::new(Memtable::new()),
+                l0_sealed: Vec::new(),
+                levels,
+            };
+            snapshot.keyspaces.insert(keyspace_id, keyspace);
+            Ok(())
+        })
     }
 
     /// Adds the given runs into the index and removes the runs/memtables with the given run_ids.
     pub(super) fn replace(
         &self,
+        keyspace_id: KeyspaceId,
         add: Vec<Run<R>>,
         min_level: usize,
         remove: HashSet<RunId>,
     ) -> anyhow::Result<()> {
+        self.update(|snapshot| {
+            let keyspace = snapshot
+                .keyspaces
+                .get_mut(&keyspace_id)
+                .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?;
+            keyspace.replace(add, min_level, remove)?;
+            Ok(())
+        })
+    }
+
+    fn update<F>(&self, f: F) -> anyhow::Result<()>
+    where
+        F: FnOnce(&mut IndexSnapshot<R>) -> anyhow::Result<()>,
+    {
         let mut current = self.current.write().unwrap();
         let snapshot = &current[0];
 
         let mut new_snapshot = (**snapshot).clone();
-        new_snapshot.replace(add, min_level, remove)?;
+        f(&mut new_snapshot)?;
         *current = array::from_fn(|_| Arc::new(new_snapshot.clone()));
 
         self.updated.notify_waiters();
@@ -145,13 +189,46 @@ where
 
 #[derive(Clone)]
 pub(super) struct IndexSnapshot<R> {
+    pub(super) keyspaces: HashMap<KeyspaceId, Keyspace<R>>,
+}
+
+impl<R> IndexSnapshot<R>
+where
+    R: FileReader + Clone,
+{
+    async fn from_manifest<S>(storage: &S, manifest: Manifest) -> anyhow::Result<Self>
+    where
+        S: Storage<R = R>,
+    {
+        let mut keyspaces = HashMap::new();
+        for (keyspace_id, keyspace_manifest) in manifest.keyspaces {
+            let keyspace = Keyspace::from_manifest(storage, keyspace_manifest).await?;
+            keyspaces.insert(keyspace_id, keyspace);
+        }
+
+        Ok(Self { keyspaces })
+    }
+
+    pub(super) fn manifest(&self) -> Manifest {
+        Manifest {
+            keyspaces: self
+                .keyspaces
+                .iter()
+                .map(|(keyspace_id, keyspace)| (*keyspace_id, keyspace.manifest()))
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct Keyspace<R> {
     pub(super) l0_active: Arc<Memtable>,
     pub(super) l0_sealed: Vec<Arc<Memtable>>,
     // For ease of expression, levels[0] is always present but empty because it's represented above.
     pub(super) levels: Vec<Level<R>>,
 }
 
-impl<R> IndexSnapshot<R>
+impl<R> Keyspace<R>
 where
     R: FileReader + Clone,
 {
