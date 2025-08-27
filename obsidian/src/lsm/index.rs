@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::RwLock;
 
 use anyhow::anyhow;
-use crossbeam::sync::ShardedLock;
 use tokio::sync::Notify;
 
 use crate::lsm::KeyspaceManifest;
@@ -44,7 +44,7 @@ pub(super) struct Index<R> {
     // Readers can choose any of them, writers must update all of them.
     //
     // This is done so that readers don't have to contend on the atomic inside the arc.
-    current: ShardedLock<[Arc<IndexSnapshot<R>>; N_STRIPES]>,
+    current: [RwLock<Arc<IndexSnapshot<R>>>; N_STRIPES],
     updated: Notify,
 }
 
@@ -60,7 +60,7 @@ where
 
     pub(super) fn from_snapshot(index_snapshot: IndexSnapshot<R>) -> Self {
         Self {
-            current: ShardedLock::new(array::from_fn(|_| Arc::new(index_snapshot.clone()))),
+            current: array::from_fn(|_| RwLock::new(Arc::new(index_snapshot.clone()))),
             updated: Notify::new(),
         }
     }
@@ -77,7 +77,7 @@ where
     /// Returns the current snapshot of the index state.
     pub(super) fn snapshot(&self) -> Arc<IndexSnapshot<R>> {
         let thread_id = std::thread::current().id().as_u64().get() as usize;
-        Arc::clone(&self.current.read().unwrap()[thread_id % N_STRIPES])
+        Arc::clone(&self.current[thread_id % N_STRIPES].read().unwrap())
     }
 
     /// Returns the current snapshot of the index state, and a future that will complete if the
@@ -97,7 +97,7 @@ where
         ts: Timestamp,
         v: RevisionValue,
     ) -> anyhow::Result<u64> {
-        let snapshot = &self.current.read().unwrap()[0];
+        let snapshot = &self.current[0].read().unwrap();
         Ok(snapshot
             .keyspaces
             .get(&keyspace_id)
@@ -174,12 +174,14 @@ where
     where
         F: FnOnce(&mut IndexSnapshot<R>) -> anyhow::Result<()>,
     {
-        let mut current = self.current.write().unwrap();
+        let mut current: [_; N_STRIPES] = array::from_fn(|i| self.current[i].write().unwrap());
         let snapshot = &current[0];
 
-        let mut new_snapshot = (**snapshot).clone();
+        let mut new_snapshot = (***snapshot).clone();
         f(&mut new_snapshot)?;
-        *current = array::from_fn(|_| Arc::new(new_snapshot.clone()));
+        for slot in current.iter_mut() {
+            **slot = Arc::new(new_snapshot.clone());
+        }
 
         self.updated.notify_waiters();
 
