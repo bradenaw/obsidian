@@ -29,22 +29,28 @@ use crate::types::Mutation;
 use crate::types::ShardId;
 use crate::types::TransferId;
 use crate::util::Retry;
+use crate::util::WithBackground;
 
-pub(crate) struct Coordinator<T> {
+pub(crate) struct Coordinator<T>(WithBackground<CoordinatorInner<T>>);
+
+struct CoordinatorInner<T> {
     meta: Arc<MetaImpl<T>>,
-    shards: Box<dyn Shards + Send + Sync>,
+    shards: Arc<dyn Shards + Send + Sync>,
 }
 
 impl<T> Coordinator<T>
 where
-    T: Tablet + Sync + Send,
+    T: Tablet + Sync + Send + 'static,
 {
-    pub(crate) fn new(meta: Arc<MetaImpl<T>>, shards: Box<dyn Shards + Send + Sync>) -> Self {
-        Self { meta, shards }
+    pub(crate) fn new(meta: Arc<MetaImpl<T>>, shards: Arc<dyn Shards + Send + Sync>) -> Self {
+        Self(WithBackground::new(Arc::new(CoordinatorInner {
+            meta,
+            shards,
+        })))
     }
 
     async fn start_move(&self, src: TabletId, dst: ShardId) -> anyhow::Result<()> {
-        let snapshot = self.meta.latest_snapshot_().await?;
+        let snapshot = self.0.meta.latest_snapshot_().await?;
         let src_metadata = snapshot.tablet_metadata(src).await?;
 
         self.start_transfer(vec![src], vec![(dst, src_metadata.range)])
@@ -59,7 +65,7 @@ where
     }
 
     async fn start_merge(&self, srcs: Vec<TabletId>, dst: ShardId) -> anyhow::Result<()> {
-        let snapshot = self.meta.latest_snapshot_().await?;
+        let snapshot = self.0.meta.latest_snapshot_().await?;
         let mut src_range_set = RangeSet::new();
         for src in &srcs {
             let src_metadata = snapshot.tablet_metadata(*src).await?;
@@ -84,7 +90,7 @@ where
         srcs: Vec<TabletId>,
         dsts: Vec<(ShardId, Range<Vec<u8>>)>,
     ) -> anyhow::Result<()> {
-        let snapshot = self.meta.latest_snapshot_().await?;
+        let snapshot = self.0.meta.latest_snapshot_().await?;
 
         if !((srcs.len() == 1 && dsts.len() >= 1) || (srcs.len() >= 1 && dsts.len() == 1)) {
             return Err(anyhow!(
@@ -188,13 +194,21 @@ where
             ),
         );
 
-        self.meta.write_syncable(snapshot, muts).await?;
+        self.0.meta.write_syncable(snapshot, muts).await?;
 
-        // TODO: spawn a task to carry it out
+        self.0.spawn(async move |inner| {
+            inner.transfer(transfer_id).await;
+        });
 
         Ok(())
     }
+}
 
+
+impl<T> CoordinatorInner<T>
+where
+    T: Tablet + Sync + Send + 'static,
+{
     async fn transfer(&self, transfer_id: TransferId) {
         Retry::new()
             .indefinitely(&async || -> anyhow::Result<()> {
