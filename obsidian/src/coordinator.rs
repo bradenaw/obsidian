@@ -49,7 +49,7 @@ where
         })))
     }
 
-    async fn start_move(&self, src: TabletId, dst: ShardId) -> anyhow::Result<()> {
+    pub(crate) async fn start_move(&self, src: TabletId, dst: ShardId) -> anyhow::Result<()> {
         let snapshot = self.0.meta.latest_snapshot_().await?;
         let src_metadata = snapshot.tablet_metadata(src).await?;
 
@@ -533,4 +533,12 @@ fn manifests_equal(a: &[&Manifest], b: &[&Manifest]) -> bool {
     }
 
     a_runs.len() == found.len()
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn transfer() -> anyhow::Result<()> {
+        Ok(())
+    }
 }

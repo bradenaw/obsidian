@@ -10,6 +10,7 @@ use std::sync::Weak;
 use anyhow::anyhow;
 use async_trait::async_trait;
 
+use crate::coordinator::Coordinator;
 use crate::lsm::LsmBuilder;
 use crate::lsm::Manifest;
 use crate::meta::Meta;
@@ -344,44 +345,57 @@ impl<T: Meta + Send + Sync> Meta for Arc<MetaProxy<T>> {
     }
 }
 
-pub(crate) async fn new_for_test(n_shards: usize) -> anyhow::Result<Frontend> {
-    if n_shards < 1 {
-        return Err(anyhow!("need at least one shard to host the meta tablet"));
+pub(crate) struct ObsidianForTest {
+    pub frontend: Frontend,
+    pub coordinator: Coordinator<Arc<dyn Tablet + Send + Sync>>,
+}
+
+impl ObsidianForTest {
+    pub(crate) async fn new(n_shards: usize) -> anyhow::Result<Self> {
+        if n_shards < 1 {
+            return Err(anyhow!("need at least one shard to host the meta tablet"));
+        }
+
+        let meta_proxy = Arc::new(MetaProxy::new());
+        let storage = Arc::new(CachedStorage::new(
+            MemStorage::new(),
+            64, // page_size
+            4,  // stripe_size_pages
+            4,  // n_stripes
+        ));
+
+        let shards = Arc::new(TestShards::new(storage.clone(), meta_proxy.clone()));
+
+        let mut shard_ids = vec![];
+        for _ in 0..n_shards {
+            shard_ids.push(shards.create_shard().await?);
+        }
+
+        let meta_tablet = shards.tablet(TabletId::META)?;
+        let meta = Arc::new(MetaImpl::new(meta_tablet));
+
+        let coordinator = Coordinator::new(
+            Arc::clone(&meta),
+            Arc::new(Arc::clone(&shards)) as Arc<dyn Shards + Send + Sync>,
+        );
+
+        for shard_id in shard_ids {
+            meta.add_shard(shard_id).await?;
+        }
+
+        meta_proxy.put(meta);
+
+        let frontend = Frontend::new(
+            Box::new(meta_proxy.clone()),
+            MetaSynced::new(meta_proxy),
+            Box::new(shards),
+        );
+
+        Ok(Self {
+            frontend,
+            coordinator,
+        })
     }
-
-    log::info!("new_for_test");
-
-    let meta_proxy = Arc::new(MetaProxy::new());
-    let storage = Arc::new(CachedStorage::new(
-        MemStorage::new(),
-        64, // page_size
-        4,  // stripe_size_pages
-        4,  // n_stripes
-    ));
-
-    let shards = Arc::new(TestShards::new(storage.clone(), meta_proxy.clone()));
-
-    let mut shard_ids = vec![];
-    for _ in 0..n_shards {
-        shard_ids.push(shards.create_shard().await?);
-    }
-
-    let meta_tablet = shards.tablet(TabletId::META)?;
-    let meta = MetaImpl::new(meta_tablet);
-
-    for shard_id in shard_ids {
-        meta.add_shard(shard_id).await?;
-    }
-
-    meta_proxy.put(meta);
-
-    let frontend = Frontend::new(
-        Box::new(meta_proxy.clone()),
-        MetaSynced::new(meta_proxy),
-        Box::new(shards),
-    );
-
-    Ok(frontend)
 }
 
 #[async_trait]

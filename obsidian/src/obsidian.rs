@@ -599,7 +599,7 @@ impl std::fmt::Display for TabletId {
         if *self == TabletId::META {
             f.write_str("meta")
         } else if self.1 == TabletId::SHARD_META_SEQ {
-            write!(f, "{}/shard_meta", self.0.0)
+            write!(f, "{}/shard_meta", self.0 .0)
         } else {
             write!(f, "{}/{}", self.0 .0, self.1)
         }
@@ -765,5 +765,9 @@ pub(crate) enum InternalError {
 mod test {
     use crate::test::obsidian_test_suite;
 
-    obsidian_test_suite!(crate::test::new_for_test);
+    obsidian_test_suite!(async |n_tablets: usize| -> anyhow::Result<
+        crate::obsidian::Frontend,
+    > {
+        Ok(crate::test::ObsidianForTest::new(n_tablets).await?.frontend)
+    });
 }

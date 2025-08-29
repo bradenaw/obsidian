@@ -189,7 +189,7 @@ mod tests {
     use crate::grpc::FrontendServer;
     use crate::obsidian::Obsidian;
     use crate::pb;
-    use crate::test::new_for_test;
+    use crate::test::ObsidianForTest;
     use crate::test::obsidian_test_suite;
     use crate::types::ColoGroupId;
     use crate::types::Key;
@@ -199,13 +199,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_write() -> anyhow::Result<()> {
-        let obs = new_for_test(1).await?;
+        let obs = ObsidianForTest::new(1).await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-        obs.create_colo_group(keyspace_id.0, vec![] /*splits*/)
+        obs.frontend.create_colo_group(keyspace_id.0, vec![] /*splits*/)
             .await?;
-        obs.create_keyspace(keyspace_id).await?;
+        obs.frontend.create_keyspace(keyspace_id).await?;
 
-        let client = spawn_server(obs).await?;
+        let client = spawn_server(obs.frontend).await?;
 
         let key = (keyspace_id, b"abc".to_vec());
 
@@ -227,10 +227,10 @@ mod tests {
         crate::grpc::frontend_client::tests::ObsidianClientServer,
     > {
         use super::spawn_server;
-        use crate::test::new_for_test;
+        use crate::test::ObsidianForTest;
 
-        let obs = new_for_test(n_tablets).await?;
-        let client = spawn_server(obs).await?;
+        let obs = ObsidianForTest::new(n_tablets).await?;
+        let client = spawn_server(obs.frontend).await?;
         Ok(client)
     });
 

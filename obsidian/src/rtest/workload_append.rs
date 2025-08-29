@@ -754,18 +754,18 @@ mod tests {
     async fn test_workload_append() -> anyhow::Result<()> {
         let _ = pretty_env_logger::try_init();
 
-        let fe = crate::test::new_for_test(2).await?;
+        let obs = crate::test::ObsidianForTest::new(2).await?;
 
-        fe.create_colo_group(
+        obs.frontend.create_colo_group(
             ColoGroupId(1),
             vec![Bound::Before(vec![2]), Bound::Before(vec![3])],
         )
         .await?;
 
-        fe.create_keyspace(KeyspaceId(ColoGroupId(1), 1)).await?;
-        fe.create_keyspace(KeyspaceId(ColoGroupId(1), 2)).await?;
+        obs.frontend.create_keyspace(KeyspaceId(ColoGroupId(1), 1)).await?;
+        obs.frontend.create_keyspace(KeyspaceId(ColoGroupId(1), 2)).await?;
 
-        let wl = WorkloadAppend::new(fe);
+        let wl = WorkloadAppend::new(obs.frontend);
 
         Arc::new(wl).run().await?;
 
