@@ -2,6 +2,7 @@ mod block;
 mod compactor;
 mod index;
 mod memtable;
+mod preload;
 mod run;
 mod util;
 
@@ -24,6 +25,8 @@ use crate::lsm::index::Index;
 use crate::lsm::index::IndexSnapshot;
 use crate::lsm::index::Keyspace;
 use crate::lsm::memtable::Memtable;
+pub(crate) use crate::lsm::preload::Preloaded;
+pub(crate) use crate::lsm::preload::Preloader;
 use crate::lsm::run::Run;
 use crate::lsm::util::LsmRevision;
 use crate::range::Bound;
@@ -338,6 +341,10 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         ))
     }
 
+    pub fn load(&self, preloaded: Preloaded<S::R>) -> anyhow::Result<()> {
+        self.index.load(preloaded.snapshot)
+    }
+
     /// Waits until at least the given sequence number has been processed.
     async fn wait_processed(&self, seqno: wal::SeqNo) -> anyhow::Result<()> {
         let mut wal_processed = self.wal_processed.clone();
@@ -498,6 +505,14 @@ pub(crate) struct Manifest {
     pub(crate) keyspaces: HashMap<KeyspaceId, KeyspaceManifest>,
 }
 
+impl Manifest {
+    pub fn new() -> Self {
+        Self {
+            keyspaces: HashMap::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct KeyspaceManifest {
     pub(crate) levels: Vec<LevelManifest>,
@@ -511,7 +526,7 @@ pub(crate) struct LevelManifest {
 #[derive(Clone, Debug)]
 pub(crate) struct RunManifest {
     pub(crate) run_id: RunId,
-    //pub(crate) key_range: Range<Vec<u8>>,
+    pub(crate) range: Range<Vec<u8>>,
 }
 
 struct KeyspaceReader<'a, R>(&'a Keyspace<R>);

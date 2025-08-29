@@ -755,6 +755,8 @@ pub(crate) enum InternalError {
     TabletNotReadable(TabletId),
     #[error("tablet not currently writable")]
     TabletNotWriteable(TabletId),
+    #[error("tablet not currently hydrating")]
+    TabletNotHydrating(TabletId),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

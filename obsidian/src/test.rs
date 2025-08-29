@@ -11,6 +11,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 
 use crate::lsm::LsmBuilder;
+use crate::lsm::Manifest;
 use crate::meta::Meta;
 use crate::meta::MetaImpl;
 use crate::meta::MetaSynced;
@@ -145,6 +146,18 @@ impl<T: Tablet + Send + Sync + ?Sized> Tablet for Arc<T> {
 
     async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
         T::wait_meta_sync(self, ts).await
+    }
+
+    async fn manifest(&self) -> anyhow::Result<Manifest> {
+        T::manifest(self).await
+    }
+
+    async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
+        T::wait_mostly_hydrated(self).await
+    }
+
+    async fn catchup(&self) -> anyhow::Result<()> {
+        T::catchup(self).await
     }
 }
 
@@ -465,6 +478,18 @@ impl Tablet for Box<dyn Tablet + Send + Sync> {
 
     async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
         Ok(self.deref().wait_meta_sync(ts).await?)
+    }
+
+    async fn manifest(&self) -> anyhow::Result<Manifest> {
+        self.deref().manifest().await
+    }
+
+    async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
+        self.deref().wait_mostly_hydrated().await
+    }
+
+    async fn catchup(&self) -> anyhow::Result<()> {
+        self.deref().catchup().await
     }
 }
 

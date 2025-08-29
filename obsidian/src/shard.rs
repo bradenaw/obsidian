@@ -246,6 +246,7 @@ where
             range,
             lsm,
             Arc::clone(&self.meta_synced),
+            Arc::clone(&self.storage),
             Arc::clone(&self.shards),
         )
         .await?;

@@ -33,6 +33,7 @@ message TransferMetadata {
     TransferState next_state = 2;
     repeated TabletId srcs = 3;
     repeated TabletId dsts = 4;
+    fixed64 timestamp_ms = 5;
 }
 
 enum TransferState {

@@ -39,7 +39,7 @@ pub(super) struct Run<R> {
 
     id: RunId,
     size: usize,
-    keyspace_id: KeyspaceId,
+    pub(super) keyspace_id: KeyspaceId,
     min_ts: Timestamp,
     max_ts: Timestamp,
 

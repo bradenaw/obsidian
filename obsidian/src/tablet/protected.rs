@@ -8,6 +8,8 @@ use tokio::sync::watch;
 use tokio::sync::Notify;
 
 use crate::lsm::Lsm;
+use crate::lsm::Manifest;
+use crate::lsm::Preloaded;
 use crate::meta::TabletState;
 use crate::meta::TabletStateProperties;
 use crate::obsidian::InternalError;
@@ -107,6 +109,27 @@ where
             guard,
             lsm: &self.lsm,
         }
+    }
+
+    pub(super) fn load<'a>(&'a self) -> Result<LsmLoadGuard<'a, S>, InternalError> {
+        let guard = self.state.load();
+
+        if guard.contains(TabletStateProperties::Hydrating) {
+            return Ok(LsmLoadGuard {
+                guard,
+                lsm: &self.lsm,
+            });
+        }
+
+        Err(InternalError::TabletNotHydrating(self.tablet_id))
+    }
+
+    pub(super) fn manifest(&self) -> Manifest {
+        self.lsm.manifest()
+    }
+
+    pub(super) async fn flush(&self) -> anyhow::Result<()> {
+        self.lsm.flush().await
     }
 
     async fn wait<'a>(
@@ -289,6 +312,20 @@ where
 
     async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
         Ok(self.lsm.create_keyspace(keyspace_id).await?)
+    }
+}
+
+pub(super) struct LsmLoadGuard<'a, S: Storage> {
+    guard: InfrequentlyChangedGuard<'a, TabletStateProperties>,
+    lsm: &'a Lsm<S>,
+}
+
+impl<'a, S> LsmLoadGuard<'a, S>
+where
+    S: Storage + Send + Sync + 'static,
+{
+    pub fn load(&self, preloaded: Preloaded<S::R>) -> anyhow::Result<()> {
+        self.lsm.load(preloaded)
     }
 }
 

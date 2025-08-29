@@ -37,15 +37,13 @@ impl<K: Key> Bound<K> {
             Bound::AfterAll => Bound::AfterAll,
         }
     }
-}
 
-impl Bound<Vec<u8>> {
     pub fn borrow(&self) -> Bound<&[u8]> {
         match self {
             Bound::BeforeAll => Bound::BeforeAll,
-            Bound::Before(v) => Bound::Before(&v[..]),
-            Bound::After(v) => Bound::After(&v[..]),
-            Bound::AfterPrefix(v) => Bound::AfterPrefix(&v[..]),
+            Bound::Before(v) => Bound::Before(&v),
+            Bound::After(v) => Bound::After(&v),
+            Bound::AfterPrefix(v) => Bound::AfterPrefix(&v),
             Bound::AfterAll => Bound::AfterAll,
         }
     }
@@ -259,6 +257,11 @@ impl<K: Key> Range<K> {
 
     pub fn contains<K2: Key>(&self, k: &K2) -> bool {
         self.lower.cmp_key(k) != Ordering::Greater && self.upper.cmp_key(k) != Ordering::Less
+    }
+
+    /// Returns true if `self` contains all of the keys in `other`.
+    pub fn contains_range<K2: Key>(&self, other: &Range<K2>) -> bool {
+        self.lower.borrow() <= other.lower.borrow() && self.upper.borrow() >= other.upper.borrow()
     }
 
     pub fn intersection(&self, other: &Range<K>) -> Range<K> {

@@ -680,6 +680,7 @@ pub(crate) struct TransferMetadata {
     pub(crate) state: MetaState<TransferState>,
     pub(crate) srcs: Vec<TabletId>,
     pub(crate) dsts: Vec<TabletId>,
+    pub(crate) timestamp_ms: u64,
 }
 
 impl Value for TransferMetadata {
@@ -712,6 +713,7 @@ impl TryFrom<pb::internal::TransferMetadata> for TransferMetadata {
                 .into_iter()
                 .map(TabletId::try_from)
                 .collect::<Result<Vec<_>, _>>()?,
+                timestamp_ms: value_pb.timestamp_ms,
         })
     }
 }
@@ -735,6 +737,7 @@ impl From<TransferMetadata> for pb::internal::TransferMetadata {
                 .into_iter()
                 .map(pb::internal::TabletId::from)
                 .collect(),
+            timestamp_ms: value.timestamp_ms,
         }
     }
 }

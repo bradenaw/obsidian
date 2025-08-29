@@ -2,8 +2,10 @@ use std::cmp;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::future::Future;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -18,12 +20,15 @@ use futures::TryStreamExt;
 use prost::Message;
 use tokio::sync::mpsc;
 
+use crate::lsm::Manifest;
+use crate::lsm::Preloader;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
 use crate::meta::MetaState;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::meta::SyncType;
+use crate::meta::TabletState;
 use crate::obsidian::InternalError;
 use crate::obsidian::Router;
 use crate::obsidian::Shards;
@@ -51,8 +56,10 @@ use crate::types::Revision;
 use crate::types::RevisionValue;
 use crate::types::Timestamp;
 use crate::util::encode;
+use crate::util::spawn_owned;
 use crate::util::Decode;
 use crate::util::Encode;
+use crate::util::OwnedJoinHandle;
 use crate::util::Retry;
 
 const MAX_PRECOND_VALUE_LEN: usize = 256;
@@ -71,6 +78,28 @@ pub(super) struct TabletInner<S: Storage> {
     prepare_sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
     commit_sender: mpsc::Sender<(Txid, Timestamp, BTreeSet<Key>, BTreeSet<Key>)>,
     waiters: Waiters,
+
+    // Only Some when the TabletState::Hydrating.
+    hydration: Mutex<Option<Hydration>>,
+}
+
+struct Hydration {
+    task: OwnedJoinHandle<()>,
+    set_state: tokio::sync::watch::Sender<HydrationState>,
+    state: tokio::sync::watch::Receiver<HydrationState>,
+}
+
+#[derive(Clone, Debug)]
+enum HydrationState {
+    // Hydration has been started but we might still have no data.
+    Started,
+    // We have most of the data, but the source(s) are still receiving writes, so even if we have
+    // everything we know about it might not be everything.
+    Mostly,
+    // Source(s) are frozen, one more cycle will have everything.
+    Catchup,
+    // Cycle after 'catchup' finished.
+    Done,
 }
 
 impl<S> TabletInner<S>
@@ -100,6 +129,7 @@ where
             sequencer: Sequencer::new(),
             lock_mgr: LockMgr::new(16384),
             waiters: Waiters::new(),
+            hydration: Mutex::new(None),
         }
     }
 
@@ -842,7 +872,7 @@ where
         shards: &Arc<dyn Shards + Send + Sync>,
         receiver: mpsc::Receiver<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
     ) {
-        crate::util::bounded_unordered_map(
+        crate::util::bounded_unordered_for_each(
             receiver,
             64,
             |(txid, keyspace_id, key, prepare_type)| async move {
@@ -1081,19 +1111,23 @@ where
         Ok(())
     }
 
-    pub(super) async fn sync_meta(&self, sync_type: SyncType, snapshot: MetaSyncedSnapshot) {
+    pub(super) fn manifest(&self) -> Manifest {
+        self.lsm.manifest()
+    }
+
+    pub(super) async fn sync_meta(
+        self: &Arc<Self>,
+        storage: &Arc<S>,
+        shards: &Arc<dyn Shards + Sync + Send>,
+        sync_type: SyncType,
+        snapshot: MetaSyncedSnapshot,
+    ) {
         Retry::new()
             .indefinitely(&async || -> anyhow::Result<()> {
                 let sync_type = sync_type.clone();
                 match sync_type {
                     SyncType::Initial => {
-                        let tablet_metadata = snapshot.tablet_metadata(self.tablet_id).await?;
-                        self.lsm
-                            .set_state(match tablet_metadata.state {
-                                MetaState::Stable(state) => state,
-                                MetaState::Transitioning(_, next_state) => next_state,
-                            })
-                            .await;
+                        self.refresh_metadata(&storage, &shards, &snapshot).await?;
                         for keyspace_id in snapshot.keyspace_ids().await? {
                             self.create_keyspace(keyspace_id).await?;
                         }
@@ -1106,16 +1140,7 @@ where
                                 }
                                 MetaKey::Tablet(tablet_id) => {
                                     if tablet_id == self.tablet_id {
-                                        let tablet_metadata =
-                                            snapshot.tablet_metadata(self.tablet_id).await?;
-                                        self.lsm
-                                            .set_state(match tablet_metadata.state {
-                                                MetaState::Stable(state) => state,
-                                                MetaState::Transitioning(_, next_state) => {
-                                                    next_state
-                                                }
-                                            })
-                                            .await;
+                                        self.refresh_metadata(&storage, &shards, &snapshot).await?;
                                     }
                                 }
                                 _ => {}
@@ -1126,6 +1151,201 @@ where
                 Ok(())
             })
             .await;
+    }
+
+    pub(super) async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
+        let mut state = {
+            self.hydration
+                .lock()
+                .unwrap()
+                .as_ref()
+                .ok_or_else(|| anyhow!("hydration not in progress"))?
+                .state
+                .clone()
+        };
+        loop {
+            {
+                let value = state.borrow_and_update();
+                match value.deref() {
+                    HydrationState::Started => {}
+                    HydrationState::Mostly => return Ok(()),
+                    other => return Err(anyhow!("hydration in unexpected state {:?}", other)),
+                }
+            }
+            state.changed().await?;
+        }
+    }
+
+    pub(super) async fn catchup(&self) -> anyhow::Result<()> {
+        let mut state = {
+            let hydration_lock = self.hydration.lock().unwrap();
+            let hydration = hydration_lock
+                .as_ref()
+                .ok_or_else(|| anyhow!("hydration not in progress"))?;
+
+            hydration.set_state.send_modify(|value| {
+                if matches!(value, HydrationState::Mostly) {
+                    *value = HydrationState::Catchup;
+                }
+            });
+            hydration.state.clone()
+        };
+        loop {
+            {
+                let value = state.borrow_and_update();
+                match value.deref() {
+                    HydrationState::Catchup => {}
+                    HydrationState::Done => return Ok(()),
+                    other => return Err(anyhow!("hydration in unexpected state {:?}", other)),
+                }
+            }
+            state.changed().await?;
+        }
+    }
+
+    async fn refresh_metadata(
+        self: &Arc<Self>,
+        storage: &Arc<S>,
+        shards: &Arc<dyn Shards + Sync + Send>,
+        snapshot: &MetaSyncedSnapshot,
+    ) -> anyhow::Result<()> {
+        let tablet_metadata = snapshot.tablet_metadata(self.tablet_id).await?;
+
+        let apparent_tablet_state = match tablet_metadata.state {
+            MetaState::Stable(state) => state,
+            MetaState::Transitioning(_, next_state) => next_state,
+        };
+        self.lsm.set_state(apparent_tablet_state).await;
+
+        if let (Some(transfer_id), TabletState::Hydrating) =
+            (tablet_metadata.transfer_id, apparent_tablet_state)
+        {
+            let transfer_metadata = snapshot.transfer_metadata(transfer_id).await?;
+
+            let mut maybe_hydration = self.hydration.lock().unwrap();
+            if matches!(maybe_hydration.deref(), None) {
+                let (tx, rx) = tokio::sync::watch::channel(HydrationState::Started);
+                *maybe_hydration = Some(Hydration {
+                    task: spawn_owned({
+                        let self_ = Arc::clone(self);
+                        let storage = Arc::clone(storage);
+                        let shards = Arc::clone(shards);
+                        let srcs = transfer_metadata.srcs.clone();
+                        async move {
+                            Retry::new().indefinitely(&async || -> anyhow::Result<()> {
+                                self_.hydrate(&storage, &shards, &srcs[..]).await?;
+                                Ok(())
+                            }).await;
+                        }
+                    }),
+                    set_state: tx,
+                    state: rx,
+                });
+            }
+        } else {
+            let mut maybe_hydration = self.hydration.lock().unwrap();
+            *maybe_hydration = None;
+        }
+
+        if let TabletState::Frozen = apparent_tablet_state {
+            self.lsm.flush().await?;
+        }
+
+        Ok(())
+    }
+
+    async fn hydrate(
+        self: &Arc<Self>,
+        storage: &Arc<S>,
+        shards: &Arc<dyn Shards + Sync + Send>,
+        srcs: &[TabletId],
+    ) -> anyhow::Result<()> {
+        let preloader = Preloader::new(Arc::clone(storage));
+        let mut loaded = HashSet::new();
+
+        for i in 0.. {
+            let mut run_ids_seen = HashSet::new();
+
+            let done_after_round = matches!(
+                *self
+                    .hydration
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("hydration cancelled"))?
+                    .state
+                    .borrow(),
+                HydrationState::Catchup,
+            );
+
+            for src_id in srcs {
+                let src = shards.tablet(*src_id)?;
+
+                let manifest = src.manifest().await?;
+
+                for keyspace_manifest in manifest.keyspaces.values() {
+                    for (i, level) in keyspace_manifest.levels.iter().enumerate() {
+                        if i == 0 {
+                            continue;
+                        }
+
+                        for run_manifest in &level.runs {
+                            if !self.range.contains_range(&run_manifest.range) {
+                                // If the run partially overlaps, compaction at the source will
+                                // eventually make it not.
+                                continue;
+                            }
+
+                            if loaded.contains(&run_manifest.run_id) {
+                                continue;
+                            }
+
+                            preloader.load(run_manifest.run_id, i);
+                            loaded.insert(run_manifest.run_id);
+                            run_ids_seen.insert(run_manifest.run_id);
+                        }
+                    }
+                }
+            }
+
+            // Unload the runs that went away because of compaction.
+            for run_id in loaded.extract_if(|run_id| !run_ids_seen.contains(run_id)) {
+                preloader.unload(run_id);
+            }
+
+            if done_after_round {
+                break;
+            }
+
+            if i == 3 {
+                self.hydration
+                    .lock()
+                    .unwrap()
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("hydration cancelled"))?
+                    .set_state
+                    .send_modify(|value| {
+                        if matches!(value, HydrationState::Started) {
+                            *value = HydrationState::Mostly;
+                        }
+                    });
+            }
+            if i >= 3 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+
+        self.lsm.load()?.load(preloader.wait().await?)?;
+        let _ = self
+            .hydration
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| anyhow!("hydration cancelled"))?
+            .set_state
+            .send(HydrationState::Done);
+
+        Ok(())
     }
 }
 

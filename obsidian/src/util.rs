@@ -233,7 +233,7 @@ pub(crate) async fn wait_all<I: Iterator<Item: Future<Output = ()>>>(iter: I) {
     while let Some(_) = waits.next().await {}
 }
 
-pub(crate) async fn bounded_unordered_map<T, F: Fn(T) -> Fut, Fut: futures::Future<Output = ()>>(
+pub(crate) async fn bounded_unordered_for_each<T, F: Fn(T) -> Fut, Fut: futures::Future<Output = ()>>(
     receiver: tokio::sync::mpsc::Receiver<T>,
     max_concurrent: usize,
     process: F,
@@ -549,7 +549,9 @@ impl<T> Future for OwnedJoinHandle<T> {
         // 1. The task is aborted. This can't happen because we only abort on drop, which means we
         //    can't be polling.
         // 2. The task itself panics. We're allowed to panic the calling task by the API contract.
-        Pin::as_mut(&mut self.0).poll(cx).map(|result| result.unwrap())
+        Pin::as_mut(&mut self.0)
+            .poll(cx)
+            .map(|result| result.unwrap())
     }
 }
 
@@ -753,5 +755,35 @@ impl TryFrom<pb::internal::CompressedKeySet> for BTreeSet<Key> {
         }
 
         Ok(out)
+    }
+}
+
+pub(crate) struct Watchable<T> {
+    value: RwLock<T>,
+    changed: Arc<tokio::sync::Notify>,
+}
+
+impl<T> Watchable<T>
+where
+    T: Clone,
+{
+    pub fn new(initial: T) -> Self {
+        Self {
+            value: RwLock::new(initial),
+            changed: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    pub fn set(&self, value: T) {
+        let mut value_locked = self.value.write().unwrap();
+        *value_locked = value;
+        self.changed.notify_waiters();
+    }
+
+    pub fn get(&self) -> (T, impl Future<Output = ()>) {
+        let notify = Arc::clone(&self.changed);
+        (self.value.read().unwrap().clone(), async move {
+            notify.notified().await;
+        })
     }
 }

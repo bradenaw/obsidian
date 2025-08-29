@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 
+use crate::lsm::Manifest;
 use crate::obsidian::InternalError;
 use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
@@ -81,6 +82,12 @@ pub(crate) trait Tablet {
     ) -> anyhow::Result<()>;
 
     async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()>;
+
+    async fn manifest(&self) -> anyhow::Result<Manifest>;
+
+    async fn wait_mostly_hydrated(&self) -> anyhow::Result<()>;
+
+    async fn catchup(&self) -> anyhow::Result<()>;
 }
 
 #[allow(unused_imports)]

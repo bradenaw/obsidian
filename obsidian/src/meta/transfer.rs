@@ -82,6 +82,7 @@ use crate::pb;
 pub(crate) enum TabletState {
     None,
     Hydrating,
+    // TODO: Remove.
     Prepared,
     Active,
     Frozen,
@@ -159,7 +160,7 @@ impl TabletState {
     pub(crate) fn properties(self) -> TabletStateProperties {
         match self {
             TabletState::None => TabletStateProperties::none(),
-            TabletState::Hydrating => TabletStateProperties::none(),
+            TabletState::Hydrating => TabletStateProperties::Hydrating,
             TabletState::Prepared => TabletStateProperties::Complete,
             TabletState::Active => {
                 TabletStateProperties::Complete
@@ -271,6 +272,8 @@ impl From<TransferState> for pb::internal::TransferState {
 #[bitmask(u8)]
 #[bitmask_config(vec_debug)]
 pub(crate) enum TabletStateProperties {
+    // The tablet is hydrating with a transfer from another tablet.
+    Hydrating = 0b00001000,
     // Tablet has a complete copy of the data.
     Complete = 0b00000100,
     // Tablet can be read from. Requires complete.

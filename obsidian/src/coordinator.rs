@@ -1,8 +1,14 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::SystemTime;
 
 use anyhow::anyhow;
+use futures::stream::FuturesUnordered;
+use futures::TryStreamExt;
 
+use crate::lsm::Manifest;
 use crate::meta::MetaImpl;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
@@ -22,6 +28,7 @@ use crate::tablet::Tablet;
 use crate::types::Mutation;
 use crate::types::ShardId;
 use crate::types::TransferId;
+use crate::util::Retry;
 
 pub(crate) struct Coordinator<T> {
     meta: Arc<MetaImpl<T>>,
@@ -175,6 +182,7 @@ where
                     state: MetaState::Stable(TransferState::Copy),
                     srcs: srcs,
                     dsts: dst_tablet_ids,
+                    timestamp_ms: SystemTime::now().elapsed()?.as_millis() as u64,
                 }
                 .encode_to_vec(),
             ),
@@ -185,6 +193,19 @@ where
         // TODO: spawn a task to carry it out
 
         Ok(())
+    }
+
+    async fn transfer(&self, transfer_id: TransferId) {
+        Retry::new()
+            .indefinitely(&async || -> anyhow::Result<()> {
+                loop {
+                    let should_continue = self.transfer_step(transfer_id).await?;
+                    if !should_continue {
+                        return Ok(());
+                    }
+                }
+            })
+            .await;
     }
 
     async fn transfer_step(&self, transfer_id: TransferId) -> anyhow::Result<bool> {
@@ -201,17 +222,64 @@ where
 
         match transfer_state {
             TransferState::Copy => {
-                // wait for destinations to nearly finish
+                // Wait until the destinations are all mostly caught up, so that we don't have to
+                // freeze writes at the sources for very long.
+                for dst_tablet_id in transfer_metadata.dsts {
+                    let tablet = self.shards.tablet(dst_tablet_id)?;
+                    tablet.wait_mostly_hydrated().await?;
+                }
 
+                // Stop accepting writes at the sources so the destinations can catch up.
                 self.transition_transfer(snapshot, transfer_id, TransferState::Catchup)
                     .await?;
             }
             TransferState::Catchup => {
-                // wait for sources to flush and destinations to fully catch up
-                //
-                // compare the source manifests and destination manifests
-                //
-                // if something is wrong then transition to aborting
+                // Wait for the sources to fully catch up.
+                if SystemTime::UNIX_EPOCH
+                    .checked_add(Duration::from_millis(transfer_metadata.timestamp_ms))
+                    .unwrap()
+                    .elapsed()?
+                    > Duration::from_secs(30)
+                {
+                    self.transition_transfer(snapshot, transfer_id, TransferState::Aborting)
+                        .await?;
+                    log::error!("{:?} timed out waiting for catchup, aborting", transfer_id);
+                    return Ok(true);
+                }
+
+                // Make sure the destinations actually have all of the data that the sources did.
+                let manifests: HashMap<_, _> =
+                    Iterator::chain(transfer_metadata.srcs.iter(), transfer_metadata.dsts.iter())
+                        .map(async |tablet_id| {
+                            Ok::<_, anyhow::Error>((
+                                *tablet_id,
+                                self.shards.tablet(*tablet_id)?.manifest().await?,
+                            ))
+                        })
+                        .collect::<FuturesUnordered<_>>()
+                        .try_collect()
+                        .await?;
+
+                let src_manifests: Vec<_> = transfer_metadata
+                    .srcs
+                    .iter()
+                    .map(|tablet_id| &manifests[tablet_id])
+                    .collect();
+                let dst_manifests: Vec<_> = transfer_metadata
+                    .dsts
+                    .iter()
+                    .map(|tablet_id| &manifests[tablet_id])
+                    .collect();
+
+                if !manifests_equal(&src_manifests[..], &dst_manifests[..]) {
+                    self.transition_transfer(snapshot, transfer_id, TransferState::Aborting)
+                        .await?;
+                    log::error!(
+                        "{:?} destination manifests didn't match sources",
+                        transfer_id
+                    );
+                    return Ok(true);
+                }
 
                 self.transition_transfer(snapshot, transfer_id, TransferState::Synced)
                     .await?;
@@ -281,6 +349,7 @@ where
         let next_transfer_metadata = {
             let mut next_transfer_metadata = transfer_metadata.clone();
             next_transfer_metadata.state = MetaState::Transitioning(curr_state, next_state);
+            next_transfer_metadata.timestamp_ms = SystemTime::now().elapsed()?.as_millis() as u64;
             next_transfer_metadata
         };
         muts.insert(
@@ -403,4 +472,51 @@ where
 
         Ok(())
     }
+}
+
+fn manifests_equal(a: &[&Manifest], b: &[&Manifest]) -> bool {
+    let mut a_runs = HashMap::new();
+    for manifest in a {
+        for (keyspace_id, keyspace) in &manifest.keyspaces {
+            for (i, level) in keyspace.levels.iter().enumerate() {
+                for run_manifest in &level.runs {
+                    // There are duplicates of this run ID in a.
+                    if a_runs.contains_key(&run_manifest.run_id) {
+                        return false;
+                    }
+
+                    a_runs.insert(run_manifest.run_id, (*keyspace_id, i));
+                }
+            }
+        }
+    }
+
+    let mut found = HashSet::new();
+    for manifest in b {
+        for (keyspace_id, keyspace) in &manifest.keyspaces {
+            for (i, level) in keyspace.levels.iter().enumerate() {
+                for run_manifest in &level.runs {
+                    if found.contains(&run_manifest.run_id) {
+                        // There are duplicates of this run ID in b.
+                        return false;
+                    }
+
+                    if !a_runs
+                        .get(&run_manifest.run_id)
+                        .map(|(a_keyspace_id, a_level)| {
+                            (*keyspace_id, i) == (*a_keyspace_id, *a_level)
+                        })
+                        .unwrap_or(false)
+                    {
+                        // This run isn't in a or it's not in the same (keyspace, level).
+                        return false;
+                    }
+
+                    found.insert(run_manifest.run_id);
+                }
+            }
+        }
+    }
+
+    a_runs.len() == found.len()
 }

@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::lsm::Lsm;
+use crate::lsm::Manifest;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::meta::TabletState;
@@ -126,6 +127,18 @@ impl<S: Storage + Send + Sync + 'static> Tablet for DataTablet<S> {
     async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
         self.meta_synced.wait(ts).await
     }
+
+    async fn manifest(&self) -> anyhow::Result<Manifest> {
+        Ok(self.inner.manifest())
+    }
+
+    async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
+        self.inner.wait_mostly_hydrated().await
+    }
+
+    async fn catchup(&self) -> anyhow::Result<()> {
+        self.inner.catchup().await
+    }
 }
 
 impl<S: Storage + Send + Sync + 'static> DataTablet<S> {
@@ -135,6 +148,7 @@ impl<S: Storage + Send + Sync + 'static> DataTablet<S> {
         range: Range<Vec<u8>>,
         lsm: Lsm<S>,
         meta_synced: Arc<MetaSynced>,
+        storage: Arc<S>,
         shards: Arc<dyn Shards + Sync + Send>,
     ) -> anyhow::Result<Self> {
         let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
@@ -188,8 +202,10 @@ impl<S: Storage + Send + Sync + 'static> DataTablet<S> {
             meta_synced
                 .subscribe(move |sync_type, snapshot: MetaSyncedSnapshot| {
                     let inner = inner.clone();
+                    let shards = shards.clone();
+                    let storage = storage.clone();
                     async move {
-                        inner.sync_meta(sync_type, snapshot).await;
+                        inner.sync_meta(&storage, &shards, sync_type, snapshot).await;
                     }
                 })
                 .await;

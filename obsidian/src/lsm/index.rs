@@ -170,6 +170,17 @@ where
         })
     }
 
+    pub(super) fn load(
+        &self,
+        new_snapshot: IndexSnapshot<R>,
+    ) -> anyhow::Result<()> {
+        self.update(|snapshot| {
+            // TODO: Error out if the existing index isn't empty.
+            *snapshot = new_snapshot;
+            Ok(())
+        })
+    }
+
     fn update<F>(&self, f: F) -> anyhow::Result<()>
     where
         F: FnOnce(&mut IndexSnapshot<R>) -> anyhow::Result<()>,
@@ -269,11 +280,13 @@ where
             for memtable in &self.l0_sealed {
                 l0_runs.push(RunManifest {
                     run_id: memtable.id(),
+                    range: memtable.range(),
                 });
             }
             if !self.l0_active.is_empty() {
                 l0_runs.push(RunManifest {
                     run_id: self.l0_active.id(),
+                    range: self.l0_active.range(),
                 });
             }
             level_manifests.push(LevelManifest { runs: l0_runs });
@@ -284,7 +297,7 @@ where
             for run in &level.runs {
                 run_manifests.push(RunManifest {
                     run_id: run.id(),
-                    //key_range: run.range(),
+                    range: run.range(),
                 });
             }
 

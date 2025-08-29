@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::lsm::Lsm;
+use crate::lsm::Manifest;
 use crate::meta::MetaSynced;
 use crate::meta::TabletState;
 use crate::obsidian::InternalError;
@@ -187,5 +188,17 @@ where
 
     async fn wait_meta_sync(&self, _ts: Timestamp) -> anyhow::Result<()> {
         Err(anyhow!("ShardMetaTablet::wait_meta_sync not allowed").into())
+    }
+
+    async fn manifest(&self) -> anyhow::Result<Manifest> {
+        Ok(self.inner.manifest())
+    }
+
+    async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
+        Err(anyhow!("ShardMetaTablet::wait_mostly_hydrated not allowed").into())
+    }
+
+    async fn catchup(&self) -> anyhow::Result<()> {
+        Err(anyhow!("ShardMetaTablet::catchup not allowed").into())
     }
 }
