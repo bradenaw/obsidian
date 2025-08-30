@@ -400,7 +400,9 @@ where
         preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
+        log::info!("waiting for write locks");
         let _guard = self.acquire_write_locks(&preconds, &muts).await?;
+        log::info!("got write locks");
 
         let lsm_rw = self.lsm.read_write()?;
 
@@ -1128,15 +1130,35 @@ where
                 match sync_type {
                     SyncType::Initial => {
                         self.refresh_metadata(&storage, &shards, &snapshot).await?;
-                        for keyspace_id in snapshot.keyspace_ids().await? {
-                            self.create_keyspace(keyspace_id).await?;
+
+                        let tablet_metadata = snapshot.tablet_metadata(self.tablet_id).await?;
+                        if matches!(
+                            tablet_metadata.state,
+                            MetaState::Stable(TabletState::Active),
+                        ) {
+                            for keyspace_id in snapshot.keyspace_ids().await? {
+                                self.create_keyspace(keyspace_id).await?;
+                            }
                         }
                     }
                     SyncType::Tx(meta_keys) => {
                         for meta_key in meta_keys {
                             match meta_key {
                                 MetaKey::Keyspace(keyspace_id) => {
-                                    self.create_keyspace(keyspace_id).await?;
+                                    let tablet_metadata =
+                                        snapshot.tablet_metadata(self.tablet_id).await?;
+
+                                    // TODO: There's a race here where we might drop a keyspace
+                                    // creation on the floor if it's done during a transition. We
+                                    // could make this graceful, but it'd be a lot easier to just
+                                    // make keyspace creation wait until there's an active tablet
+                                    // for every range.
+                                    if matches!(
+                                        tablet_metadata.state,
+                                        MetaState::Stable(TabletState::Active),
+                                    ) {
+                                        self.create_keyspace(keyspace_id).await?;
+                                    }
                                 }
                                 MetaKey::Tablet(tablet_id) => {
                                     if tablet_id == self.tablet_id {
@@ -1224,6 +1246,11 @@ where
 
             let mut maybe_hydration = self.hydration.lock().unwrap();
             if matches!(maybe_hydration.deref(), None) {
+                log::info!(
+                    "{:?} starting hydration for {:?}",
+                    self.tablet_id,
+                    transfer_id
+                );
                 let (tx, rx) = tokio::sync::watch::channel(HydrationState::Started);
                 *maybe_hydration = Some(Hydration {
                     task: spawn_owned({
@@ -1232,10 +1259,12 @@ where
                         let shards = Arc::clone(shards);
                         let srcs = transfer_metadata.srcs.clone();
                         async move {
-                            Retry::new().indefinitely(&async || -> anyhow::Result<()> {
-                                self_.hydrate(&storage, &shards, &srcs[..]).await?;
-                                Ok(())
-                            }).await;
+                            Retry::new()
+                                .indefinitely(&async || -> anyhow::Result<()> {
+                                    self_.hydrate(&storage, &shards, &srcs[..]).await?;
+                                    Ok(())
+                                })
+                                .await;
                         }
                     }),
                     set_state: tx,

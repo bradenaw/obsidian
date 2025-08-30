@@ -104,7 +104,6 @@ where
                         }));
                     }
                     None => {
-                        log::trace!("no new compactions to schedule");
                         break;
                     }
                 }

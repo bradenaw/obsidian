@@ -348,6 +348,7 @@ impl<T: Meta + Send + Sync> Meta for Arc<MetaProxy<T>> {
 pub(crate) struct ObsidianForTest {
     pub frontend: Frontend,
     pub coordinator: Coordinator<Arc<dyn Tablet + Send + Sync>>,
+    pub meta: Arc<MetaImpl<Arc<dyn Tablet + Send + Sync>>>,
 }
 
 impl ObsidianForTest {
@@ -383,7 +384,7 @@ impl ObsidianForTest {
             meta.add_shard(shard_id).await?;
         }
 
-        meta_proxy.put(meta);
+        meta_proxy.put(Arc::clone(&meta));
 
         let frontend = Frontend::new(
             Box::new(meta_proxy.clone()),
@@ -393,6 +394,7 @@ impl ObsidianForTest {
 
         Ok(Self {
             frontend,
+            meta,
             coordinator,
         })
     }
