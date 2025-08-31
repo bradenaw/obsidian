@@ -1,5 +1,4 @@
 use std::cmp::Reverse;
-use anyhow::anyhow;
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
 
@@ -57,7 +56,6 @@ impl LockMgr {
         }
         hashes.sort();
         hashes.dedup_by_key(|(hash, _)| *hash);
-        //log::debug!("acquiring key hash locks for {:?}: {:?}", hashes, anyhow!("hey"));
 
         // Acquire locks in sorted order to avoid deadlock.
         let mut read_guards = Vec::with_capacity(n_reads);

@@ -584,12 +584,15 @@ fn manifests_equal(a: &[&Manifest], b: &[&Manifest]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use crate::meta::MetaReader;
     use crate::obsidian::Obsidian;
     use crate::range::Bound;
     use crate::test::ObsidianForTest;
     use crate::types::ColoGroupId;
     use crate::types::KeyspaceId;
+    use crate::types::Mutation;
 
     #[tokio::test]
     async fn test_transfer() -> anyhow::Result<()> {
@@ -605,6 +608,22 @@ mod tests {
             )
             .await?;
         obs.frontend.create_keyspace(keyspace_id).await?;
+
+        let kvs = [
+            (b"aa", b"foo"),
+            (b"ab", b"bar"),
+            (b"ba", b"baz"),
+            (b"ba", b"baz"),
+        ];
+
+        for (key, value) in &kvs {
+            obs.frontend
+                .write(
+                    vec![],
+                    BTreeMap::from([((keyspace_id, key.to_vec()), Mutation::Put(value.to_vec()))]),
+                )
+                .await?;
+        }
 
         let meta_snapshot = obs.meta.latest_snapshot_().await?;
         let tablet_ids = meta_snapshot.tablet_ids().await?;
@@ -624,6 +643,16 @@ mod tests {
             .await?;
 
         obs.coordinator.wait_transfer(transfer_id).await?;
+
+        let ts = obs
+            .frontend
+            .latest_snapshot(kvs.iter().map(|(k, _)| (keyspace_id, k.to_vec())).collect())
+            .await?;
+        for (key, value) in &kvs {
+            let actual = obs.frontend.get(ts, &(keyspace_id, key.to_vec())).await?;
+
+            assert_eq!(Some(&value.to_vec()), actual.as_ref().map(|record| &record.value));
+        }
 
         Ok(())
     }

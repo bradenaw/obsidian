@@ -1289,7 +1289,7 @@ where
         shards: &Arc<dyn Shards + Sync + Send>,
         srcs: &[TabletId],
     ) -> anyhow::Result<()> {
-        let preloader = Preloader::new(Arc::clone(storage));
+        let mut preloader = Preloader::new(Arc::clone(storage));
         let mut loaded = HashSet::new();
 
         for i in 0.. {
@@ -1312,7 +1312,8 @@ where
 
                 let manifest = src.manifest().await?;
 
-                for keyspace_manifest in manifest.keyspaces.values() {
+                for (keyspace_id, keyspace_manifest) in &manifest.keyspaces {
+                    preloader.add_keyspace(*keyspace_id, keyspace_manifest.levels.len());
                     for (i, level) in keyspace_manifest.levels.iter().enumerate() {
                         if i == 0 {
                             continue;
