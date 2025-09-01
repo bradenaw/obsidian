@@ -342,8 +342,8 @@ where
         let limit = cmp::min(limit, 1000);
         let keyspace_id = key.0;
 
-        let _guard = self.lock_mgr.read_lock(&key.1).await;
         let lsm_read = self.lsm.read()?;
+        let _guard = self.lock_mgr.read_lock(&key.1).await;
 
         let range = match range {
             HistoryRange::Until(max) => {
@@ -400,11 +400,8 @@ where
         preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
-        log::info!("waiting for write locks");
-        let _guard = self.acquire_write_locks(&preconds, &muts).await?;
-        log::info!("got write locks");
-
         let lsm_rw = self.lsm.read_write()?;
+        let _guard = self.acquire_write_locks(&preconds, &muts).await?;
 
         if let Some(conflict_txid) = Self::check_write_conflicts(&lsm_rw, &preconds, &muts).await? {
             return Err(InternalError::Conflict(conflict_txid));
@@ -426,9 +423,9 @@ where
         preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
-        let _guard = self.acquire_write_locks(&preconds, &muts).await?;
-
         let lsm_rw = self.lsm.read_write()?;
+
+        let _guard = self.acquire_write_locks(&preconds, &muts).await?;
 
         if let Some(conflict_txid) = Self::check_write_conflicts(&lsm_rw, &preconds, &muts).await? {
             return Err(InternalError::Conflict(conflict_txid));
@@ -531,11 +528,11 @@ where
     }
 
     pub(super) async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
-        let lsm_read = self.lsm.read()?;
         let tx_outcome_key = txid.encode_fixed();
         self.check_key(KeyspaceId::TX_OUTCOMES.0, &tx_outcome_key[..])?;
         loop {
             let wait = {
+                let lsm_read = self.lsm.read()?;
                 let _guard = self.lock_mgr.read_lock(&tx_outcome_key[..]).await;
 
                 match Self::unsafe_get_latest_record(
@@ -652,8 +649,8 @@ where
         {
             self.check_key(KeyspaceId::TX_OUTCOMES.0, &tx_outcome_key[..])?;
 
-            let _guard = self.lock_mgr.write_lock(&tx_outcome_key[..]).await;
             let lsm_rw = self.lsm.read_write()?;
+            let _guard = self.lock_mgr.write_lock(&tx_outcome_key[..]).await;
 
             if let Some((_, RevisionValue::Regular(tx_outcome_bytes))) =
                 Self::unsafe_get_latest_record(
