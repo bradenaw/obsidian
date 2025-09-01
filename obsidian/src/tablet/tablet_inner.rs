@@ -1362,7 +1362,7 @@ where
             }
         }
 
-        self.lsm.load()?.load(preloader.wait().await?)?;
+        self.lsm.load()?.load(preloader.wait().await?).await?;
         let _ = self
             .hydration
             .lock()

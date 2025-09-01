@@ -341,8 +341,11 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         ))
     }
 
-    pub fn load(&self, preloaded: Preloaded<S::R>) -> anyhow::Result<()> {
-        self.index.load(preloaded.snapshot)
+    pub async fn load(&self, preloaded: Preloaded<S::R>) -> anyhow::Result<()> {
+        self.index.load(preloaded.snapshot)?;
+        // We need to flush here otherwise after a crash and restart we'd lose track of the runs,
+        // and could erroneously transition to Active with no data.
+        self.flush().await
     }
 
     /// Waits until at least the given sequence number has been processed.
