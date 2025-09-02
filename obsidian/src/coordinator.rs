@@ -605,7 +605,7 @@ mod tests {
     #[tokio::test]
     async fn test_transfer() -> anyhow::Result<()> {
         console_subscriber::init();
-        let _ = pretty_env_logger::init();
+        let _ = pretty_env_logger::try_init();
 
         let obs = ObsidianForTest::new(2 /*n_shards*/).await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
