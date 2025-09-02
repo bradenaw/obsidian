@@ -18,7 +18,6 @@ use crate::meta::TabletMetadata;
 use crate::meta::TabletState;
 use crate::meta::TransferMetadata;
 use crate::meta::TransferState;
-use crate::meta::TransferTabletTransition;
 use crate::meta::Value;
 use crate::obsidian::Shards;
 use crate::obsidian::TabletId;
@@ -384,23 +383,16 @@ where
             }
         };
 
-        let (tablet_ids_to_transition, next_tablet_state) =
-            match curr_state.tablet_transition(&next_state) {
-                Some(TransferTabletTransition::Srcs(srcs_next_state)) => {
-                    (&transfer_metadata.srcs, srcs_next_state)
-                }
-                Some(TransferTabletTransition::Dsts(dsts_next_state)) => {
-                    (&transfer_metadata.dsts, dsts_next_state)
-                }
-                None => {
-                    return Err(anyhow!(
-                        "can't transition {:?}: {:?} -> {:?} not allowed by state machine",
-                        transfer_id,
-                        curr_state,
-                        next_state
-                    ));
-                }
-            };
+        if !curr_state.can_transition(next_state) {
+            return Err(anyhow!(
+                "can't transition {:?}: {:?} -> {:?} not allowed by state machine",
+                transfer_id,
+                curr_state,
+                next_state
+            ));
+        }
+
+        let (srcs_next_state, dsts_next_state) = next_state.tablet_states();
 
         let mut muts = HashMap::new();
         let next_transfer_metadata = {
@@ -414,26 +406,37 @@ where
             Mutation::Put(next_transfer_metadata.encode_to_vec()),
         );
 
-        for tablet_id in tablet_ids_to_transition {
-            let mut tablet_metadata = snapshot.tablet_metadata(*tablet_id).await?;
+        for (tablet_ids, next_tablet_state) in [
+            (transfer_metadata.srcs, srcs_next_state),
+            (transfer_metadata.dsts, dsts_next_state),
+        ] {
+            for tablet_id in &tablet_ids {
+                let mut tablet_metadata = snapshot.tablet_metadata(*tablet_id).await?;
 
-            let curr_tablet_state = match tablet_metadata.state {
-                MetaState::Stable(curr_state) => curr_state,
-                MetaState::Transitioning(_, _) => {
-                    return Err(anyhow!(
-                        "can't transition {:?}: participant {:?} already transitioning",
-                        transfer_id,
-                        tablet_id
-                    ));
-                }
-            };
+                let curr_tablet_state = match tablet_metadata.state {
+                    MetaState::Stable(curr_state) => {
+                        if curr_state == next_tablet_state {
+                            continue;
+                        }
+                        curr_state
+                    }
+                    MetaState::Transitioning(_, _) => {
+                        return Err(anyhow!(
+                            "can't transition {:?}: participant {:?} already transitioning",
+                            transfer_id,
+                            tablet_id
+                        ));
+                    }
+                };
 
-            tablet_metadata.state = MetaState::Transitioning(curr_tablet_state, next_tablet_state);
+                tablet_metadata.state =
+                    MetaState::Transitioning(curr_tablet_state, next_tablet_state);
 
-            muts.insert(
-                MetaKey::Tablet(*tablet_id),
-                Mutation::Put(tablet_metadata.encode_to_vec()),
-            );
+                muts.insert(
+                    MetaKey::Tablet(*tablet_id),
+                    Mutation::Put(tablet_metadata.encode_to_vec()),
+                );
+            }
         }
 
         log::info!("{:?} transitioning to {:?}", transfer_id, next_state);
@@ -463,35 +466,6 @@ where
             MetaState::Transitioning(curr_state, next_state) => (curr_state, next_state),
         };
 
-        let (tablet_ids_to_transition, next_tablet_state) =
-            match curr_state.tablet_transition(&next_state) {
-                Some(TransferTabletTransition::Srcs(srcs_next_state)) => {
-                    (&transfer_metadata.srcs, srcs_next_state)
-                }
-                Some(TransferTabletTransition::Dsts(dsts_next_state)) => {
-                    (&transfer_metadata.dsts, dsts_next_state)
-                }
-                None => {
-                    return Err(anyhow!(
-                        "can't transition {:?}: {:?} -> {:?} not allowed by state machine",
-                        transfer_id,
-                        curr_state,
-                        next_state
-                    ));
-                }
-            };
-
-        // IMPORTANT: Must make sure that all of the participating tablets are aware of the
-        // transitioning state before continuing.
-        for tablet_id in tablet_ids_to_transition {
-            // This means they're at least aware of what we're seeing in `snapshot`, and
-            // `write_syncable` below will fail if it turns out we were out of date.
-            self.shards
-                .tablet(*tablet_id)?
-                .wait_meta_sync(snapshot.ts())
-                .await?;
-        }
-
         let mut muts = HashMap::new();
         let next_transfer_metadata = {
             let mut next_transfer_metadata = transfer_metadata.clone();
@@ -503,36 +477,52 @@ where
             Mutation::Put(next_transfer_metadata.encode_to_vec()),
         );
 
-        for tablet_id in tablet_ids_to_transition {
-            let mut tablet_metadata = snapshot.tablet_metadata(*tablet_id).await?;
+        let (curr_srcs_state, curr_dsts_state) = curr_state.tablet_states();
+        let (next_srcs_state, next_dsts_state) = next_state.tablet_states();
 
-            match tablet_metadata.state {
-                MetaState::Stable(curr_state) => {
+        let srcs_expected_state = if curr_srcs_state == next_srcs_state {
+            MetaState::Stable(curr_srcs_state)
+        } else {
+            MetaState::Transitioning(curr_srcs_state, next_srcs_state)
+        };
+        let dsts_expected_state = if curr_dsts_state == next_dsts_state {
+            MetaState::Stable(curr_dsts_state)
+        } else {
+            MetaState::Transitioning(curr_dsts_state, next_dsts_state)
+        };
+
+        for (tablet_ids, expected_state) in [
+            (&transfer_metadata.srcs, srcs_expected_state),
+            (&transfer_metadata.dsts, dsts_expected_state),
+        ] {
+            for tablet_id in tablet_ids {
+                let mut tablet_metadata = snapshot.tablet_metadata(*tablet_id).await?;
+
+                if tablet_metadata.state != expected_state {
                     return Err(anyhow!(
-                        "can't roll forward transition for {:?}: participant {:?} already stable in {:?}",
+                        "can't roll forward transition for {:?}: participant {:?} not in expected state: {:?} != {:?}",
                         transfer_id,
                         tablet_id,
-                        curr_state,
+                        tablet_metadata.state,
+                        expected_state,
                     ));
                 }
-                MetaState::Transitioning(_, attempting_transition_to) => {
-                    if next_tablet_state != attempting_transition_to {
-                        return Err(anyhow!(
-                            "can't roll forward transition for {:?}: participant {:?} trying to transition to {:?} instead of {:?}",
-                            transfer_id,
-                            tablet_id,
-                            attempting_transition_to,
-                            next_tablet_state,
-                        ));
-                    }
+
+                if let MetaState::Transitioning(_, next_tablet_state) = tablet_metadata.state {
+                    // IMPORTANT: Must make sure that all of the participating tablets are aware of
+                    // the transitioning state before continuing.
+                    self.shards
+                        .tablet(*tablet_id)?
+                        .wait_meta_sync(snapshot.ts())
+                        .await?;
+
+                    tablet_metadata.state = MetaState::Stable(next_tablet_state);
+                    muts.insert(
+                        MetaKey::Tablet(*tablet_id),
+                        Mutation::Put(tablet_metadata.encode_to_vec()),
+                    );
                 }
             }
-
-            tablet_metadata.state = MetaState::Stable(next_tablet_state);
-            muts.insert(
-                MetaKey::Tablet(*tablet_id),
-                Mutation::Put(tablet_metadata.encode_to_vec()),
-            );
         }
 
         let _ = self.meta.write_syncable(snapshot, muts).await?;

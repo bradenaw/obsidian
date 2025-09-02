@@ -140,11 +140,6 @@ pub(crate) enum TransferState {
     Aborted,  // Active     None
 }
 
-pub(crate) enum TransferTabletTransition {
-    Srcs(TabletState),
-    Dsts(TabletState),
-}
-
 impl TransferState {
     pub(crate) fn tablet_states(&self) -> (TabletState, TabletState) {
         match self {
@@ -158,7 +153,7 @@ impl TransferState {
         }
     }
 
-    pub(crate) fn can_transition(&self, to: &Self) -> bool {
+    pub(crate) fn can_transition(&self, to: Self) -> bool {
         match (self, to) {
             (TransferState::Copy, TransferState::Catchup) => true,
             (TransferState::Catchup, TransferState::Synced) => true,
@@ -171,23 +166,6 @@ impl TransferState {
             (TransferState::Aborting, TransferState::Aborted) => true,
 
             _ => false,
-        }
-    }
-
-    pub(crate) fn tablet_transition(&self, to: &Self) -> Option<TransferTabletTransition> {
-        if !self.can_transition(to) {
-            return None;
-        }
-
-        let (srcs_curr, dsts_curr) = self.tablet_states();
-        let (srcs_next, dsts_next) = to.tablet_states();
-
-        if srcs_curr != srcs_next && dsts_curr == dsts_next {
-            return Some(TransferTabletTransition::Srcs(srcs_next));
-        } else if srcs_curr == srcs_next && dsts_curr != dsts_next {
-            return Some(TransferTabletTransition::Dsts(dsts_next));
-        } else {
-            return None;
         }
     }
 }

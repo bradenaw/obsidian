@@ -600,7 +600,7 @@ pub(crate) trait Value {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub(crate) enum MetaState<T> {
     Stable(T),
     Transitioning(T, T),

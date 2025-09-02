@@ -18,4 +18,3 @@ pub(crate) use meta_synced::SyncType;
 pub(crate) use transfer::TabletState;
 pub(crate) use transfer::TabletStateProperties;
 pub(crate) use transfer::TransferState;
-pub(crate) use transfer::TransferTabletTransition;
