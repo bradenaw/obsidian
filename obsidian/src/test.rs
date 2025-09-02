@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use std::sync::Weak;
 
 use anyhow::anyhow;
+use arc_atomic::AtomicArc;
 use async_trait::async_trait;
 
 use crate::coordinator::Coordinator;
@@ -42,7 +43,6 @@ use crate::types::Revision;
 use crate::types::ShardId;
 use crate::types::Timestamp;
 use crate::util::encode;
-use crate::util::AtomicArc;
 use crate::util::Decode;
 use crate::util::Encode;
 
