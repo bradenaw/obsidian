@@ -82,8 +82,6 @@ use crate::pb;
 pub(crate) enum TabletState {
     None,
     Hydrating,
-    // TODO: Remove.
-    Prepared,
     Active,
     Frozen,
 }
@@ -93,7 +91,6 @@ impl From<TabletState> for pb::internal::TabletState {
         match value {
             TabletState::None => pb::internal::TabletState::None,
             TabletState::Hydrating => pb::internal::TabletState::Hydrating,
-            TabletState::Prepared => pb::internal::TabletState::Prepared,
             TabletState::Active => pb::internal::TabletState::Active,
             TabletState::Frozen => pb::internal::TabletState::Frozen,
         }
@@ -107,7 +104,6 @@ impl TryFrom<pb::internal::TabletState> for TabletState {
         Ok(match value {
             pb::internal::TabletState::None => TabletState::None,
             pb::internal::TabletState::Hydrating => TabletState::Hydrating,
-            pb::internal::TabletState::Prepared => TabletState::Prepared,
             pb::internal::TabletState::Active => TabletState::Active,
             pb::internal::TabletState::Frozen => TabletState::Frozen,
             _ => return Err(anyhow!("unrecognized TabletState {:?}", value)),
@@ -116,52 +112,10 @@ impl TryFrom<pb::internal::TabletState> for TabletState {
 }
 
 impl TabletState {
-    pub(crate) fn can_transition(
-        self,
-        next: TabletState,
-        transfer_states: Option<(TabletState, TabletState)>,
-    ) -> bool {
-        match (self, next, transfer_states) {
-            // Only actually allowed when a colo group is created.
-            // (TabletState::None, TabletState::Active, None) => true,
-
-            // Transfer happy path for dst:
-            (TabletState::None, TabletState::Hydrating, Some(_)) => true,
-            (TabletState::Hydrating, TabletState::Prepared, Some((src_state, _))) => {
-                src_state == TabletState::Frozen
-            }
-            (TabletState::Prepared, TabletState::Active, Some((src_state, _))) => {
-                src_state == TabletState::None
-            }
-
-            // Transfer happy path for src:
-            (TabletState::Active, TabletState::Frozen, Some((_, dst_state))) => {
-                dst_state == TabletState::Hydrating
-            }
-            (TabletState::Frozen, TabletState::None, Some((_, dst_state))) => {
-                dst_state == TabletState::Prepared
-            }
-
-            // Transfer cancel for dst:
-            (TabletState::Hydrating, TabletState::None, Some(_)) => true,
-            (TabletState::Prepared, TabletState::None, Some((src_state, _))) => {
-                // Transfer is committed and must continue if src reaches None.
-                src_state != TabletState::None
-            }
-
-            // Transfer cancel for src:
-            (TabletState::Frozen, TabletState::Active, Some((_, dst_state))) => {
-                dst_state != TabletState::Prepared
-            }
-            _ => false,
-        }
-    }
-
     pub(crate) fn properties(self) -> TabletStateProperties {
         match self {
             TabletState::None => TabletStateProperties::none(),
             TabletState::Hydrating => TabletStateProperties::Hydrating,
-            TabletState::Prepared => TabletStateProperties::Complete,
             TabletState::Active => {
                 TabletStateProperties::Complete
                     | TabletStateProperties::Readable
