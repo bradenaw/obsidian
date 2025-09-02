@@ -212,7 +212,7 @@ impl TransferState {
             (TransferState::Handoff, TransferState::Complete) => true,
 
             (TransferState::Copy, TransferState::Aborted) => true,
-            (TransferState::Catchup, TransferState::Aborted) => true,
+            (TransferState::Catchup, TransferState::Aborting) => true,
             (TransferState::Synced, TransferState::Aborting) => true,
             (TransferState::Aborting, TransferState::Aborted) => true,
 

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
+
+use anyhow::anyhow;
 
 use crate::lsm::index::Level;
 use crate::lsm::memtable::Memtable;
@@ -9,6 +10,7 @@ use crate::lsm::Keyspace;
 use crate::lsm::Run;
 use crate::lsm::RunId;
 use crate::storage::Storage;
+use crate::types::KeyspaceId;
 use crate::util::spawn_owned;
 use crate::util::OwnedJoinHandle;
 
@@ -19,7 +21,13 @@ where
     storage: Arc<S>,
 
     semaphore: Arc<tokio::sync::Semaphore>,
-    runs: Mutex<HashMap<RunId, (usize, OwnedJoinHandle<anyhow::Result<Run<S::R>>>)>>,
+    runs: HashMap<RunId, (usize, PreloadRun<S::R>)>,
+    keyspaces: HashMap<KeyspaceId, usize>,
+}
+
+enum PreloadRun<R> {
+    Loading(OwnedJoinHandle<anyhow::Result<Run<R>>>),
+    Loaded(Run<R>),
 }
 
 impl<S> Preloader<S>
@@ -27,21 +35,24 @@ where
     S: Storage + Sync + Send + 'static,
 {
     pub fn new(storage: Arc<S>) -> Self {
-        Self{
+        Self {
             storage,
             semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
-            runs: Mutex::new(HashMap::new()),
+            runs: HashMap::new(),
+            keyspaces: HashMap::new(),
         }
     }
 
-    pub fn load(&self, run_id: RunId, level: usize) {
-        let mut runs = self.runs.lock().unwrap();
+    pub fn add_keyspace(&mut self, keyspace_id: KeyspaceId, depth: usize) {
+        self.keyspaces.insert(keyspace_id, depth);
+    }
 
-        runs.insert(
+    pub fn queue(&mut self, run_id: RunId, level: usize) {
+        self.runs.insert(
             run_id,
             (
                 level,
-                spawn_owned({
+                PreloadRun::Loading(spawn_owned({
                     let storage = Arc::clone(&self.storage);
                     let semaphore = Arc::clone(&self.semaphore);
                     async move {
@@ -49,13 +60,23 @@ where
                         let file = storage.get(&run_id.to_string()).await?;
                         Run::open(file).await
                     }
-                }),
+                })),
             ),
         );
     }
 
-    pub fn unload(&self, run_id: RunId) {
-        self.runs.lock().unwrap().remove(&run_id);
+    pub async fn load(&mut self) -> anyhow::Result<()> {
+        for (_, (_, preload_run)) in self.runs.iter_mut() {
+            if let PreloadRun::Loading(join_handle) = preload_run {
+                let run = join_handle.await?;
+                *preload_run = PreloadRun::Loaded(run);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn unload(&mut self, run_id: RunId) {
+        self.runs.remove(&run_id);
     }
 
     pub async fn wait(self) -> anyhow::Result<Preloaded<S::R>> {
@@ -63,26 +84,43 @@ where
             keyspaces: HashMap::new(),
         };
 
-        let runs = {
-            let mut runs_lock = self.runs.lock().unwrap();
-            std::mem::take(&mut *runs_lock)
-        };
-        for (_, (level, join_handle)) in runs.into_iter() {
-            let run = join_handle.await?;
-
-            let keyspace = snapshot
-                .keyspaces
-                .entry(run.keyspace_id)
-                .or_insert_with(|| Keyspace {
+        for (keyspace_id, depth) in &self.keyspaces {
+            snapshot.keyspaces.insert(
+                *keyspace_id,
+                Keyspace {
                     l0_active: Arc::new(Memtable::new()),
                     l0_sealed: Vec::new(),
-                    levels: Vec::new(),
-                });
-            // TODO this doesn't actually guarantee we have the right depth
-            while keyspace.levels.len() < level {
-                keyspace.levels.push(Level { runs: Vec::new() });
+                    levels: (0..*depth)
+                        .into_iter()
+                        .map(|_| Level { runs: Vec::new() })
+                        .collect(),
+                },
+            );
+        }
+        for (run_id, (level, preload_run)) in self.runs.into_iter() {
+            let run = match preload_run {
+                PreloadRun::Loading(join_handle) => join_handle.await?,
+                PreloadRun::Loaded(run) => run,
+            };
+
+            if let Some(keyspace) = snapshot.keyspaces.get_mut(&run.keyspace_id) {
+                if level >= keyspace.levels.len() {
+                    return Err(anyhow!(
+                        "{:?} in {:?} at depth {} but keyspace only has depth {}",
+                        run_id,
+                        run.keyspace_id,
+                        level,
+                        keyspace.levels.len()
+                    ));
+                }
+                keyspace.levels[level].runs.push(Arc::new(run));
+            } else {
+                return Err(anyhow!(
+                    "{:?} in {:?} but keyspace never added to preloader",
+                    run_id,
+                    run.keyspace_id,
+                ));
             }
-            keyspace.levels[level].runs.push(Arc::new(run));
         }
         for (_, keyspace) in &mut snapshot.keyspaces {
             for level in &mut keyspace.levels {

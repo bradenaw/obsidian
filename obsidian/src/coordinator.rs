@@ -31,6 +31,8 @@ use crate::types::TransferId;
 use crate::util::Retry;
 use crate::util::WithBackground;
 
+const CATCHUP_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub(crate) struct Coordinator<T>(WithBackground<CoordinatorInner<T>>);
 
 struct CoordinatorInner<T> {
@@ -43,20 +45,24 @@ where
     T: Tablet + Sync + Send + 'static,
 {
     pub(crate) fn new(meta: Arc<MetaImpl<T>>, shards: Arc<dyn Shards + Send + Sync>) -> Self {
+        // TODO: scan for transfers
         Self(WithBackground::new(Arc::new(CoordinatorInner {
             meta,
             shards,
         })))
     }
 
-    pub(crate) async fn start_move(&self, src: TabletId, dst: ShardId) -> anyhow::Result<()> {
+    pub(crate) async fn start_move(
+        &self,
+        src: TabletId,
+        dst: ShardId,
+    ) -> anyhow::Result<TransferId> {
         let snapshot = self.0.meta.latest_snapshot_().await?;
         let src_metadata = snapshot.tablet_metadata(src).await?;
 
-        self.start_transfer(vec![src], vec![(dst, src_metadata.range)])
-            .await?;
-
-        Ok(())
+        Ok(self
+            .start_transfer(vec![src], vec![(dst, src_metadata.range)])
+            .await?)
     }
 
     async fn start_split(&self, _src: TabletId, _dsts: Vec<ShardId>) -> anyhow::Result<()> {
@@ -85,11 +91,28 @@ where
         Ok(())
     }
 
+    pub(crate) async fn wait_transfer(&self, transfer_id: TransferId) -> anyhow::Result<()> {
+        loop {
+            let snapshot = self.0.meta.latest_snapshot_().await?;
+            let transfer_metadata = snapshot.transfer_metadata(transfer_id).await?;
+
+            if matches!(
+                transfer_metadata.state,
+                MetaState::Stable(TransferState::Complete)
+                    | MetaState::Stable(TransferState::Aborted)
+            ) {
+                return Ok(());
+            }
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
     async fn start_transfer(
         &self,
         srcs: Vec<TabletId>,
         dsts: Vec<(ShardId, Range<Vec<u8>>)>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<TransferId> {
         let snapshot = self.0.meta.latest_snapshot_().await?;
 
         if !((srcs.len() == 1 && dsts.len() >= 1) || (srcs.len() >= 1 && dsts.len() == 1)) {
@@ -174,7 +197,7 @@ where
                         colo_group_id: colo_group_id.unwrap(),
                         range: dst_range.clone(),
                         state: MetaState::Stable(TabletState::Hydrating),
-                        transfer_id: None,
+                        transfer_id: Some(transfer_id),
                     }
                     .encode_to_vec(),
                 ),
@@ -186,9 +209,9 @@ where
             Mutation::Put(
                 TransferMetadata {
                     state: MetaState::Stable(TransferState::Copy),
-                    srcs: srcs,
-                    dsts: dst_tablet_ids,
-                    timestamp_ms: SystemTime::now().elapsed()?.as_millis() as u64,
+                    srcs: srcs.clone(),
+                    dsts: dst_tablet_ids.clone(),
+                    timestamp: SystemTime::now(),
                 }
                 .encode_to_vec(),
             ),
@@ -196,14 +219,20 @@ where
 
         self.0.meta.write_syncable(snapshot, muts).await?;
 
+        log::info!(
+            "{:?} started {:?} -> {:?}",
+            transfer_id,
+            srcs,
+            dst_tablet_ids
+        );
+
         self.0.spawn(async move |inner| {
             inner.transfer(transfer_id).await;
         });
 
-        Ok(())
+        Ok(transfer_id)
     }
 }
-
 
 impl<T> CoordinatorInner<T>
 where
@@ -248,18 +277,32 @@ where
                     .await?;
             }
             TransferState::Catchup => {
-                // Wait for the sources to fully catch up.
-                if SystemTime::UNIX_EPOCH
-                    .checked_add(Duration::from_millis(transfer_metadata.timestamp_ms))
-                    .unwrap()
-                    .elapsed()?
-                    > Duration::from_secs(30)
-                {
+                let time_in_state = transfer_metadata.timestamp.elapsed()?;
+                if time_in_state > CATCHUP_TIMEOUT {
+                    log::error!(
+                        "{:?} timed out waiting for catchup after {:?}, aborting",
+                        transfer_id,
+                        time_in_state,
+                    );
                     self.transition_transfer(snapshot, transfer_id, TransferState::Aborting)
                         .await?;
-                    log::error!("{:?} timed out waiting for catchup, aborting", transfer_id);
                     return Ok(true);
                 }
+
+                tokio::time::timeout(
+                    CATCHUP_TIMEOUT,
+                    // Wait for the sources to fully catch up.
+                    transfer_metadata
+                        .dsts
+                        .iter()
+                        .map(async |tablet_id| -> anyhow::Result<()> {
+                            self.shards.tablet(*tablet_id)?.catchup().await?;
+                            Ok(())
+                        })
+                        .collect::<FuturesUnordered<_>>()
+                        .try_collect::<Vec<_>>(),
+                )
+                .await??;
 
                 // Make sure the destinations actually have all of the data that the sources did.
                 let manifests: HashMap<_, _> =
@@ -363,7 +406,7 @@ where
         let next_transfer_metadata = {
             let mut next_transfer_metadata = transfer_metadata.clone();
             next_transfer_metadata.state = MetaState::Transitioning(curr_state, next_state);
-            next_transfer_metadata.timestamp_ms = SystemTime::now().elapsed()?.as_millis() as u64;
+            next_transfer_metadata.timestamp = SystemTime::now();
             next_transfer_metadata
         };
         muts.insert(
@@ -393,9 +436,19 @@ where
             );
         }
 
+        log::info!("{:?} transitioning to {:?}", transfer_id, next_state);
+
         let _ = self.meta.write_syncable(snapshot, muts).await?;
 
+        log::info!("{:?} transition to {:?} persisted", transfer_id, next_state);
+
         self.roll_transition_forward(transfer_id).await?;
+
+        log::info!(
+            "{:?} transition to {:?} rolled forward",
+            transfer_id,
+            next_state
+        );
 
         Ok(())
     }
@@ -484,6 +537,8 @@ where
 
         let _ = self.meta.write_syncable(snapshot, muts).await?;
 
+        log::info!("{:?} transitioned to {:?}", transfer_id, next_state);
+
         Ok(())
     }
 }
@@ -537,8 +592,80 @@ fn manifests_equal(a: &[&Manifest], b: &[&Manifest]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use crate::meta::MetaReader;
+    use crate::obsidian::Obsidian;
+    use crate::range::Bound;
+    use crate::test::ObsidianForTest;
+    use crate::types::ColoGroupId;
+    use crate::types::KeyspaceId;
+    use crate::types::Mutation;
+
     #[tokio::test]
-    async fn transfer() -> anyhow::Result<()> {
+    async fn test_transfer() -> anyhow::Result<()> {
+        console_subscriber::init();
+        let _ = pretty_env_logger::init();
+
+        let obs = ObsidianForTest::new(2 /*n_shards*/).await?;
+        let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
+
+        obs.frontend
+            .create_colo_group(
+                keyspace_id.0,
+                vec![Bound::Before(b"b".to_vec())], // splits
+            )
+            .await?;
+        obs.frontend.create_keyspace(keyspace_id).await?;
+
+        let kvs = [
+            (b"aa", b"foo"),
+            (b"ab", b"bar"),
+            (b"ba", b"baz"),
+            (b"ba", b"baz"),
+        ];
+
+        for (key, value) in &kvs {
+            obs.frontend
+                .write(
+                    vec![],
+                    BTreeMap::from([((keyspace_id, key.to_vec()), Mutation::Put(value.to_vec()))]),
+                )
+                .await?;
+        }
+
+        let meta_snapshot = obs.meta.latest_snapshot_().await?;
+        let tablet_ids = meta_snapshot.tablet_ids().await?;
+        let shard_ids = meta_snapshot.shard_ids().await?;
+
+        let transfer_id = obs
+            .coordinator
+            .start_move(
+                tablet_ids[0],
+                shard_ids
+                    .iter()
+                    .filter(|shard_id| **shard_id != tablet_ids[0].0)
+                    .copied()
+                    .next()
+                    .unwrap(),
+            )
+            .await?;
+
+        obs.coordinator.wait_transfer(transfer_id).await?;
+
+        let ts = obs
+            .frontend
+            .latest_snapshot(kvs.iter().map(|(k, _)| (keyspace_id, k.to_vec())).collect())
+            .await?;
+        for (key, value) in &kvs {
+            let actual = obs.frontend.get(ts, &(keyspace_id, key.to_vec())).await?;
+
+            assert_eq!(
+                Some(&value.to_vec()),
+                actual.as_ref().map(|record| &record.value)
+            );
+        }
+
         Ok(())
     }
 }

@@ -3,6 +3,8 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::SystemTime;
 
 use anyhow::anyhow;
 use async_stream::try_stream;
@@ -113,6 +115,11 @@ impl MetaKey {
                     ShardId(u32::try_from(shard_id_raw)?),
                     tablet_id_raw,
                 )))
+            }
+            Self::PFX_TRANSFERS => {
+                let (_, transfer_id_raw): (u64, uuid::Uuid) = tuple_decode(b)?;
+                let transfer_id = TransferId(transfer_id_raw);
+                Ok(Self::Transfer(transfer_id))
             }
             _ => Err(anyhow!("unrecognized MetaKey prefix {}", prefix)),
         }
@@ -680,7 +687,7 @@ pub(crate) struct TransferMetadata {
     pub(crate) state: MetaState<TransferState>,
     pub(crate) srcs: Vec<TabletId>,
     pub(crate) dsts: Vec<TabletId>,
-    pub(crate) timestamp_ms: u64,
+    pub(crate) timestamp: SystemTime,
 }
 
 impl Value for TransferMetadata {
@@ -713,7 +720,9 @@ impl TryFrom<pb::internal::TransferMetadata> for TransferMetadata {
                 .into_iter()
                 .map(TabletId::try_from)
                 .collect::<Result<Vec<_>, _>>()?,
-                timestamp_ms: value_pb.timestamp_ms,
+            timestamp: SystemTime::UNIX_EPOCH
+                .checked_add(Duration::from_millis(value_pb.timestamp_ms))
+                .unwrap(),
         })
     }
 }
@@ -737,7 +746,11 @@ impl From<TransferMetadata> for pb::internal::TransferMetadata {
                 .into_iter()
                 .map(pb::internal::TabletId::from)
                 .collect(),
-            timestamp_ms: value.timestamp_ms,
+            timestamp_ms: value
+                .timestamp
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
         }
     }
 }

@@ -51,8 +51,10 @@ where
     pub(crate) async fn new(lsm: Lsm<S>) -> anyhow::Result<Self> {
         lsm.create_keyspace(KeyspaceId::META).await?;
 
-        let (prepare_sender, _) = mpsc::channel(1024);
-        let (commit_sender, _) = mpsc::channel(128);
+        // These are not ever used because they only happen on 2PC participants, which the meta
+        // tablet never does.
+        let (prepare_sender, _) = mpsc::channel(1);
+        let (commit_sender, _) = mpsc::channel(1);
 
         Ok(Self {
             inner: TabletInner::new(

@@ -127,7 +127,7 @@ where
             prepare_sender,
             commit_sender,
             sequencer: Sequencer::new(),
-            lock_mgr: LockMgr::new(16384),
+            lock_mgr: LockMgr::new(1),
             waiters: Waiters::new(),
             hydration: Mutex::new(None),
         }
@@ -138,12 +138,12 @@ where
         ts: Timestamp,
         key: &Key,
     ) -> Result<Option<Record>, InternalError> {
+        self.sequencer.wait_for_safe_read(ts).await?;
+
         let lsm_read = self.lsm.read()?;
 
         let keyspace_id = key.0;
-
         self.check_key(keyspace_id.0, &key.1)?;
-        self.sequencer.wait_for_safe_read(ts).await?;
 
         let key_future = lsm_read.get(ts, keyspace_id, &key.1);
         let (maybe_record, maybe_pending_value) = match keyspace_id.pending() {
@@ -246,6 +246,7 @@ where
         let limit = cmp::min(limit, 1000);
 
         let scan_range = self.scan_range(keyspace_id.0, range, direction)?;
+        self.sequencer.wait_for_safe_read(ts).await?;
 
         let lsm_read = self.lsm.read()?;
 
@@ -253,7 +254,6 @@ where
         // self.range               |---------|
         // scan_range                     |---|
 
-        self.sequencer.wait_for_safe_read(ts).await?;
 
         // Ask the LSM for the page. Note that the returned continuation is in terms of the
         // constrained range that we asked it for, not the entire range from the request.
@@ -342,9 +342,6 @@ where
         let limit = cmp::min(limit, 1000);
         let keyspace_id = key.0;
 
-        let _guard = self.lock_mgr.read_lock(&key.1).await;
-        let lsm_read = self.lsm.read()?;
-
         let range = match range {
             HistoryRange::Until(max) => {
                 self.sequencer.wait_for_safe_read(max).await?;
@@ -363,6 +360,9 @@ where
                 HistoryRange::Between(min, max)
             }
         };
+
+        let lsm_read = self.lsm.read()?;
+        let _guard = self.lock_mgr.read_lock(&key.1).await;
 
         let (page, continue_cursor) = lsm_read
             .history_page(keyspace_id, &key.1, range, direction, limit)
@@ -400,9 +400,8 @@ where
         preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
-        let _guard = self.acquire_write_locks(&preconds, &muts).await?;
-
         let lsm_rw = self.lsm.read_write()?;
+        let _guard = self.acquire_write_locks(&preconds, &muts).await?;
 
         if let Some(conflict_txid) = Self::check_write_conflicts(&lsm_rw, &preconds, &muts).await? {
             return Err(InternalError::Conflict(conflict_txid));
@@ -424,9 +423,8 @@ where
         preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
-        let _guard = self.acquire_write_locks(&preconds, &muts).await?;
-
         let lsm_rw = self.lsm.read_write()?;
+        let _guard = self.acquire_write_locks(&preconds, &muts).await?;
 
         if let Some(conflict_txid) = Self::check_write_conflicts(&lsm_rw, &preconds, &muts).await? {
             return Err(InternalError::Conflict(conflict_txid));
@@ -529,11 +527,11 @@ where
     }
 
     pub(super) async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
-        let lsm_read = self.lsm.read()?;
         let tx_outcome_key = txid.encode_fixed();
         self.check_key(KeyspaceId::TX_OUTCOMES.0, &tx_outcome_key[..])?;
         loop {
             let wait = {
+                let lsm_read = self.lsm.read()?;
                 let _guard = self.lock_mgr.read_lock(&tx_outcome_key[..]).await;
 
                 match Self::unsafe_get_latest_record(
@@ -650,8 +648,8 @@ where
         {
             self.check_key(KeyspaceId::TX_OUTCOMES.0, &tx_outcome_key[..])?;
 
-            let _guard = self.lock_mgr.write_lock(&tx_outcome_key[..]).await;
             let lsm_rw = self.lsm.read_write()?;
+            let _guard = self.lock_mgr.write_lock(&tx_outcome_key[..]).await;
 
             if let Some((_, RevisionValue::Regular(tx_outcome_bytes))) =
                 Self::unsafe_get_latest_record(
@@ -1128,15 +1126,35 @@ where
                 match sync_type {
                     SyncType::Initial => {
                         self.refresh_metadata(&storage, &shards, &snapshot).await?;
-                        for keyspace_id in snapshot.keyspace_ids().await? {
-                            self.create_keyspace(keyspace_id).await?;
+
+                        let tablet_metadata = snapshot.tablet_metadata(self.tablet_id).await?;
+                        if matches!(
+                            tablet_metadata.state,
+                            MetaState::Stable(TabletState::Active),
+                        ) {
+                            for keyspace_id in snapshot.keyspace_ids().await? {
+                                self.create_keyspace(keyspace_id).await?;
+                            }
                         }
                     }
                     SyncType::Tx(meta_keys) => {
                         for meta_key in meta_keys {
                             match meta_key {
                                 MetaKey::Keyspace(keyspace_id) => {
-                                    self.create_keyspace(keyspace_id).await?;
+                                    let tablet_metadata =
+                                        snapshot.tablet_metadata(self.tablet_id).await?;
+
+                                    // TODO: There's a race here where we might drop a keyspace
+                                    // creation on the floor if it's done during a transition. We
+                                    // could make this graceful, but it'd be a lot easier to just
+                                    // make keyspace creation wait until there's an active tablet
+                                    // for every range.
+                                    if matches!(
+                                        tablet_metadata.state,
+                                        MetaState::Stable(TabletState::Active),
+                                    ) {
+                                        self.create_keyspace(keyspace_id).await?;
+                                    }
                                 }
                                 MetaKey::Tablet(tablet_id) => {
                                     if tablet_id == self.tablet_id {
@@ -1224,6 +1242,11 @@ where
 
             let mut maybe_hydration = self.hydration.lock().unwrap();
             if matches!(maybe_hydration.deref(), None) {
+                log::info!(
+                    "{:?} starting hydration for {:?}",
+                    self.tablet_id,
+                    transfer_id
+                );
                 let (tx, rx) = tokio::sync::watch::channel(HydrationState::Started);
                 *maybe_hydration = Some(Hydration {
                     task: spawn_owned({
@@ -1232,10 +1255,12 @@ where
                         let shards = Arc::clone(shards);
                         let srcs = transfer_metadata.srcs.clone();
                         async move {
-                            Retry::new().indefinitely(&async || -> anyhow::Result<()> {
-                                self_.hydrate(&storage, &shards, &srcs[..]).await?;
-                                Ok(())
-                            }).await;
+                            Retry::new()
+                                .indefinitely(&async || -> anyhow::Result<()> {
+                                    self_.hydrate(&storage, &shards, &srcs[..]).await?;
+                                    Ok(())
+                                })
+                                .await;
                         }
                     }),
                     set_state: tx,
@@ -1260,7 +1285,7 @@ where
         shards: &Arc<dyn Shards + Sync + Send>,
         srcs: &[TabletId],
     ) -> anyhow::Result<()> {
-        let preloader = Preloader::new(Arc::clone(storage));
+        let mut preloader = Preloader::new(Arc::clone(storage));
         let mut loaded = HashSet::new();
 
         for i in 0.. {
@@ -1283,7 +1308,8 @@ where
 
                 let manifest = src.manifest().await?;
 
-                for keyspace_manifest in manifest.keyspaces.values() {
+                for (keyspace_id, keyspace_manifest) in &manifest.keyspaces {
+                    preloader.add_keyspace(*keyspace_id, keyspace_manifest.levels.len());
                     for (i, level) in keyspace_manifest.levels.iter().enumerate() {
                         if i == 0 {
                             continue;
@@ -1300,7 +1326,7 @@ where
                                 continue;
                             }
 
-                            preloader.load(run_manifest.run_id, i);
+                            preloader.queue(run_manifest.run_id, i);
                             loaded.insert(run_manifest.run_id);
                             run_ids_seen.insert(run_manifest.run_id);
                         }
@@ -1316,6 +1342,8 @@ where
             if done_after_round {
                 break;
             }
+
+            preloader.load().await?;
 
             if i == 3 {
                 self.hydration
@@ -1335,7 +1363,7 @@ where
             }
         }
 
-        self.lsm.load()?.load(preloader.wait().await?)?;
+        self.lsm.load()?.load(preloader.wait().await?).await?;
         let _ = self
             .hydration
             .lock()

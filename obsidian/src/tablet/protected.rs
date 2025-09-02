@@ -51,16 +51,10 @@ where
     }
 
     pub(super) async fn set_state(&self, state: TabletState) {
-        log::info!(
-            "{:?}: set_state({:?}) ({:?})...",
-            self.tablet_id,
-            state,
-            state.properties()
-        );
         self.state.store_and_wait(state.properties()).await;
         let _ = self.on_change.send(());
         log::info!(
-            "{:?}: set_state({:?}) ({:?}) done",
+            "{:?}: set_state({:?}) ({:?})",
             self.tablet_id,
             state,
             state.properties()
@@ -324,8 +318,8 @@ impl<'a, S> LsmLoadGuard<'a, S>
 where
     S: Storage + Send + Sync + 'static,
 {
-    pub fn load(&self, preloaded: Preloaded<S::R>) -> anyhow::Result<()> {
-        self.lsm.load(preloaded)
+    pub async fn load(&self, preloaded: Preloaded<S::R>) -> anyhow::Result<()> {
+        self.lsm.load(preloaded).await
     }
 }
 

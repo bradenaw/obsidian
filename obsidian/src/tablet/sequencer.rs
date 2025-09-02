@@ -1,49 +1,56 @@
 use std::collections::BTreeSet;
 use std::collections::BinaryHeap;
 use std::ops::Deref;
+use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
 
 use crate::types::Timestamp;
+use crate::util::spawn_owned;
 use crate::util::OrdEqByFirst;
+use crate::util::OwnedJoinHandle;
+
+const ADVANCE_TICK: Duration = Duration::from_millis(25);
 
 pub struct Sequencer {
-    inner: RwLock<SequencerInner>,
+    inner: Arc<RwLock<SequencerInner>>,
+    advance: OwnedJoinHandle<()>,
 }
 
 impl Sequencer {
     pub fn new() -> Self {
-        Self {
-            inner: RwLock::new(SequencerInner {
-                last_ts: Timestamp::ZERO,
-                safe_read_ts: Timestamp::ZERO,
-                pending: BTreeSet::new(),
-                waiters: BinaryHeap::new(),
-            }),
-        }
+        let inner = Arc::new(RwLock::new(SequencerInner {
+            last_ts: Timestamp::ZERO,
+            safe_read_ts: Timestamp::ZERO,
+            pending: BTreeSet::new(),
+            waiters: BinaryHeap::new(),
+        }));
+
+        let advance = spawn_owned({
+            let inner = Arc::clone(&inner);
+            async move {
+                loop {
+                    {
+                        let mut inner = inner.write().unwrap();
+                        let ts = inner.start_write();
+                        inner.finish_write(ts);
+                    }
+                    tokio::time::sleep(ADVANCE_TICK).await;
+                }
+            }
+        });
+        Self { inner, advance }
     }
 
     pub fn start_write(&self) -> WriteTsGuard<'_> {
         let mut inner = self.inner.write().unwrap();
-        let ts = Timestamp::now_after(inner.last_ts);
-        inner.last_ts = ts;
-        if inner.pending.is_empty() {
-            inner.safe_read_ts = ts.minus_one();
-            inner.wake_waiters();
-        }
-        inner.pending.insert(ts);
+        let ts = inner.start_write();
         WriteTsGuard { parent: self, ts }
     }
 
     fn finish_write(&self, ts: Timestamp) {
         let mut inner = self.inner.write().unwrap();
-        assert!(inner.pending.remove(&ts));
-        if let Some(lowest_pending_ts) = inner.pending.first() {
-            inner.safe_read_ts = lowest_pending_ts.minus_one();
-        } else {
-            inner.safe_read_ts = inner.last_ts;
-        }
-        inner.wake_waiters();
+        inner.finish_write(ts)
     }
 
     pub fn safe_read_ts(&self) -> Timestamp {
@@ -125,6 +132,26 @@ struct SequencerInner {
 }
 
 impl SequencerInner {
+    fn start_write(&mut self) -> Timestamp {
+        let ts = Timestamp::now_after(self.last_ts);
+        self.last_ts = ts;
+        if self.pending.is_empty() {
+            self.safe_read_ts = ts.minus_one();
+            self.wake_waiters();
+        }
+        self.pending.insert(ts);
+        ts
+    }
+
+    fn finish_write(&mut self, ts: Timestamp) {
+        assert!(self.pending.remove(&ts));
+        if let Some(lowest_pending_ts) = self.pending.first() {
+            self.safe_read_ts = lowest_pending_ts.minus_one();
+        } else {
+            self.safe_read_ts = self.last_ts;
+        }
+        self.wake_waiters();
+    }
     fn wake_waiters(&mut self) {
         while let Some(OrdEqByFirst(wait_ts, _)) = self.waiters.peek() {
             if *wait_ts >= self.safe_read_ts {
