@@ -97,12 +97,14 @@ where
             let snapshot = self.0.meta.latest_snapshot_().await?;
             let transfer_metadata = snapshot.transfer_metadata(transfer_id).await?;
 
-            if matches!(
-                transfer_metadata.state,
-                MetaState::Stable(TransferState::Complete)
-                    | MetaState::Stable(TransferState::Aborted)
-            ) {
-                return Ok(());
+            match transfer_metadata.state {
+                MetaState::Stable(TransferState::Complete) => {
+                    return Ok(());
+                }
+                MetaState::Stable(TransferState::Aborted) => {
+                    return Err(anyhow!("{:?} aborted", transfer_id));
+                }
+                _ => {}
             }
 
             tokio::time::sleep(Duration::from_secs(1)).await;
