@@ -14,6 +14,8 @@ use tokio::sync::oneshot;
 use crate::meta::Meta;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
+use crate::meta::MetaState;
+use crate::meta::TabletState;
 use crate::obsidian::Router;
 use crate::obsidian::TabletId;
 use crate::range::Bound;
@@ -353,6 +355,10 @@ impl MetaSyncedInner {
 
         for tablet_id in snapshot.tablet_ids().await? {
             let tablet_metadata = snapshot.tablet_metadata(tablet_id).await?;
+
+            if !matches!(tablet_metadata.state, MetaState::Stable(TabletState::Active)) {
+                continue;
+            }
 
             ranges_by_colo_group
                 .entry(tablet_metadata.colo_group_id)

@@ -206,14 +206,9 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
 
         let mut muts = HashMap::from([(MetaKey::ColoGroup(colo_group_id), Mutation::Put(vec![]))]);
 
-        let all_tablet_ids = snapshot.tablet_ids().await?;
-
         let mut next_tablet_id_by_shard = BTreeMap::new();
-
-        for tablet_id in &all_tablet_ids {
-            if !next_tablet_id_by_shard.contains_key(&tablet_id.0) {
-                next_tablet_id_by_shard.insert(tablet_id.0, tablet_id.1 + 1);
-            }
+        for shard_id in &shard_ids {
+            next_tablet_id_by_shard.insert(*shard_id, snapshot.next_tablet_id(*shard_id).await?.1);
         }
 
         // Round-robin the created ranges among the shards.
@@ -221,7 +216,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
             let shard_id = shard_ids[i % shard_ids.len()];
             let tablet_id = TabletId(
                 shard_id,
-                *next_tablet_id_by_shard.get(&shard_id).unwrap_or(&2),
+                *next_tablet_id_by_shard.get(&shard_id).unwrap_or(&1),
             );
             next_tablet_id_by_shard.insert(shard_id, tablet_id.1 + 1);
 

@@ -69,7 +69,11 @@ where
         todo!();
     }
 
-    async fn start_merge(&self, srcs: Vec<TabletId>, dst: ShardId) -> anyhow::Result<()> {
+    pub(crate) async fn start_merge(
+        &self,
+        srcs: Vec<TabletId>,
+        dst: ShardId,
+    ) -> anyhow::Result<TransferId> {
         let snapshot = self.0.meta.latest_snapshot_().await?;
         let mut src_range_set = RangeSet::new();
         for src in &srcs {
@@ -85,9 +89,7 @@ where
             )
         })?;
 
-        self.start_transfer(srcs, vec![(dst, dst_range)]).await?;
-
-        Ok(())
+        Ok(self.start_transfer(srcs, vec![(dst, dst_range)]).await?)
     }
 
     pub(crate) async fn wait_transfer(&self, transfer_id: TransferId) -> anyhow::Result<()> {
@@ -593,8 +595,7 @@ mod tests {
     use crate::types::Mutation;
 
     #[tokio::test]
-    async fn test_transfer() -> anyhow::Result<()> {
-        console_subscriber::init();
+    async fn test_move() -> anyhow::Result<()> {
         let _ = pretty_env_logger::try_init();
 
         let obs = ObsidianForTest::new(2 /*n_shards*/).await?;
@@ -642,6 +643,79 @@ mod tests {
             .await?;
 
         obs.coordinator.wait_transfer(transfer_id).await?;
+
+        // TODO: jank, because we need to wait for the frontend to find out about the routing
+        // change
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let ts = obs
+            .frontend
+            .latest_snapshot(kvs.iter().map(|(k, _)| (keyspace_id, k.to_vec())).collect())
+            .await?;
+        for (key, value) in &kvs {
+            let actual = obs.frontend.get(ts, &(keyspace_id, key.to_vec())).await?;
+
+            assert_eq!(
+                Some(&value.to_vec()),
+                actual.as_ref().map(|record| &record.value)
+            );
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_merge() -> anyhow::Result<()> {
+        let _ = pretty_env_logger::try_init();
+
+        let obs = ObsidianForTest::new(3 /*n_shards*/).await?;
+        let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
+
+        obs.frontend
+            .create_colo_group(
+                keyspace_id.0,
+                vec![Bound::Before(b"b".to_vec())], // splits
+            )
+            .await?;
+        obs.frontend.create_keyspace(keyspace_id).await?;
+
+        let kvs = [
+            (b"aa", b"foo"),
+            (b"ab", b"bar"),
+            (b"ba", b"baz"),
+            (b"ba", b"baz"),
+        ];
+
+        for (key, value) in &kvs {
+            obs.frontend
+                .write(
+                    vec![],
+                    BTreeMap::from([((keyspace_id, key.to_vec()), Mutation::Put(value.to_vec()))]),
+                )
+                .await?;
+        }
+
+        let meta_snapshot = obs.meta.latest_snapshot_().await?;
+        let tablet_ids = meta_snapshot.tablet_ids().await?;
+        let shard_ids = meta_snapshot.shard_ids().await?;
+
+        let target_shard_id = shard_ids
+            .iter()
+            .filter(|shard_id| !tablet_ids.iter().any(|tablet_id| tablet_id.0 == **shard_id))
+            .copied()
+            .next()
+            .unwrap();
+
+        let transfer_id = obs
+            .coordinator
+            .start_merge(tablet_ids, target_shard_id)
+            .await?;
+
+        obs.coordinator.wait_transfer(transfer_id).await?;
+
+        // TODO: jank, because we need to wait for the frontend to find out about the routing
+        // change
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let ts = obs
             .frontend
