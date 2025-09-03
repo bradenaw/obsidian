@@ -287,7 +287,7 @@ where
                         transfer_id,
                         time_in_state,
                     );
-                    self.transition_transfer(snapshot, transfer_id, TransferState::Aborting)
+                    self.transition_transfer(snapshot, transfer_id, TransferState::Aborted)
                         .await?;
                     return Ok(true);
                 }
@@ -332,7 +332,7 @@ where
                     .collect();
 
                 if !manifests_equal(&src_manifests[..], &dst_manifests[..]) {
-                    self.transition_transfer(snapshot, transfer_id, TransferState::Aborting)
+                    self.transition_transfer(snapshot, transfer_id, TransferState::Aborted)
                         .await?;
                     log::error!(
                         "{:?} destination manifests didn't match sources",
@@ -345,22 +345,20 @@ where
                     .await?;
             }
             TransferState::Synced => {
-                // No action, we just have to transit this.
+                // No action, we just have to transit this to ensure we add
+                // TabletStateProperties::Complete to the desinations before we remove it from the
+                // sources below.
                 self.transition_transfer(snapshot, transfer_id, TransferState::Handoff)
                     .await?;
             }
             TransferState::Handoff => {
-                // No action, we just have to transit this.
+                // No action, we just have to transit this to ensure we've already removed
+                // TabletStateProperties::Readable from the sources before granting
+                // TabletStateProperties::Writable to the destination.
                 self.transition_transfer(snapshot, transfer_id, TransferState::Complete)
                     .await?;
             }
             TransferState::Complete => return Ok(false),
-
-            TransferState::Aborting => {
-                // No action, we just have to transit this.
-                self.transition_transfer(snapshot, transfer_id, TransferState::Aborted)
-                    .await?;
-            }
             TransferState::Aborted => return Ok(false),
         }
 

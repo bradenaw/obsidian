@@ -47,29 +47,29 @@ use crate::pb;
 //    ┌──────────────────────────┐                                                                //
 //    │           Copy           │                                                                //
 //    ├──────────────────────────┤                                                                //
-//    │ Active [crw] │ Hydrating ├──────────────────────────────────────────┐                     //
-//    └──────────┬───────────────┘                                          │                     //
-//               │     ^                                                    │                     //
-//               v     │                                                    v                     //
-//    ┌────────────────┴─────────┐    ┌─────────────────────┐    ┌─────────────────────┐          //
-//    │         Catchup          │    │      Aborting       │    │       Aborted       │          //
-//    ├──────────────────────────┤    ├─────────────────────┤    ├─────────────────────┤          //
-//    │ Frozen [cr_] │ Hydrating ├───>│ Frozen [cr_] │ None ├───>│ Active [crw] │ None │          //
-//    └─────────────┬────────────┘    └─────────────────────┘    └─────────────────────┘          //
-//                  │                            ^                  (Transfer Aborted)            //
+//    │ Active [crw] │ Hydrating ├───────────────┐                                                //
+//    └─────────────┬────────────┘               │                                                //
+//                  │                            │                                                //
+//                  v                            v                                                //
+//    ┌──────────────────────────┐    ┌─────────────────────┐                                     //
+//    │         Catchup          │    │       Aborted       │                                     //
+//    ├──────────────────────────┤    ├─────────────────────┤                                     //
+//    │ Frozen [cr_] │ Hydrating ├───>│ Active [crw] │ None │                                     //
+//    └─────────────┬────────────┘    └─────────────────────┘                                     //
+//                  │                            ^                                                //
 //                  v                            │                                                //
 //   ┌─────────────────────────────┐             │                                                //
 //   │            Synced           │             │                                                //
 //   ├─────────────────────────────┤             │                                                //
-//   │ Frozen [cr_] │ Frozen [cr_] ├─────────────┘                                                //
-//   └──────────────┬──────────────┘                                                              //
-//                  │                                                                             //
-//                  v                                                                             //
-//        ┌─────────────────────┐                                                                 //
-//        │      Handoff        │                                                                 //
-//        ├─────────────────────┤                                                                 //
-//        │ None │ Frozen [cr_] │    Once src reaches None, it is no longer                       //
-//        └─────────┬───────────┘    possible to abort                                            //
+//   │ Frozen [cr_] │ Frozen [cr_] ├─────────────┤                                                //
+//   └──────────────┬──────────────┘             │                                                //
+//                  │                            │                                                //
+//                  v                            │                                                //
+//        ┌─────────────────────┐                │                                                //
+//        │      Handoff        │                │                                                //
+//        ├─────────────────────┤                │                                                //
+//        │ None │ Frozen [cr_] ├────────────────┘                                                //
+//        └─────────┬───────────┘                                                                 //
 //                  │                                                                             //
 //                  v                                                                             //
 //        ┌─────────────────────┐                                                                 //
@@ -136,7 +136,6 @@ pub(crate) enum TransferState {
     Synced,   // Frozen     Frozen
     Handoff,  // None       Frozen
     Complete, // None       Active
-    Aborting, // Frozen     None
     Aborted,  // Active     None
 }
 
@@ -145,10 +144,9 @@ impl TransferState {
         match self {
             TransferState::Copy => (TabletState::Active, TabletState::Hydrating),
             TransferState::Catchup => (TabletState::Frozen, TabletState::Hydrating),
-            TransferState::Synced => (TabletState::Frozen, TabletState::Frozen),
             TransferState::Handoff => (TabletState::None, TabletState::Frozen),
+            TransferState::Synced => (TabletState::Frozen, TabletState::Frozen),
             TransferState::Complete => (TabletState::None, TabletState::Active),
-            TransferState::Aborting => (TabletState::Frozen, TabletState::None),
             TransferState::Aborted => (TabletState::Active, TabletState::None),
         }
     }
@@ -161,9 +159,8 @@ impl TransferState {
             (TransferState::Handoff, TransferState::Complete) => true,
 
             (TransferState::Copy, TransferState::Aborted) => true,
-            (TransferState::Catchup, TransferState::Aborting) => true,
-            (TransferState::Synced, TransferState::Aborting) => true,
-            (TransferState::Aborting, TransferState::Aborted) => true,
+            (TransferState::Catchup, TransferState::Aborted) => true,
+            (TransferState::Handoff, TransferState::Aborted) => true,
 
             _ => false,
         }
@@ -180,7 +177,6 @@ impl TryFrom<pb::internal::TransferState> for TransferState {
             pb::internal::TransferState::Synced => Self::Synced,
             pb::internal::TransferState::Handoff => Self::Handoff,
             pb::internal::TransferState::Complete => Self::Complete,
-            pb::internal::TransferState::Aborting => Self::Aborting,
             pb::internal::TransferState::Aborted => Self::Aborted,
             pb::internal::TransferState::Unknown => return Err(anyhow!("unknown TransferState")),
         })
@@ -195,7 +191,6 @@ impl From<TransferState> for pb::internal::TransferState {
             TransferState::Synced => pb::internal::TransferState::Synced,
             TransferState::Handoff => pb::internal::TransferState::Handoff,
             TransferState::Complete => pb::internal::TransferState::Complete,
-            TransferState::Aborting => pb::internal::TransferState::Aborting,
             TransferState::Aborted => pb::internal::TransferState::Aborted,
         }
     }
