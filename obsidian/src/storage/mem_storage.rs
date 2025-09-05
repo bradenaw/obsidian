@@ -1,18 +1,19 @@
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
+use std::task::Poll;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
-use tokio::io::AsyncRead;
-use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWrite;
 
 use crate::storage::FileReader;
 use crate::storage::Storage;
 
 pub(crate) struct MemStorage {
-    inner: Mutex<MemStorageInner>,
+    inner: Arc<Mutex<MemStorageInner>>,
 }
 
 struct MemStorageInner {
@@ -22,27 +23,24 @@ struct MemStorageInner {
 impl MemStorage {
     pub(crate) fn new() -> Self {
         Self {
-            inner: Mutex::new(MemStorageInner {
+            inner: Arc::new(Mutex::new(MemStorageInner {
                 files: HashMap::new(),
-            }),
+            })),
         }
     }
 }
 
 #[async_trait]
 impl Storage for MemStorage {
+    type Writer = MemFileWriter;
     type R = MemFile;
 
-    async fn put<C: AsyncRead + Send>(&self, name: &str, content: C) -> anyhow::Result<()> {
-        let mut buf = Vec::new();
-        Box::pin(content).read_to_end(&mut buf).await?;
-        self.inner
-            .lock()
-            .unwrap()
-            .files
-            .insert(name.to_string(), Arc::new(buf));
-
-        Ok(())
+    async fn put(&self, name: &str) -> anyhow::Result<Self::Writer> {
+        Ok(MemFileWriter{
+            parent: Arc::clone(&self.inner),
+            name: name.to_string(),
+            content: Vec::new(),
+        })
     }
 
     async fn get(&self, name: &str) -> anyhow::Result<Self::R> {
@@ -93,5 +91,39 @@ impl FileReader for MemFile {
     async fn len(&self) -> anyhow::Result<u64> {
         self.content_or()?;
         Ok(self.len)
+    }
+}
+
+pub(crate) struct MemFileWriter {
+    name: String,
+    content: Vec<u8>,
+    parent: Arc<Mutex<MemStorageInner>>,
+}
+
+impl AsyncWrite for MemFileWriter {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        let self_ = Pin::get_mut(self);
+        self_.content.extend_from_slice(buf);
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        let mut parent = self.parent.lock().unwrap();
+        parent.files.insert(self.name.clone(), Arc::new(self.content.clone()));
+        Poll::Ready(Ok(()))
     }
 }

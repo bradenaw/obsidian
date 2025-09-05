@@ -13,6 +13,7 @@ use futures::SinkExt;
 use futures::Stream;
 use futures::StreamExt;
 use rand::Rng;
+use tokio::io::AsyncWriteExt;
 
 use crate::lsm::index::Index;
 use crate::lsm::index::IndexSnapshot;
@@ -388,12 +389,15 @@ where
         a: &Run<S::R>,
         b: &[Arc<Run<S::R>>],
     ) -> anyhow::Result<Vec<Run<S::R>>> {
-        self.runs_from_revisions(keyspace_id, merge_sorted_streams(vec![
-            a.stream().boxed(),
-            futures::stream::iter(b.iter().map(|run| run.stream()))
-                .flatten()
-                .boxed(),
-        ]))
+        self.runs_from_revisions(
+            keyspace_id,
+            merge_sorted_streams(vec![
+                a.stream().boxed(),
+                futures::stream::iter(b.iter().map(|run| run.stream()))
+                    .flatten()
+                    .boxed(),
+            ]),
+        )
         .await
     }
 
@@ -410,20 +414,13 @@ where
             let (mut tx, rx) = futures::channel::mpsc::channel(256);
 
             let id = RunId::new();
-            let (mut writer, reader) = tokio::io::duplex(16384);
-            future::try_join3(
-                self.storage.put(&id.to_string(), reader),
+            let mut writer = Box::pin(self.storage.put(&id.to_string()).await?);
+            future::try_join(
                 async {
-                    Run::<()>::write(
-                        &mut writer,
-                        id,
-                        keyspace_id,
-                        self.block_size_target,
-                        rx,
-                    )
-                    .await?;
-                    drop(writer);
-                    Ok(())
+                    Run::<()>::write(&mut writer, id, keyspace_id, self.block_size_target, rx)
+                        .await?;
+                    writer.shutdown().await?;
+                    Ok::<_, anyhow::Error>(())
                 },
                 async {
                     while let Some(revision) = sorted.next().await.transpose()? {

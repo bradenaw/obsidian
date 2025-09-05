@@ -2,13 +2,14 @@ mod cached_storage;
 mod mem_storage;
 
 use async_trait::async_trait;
-use tokio::io::AsyncRead;
+use tokio::io::AsyncWrite;
 
 #[async_trait]
 pub(crate) trait Storage {
+    type Writer: AsyncWrite + Send;
     type R: FileReader + Clone + Sync + Send;
 
-    async fn put<C: AsyncRead + Send>(&self, name: &str, content: C) -> anyhow::Result<()>;
+    async fn put(&self, name: &str) -> anyhow::Result<Self::Writer>;
 
     async fn delete(&self, name: &str) -> anyhow::Result<()>;
 

@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::hash::Hash;
 use std::hash::RandomState;
-use std::mem::MaybeUninit;
 use std::pin::pin;
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
@@ -13,8 +12,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
-use tokio::io::AsyncRead;
-use tokio::io::ReadBuf;
+use tokio::io::AsyncWrite;
 
 use crate::storage::FileReader;
 use crate::storage::Storage;
@@ -56,6 +54,7 @@ impl<S: Storage + Sync> CachedStorage<S> {
 
 #[async_trait]
 impl<S: Storage + Sync> Storage for CachedStorage<S> {
+    type Writer = PutCacher<Pin<Box<S::Writer>>>;
     type R = GetCacher<S::R>;
 
     // Assuming that:
@@ -65,21 +64,15 @@ impl<S: Storage + Sync> Storage for CachedStorage<S> {
     //
     // Then it's perfectly safe to not actually make any changes to the cache from put/delete.
 
-    async fn put<C: AsyncRead + Send>(&self, name: &str, content: C) -> anyhow::Result<()> {
-        let mut backing: Box<[MaybeUninit<u8>]> = Box::new_uninit_slice(self.page_size);
-        let buf = ReadBuf::uninit(&mut backing);
-
-        let mut wrapper = PutCacher {
-            inner: Box::pin(content),
+    async fn put(&self, name: &str) -> anyhow::Result<Self::Writer> {
+        Ok(PutCacher {
+            inner: Box::pin(self.inner.put(name).await?),
             cache: self.cache.clone(),
             name: Arc::new(name.to_string()),
-            buf: buf,
+            buf: Vec::with_capacity(self.page_size),
             buf_offset: 0,
-            cursor: 0,
-            inner_done: false,
-        };
-
-        self.inner.put(name, &mut wrapper).await
+            page_size: self.page_size as usize,
+        })
     }
 
     async fn get(&self, name: &str) -> anyhow::Result<Self::R> {
@@ -102,88 +95,94 @@ impl<S: Storage + Sync> Storage for CachedStorage<S> {
 // Caches pages while a file is being put.
 //
 // put() takes in a stream of bytes, so we have to wrap the reader of that stream.
-struct PutCacher<'a, C: AsyncRead + Send> {
-    inner: C,
+pub(crate) struct PutCacher<W>
+where
+    W: AsyncWrite,
+{
+    inner: W,
     // The name of the file being read.
     name: Arc<String>,
     // A reference to the cache from the CachedStorage this PutCacher was made from.
     cache: Arc<Cache<(Arc<String>, u64), Arc<Vec<u8>>>>,
     // Must have `buf.capacity() == page_size`.
-    buf: ReadBuf<'a>,
+    buf: Vec<u8>,
     // The offset of the bytes contained in `buf` from the start of the file.
     buf_offset: u64,
-    // The reader's cursor, in `[0..buf.capacity()]`.
-    cursor: usize,
-    // True if inner doesn't have any more bytes to give, so the read is over once the reader
-    // consumes what's left in `buf`.
-    inner_done: bool,
+    page_size: usize,
 }
 
-impl<'a, C: AsyncRead + Send + Unpin> PutCacher<'a, C> {
-    fn flush_page(&mut self) {
-        if self.buf.filled().len() == 0 {
-            return;
-        }
+impl<W> PutCacher<W>
+where
+    W: AsyncWrite + Unpin,
+{
+    fn put(&mut self, buf: &[u8]) {
+        let mut remaining = buf;
+        while remaining.len() > 0 {
+            let take = cmp::min(self.page_size - self.buf.len(), remaining.len());
+            self.buf.extend_from_slice(&remaining[..take]);
+            remaining = &remaining[take..];
 
-        let page = Arc::new(self.buf.filled().to_vec());
-        self.cache
-            .insert((self.name.clone(), self.buf_offset), page);
-        self.buf_offset += self.buf.capacity() as u64;
-        self.buf.set_filled(0);
-        self.cursor = 0;
+            if self.buf.len() == self.page_size {
+                self.flush();
+            }
+        }
     }
 
-    fn poll_read_inner(
+    fn flush(&mut self) {
+        let page = std::mem::replace(&mut self.buf, Vec::with_capacity(self.page_size));
+        self.cache
+            .insert((self.name.clone(), self.buf_offset), Arc::new(page));
+        self.buf_offset += self.page_size as u64;
+    }
+
+    fn poll_write_inner(
         &mut self,
         cx: &mut std::task::Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        loop {
-            // See if we have any bytes to give to the caller.
-            let n = cmp::min(self.buf.filled().len() - self.cursor, buf.remaining());
-            if n > 0 {
-                buf.put_slice(&self.buf.filled()[self.cursor..self.cursor + n]);
-                self.cursor += n;
-
-                // If that means the reader just finished a whole page, place it into cache.
-                if self.cursor == self.buf.capacity() {
-                    self.flush_page();
-                }
-
-                return std::task::Poll::Ready(Ok(()));
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let inner = pin!(&mut self.inner);
+        match inner.poll_write(cx, &buf[..]) {
+            std::task::Poll::Ready(Ok(n)) => {
+                self.put(&buf[..n]);
+                return std::task::Poll::Ready(Ok(n));
             }
-
-            // If we're here, it implies that the cursor is at the end of our buf, we need to get
-            // some more bytes from inner.
-
-            let start_len = self.buf.filled().len();
-            let inner = pin!(&mut self.inner);
-            let inner_poll = inner.poll_read(cx, &mut self.buf);
-            if let std::task::Poll::Ready(Ok(())) = inner_poll {
-                if start_len == self.buf.filled().len() {
-                    // No more bytes from inner, so we're done reading.
-                    self.flush_page();
-                    return std::task::Poll::Ready(Ok(()));
-                }
-
-                // We got some bytes back, so loop back around to see if we can give them to the
-                // caller.
-                continue;
-            }
-
-            return inner_poll;
+            x => return x,
         }
     }
 }
 
-impl<'a, C: AsyncRead + Send + Unpin> AsyncRead for PutCacher<'a, C> {
-    fn poll_read(
+impl<W> AsyncWrite for PutCacher<W>
+where
+    W: AsyncWrite + Unpin,
+{
+    fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
         let self_ = Pin::get_mut(self);
-        self_.poll_read_inner(cx, buf)
+        self_.poll_write_inner(cx, buf)
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        let self_ = Pin::get_mut(self);
+        let inner = pin!(&mut self_.inner);
+        inner.poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        let self_ = Pin::get_mut(self);
+        if self_.buf.len() > 0 {
+            self_.flush();
+        }
+        let inner = pin!(&mut self_.inner);
+        inner.poll_shutdown(cx)
     }
 }
 
@@ -685,6 +684,8 @@ mod tests {
     use std::hash::RandomState;
     use std::sync::Arc;
 
+    use tokio::io::AsyncWriteExt;
+
     use super::Cache;
     use super::CachedStorage;
     use super::FileReader;
@@ -725,7 +726,9 @@ mod tests {
         ]);
 
         for (name, content) in &test_files {
-            storage.put(name, &content[..]).await?;
+            let mut writer = storage.put(name).await?;
+            writer.write_all(&content[..]).await?;
+            writer.shutdown().await?;
         }
 
         let n_pages = test_files
