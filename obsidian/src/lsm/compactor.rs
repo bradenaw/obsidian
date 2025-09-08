@@ -5,6 +5,7 @@ use std::iter;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use async_stream::try_stream;
 use futures::future::Either;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
@@ -25,6 +26,8 @@ use crate::range::Bound;
 use crate::range::Range;
 use crate::storage::Storage;
 use crate::types::KeyspaceId;
+use crate::types::RevisionValue;
+use crate::types::Timestamp;
 use crate::util::merge_sorted_streams;
 use crate::util::spawn_owned;
 use crate::util::WithBackground;
@@ -405,22 +408,11 @@ where
         keyspace_id: KeyspaceId,
         entries: impl Stream<Item = anyhow::Result<LsmRevision>> + Send,
     ) -> anyhow::Result<Vec<Run<S::R>>> {
-        let mut sorted = entries.boxed().peekable();
-
+        let mut revs_by_key = group_by_key(entries.boxed()).boxed().peekable();
         let mut runs = Vec::new();
 
-        if Pin::new(&mut sorted).peek().await.is_none() {
-            return Ok(Vec::new());
-        }
-
-        // Since all revisions for the same key need to end up in the same run (otherwise the runs
-        // would overlap), we buffer the revisions for the same key together.
-        let mut maybe_key: Option<Vec<u8>> = None;
-        let mut revs = Vec::new();
-        let mut revs_size = 0u64;
-
         loop {
-            if Pin::new(&mut sorted).peek().await.is_none() && revs.is_empty() {
+            if Pin::new(&mut revs_by_key).peek().await.is_none() {
                 break;
             }
 
@@ -428,65 +420,26 @@ where
             let mut writer = Box::pin(self.storage.put(&id.to_string()).await?);
             let mut run = RunBuilder::new(&mut writer, id, keyspace_id, self.block_size_target);
 
-            if Pin::new(&mut sorted).peek().await.is_none() && !revs.is_empty() {
+            while let Some((key, mut revs)) = Pin::new(&mut revs_by_key).next().await.transpose()? {
                 for (ts, value) in revs.drain(..) {
                     run.push(LsmRevision {
-                        key: maybe_key.as_ref().unwrap().clone(),
+                        key: key.clone(),
                         ts,
                         value,
                     })
                     .await?;
                 }
-                revs_size = 0;
-                maybe_key = None;
-            }
 
-            while let Some(rev) = Pin::new(&mut sorted).next().await.transpose()? {
-                let mut rev_size = 8 + (rev.value.len() as u64);
-
-                match maybe_key {
-                    Some(ref key) => {
-                        if key != &rev.key {
-                            for (ts, value) in revs.drain(..) {
-                                run.push(LsmRevision {
-                                    key: key.clone(),
-                                    ts,
-                                    value,
-                                })
-                                .await?;
-                            }
-
-                            revs_size = 0;
-                            rev_size += rev.key.len() as u64;
-                            maybe_key = Some(rev.key);
-                        }
-                    }
-                    None => {
-                        rev_size += rev.key.len() as u64;
-                        maybe_key = Some(rev.key);
+                if let Some(Ok((key, revs))) =
+                    Pin::new(&mut revs_by_key).peek().await.map(Result::as_ref)
+                {
+                    let next_size_estimate = (key.len()
+                        + revs.iter().map(|(_, value)| 8 + value.len()).sum::<usize>())
+                        as u64;
+                    if run.size_estimate() + next_size_estimate > self.run_size_target {
+                        break;
                     }
                 }
-                revs.push((rev.ts, rev.value));
-                revs_size += rev_size;
-
-                if run.size_estimate() + revs_size > self.run_size_target {
-                    break;
-                }
-            }
-
-            if Pin::new(&mut sorted).peek().await.is_none()
-                && (run.is_empty() || run.size_estimate() + revs_size <= self.run_size_target)
-            {
-                for (ts, value) in revs.drain(..) {
-                    run.push(LsmRevision {
-                        key: maybe_key.as_ref().unwrap().clone(),
-                        ts,
-                        value,
-                    })
-                    .await?;
-                }
-                revs_size = 0;
-                maybe_key = None;
             }
 
             run.finish().await?;
@@ -494,6 +447,29 @@ where
             runs.push(Run::open(self.storage.get(&id.to_string()).await?).await?);
         }
         Ok(runs)
+    }
+}
+
+fn group_by_key(
+    mut entries: impl Stream<Item = anyhow::Result<LsmRevision>> + Send + Unpin,
+) -> impl Stream<Item = anyhow::Result<(Vec<u8>, Vec<(Timestamp, RevisionValue)>)>> {
+    try_stream! {
+        let mut maybe_key: Option<Vec<u8>> = None;
+        let mut revs = Vec::new();
+
+        while let Some(rev) = entries.next().await.transpose()? {
+            if let Some(prev_key) = maybe_key.take_if(|key| *key != rev.key) {
+                yield (prev_key, std::mem::take(&mut revs));
+            }
+            if maybe_key.is_none() {
+                maybe_key = Some(rev.key);
+            }
+            revs.push((rev.ts, rev.value));
+        }
+
+        if let Some(key) = maybe_key {
+            yield (key, revs);
+        }
     }
 }
 
