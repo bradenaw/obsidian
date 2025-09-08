@@ -449,16 +449,20 @@ impl BlockBuilder {
         Ok(())
     }
 
-    pub(super) fn size_estimate(&self) -> usize {
+    pub(super) fn size_estimate(&self) -> u64 {
         let key_offset_size = byte_width(self.key_size_estimate as u64);
         let version_offset_size = byte_width(self.n_versions as u64);
         let value_offset_size = byte_width((self.value_size as u64) << 1);
-        let timestamp_size = byte_width(self.max_ts.as_nanos() - self.min_ts.as_nanos());
+        let timestamp_size = if self.buffer.is_empty() {
+            1
+        } else {
+            byte_width(self.max_ts.as_nanos() - self.min_ts.as_nanos())
+        };
         let n_keys = self.buffer.len();
-        self.key_size_estimate
+        (self.key_size_estimate
             + self.value_size
             + ((key_offset_size + version_offset_size) * n_keys)
-            + ((value_offset_size + timestamp_size) * self.n_versions)
+            + ((value_offset_size + timestamp_size) * self.n_versions)) as u64
     }
 
     pub(super) fn first_key(&self) -> Option<&Vec<u8>> {

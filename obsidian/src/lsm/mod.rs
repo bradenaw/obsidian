@@ -868,6 +868,7 @@ mod test {
     use crate::lsm::memtable::Memtable;
     use crate::lsm::run::dump_run;
     use crate::lsm::run::Run;
+    use crate::lsm::run::RunBuilder;
     use crate::lsm::util::LsmRevision;
     use crate::lsm::RunId;
     use crate::range::Bound;
@@ -1874,14 +1875,16 @@ mod test {
                     }
                 } else {
                     let mut v = vec![];
-                    Run::<()>::write(
+                    let mut run_builder = RunBuilder::new(
                         &mut v,
                         RunId::new(),
                         KeyspaceId(ColoGroupId(1), 1),
                         1024, // block_size_target
-                        futures::stream::iter(revisions.into_iter().map(|revision| Ok(revision))),
-                    )
-                    .await?;
+                    );
+                    for revision in revisions {
+                        run_builder.push(revision).await?;
+                    }
+                    run_builder.finish().await?;
                     let run = Run::open(TestFile::from(v)).await?;
                     level.runs.push(Arc::new(run));
                 }

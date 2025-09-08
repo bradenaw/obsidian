@@ -157,7 +157,7 @@ impl Memtable {
             })),
             Direction::Desc => IteratorEither::Left(IteratorEither::Right(HistoryDescIterator {
                 entry,
-                cursor: max,
+                cursor: Some(max),
                 min,
             })),
         };
@@ -226,7 +226,7 @@ impl<'a> Iterator for HistoryAscIterator<'a> {
 
 struct HistoryDescIterator<'a> {
     entry: crossbeam_skiplist::map::Entry<'a, Vec<u8>, SkipMap<Timestamp, RevisionValue>>,
-    cursor: Timestamp,
+    cursor: Option<Timestamp>,
     min: Timestamp,
 }
 
@@ -234,19 +234,26 @@ impl<'a> Iterator for HistoryDescIterator<'a> {
     type Item = (Timestamp, RevisionValue);
 
     fn next(&mut self) -> Option<Self::Item> {
+        let cursor = self.cursor?;
+
         if let Some(entry) = self
             .entry
             .value()
-            .upper_bound(std::ops::Bound::Included(&self.cursor))
+            .upper_bound(std::ops::Bound::Included(&cursor))
         {
             let ts = *entry.key();
-            let value = entry.value().clone();
-
-            self.cursor = ts.minus_one();
-
             if ts < self.min {
                 return None;
             }
+
+            // A thing we actually encounter because TxOutcomes are written at timestamp 0.
+            if ts == Timestamp::ZERO {
+                self.cursor = None;
+            } else {
+                self.cursor = Some(ts.minus_one());
+            }
+
+            let value = entry.value().clone();
 
             return Some((ts, value));
         }

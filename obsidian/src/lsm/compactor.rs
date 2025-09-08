@@ -5,11 +5,9 @@ use std::iter;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use futures::future;
 use futures::future::Either;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
-use futures::SinkExt;
 use futures::Stream;
 use futures::StreamExt;
 use rand::Rng;
@@ -18,6 +16,7 @@ use tokio::io::AsyncWriteExt;
 use crate::lsm::index::Index;
 use crate::lsm::index::IndexSnapshot;
 use crate::lsm::index::Keyspace;
+use crate::lsm::run::RunBuilder;
 use crate::lsm::LsmRevision;
 use crate::lsm::Memtable;
 use crate::lsm::Run;
@@ -99,7 +98,7 @@ where
 
                         compact_futures.push(join_handle.map(|result| {
                             if let Err(e) = result {
-                                log::error!("error in compaction: {}", e);
+                                log::error!("error in compaction: {:?}", e);
                             }
                             compaction
                         }));
@@ -409,58 +408,91 @@ where
         let mut sorted = entries.boxed().peekable();
 
         let mut runs = Vec::new();
-        while let Some(_) = Pin::new(&mut sorted).peek().await {
-            let mut curr_size = 0u64;
-            let (mut tx, rx) = futures::channel::mpsc::channel(256);
+
+        if Pin::new(&mut sorted).peek().await.is_none() {
+            return Ok(Vec::new());
+        }
+
+        // Since all revisions for the same key need to end up in the same run (otherwise the runs
+        // would overlap), we buffer the revisions for the same key together.
+        let mut maybe_key: Option<Vec<u8>> = None;
+        let mut revs = Vec::new();
+        let mut revs_size = 0u64;
+
+        loop {
+            if Pin::new(&mut sorted).peek().await.is_none() && revs.is_empty() {
+                break;
+            }
 
             let id = RunId::new();
             let mut writer = Box::pin(self.storage.put(&id.to_string()).await?);
-            future::try_join(
-                async {
-                    Run::<()>::write(&mut writer, id, keyspace_id, self.block_size_target, rx)
-                        .await?;
-                    writer.shutdown().await?;
-                    Ok::<_, anyhow::Error>(())
-                },
-                async {
-                    while let Some(revision) = sorted.next().await.transpose()? {
-                        let revision_size =
-                            (revision.key.len() as u64) + 8 + (revision.value.len() as u64);
-                        curr_size += revision_size;
-                        let break_after = {
-                            // All of the revisions for a single key need to end up in the same run, so once
-                            // we've gone over the target size look for a break between keys.
-                            if curr_size > self.run_size_target {
-                                if let Some(Ok(next_revision)) = Pin::new(&mut sorted).peek().await
-                                {
-                                    if revision.key != next_revision.key {
-                                        true
-                                    } else {
-                                        false
-                                    }
-                                } else {
-                                    false
-                                }
-                            } else {
-                                false
+            let mut run = RunBuilder::new(&mut writer, id, keyspace_id, self.block_size_target);
+
+            if Pin::new(&mut sorted).peek().await.is_none() && !revs.is_empty() {
+                for (ts, value) in revs.drain(..) {
+                    run.push(LsmRevision {
+                        key: maybe_key.as_ref().unwrap().clone(),
+                        ts,
+                        value,
+                    })
+                    .await?;
+                }
+                revs_size = 0;
+                maybe_key = None;
+            }
+
+            while let Some(rev) = Pin::new(&mut sorted).next().await.transpose()? {
+                let mut rev_size = 8 + (rev.value.len() as u64);
+
+                match maybe_key {
+                    Some(ref key) => {
+                        if key != &rev.key {
+                            for (ts, value) in revs.drain(..) {
+                                run.push(LsmRevision {
+                                    key: key.clone(),
+                                    ts,
+                                    value,
+                                })
+                                .await?;
                             }
-                        };
-                        tx.send(Ok(revision)).await?;
-                        if break_after {
-                            break;
+
+                            revs_size = 0;
+                            rev_size += rev.key.len() as u64;
+                            maybe_key = Some(rev.key);
                         }
                     }
-                    drop(tx);
+                    None => {
+                        rev_size += rev.key.len() as u64;
+                        maybe_key = Some(rev.key);
+                    }
+                }
+                revs.push((rev.ts, rev.value));
+                revs_size += rev_size;
 
-                    Ok(())
-                },
-            )
-            .await?;
+                if run.size_estimate() + revs_size > self.run_size_target {
+                    break;
+                }
+            }
 
-            let run = Run::open(self.storage.get(&id.to_string()).await?).await?;
-            runs.push(run);
+            if Pin::new(&mut sorted).peek().await.is_none()
+                && (run.is_empty() || run.size_estimate() + revs_size <= self.run_size_target)
+            {
+                for (ts, value) in revs.drain(..) {
+                    run.push(LsmRevision {
+                        key: maybe_key.as_ref().unwrap().clone(),
+                        ts,
+                        value,
+                    })
+                    .await?;
+                }
+                revs_size = 0;
+                maybe_key = None;
+            }
+
+            run.finish().await?;
+            writer.shutdown().await?;
+            runs.push(Run::open(self.storage.get(&id.to_string()).await?).await?);
         }
-
         Ok(runs)
     }
 }

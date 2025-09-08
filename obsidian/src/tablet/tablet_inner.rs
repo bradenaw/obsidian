@@ -1363,6 +1363,7 @@ where
             }
         }
 
+        // TODO: Need to block compactions and only enable after we transition.
         self.lsm.load()?.load(preloader.wait().await?).await?;
         let _ = self
             .hydration

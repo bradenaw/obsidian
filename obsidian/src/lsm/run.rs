@@ -7,7 +7,6 @@ use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use futures::pin_mut;
 use futures::Stream;
-use futures::StreamExt;
 use futures::TryStreamExt;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
@@ -49,31 +48,6 @@ pub(super) struct Run<R> {
 
     min_key: Vec<u8>,
     max_key: Vec<u8>,
-}
-
-impl<R> Run<R> {
-    // Assumes S is in (key, rev(ts)) order, and assumes termination at a reasonable size limit.
-    pub(super) async fn write<W, S>(
-        w: &mut W,
-        id: RunId,
-        keyspace_id: KeyspaceId,
-        block_size_target: u64,
-        s: S,
-    ) -> anyhow::Result<()>
-    where
-        W: AsyncWrite + Unpin,
-        S: Stream<Item = anyhow::Result<LsmRevision>>,
-    {
-        pin_mut!(s);
-
-        let mut b = RunBuilder::new(w, id, keyspace_id, block_size_target);
-        while let Some(revision) = s.next().await.transpose()? {
-            b.push(revision).await?;
-        }
-        b.finish().await?;
-
-        Ok(())
-    }
 }
 
 impl<R: FileReader> Run<R> {
@@ -242,13 +216,13 @@ impl<R: FileReader> Run<R> {
     }
 }
 
-struct RunBuilder<W> {
+pub(crate) struct RunBuilder<W> {
     w: W,
     id: RunId,
     keyspace_id: KeyspaceId,
     block_size_target: u64,
 
-    bytes_written: usize,
+    bytes_written: u64,
     index: BTreeMap<Vec<u8>, u64>,
     last_key: Vec<u8>,
     buffer: BlockBuilder,
@@ -257,7 +231,7 @@ struct RunBuilder<W> {
 }
 
 impl<W: AsyncWrite + Unpin> RunBuilder<W> {
-    fn new(w: W, id: RunId, keyspace_id: KeyspaceId, block_size_target: u64) -> Self {
+    pub fn new(w: W, id: RunId, keyspace_id: KeyspaceId, block_size_target: u64) -> Self {
         Self {
             w,
             id,
@@ -272,7 +246,15 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
         }
     }
 
-    async fn push(&mut self, revision: LsmRevision) -> anyhow::Result<()> {
+    pub fn size_estimate(&self) -> u64 {
+        self.bytes_written + self.buffer.size_estimate()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes_written == 0 && self.buffer.is_empty()
+    }
+
+    pub async fn push(&mut self, revision: LsmRevision) -> anyhow::Result<()> {
         let revision_size_estimate = {
             let key_len = if self.buffer.contains_key(&revision.key) {
                 0
@@ -283,7 +265,7 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
         };
 
         if !self.buffer.is_empty()
-            && (self.buffer.size_estimate() + revision_size_estimate) as u64
+            && self.buffer.size_estimate() + (revision_size_estimate as u64)
                 > self.block_size_target
             && !self.buffer.contains_key(&revision.key)
         {
@@ -307,7 +289,7 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
 
         let block = self.buffer.encode()?;
         self.w.write_all(&block[..]).await?;
-        self.bytes_written += block.len();
+        self.bytes_written += block.len() as u64;
 
         let block_end_offset = self.bytes_written;
         self.index
@@ -318,7 +300,7 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
         Ok(())
     }
 
-    async fn finish(&mut self) -> anyhow::Result<()> {
+    pub async fn finish(mut self) -> anyhow::Result<()> {
         if !self.buffer.is_empty() {
             self.flush_block().await?;
         }
@@ -332,11 +314,11 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
         PrefixCompressedKV::<()>::write(&mut encoded_index, &self.index);
 
         self.w.write_all(&encoded_index).await?;
-        self.bytes_written += encoded_index.len();
+        self.bytes_written += encoded_index.len() as u64;
 
         let max_key_offset = self.bytes_written;
         self.w.write_all(&self.last_key).await?;
-        self.bytes_written += self.last_key.len();
+        self.bytes_written += self.last_key.len() as u64;
 
         let trailer_offset = self.bytes_written;
 
@@ -519,15 +501,12 @@ mod test {
             },
         ];
         let mut v = vec![];
-        Run::<()>::write(
-            &mut v,
-            RunId::new(),
-            KeyspaceId(ColoGroupId(1), 1),
-            32768,
-            futures::stream::iter(revisions.iter().map(|revision| Ok(revision.clone()))),
-        )
-        .await
-        .unwrap();
+        let mut run_builder =
+            RunBuilder::new(&mut v, RunId::new(), KeyspaceId(ColoGroupId(1), 1), 32768);
+        for revision in &revisions {
+            run_builder.push(revision.clone()).await?;
+        }
+        run_builder.finish().await?;
 
         let run = Run::open(TestFile::from(v)).await?;
 
@@ -733,13 +712,18 @@ mod test {
                 revisions.sort_by_key(|revision| (revision.key.clone(), Reverse(revision.ts)));
 
                 let mut v = vec![];
-                Run::<()>::write(
+                let mut run_builder = RunBuilder::new(
                     &mut v,
                     RunId::new(),
                     KeyspaceId(ColoGroupId(1), 1),
                     1024,
-                    futures::stream::iter(revisions.iter().map(|revision| Ok(revision.clone()))),
-                ).await.unwrap();
+                );
+
+                for revision in &revisions {
+                    run_builder.push(revision.clone()).await.unwrap();
+                }
+                run_builder.finish().await.unwrap();
+
 
                 let run = Run::open(TestFile::from(v)).await.unwrap();
 
