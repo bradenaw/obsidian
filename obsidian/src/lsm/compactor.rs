@@ -1,4 +1,5 @@
 use std::cmp;
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::future::Future;
 use std::iter;
@@ -139,7 +140,13 @@ where
     ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
         for (keyspace_id, keyspace) in &snapshot.keyspaces {
             if let Some(out) = self
-                .schedule_next_keyspace(*keyspace_id, keyspace, in_flight_from, in_flight_into)
+                .schedule_next_keyspace(
+                    *keyspace_id,
+                    keyspace,
+                    &snapshot.splits,
+                    in_flight_from,
+                    in_flight_into,
+                )
                 .await
             {
                 return Some(out);
@@ -152,6 +159,83 @@ where
         self: &Arc<Self>,
         keyspace_id: KeyspaceId,
         keyspace: &Keyspace<S::R>,
+        splits: &[Bound<Vec<u8>>],
+        in_flight_from: &HashSet<RunId>,
+        in_flight_into: &HashSet<RunId>,
+    ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
+        if let Some((compaction, future)) = self.schedule_for_splits(
+            keyspace_id,
+            keyspace,
+            splits,
+            in_flight_from,
+            in_flight_into,
+        ) {
+            return Some((compaction, Either::Left(future)));
+        }
+
+        if let Some((compaction, future)) = self.schedule_for_size(
+            keyspace_id,
+            keyspace,
+            splits,
+            in_flight_from,
+            in_flight_into,
+        ) {
+            return Some((compaction, Either::Right(Either::Left(future))));
+        }
+
+        if let Some((compaction, future)) = self.schedule_for_ingest(
+            keyspace_id,
+            keyspace,
+            splits,
+            in_flight_from,
+            in_flight_into,
+        ) {
+            return Some((compaction, Either::Right(Either::Right(future))));
+        }
+
+        // TODO: lmax compactions for garbage collection
+
+        None
+    }
+
+    fn schedule_for_splits(
+        self: &Arc<Self>,
+        keyspace_id: KeyspaceId,
+        keyspace: &Keyspace<S::R>,
+        splits: &[Bound<Vec<u8>>],
+        in_flight_from: &HashSet<RunId>,
+        in_flight_into: &HashSet<RunId>,
+    ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
+        if splits.is_empty() {
+            return None;
+        }
+
+        for (level_idx, run) in keyspace.runs() {
+            if !splits.iter().any(|bound| run.range().contains_bound(bound)) {
+                continue;
+            }
+
+            if let Some((compaction, future)) = self.try_schedule(
+                keyspace_id,
+                keyspace,
+                splits,
+                in_flight_from,
+                in_flight_into,
+                level_idx,
+                run,
+            ) {
+                return Some((compaction, future));
+            }
+        }
+
+        None
+    }
+
+    fn schedule_for_size(
+        self: &Arc<Self>,
+        keyspace_id: KeyspaceId,
+        keyspace: &Keyspace<S::R>,
+        splits: &[Bound<Vec<u8>>],
         in_flight_from: &HashSet<RunId>,
         in_flight_into: &HashSet<RunId>,
     ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
@@ -188,34 +272,104 @@ where
             for j in 0..level.runs.len() {
                 let run = &level.runs[(j + offset) % level.runs.len()];
 
-                if in_flight_from.contains(&run.id()) {
-                    continue;
-                }
-                if in_flight_into.contains(&run.id()) {
-                    continue;
-                }
-
-                let intersecting_runs = keyspace.levels[i + 1].range(run.range());
-
-                let into: HashSet<_> = intersecting_runs.iter().map(|run| run.id()).collect();
-                let conflict = into.iter().any(|run_id| {
-                    in_flight_from.contains(&run_id) || in_flight_into.contains(run_id)
-                });
-
-                if !conflict {
-                    return Some((
-                        Compaction {
-                            keyspace_id,
-                            from_level: i,
-                            from: HashSet::from([run.id()]),
-                            into,
-                        },
-                        Either::Left(self.compact_from(keyspace_id, i, run, intersecting_runs)),
-                    ));
+                if let Some((compaction, future)) = self.try_schedule(
+                    keyspace_id,
+                    keyspace,
+                    splits,
+                    in_flight_from,
+                    in_flight_into,
+                    i,
+                    run,
+                ) {
+                    return Some((compaction, future));
                 }
             }
         }
 
+        None
+    }
+
+    fn try_schedule(
+        self: &Arc<Self>,
+        keyspace_id: KeyspaceId,
+        keyspace: &Keyspace<S::R>,
+        splits: &[Bound<Vec<u8>>],
+        in_flight_from: &HashSet<RunId>,
+        in_flight_into: &HashSet<RunId>,
+        level_idx: usize,
+        run: &Arc<Run<S::R>>,
+    ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
+        if in_flight_from.contains(&run.id()) {
+            return None;
+        }
+        if in_flight_into.contains(&run.id()) {
+            return None;
+        }
+
+        if level_idx < keyspace.levels.len() - 1 {
+            let intersecting_runs = keyspace.levels[level_idx + 1].range(run.range());
+
+            let into: HashSet<_> = intersecting_runs.iter().map(|run| run.id()).collect();
+            let conflict = into
+                .iter()
+                .any(|run_id| in_flight_from.contains(&run_id) || in_flight_into.contains(&run_id));
+
+            if conflict {
+                return None;
+            }
+
+            return Some((
+                Compaction {
+                    keyspace_id,
+                    from_level: level_idx,
+                    from: HashSet::from([run.id()]),
+                    into,
+                },
+                Either::Left(self.compact_from(
+                    keyspace_id,
+                    splits,
+                    level_idx,
+                    run,
+                    intersecting_runs,
+                )),
+            ));
+        } else {
+            let run_idx = keyspace.levels[level_idx]
+                .runs
+                .iter()
+                .position(|other_run| other_run.id() == run.id())?;
+
+            let siblings = &keyspace.levels[level_idx].runs[run_idx.saturating_sub(1)
+                ..cmp::min(run_idx + 1, keyspace.levels[level_idx].runs.len())];
+
+            let conflict = siblings.iter().any(|run| {
+                in_flight_from.contains(&run.id()) || in_flight_into.contains(&run.id())
+            });
+
+            if conflict {
+                return None;
+            }
+
+            return Some((
+                Compaction {
+                    keyspace_id,
+                    from_level: level_idx,
+                    from: siblings.iter().map(|run| run.id()).collect(),
+                    into: HashSet::new(),
+                },
+                Either::Right(self.compact_max(keyspace_id, splits, level_idx, siblings)),
+            ));
+        }
+    }
+
+    fn schedule_for_ingest(
+        self: &Arc<Self>,
+        keyspace_id: KeyspaceId,
+        keyspace: &Keyspace<S::R>,
+        splits: &[Bound<Vec<u8>>],
+        in_flight_from: &HashSet<RunId>,
+        in_flight_into: &HashSet<RunId>,
+    ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
         let l0_available: Vec<_> = keyspace
             .l0_sealed
             .iter()
@@ -224,56 +378,51 @@ where
             })
             .cloned()
             .collect();
-        if !l0_available.is_empty() {
-            // With random inserts, we'll always be compacting all of l0 into all of l1, so it's
-            // all but guaranteed that all l0 compactions with conflict with each other.
-            //
-            // However, if inserts are mostly in sorted order, then we can compact multiple in
-            // parallel.
-            let l0_available_range =
-                bounding_range(l0_available.iter().map(|memtable| memtable.range()));
-            let l0_in_flight_range = bounding_range(
-                keyspace
-                    .l0_sealed
-                    .iter()
-                    .filter(|memtable| in_flight_from.contains(&memtable.id()))
-                    .map(|memtable| memtable.range()),
-            );
-
-            // 1) These would end up conflicting later anyway.
-            // 2) It would be incorrect to compact later writes for a single key into l1 before
-            //    earlier. No intersecting ranges guarantees this.
-            if l0_available_range
-                .intersection(&l0_in_flight_range)
-                .is_empty()
-            {
-                let intersecting_runs = keyspace.levels[1].range(l0_available_range);
-
-                let from: HashSet<_> = l0_available.iter().map(|memtable| memtable.id()).collect();
-                let into: HashSet<_> = intersecting_runs.iter().map(|run| run.id()).collect();
-
-                let conflict = Iterator::chain(from.iter(), into.iter()).any(|run_id| {
-                    in_flight_from.contains(run_id) || in_flight_into.contains(run_id)
-                });
-                if !conflict {
-                    return Some((
-                        Compaction {
-                            keyspace_id,
-                            from_level: 0,
-                            from,
-                            into,
-                        },
-                        Either::Right(self.compact_l0(
-                            keyspace_id,
-                            &l0_available[..],
-                            intersecting_runs,
-                        )),
-                    ));
-                }
-            }
+        if l0_available.is_empty() {
+            return None;
         }
 
-        // TODO: lmax compactions for garbage collection
+        // With random inserts, we'll always be compacting all of l0 into all of l1, so it's
+        // all but guaranteed that all l0 compactions with conflict with each other.
+        //
+        // However, if inserts are mostly in sorted order, then we can compact multiple in
+        // parallel.
+        let l0_available_range =
+            bounding_range(l0_available.iter().map(|memtable| memtable.range()));
+        let l0_in_flight_range = bounding_range(
+            keyspace
+                .l0_sealed
+                .iter()
+                .filter(|memtable| in_flight_from.contains(&memtable.id()))
+                .map(|memtable| memtable.range()),
+        );
+
+        // 1) These would end up conflicting later anyway.
+        // 2) It would be incorrect to compact later writes for a single key into l1 before
+        //    earlier. No intersecting ranges guarantees this.
+        if l0_available_range
+            .intersection(&l0_in_flight_range)
+            .is_empty()
+        {
+            let intersecting_runs = keyspace.levels[1].range(l0_available_range);
+
+            let from: HashSet<_> = l0_available.iter().map(|memtable| memtable.id()).collect();
+            let into: HashSet<_> = intersecting_runs.iter().map(|run| run.id()).collect();
+
+            let conflict = Iterator::chain(from.iter(), into.iter())
+                .any(|run_id| in_flight_from.contains(run_id) || in_flight_into.contains(run_id));
+            if !conflict {
+                return Some((
+                    Compaction {
+                        keyspace_id,
+                        from_level: 0,
+                        from,
+                        into,
+                    },
+                    self.compact_l0(keyspace_id, &splits, &l0_available[..], intersecting_runs),
+                ));
+            }
+        }
 
         None
     }
@@ -281,6 +430,7 @@ where
     fn compact_l0(
         self: &Arc<Self>,
         keyspace_id: KeyspaceId,
+        splits: &[Bound<Vec<u8>>],
         from: &[Arc<Memtable>],
         into: &[Arc<Run<S::R>>],
     ) -> impl Future<Output = anyhow::Result<()>> {
@@ -300,10 +450,11 @@ where
 
         spawn_owned({
             let self_ = Arc::clone(self);
+            let splits = splits.to_vec();
             let from = from.to_vec();
             let into = into.to_vec();
             async move {
-                let add = self_.merge_l0(keyspace_id, &from[..], &into[..]).await?;
+                let add = self_.merge_l0(keyspace_id, &splits, &from, &into).await?;
 
                 log::trace!(
                     "compacted l0 {:?} + {:?}, producing {:?}",
@@ -324,6 +475,7 @@ where
     async fn merge_l0(
         &self,
         keyspace_id: KeyspaceId,
+        splits: &[Bound<Vec<u8>>],
         memtables: &[Arc<Memtable>],
         runs: &[Arc<Run<S::R>>],
     ) -> anyhow::Result<Vec<Run<S::R>>> {
@@ -343,13 +495,14 @@ where
             streams
         };
 
-        self.runs_from_revisions(keyspace_id, merge_sorted_streams(streams))
+        self.runs_from_revisions(keyspace_id, splits, merge_sorted_streams(streams))
             .await
     }
 
     fn compact_from(
         self: &Arc<Self>,
         keyspace_id: KeyspaceId,
+        splits: &[Bound<Vec<u8>>],
         from_level: usize,
         from: &Arc<Run<S::R>>,
         into: &[Arc<Run<S::R>>],
@@ -367,9 +520,10 @@ where
         spawn_owned({
             let from = Arc::clone(from);
             let into = into.to_vec();
+            let splits = splits.to_vec();
             let self_ = Arc::clone(self);
             async move {
-                let add = self_.merge_runs(keyspace_id, &from, &into[..]).await?;
+                let add = self_.merge_runs(keyspace_id, &splits, &from, &into).await?;
                 log::trace!(
                     "compacted l{} {:?} + {:?}, producing {:?}",
                     from_level,
@@ -388,11 +542,13 @@ where
     async fn merge_runs(
         &self,
         keyspace_id: KeyspaceId,
+        splits: &[Bound<Vec<u8>>],
         a: &Run<S::R>,
         b: &[Arc<Run<S::R>>],
     ) -> anyhow::Result<Vec<Run<S::R>>> {
         self.runs_from_revisions(
             keyspace_id,
+            splits,
             merge_sorted_streams(vec![
                 a.stream().boxed(),
                 futures::stream::iter(b.iter().map(|run| run.stream()))
@@ -403,13 +559,56 @@ where
         .await
     }
 
+    fn compact_max(
+        self: &Arc<Self>,
+        keyspace_id: KeyspaceId,
+        splits: &[Bound<Vec<u8>>],
+        level: usize,
+        runs: &[Arc<Run<S::R>>],
+    ) -> impl Future<Output = anyhow::Result<()>> {
+        log::trace!(
+            "compacting lmax {:?}",
+            runs.iter().map(|run| run.id()).collect::<Vec<_>>(),
+        );
+
+        let remove = runs.iter().map(|run| run.id()).collect();
+
+        spawn_owned({
+            let self_ = Arc::clone(self);
+            let splits = splits.to_vec();
+            let runs = runs.to_vec();
+            async move {
+                let add = self_
+                    .runs_from_revisions(
+                        keyspace_id,
+                        &splits,
+                        futures::stream::iter(runs.iter().map(|run| run.stream()))
+                            .flatten()
+                            .boxed(),
+                    )
+                    .await?;
+                log::trace!(
+                    "compacted lmax {:?}, producing {:?}",
+                    runs.iter().map(|run| run.id()).collect::<Vec<_>>(),
+                    add.iter().map(|run| run.id()).collect::<Vec<_>>(),
+                );
+                self_.index.replace(keyspace_id, add, level, remove)?;
+                Ok(())
+            }
+        })
+    }
+
     async fn runs_from_revisions(
         &self,
         keyspace_id: KeyspaceId,
+        splits: &[Bound<Vec<u8>>],
         entries: impl Stream<Item = anyhow::Result<LsmRevision>> + Send,
     ) -> anyhow::Result<Vec<Run<S::R>>> {
         let mut revs_by_key = group_by_key(entries.boxed()).boxed().peekable();
         let mut runs = Vec::new();
+
+        // The current key is before the bound at splits[split_idx].
+        let mut split_idx = 0;
 
         loop {
             if Pin::new(&mut revs_by_key).peek().await.is_none() {
@@ -421,6 +620,11 @@ where
             let mut run = RunBuilder::new(&mut writer, id, keyspace_id, self.block_size_target);
 
             while let Some((key, mut revs)) = Pin::new(&mut revs_by_key).next().await.transpose()? {
+                while split_idx < splits.len() && splits[split_idx].cmp_key(&key) == Ordering::Less
+                {
+                    split_idx += 1;
+                }
+
                 for (ts, value) in revs.drain(..) {
                     run.push(LsmRevision {
                         key: key.clone(),
@@ -437,6 +641,11 @@ where
                         + revs.iter().map(|(_, value)| 8 + value.len()).sum::<usize>())
                         as u64;
                     if run.size_estimate() + next_size_estimate > self.run_size_target {
+                        break;
+                    }
+
+                    if split_idx < splits.len() && splits[split_idx].cmp_key(key) == Ordering::Less
+                    {
                         break;
                     }
                 }

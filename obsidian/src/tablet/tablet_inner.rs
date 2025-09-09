@@ -36,6 +36,7 @@ use crate::obsidian::TabletId;
 use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
 use crate::pb;
+use crate::range::Bound;
 use crate::range::Range;
 use crate::storage::Storage;
 use crate::tablet::lock_mgr::Guard;
@@ -253,7 +254,6 @@ where
         // range                          |-----------|
         // self.range               |---------|
         // scan_range                     |---|
-
 
         // Ask the LSM for the page. Note that the returned continuation is in terms of the
         // constrained range that we asked it for, not the entire range from the request.
@@ -1235,41 +1235,59 @@ where
         };
         self.lsm.set_state(apparent_tablet_state).await;
 
-        if let (Some(transfer_id), TabletState::Hydrating) =
-            (tablet_metadata.transfer_id, apparent_tablet_state)
-        {
-            let transfer_metadata = snapshot.transfer_metadata(transfer_id).await?;
+        let mut has_splits = false;
 
-            let mut maybe_hydration = self.hydration.lock().unwrap();
-            if matches!(maybe_hydration.deref(), None) {
-                log::info!(
-                    "{:?} starting hydration for {:?}",
-                    self.tablet_id,
-                    transfer_id
-                );
-                let (tx, rx) = tokio::sync::watch::channel(HydrationState::Started);
-                *maybe_hydration = Some(Hydration {
-                    task: spawn_owned({
-                        let self_ = Arc::clone(self);
-                        let storage = Arc::clone(storage);
-                        let shards = Arc::clone(shards);
-                        let srcs = transfer_metadata.srcs.clone();
-                        async move {
-                            Retry::new()
-                                .indefinitely(&async || -> anyhow::Result<()> {
-                                    self_.hydrate(&storage, &shards, &srcs[..]).await?;
-                                    Ok(())
-                                })
-                                .await;
-                        }
-                    }),
-                    set_state: tx,
-                    state: rx,
-                });
+        if let Some(transfer_id) = tablet_metadata.transfer_id {
+            let transfer_metadata = snapshot.transfer_metadata(transfer_id).await?;
+            if matches!(apparent_tablet_state, TabletState::Hydrating) {
+                let mut maybe_hydration = self.hydration.lock().unwrap();
+                if matches!(maybe_hydration.deref(), None) {
+                    log::info!(
+                        "{:?} starting hydration for {:?}",
+                        self.tablet_id,
+                        transfer_id
+                    );
+                    let (tx, rx) = tokio::sync::watch::channel(HydrationState::Started);
+                    *maybe_hydration = Some(Hydration {
+                        task: spawn_owned({
+                            let self_ = Arc::clone(self);
+                            let storage = Arc::clone(storage);
+                            let shards = Arc::clone(shards);
+                            let srcs = transfer_metadata.srcs.clone();
+                            async move {
+                                Retry::new()
+                                    .indefinitely(&async || -> anyhow::Result<()> {
+                                        self_.hydrate(&storage, &shards, &srcs[..]).await?;
+                                        Ok(())
+                                    })
+                                    .await;
+                            }
+                        }),
+                        set_state: tx,
+                        state: rx,
+                    });
+                }
+            }
+
+            if transfer_metadata.srcs.contains(&self.tablet_id) && transfer_metadata.dsts.len() > 1
+            {
+                let mut dst_ranges = vec![];
+                for dst_tablet_id in transfer_metadata.dsts {
+                    let dst_tablet_metadata = snapshot.tablet_metadata(dst_tablet_id).await?;
+                    dst_ranges.push(dst_tablet_metadata.range);
+                }
+
+                has_splits = true;
+                let splits = ranges_to_splits(dst_ranges)?;
+                self.lsm.set_splits(splits);
             }
         } else {
             let mut maybe_hydration = self.hydration.lock().unwrap();
             *maybe_hydration = None;
+        }
+
+        if !has_splits {
+            self.lsm.set_splits(vec![]);
         }
 
         if let TabletState::Frozen = apparent_tablet_state {
@@ -1401,6 +1419,25 @@ where
             maybe_cursor = continue_cursor;
         }
     }
+}
+
+fn ranges_to_splits(mut ranges: Vec<Range<Vec<u8>>>) -> anyhow::Result<Vec<Bound<Vec<u8>>>> {
+    ranges.sort_unstable_by(|a, b| Ord::cmp(&a.lower, &b.lower));
+    let mut out = Vec::with_capacity(ranges.len() - 1);
+    let ranges_len = ranges.len();
+    for (i, range) in ranges.into_iter().enumerate() {
+        if out.len() == 0 && out[out.len() - 1] != range.lower {
+            return Err(anyhow!(
+                "can't range_to_splits, ranges not contiguous: gap at {:?} {:?}",
+                out[out.len() - 1],
+                range.lower
+            ));
+        }
+        if i < ranges_len - 1 {
+            out.push(range.upper);
+        }
+    }
+    Ok(out)
 }
 
 pub(crate) enum PrepareType {

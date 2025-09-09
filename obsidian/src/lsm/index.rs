@@ -15,6 +15,7 @@ use crate::lsm::Memtable;
 use crate::lsm::Run;
 use crate::lsm::RunId;
 use crate::lsm::RunManifest;
+use crate::range::Bound;
 use crate::range::KeyOrBound;
 use crate::range::Range;
 use crate::range::RangeMap;
@@ -55,6 +56,7 @@ where
     pub(super) fn new() -> Self {
         Self::from_snapshot(IndexSnapshot {
             keyspaces: HashMap::new(),
+            splits: vec![],
         })
     }
 
@@ -170,15 +172,19 @@ where
         })
     }
 
-    pub(super) fn load(
-        &self,
-        new_snapshot: IndexSnapshot<R>,
-    ) -> anyhow::Result<()> {
+    pub(super) fn load(&self, new_snapshot: IndexSnapshot<R>) -> anyhow::Result<()> {
         self.update(|snapshot| {
             // TODO: Error out if the existing index isn't empty.
             *snapshot = new_snapshot;
             Ok(())
         })
+    }
+
+    pub(super) fn set_splits(&self, splits: Vec<Bound<Vec<u8>>>) {
+        let _ = self.update(|snapshot| {
+            snapshot.splits = splits;
+            Ok(())
+        });
     }
 
     fn update<F>(&self, f: F) -> anyhow::Result<()>
@@ -203,6 +209,7 @@ where
 #[derive(Clone)]
 pub(super) struct IndexSnapshot<R> {
     pub(super) keyspaces: HashMap<KeyspaceId, Keyspace<R>>,
+    pub(super) splits: Vec<Bound<Vec<u8>>>,
 }
 
 impl<R> IndexSnapshot<R>
@@ -219,7 +226,10 @@ where
             keyspaces.insert(keyspace_id, keyspace);
         }
 
-        Ok(Self { keyspaces })
+        Ok(Self {
+            keyspaces,
+            splits: vec![],
+        })
     }
 
     pub(super) fn manifest(&self) -> Manifest {
@@ -309,6 +319,14 @@ where
         KeyspaceManifest {
             levels: level_manifests,
         }
+    }
+
+    pub fn runs(&self) -> impl Iterator<Item = (usize, &Arc<Run<R>>)> {
+        self.levels
+            .iter()
+            .enumerate()
+            .map(|(i, level)| level.runs.iter().map(move |run| (i, run)))
+            .flatten()
     }
 
     fn replace(

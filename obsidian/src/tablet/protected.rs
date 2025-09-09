@@ -14,6 +14,7 @@ use crate::meta::TabletState;
 use crate::meta::TabletStateProperties;
 use crate::obsidian::InternalError;
 use crate::obsidian::TabletId;
+use crate::range::Bound;
 use crate::range::Range;
 use crate::storage::Storage;
 use crate::types::Direction;
@@ -124,6 +125,10 @@ where
 
     pub(super) async fn flush(&self) -> anyhow::Result<()> {
         self.lsm.flush().await
+    }
+
+    pub(super) fn set_splits(&self, splits: Vec<Bound<Vec<u8>>>) {
+        self.lsm.set_splits(splits);
     }
 
     async fn wait<'a>(

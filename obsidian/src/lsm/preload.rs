@@ -82,6 +82,7 @@ where
     pub async fn wait(self) -> anyhow::Result<Preloaded<S::R>> {
         let mut snapshot = IndexSnapshot {
             keyspaces: HashMap::new(),
+            splits: vec![],
         };
 
         for (keyspace_id, depth) in &self.keyspaces {

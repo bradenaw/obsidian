@@ -259,6 +259,10 @@ impl<K: Key> Range<K> {
         self.lower.cmp_key(k) != Ordering::Greater && self.upper.cmp_key(k) != Ordering::Less
     }
 
+    pub fn contains_bound<K2: Key>(&self, bound: &Bound<K2>) -> bool {
+        self.lower.borrow() < bound.borrow() && self.upper.borrow() > bound.borrow()
+    }
+
     /// Returns true if `self` contains all of the keys in `other`.
     pub fn contains_range<K2: Key>(&self, other: &Range<K2>) -> bool {
         self.lower.borrow() <= other.lower.borrow() && self.upper.borrow() >= other.upper.borrow()

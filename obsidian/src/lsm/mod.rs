@@ -348,6 +348,10 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         self.flush().await
     }
 
+    pub fn set_splits(&self, splits: Vec<Bound<Vec<u8>>>) {
+        self.index.set_splits(splits);
+    }
+
     /// Waits until at least the given sequence number has been processed.
     async fn wait_processed(&self, seqno: wal::SeqNo) -> anyhow::Result<()> {
         let mut wal_processed = self.wal_processed.clone();
