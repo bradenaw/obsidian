@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use anyhow::anyhow;
 use tokio::sync::watch;
 use tokio::sync::Notify;
 
@@ -121,6 +122,12 @@ where
 
     pub(super) fn manifest(&self) -> Manifest {
         self.lsm.manifest()
+    }
+
+    pub(super) async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
+        self.lsm
+            .find_split()
+            .ok_or_else(|| anyhow!("no split candidates for {:?}", self.tablet_id))
     }
 
     pub(super) async fn flush(&self) -> anyhow::Result<()> {

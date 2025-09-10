@@ -1221,6 +1221,10 @@ where
         }
     }
 
+    pub(super) async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
+        self.lsm.find_split().await
+    }
+
     async fn refresh_metadata(
         self: &Arc<Self>,
         storage: &Arc<S>,
@@ -1343,10 +1347,17 @@ where
                                 // If the run partially overlaps, compaction at the source will
                                 // eventually make it not.
                                 if self.range.intersects(&run_manifest.range) {
+                                    log::debug!(
+                                        "{:?} hydration not complete because {:?} partially overlaps",
+                                        self.tablet_id,
+                                        run_manifest.run_id,
+                                    );
                                     complete = false;
                                 }
                                 continue;
                             }
+
+                            run_ids_seen.insert(run_manifest.run_id);
 
                             if loaded.contains(&run_manifest.run_id) {
                                 continue;
@@ -1354,7 +1365,12 @@ where
 
                             preloader.queue(run_manifest.run_id, i);
                             loaded.insert(run_manifest.run_id);
-                            run_ids_seen.insert(run_manifest.run_id);
+                            log::debug!(
+                                "{:?} queued {:?} {:?} for hydration",
+                                self.tablet_id,
+                                run_manifest.run_id,
+                                run_manifest.range
+                            );
                         }
                     }
                 }
@@ -1365,7 +1381,7 @@ where
                 preloader.unload(run_id);
             }
 
-            if done_after_round {
+            if done_after_round && complete {
                 break;
             }
 
@@ -1374,6 +1390,11 @@ where
             if complete {
                 rounds_with_completed += 1;
                 if rounds_with_completed == 3 {
+                    log::debug!(
+                        "{:?} hydration transitioning to {:?}",
+                        self.tablet_id,
+                        HydrationState::Mostly
+                    );
                     self.hydration
                         .lock()
                         .unwrap()
@@ -1436,7 +1457,7 @@ fn ranges_to_splits(mut ranges: Vec<Range<Vec<u8>>>) -> anyhow::Result<Vec<Bound
     let mut out = Vec::with_capacity(ranges.len() - 1);
     let ranges_len = ranges.len();
     for (i, range) in ranges.into_iter().enumerate() {
-        if out.len() == 0 && out[out.len() - 1] != range.lower {
+        if out.len() > 0 && out[out.len() - 1] != range.lower {
             return Err(anyhow!(
                 "can't range_to_splits, ranges not contiguous: gap at {:?} {:?}",
                 out[out.len() - 1],

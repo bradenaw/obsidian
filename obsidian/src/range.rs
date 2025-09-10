@@ -281,6 +281,9 @@ impl<K: Key> Range<K> {
     }
 
     pub fn split(&self, b: &Bound<K>) -> (Range<K>, Range<K>) {
+        if !self.contains_bound(b) {
+            return (self.clone(), Range::empty());
+        }
         (
             Range {
                 lower: self.lower.clone(),

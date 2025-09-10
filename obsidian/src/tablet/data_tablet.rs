@@ -16,6 +16,7 @@ use crate::obsidian::Shards;
 use crate::obsidian::TabletId;
 use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
+use crate::range::Bound;
 use crate::range::Range;
 use crate::storage::Storage;
 use crate::tablet::protected::ProtectedLsm;
@@ -138,6 +139,10 @@ impl<S: Storage + Send + Sync + 'static> Tablet for DataTablet<S> {
 
     async fn catchup(&self) -> anyhow::Result<()> {
         self.inner.catchup().await
+    }
+
+    async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
+        self.inner.find_split().await
     }
 }
 

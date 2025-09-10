@@ -45,6 +45,7 @@ use crate::types::Timestamp;
 use crate::types::WriteError;
 use crate::util::hexlify;
 use crate::util::merge_sorted_streams;
+use crate::util::shortest_between;
 use crate::util::Background;
 use crate::util::IteratorEither;
 use crate::util::OrdEqByFirst;
@@ -329,6 +330,66 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         self.index.snapshot().manifest()
     }
 
+    pub fn find_split(&self) -> Option<Bound<Vec<u8>>> {
+        let index_snapshot = self.index.snapshot();
+
+        // This is an estimate that relies on the assumption that there are a reasonable number of
+        // runs per LSM, say, in the hundreds to thousands, and a relatively small number of
+        // keyspaces. That means we can basically ignore the fact that the runs overlap each other
+        // among levels and among keyspaces in choosing our split.
+        //
+        // We're trying to pick a key that splits roughly in half _overall_ but we're splitting
+        // across all of the keyspaces, and we want to prefer shorter split points over longer ones
+        // because they're more likely to keep relevant data together.
+
+        let mut runs = vec![];
+        for (_, keyspace) in &index_snapshot.keyspaces {
+            for level in &keyspace.levels {
+                for run in &level.runs {
+                    runs.push((&run.min_key, run.size()));
+                }
+            }
+        }
+
+        runs.sort_unstable_by(|a, b| Ord::cmp(a.0, b.0));
+
+        let total_size: u64 = runs.iter().map(|(_, size)| *size as u64).sum();
+
+        let mut running_size = 0u64;
+        let mut maybe_candidate: Option<Vec<u8>> = None;
+        let mut candidate_distance_from_mid = 0u64;
+        for (lower, size) in &runs {
+            running_size += *size as u64;
+
+            if running_size > total_size / 5 {
+                let new_candidate_distance_from_mid =
+                    ((running_size as i64) - (total_size as i64 / 2)).abs() as u64;
+                match maybe_candidate {
+                    Some(ref candidate) => {
+                        let new_candidate = shortest_between(runs[0].0, lower);
+                        // If they're equal we'd prefer the one closer to the midpoint.
+                        if new_candidate.len() < candidate.len()
+                            || (new_candidate.len() == candidate.len()
+                                && new_candidate_distance_from_mid < candidate_distance_from_mid)
+                        {
+                            maybe_candidate = Some(new_candidate);
+                            candidate_distance_from_mid = new_candidate_distance_from_mid;
+                        }
+                    }
+                    None => {
+                        maybe_candidate = Some(lower.to_vec());
+                        candidate_distance_from_mid = new_candidate_distance_from_mid;
+                    },
+                }
+            }
+            if running_size > total_size * 4 / 5 {
+                break;
+            }
+        }
+
+        maybe_candidate.map(|key| Bound::Before(key))
+    }
+
     fn keyspace(
         snapshot: &IndexSnapshot<S::R>,
         keyspace_id: KeyspaceId,
@@ -507,7 +568,7 @@ impl Debug for RunId {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct Manifest {
     pub(crate) keyspaces: HashMap<KeyspaceId, KeyspaceManifest>,
 }
@@ -517,6 +578,27 @@ impl Manifest {
         Self {
             keyspaces: HashMap::new(),
         }
+    }
+}
+
+impl Debug for Manifest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut keyspace_ids: Vec<_> = self.keyspaces.keys().collect();
+        keyspace_ids.sort_unstable();
+
+        write!(f, "manifest\n")?;
+        for keyspace_id in keyspace_ids {
+            let keyspace = &self.keyspaces[keyspace_id];
+            write!(f, "  {:?}\n", keyspace_id)?;
+            for (i, level) in keyspace.levels.iter().enumerate() {
+                write!(f, "    l{}\n", i)?;
+                for run_manifest in &level.runs {
+                    write!(f, "      {:?} {:?}\n", run_manifest.run_id, run_manifest.range)?;
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

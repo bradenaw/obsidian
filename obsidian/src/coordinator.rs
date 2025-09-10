@@ -64,9 +64,24 @@ where
             .await?)
     }
 
-    async fn start_split(&self, _src: TabletId, _dsts: Vec<ShardId>) -> anyhow::Result<()> {
-        // ask tablet for ranges
-        todo!();
+    pub(crate) async fn start_split(
+        &self,
+        src: TabletId,
+        dst_a: ShardId,
+        dst_b: ShardId,
+    ) -> anyhow::Result<TransferId> {
+        let snapshot = self.0.meta.latest_snapshot_().await?;
+        let src_metadata = snapshot.tablet_metadata(src).await?;
+
+        let src_tablet = self.0.shards.tablet(src)?;
+        let split_point = src_tablet.find_split().await?;
+
+        log::debug!("selected {:?} for split of {:?}", split_point, src);
+
+        let (range_a, range_b) = src_metadata.range.split(&split_point);
+
+        self.start_transfer(vec![src], vec![(dst_a, range_a), (dst_b, range_b)])
+            .await
     }
 
     pub(crate) async fn start_merge(
@@ -331,12 +346,15 @@ where
                     .map(|tablet_id| &manifests[tablet_id])
                     .collect();
 
-                if !manifests_equal(&src_manifests[..], &dst_manifests[..]) {
+                if let Err(e) = check_manifests_equal(&src_manifests[..], &dst_manifests[..]) {
                     self.transition_transfer(snapshot, transfer_id, TransferState::Aborted)
                         .await?;
                     log::error!(
-                        "{:?} destination manifests didn't match sources",
-                        transfer_id
+                        "{:?} destination manifests didn't match sources:\nerr:\n{:?}\nsources:\n{:?}\ndestinations:\n{:?}",
+                        transfer_id,
+                        e,
+                        src_manifests,
+                        dst_manifests,
                     );
                     return Ok(true);
                 }
@@ -535,7 +553,7 @@ where
     }
 }
 
-fn manifests_equal(a: &[&Manifest], b: &[&Manifest]) -> bool {
+fn check_manifests_equal(a: &[&Manifest], b: &[&Manifest]) -> anyhow::Result<()> {
     let mut a_runs = HashMap::new();
     for manifest in a {
         for (keyspace_id, keyspace) in &manifest.keyspaces {
@@ -543,7 +561,7 @@ fn manifests_equal(a: &[&Manifest], b: &[&Manifest]) -> bool {
                 for run_manifest in &level.runs {
                     // There are duplicates of this run ID in a.
                     if a_runs.contains_key(&run_manifest.run_id) {
-                        return false;
+                        return Err(anyhow!("left has duplicate run {:?}", run_manifest.run_id));
                     }
 
                     a_runs.insert(run_manifest.run_id, (*keyspace_id, i));
@@ -559,7 +577,7 @@ fn manifests_equal(a: &[&Manifest], b: &[&Manifest]) -> bool {
                 for run_manifest in &level.runs {
                     if found.contains(&run_manifest.run_id) {
                         // There are duplicates of this run ID in b.
-                        return false;
+                        return Err(anyhow!("right has duplicate run {:?}", run_manifest.run_id));
                     }
 
                     if !a_runs
@@ -570,7 +588,7 @@ fn manifests_equal(a: &[&Manifest], b: &[&Manifest]) -> bool {
                         .unwrap_or(false)
                     {
                         // This run isn't in a or it's not in the same (keyspace, level).
-                        return false;
+                        return Err(anyhow!("left is missing run {:?}", run_manifest.run_id));
                     }
 
                     found.insert(run_manifest.run_id);
@@ -579,12 +597,27 @@ fn manifests_equal(a: &[&Manifest], b: &[&Manifest]) -> bool {
         }
     }
 
-    a_runs.len() == found.len()
+    if a_runs.len() != found.len() {
+        for run_id in a_runs.keys() {
+            if !found.contains(run_id) {
+                return Err(anyhow!("right is missing run {:?}", run_id));
+            }
+        }
+        return Err(anyhow!("right is missing run"));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::collections::BTreeSet;
+    use std::collections::HashMap;
+
+    use byteorder::BigEndian;
+    use byteorder::ByteOrder;
+    use rand::RngCore;
 
     use crate::meta::MetaReader;
     use crate::obsidian::Obsidian;
@@ -722,6 +755,85 @@ mod tests {
             .latest_snapshot(kvs.iter().map(|(k, _)| (keyspace_id, k.to_vec())).collect())
             .await?;
         for (key, value) in &kvs {
+            let actual = obs.frontend.get(ts, &(keyspace_id, key.to_vec())).await?;
+
+            assert_eq!(
+                Some(&value.to_vec()),
+                actual.as_ref().map(|record| &record.value)
+            );
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_split() -> anyhow::Result<()> {
+        let _ = pretty_env_logger::try_init();
+
+        let obs = ObsidianForTest::new(3 /*n_shards*/).await?;
+        let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
+
+        obs.frontend
+            .create_colo_group(
+                keyspace_id.0,
+                vec![], // splits
+            )
+            .await?;
+        obs.frontend.create_keyspace(keyspace_id).await?;
+
+        let mut expected = HashMap::new();
+        let mut writes_done = 0;
+        // We have to do a bunch of writes for there to be enough for a split estimate.
+        for prefix in [0u8, 1u8] {
+            for i in 0..5 {
+                let mut muts = BTreeMap::new();
+                for j in 0..100 {
+                    let mut key = [0u8; 8];
+                    BigEndian::write_u64(&mut key, i * 100 + j);
+                    key[0] = prefix;
+
+                    let mut value = [0u8; 32];
+                    rand::thread_rng().fill_bytes(&mut value);
+
+                    expected.insert(key.to_vec(), value.to_vec());
+                    muts.insert((keyspace_id, key.to_vec()), Mutation::Put(value.to_vec()));
+                    writes_done += 1;
+                    if writes_done % 100 == 0 {
+                        log::debug!("{} writes done", writes_done);
+                    }
+                }
+
+                obs.frontend.write(vec![], muts).await?;
+            }
+        }
+
+        let meta_snapshot = obs.meta.latest_snapshot_().await?;
+        let tablet_ids = meta_snapshot.tablet_ids().await?;
+        let shard_ids = meta_snapshot.shard_ids().await?;
+
+        let target_shard_ids: Vec<_> = shard_ids
+            .iter()
+            .filter(|shard_id| !tablet_ids.iter().any(|tablet_id| tablet_id.0 == **shard_id))
+            .copied()
+            .collect();
+
+        let transfer_id = obs
+            .coordinator
+            .start_split(tablet_ids[0], target_shard_ids[0], target_shard_ids[1])
+            .await?;
+
+        obs.coordinator.wait_transfer(transfer_id).await?;
+
+        // TODO: jank, because we need to wait for the frontend to find out about the routing
+        // change
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        for (key, value) in &expected {
+            let ts = obs
+                .frontend
+                .latest_snapshot(BTreeSet::from([(keyspace_id, key.clone())]))
+                .await?;
+
             let actual = obs.frontend.get(ts, &(keyspace_id, key.to_vec())).await?;
 
             assert_eq!(

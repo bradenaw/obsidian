@@ -5,7 +5,8 @@ use bitmask_enum::bitmask;
 
 use crate::pb;
 
-// State properties shown as [crw] for complete, readable, writable on states that have any.
+// State properties shown as [hcrw] for hydrating, complete, readable, writable on states that have
+// any.
 //
 // In a range transfer, the source tablet starts at Active and the destination starts at None. The
 // goal is to get the source to None and the destination to Active.
@@ -16,20 +17,20 @@ use crate::pb;
 //                   │                           │                            │                   //
 //                   │                           │                            │                   //
 //                   │╴new colo group            v                            │                   //
-//                   │                     ┌───────────┐                      │                   //
-//                   │                     │ Hydrating ├──────────────────────┤                   //
-//                   │                     └─────┬─────┘                      │                   //
+//                   │                  ┌──────────────────┐                  │                   //
+//                   │                  │ Hydrating [h___] ├──────────────────┤                   //
+//                   │                  └────────┬─────────┘                  │                   //
 //                   │                           │                            │                   //
 //                   │                           v                            │                   //
-//                   │                   ┌────────────────┐                   │                   //
-//                   │                   │ Frozen   [cr_] ├───────────────────┘                   //
-//                   │                   └────┬───────────┘                                       //
+//                   │                   ┌─────────────────┐                  │                   //
+//                   │                   │ Frozen   [_cr_] ├──────────────────┘                   //
+//                   │                   └────┬────────────┘                                      //
 //                   │                        │     ^                                             //
 //                   │                        │     │                                             //
 //                   │                        v     │                                             //
-//                   │                   ┌──────────┴─────┐                                       //
-//                   └──────────────────>│ Active   [crw] │                                       //
-//                                       └────────────────┘                                       //
+//                   │                   ┌──────────┴──────┐                                      //
+//                   └──────────────────>│ Active   [_crw] │                                      //
+//                                       └─────────────────┘                                      //
 //
 //
 // And a state machine of the entire transfer, with source(s) on the left and destination(s) on the

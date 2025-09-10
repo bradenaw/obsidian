@@ -1,9 +1,9 @@
+mod data_tablet;
 mod lock_mgr;
 mod meta_tablet;
 mod protected;
 mod sequencer;
 mod shard_meta_tablet;
-mod data_tablet;
 mod tablet_inner;
 
 use std::collections::BTreeMap;
@@ -15,6 +15,7 @@ use crate::lsm::Manifest;
 use crate::obsidian::InternalError;
 use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
+use crate::range::Bound;
 use crate::range::Range;
 use crate::types::Direction;
 use crate::types::HistoryRange;
@@ -88,6 +89,8 @@ pub(crate) trait Tablet {
     async fn wait_mostly_hydrated(&self) -> anyhow::Result<()>;
 
     async fn catchup(&self) -> anyhow::Result<()>;
+
+    async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>>;
 }
 
 #[allow(unused_imports)]

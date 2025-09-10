@@ -307,6 +307,8 @@ where
         }
 
         if level_idx < keyspace.levels.len() - 1 {
+            // If we're compacting anything but the lowest level, then we're compacting into the
+            // next level down.
             let intersecting_runs = keyspace.levels[level_idx + 1].range(run.range());
 
             let into: HashSet<_> = intersecting_runs.iter().map(|run| run.id()).collect();
@@ -339,6 +341,9 @@ where
                 .iter()
                 .position(|other_run| other_run.id() == run.id())?;
 
+            // If we're compacting the lowest level, then there's nothing to compact "into". We
+            // compact the run along with its two neighbors since compaction can shrink a run via
+            // garbage collection of unreachable revisions or by cleaving at a split point.
             let siblings = &keyspace.levels[level_idx].runs[run_idx.saturating_sub(1)
                 ..cmp::min(run_idx + 1, keyspace.levels[level_idx].runs.len())];
 

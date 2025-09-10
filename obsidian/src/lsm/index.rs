@@ -209,6 +209,10 @@ where
 #[derive(Clone)]
 pub(super) struct IndexSnapshot<R> {
     pub(super) keyspaces: HashMap<KeyspaceId, Keyspace<R>>,
+    /// The compactor will split runs at these bounds and schedule compactions of all runs that
+    /// contain any.
+    ///
+    /// That is, "eventually" the LSM will have no runs that cross any of these bounds.
     pub(super) splits: Vec<Bound<Vec<u8>>>,
 }
 

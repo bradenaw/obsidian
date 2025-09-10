@@ -160,6 +160,10 @@ impl<T: Tablet + Send + Sync + ?Sized> Tablet for Arc<T> {
     async fn catchup(&self) -> anyhow::Result<()> {
         T::catchup(self).await
     }
+
+    async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
+        T::find_split(self).await
+    }
 }
 
 struct TestShards<S, M> {
@@ -506,6 +510,10 @@ impl Tablet for Box<dyn Tablet + Send + Sync> {
 
     async fn catchup(&self) -> anyhow::Result<()> {
         self.deref().catchup().await
+    }
+
+    async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
+        self.deref().find_split().await
     }
 }
 

@@ -20,6 +20,7 @@ pub(crate) use bytes::encode;
 pub(crate) use bytes::hexlify;
 pub(crate) use bytes::longest_shared_prefix;
 pub(crate) use bytes::longest_shared_prefix_len;
+pub(crate) use bytes::shortest_between;
 pub(crate) use bytes::Decode;
 pub(crate) use bytes::Encode;
 pub(crate) use futures::bounded_unordered_for_each;

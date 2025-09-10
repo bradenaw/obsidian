@@ -12,6 +12,7 @@ use crate::obsidian::InternalError;
 use crate::obsidian::TabletId;
 use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
+use crate::range::Bound;
 use crate::range::Range;
 use crate::storage::Storage;
 use crate::tablet::protected::ProtectedLsm;
@@ -168,5 +169,9 @@ where
 
     async fn catchup(&self) -> anyhow::Result<()> {
         Err(anyhow!("MetaTablet::catchup not allowed").into())
+    }
+
+    async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
+        Err(anyhow!("MetaTablet::find_split not allowed").into())
     }
 }

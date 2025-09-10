@@ -46,8 +46,8 @@ pub(super) struct Run<R> {
     // in that block, and the value is the file offset of the _end_ of the block.
     index: PrefixCompressedKV<Vec<u8>>,
 
-    min_key: Vec<u8>,
-    max_key: Vec<u8>,
+    pub(super) min_key: Vec<u8>,
+    pub(super) max_key: Vec<u8>,
 }
 
 impl<R: FileReader> Run<R> {
