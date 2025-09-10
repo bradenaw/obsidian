@@ -275,6 +275,11 @@ impl<K: Key> Range<K> {
         }
     }
 
+    pub fn intersects<K2: Key>(&self, other: &Range<K2>) -> bool {
+        std::cmp::max(self.lower.borrow(), other.lower.borrow())
+            < std::cmp::min(self.upper.borrow(), other.upper.borrow())
+    }
+
     pub fn split(&self, b: &Bound<K>) -> (Range<K>, Range<K>) {
         (
             Range {

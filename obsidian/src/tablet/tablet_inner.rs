@@ -1306,8 +1306,13 @@ where
         let mut preloader = Preloader::new(Arc::clone(storage));
         let mut loaded = HashSet::new();
 
-        for i in 0.. {
+        let mut rounds_with_completed = 0;
+
+        loop {
             let mut run_ids_seen = HashSet::new();
+            // True if there aren't partially-overlapping runs, so that once we do preloader.load()
+            // we have all of the data we were aware of.
+            let mut complete = true;
 
             let done_after_round = matches!(
                 *self
@@ -1337,6 +1342,9 @@ where
                             if !self.range.contains_range(&run_manifest.range) {
                                 // If the run partially overlaps, compaction at the source will
                                 // eventually make it not.
+                                if self.range.intersects(&run_manifest.range) {
+                                    complete = false;
+                                }
                                 continue;
                             }
 
@@ -1363,22 +1371,24 @@ where
 
             preloader.load().await?;
 
-            if i == 3 {
-                self.hydration
-                    .lock()
-                    .unwrap()
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("hydration cancelled"))?
-                    .set_state
-                    .send_modify(|value| {
-                        if matches!(value, HydrationState::Started) {
-                            *value = HydrationState::Mostly;
-                        }
-                    });
+            if complete {
+                rounds_with_completed += 1;
+                if rounds_with_completed == 3 {
+                    self.hydration
+                        .lock()
+                        .unwrap()
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("hydration cancelled"))?
+                        .set_state
+                        .send_modify(|value| {
+                            if matches!(value, HydrationState::Started) {
+                                *value = HydrationState::Mostly;
+                            }
+                        });
+                }
             }
-            if i >= 3 {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
         // TODO: Need to block compactions and only enable after we transition.
