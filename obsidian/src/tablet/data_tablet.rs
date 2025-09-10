@@ -165,7 +165,9 @@ impl<S: Storage + Send + Sync + 'static> DataTablet<S> {
             tablet_id,
             colo_group_id,
             range,
-            ProtectedLsm::new(tablet_id, lsm, TabletState::None),
+            // Start out in Defunct because it has no permissions to do anything and we don't
+            // actually know what we should be allowed to do until the meta sync finishes.
+            ProtectedLsm::new(tablet_id, lsm, TabletState::Defunct),
             prepare_sender.clone(),
             commit_sender.clone(),
         ));

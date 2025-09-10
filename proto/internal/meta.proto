@@ -21,7 +21,7 @@ message TabletMetadata {
 
 enum TabletState {
     TABLET_STATE_UNKNOWN = 0;
-    TABLET_STATE_NONE = 1;
+    TABLET_STATE_DEFUNCT = 1;
     TABLET_STATE_HYDRATING = 2;
     TABLET_STATE_ACTIVE = 3;
     TABLET_STATE_FROZEN = 4;

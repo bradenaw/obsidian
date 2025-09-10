@@ -8,28 +8,26 @@ use crate::pb;
 // State properties shown as [hcrw] for hydrating, complete, readable, writable on states that have
 // any.
 //
-// In a range transfer, the source tablet starts at Active and the destination starts at None. The
-// goal is to get the source to None and the destination to Active.
+// In a range transfer, the source tablet starts at Active and the destination starts at Hydrating.
+// The goal is to get the source to Defunct and the destination to Active.
 //
-//                                           ┌──────┐                                             //
-//                   ┌───────────────────────┤ None │<────────────────────────┐                   //
-//                   │                       └───┬──┘                         │                   //
-//                   │                           │                            │                   //
-//                   │                           │                            │                   //
-//                   │╴new colo group            v                            │                   //
-//                   │                  ┌──────────────────┐                  │                   //
-//                   │                  │ Hydrating [h___] ├──────────────────┤                   //
-//                   │                  └────────┬─────────┘                  │                   //
-//                   │                           │                            │                   //
-//                   │                           v                            │                   //
-//                   │                   ┌─────────────────┐                  │                   //
-//                   │                   │ Frozen   [_cr_] ├──────────────────┘                   //
-//                   │                   └────┬────────────┘                                      //
-//                   │                        │     ^                                             //
-//                   │                        │     │                                             //
-//                   │                        v     │                                             //
-//                   │                   ┌──────────┴──────┐                                      //
-//                   └──────────────────>│ Active   [_crw] │                                      //
+//                                          ┌─────────┐                                           //
+//                                          │ Defunct │<──────────────────────┐                   //
+//                                          └────┬────┘                       │                   //
+//                                               │                            │                   //
+//                                               v                            │                   //
+//                                      ┌──────────────────┐                  │                   //
+//       new transfer destination╶─────>│ Hydrating [h___] ├──────────────────┤                   //
+//                                      └────────┬─────────┘                  │                   //
+//                                               │                            │                   //
+//                                               v                            │                   //
+//                                       ┌─────────────────┐                  │                   //
+//                                       │ Frozen   [_cr_] ├──────────────────┘                   //
+//                                       └────┬────────────┘                                      //
+//                                            │     ^                                             //
+//                                            v     │                                             //
+//                                       ┌──────────┴──────┐                                      //
+//           new colo group╶────────────>│ Active   [_crw] │                                      //
 //                                       └─────────────────┘                                      //
 //
 //
@@ -37,14 +35,6 @@ use crate::pb;
 // right. Note that there is always at least one [c**] tablet, and [**w] never exists alongside a
 // separate [c**].
 //
-//            src         dst                                                                     //
-//       ┌─────────────────────┐                                                                  //
-//       │        None         │╴transfer state                                                   //
-//       ├─────────────────────┤                                                                  //
-//   src╶│ Active [crw] │ None │╴dst                                                              //
-//       └──────────┬──────────┘                                                                  //
-//                  │                                                                             //
-//                  v                                                                             //
 //    ┌──────────────────────────┐                                                                //
 //    │           Copy           │                                                                //
 //    ├──────────────────────────┤                                                                //
@@ -52,36 +42,36 @@ use crate::pb;
 //    └─────────────┬────────────┘               │                                                //
 //                  │                            │                                                //
 //                  v                            v                                                //
-//    ┌──────────────────────────┐    ┌─────────────────────┐                                     //
-//    │         Catchup          │    │       Aborted       │                                     //
-//    ├──────────────────────────┤    ├─────────────────────┤                                     //
-//    │ Frozen [cr_] │ Hydrating ├───>│ Active [crw] │ None │                                     //
-//    └─────────────┬────────────┘    └─────────────────────┘                                     //
+//    ┌──────────────────────────┐    ┌────────────────────────┐                                  //
+//    │         Catchup          │    │         Aborted        │                                  //
+//    ├──────────────────────────┤    ├────────────────────────┤                                  //
+//    │ Frozen [cr_] │ Hydrating ├───>│ Active [crw] │ Defunct │                                  //
+//    └─────────────┬────────────┘    └────────────────────────┘                                  //
 //                  │                            ^                                                //
 //                  v                            │                                                //
 //   ┌─────────────────────────────┐             │                                                //
 //   │            Synced           │             │                                                //
 //   ├─────────────────────────────┤             │                                                //
-//   │ Frozen [cr_] │ Frozen [cr_] ├─────────────┤                                                //
-//   └──────────────┬──────────────┘             │                                                //
-//                  │                            │                                                //
-//                  v                            │                                                //
-//        ┌─────────────────────┐                │                                                //
-//        │      Handoff        │                │                                                //
-//        ├─────────────────────┤                │                                                //
-//        │ None │ Frozen [cr_] ├────────────────┘                                                //
-//        └─────────┬───────────┘                                                                 //
+//   │ Frozen [cr_] │ Frozen [cr_] ├─────────────┘                                                //
+//   └──────────────┬──────────────┘                                                              //
 //                  │                                                                             //
 //                  v                                                                             //
-//        ┌─────────────────────┐                                                                 //
-//        │      Complete       │                                                                 //
-//        ├─────────────────────┤                                                                 //
-//        │ None │ Active [crw] │                                                                 //
-//        └─────────────────────┘                                                                 //
+//      ┌────────────────────────┐                                                                //
+//      │         Handoff        │                                                                //
+//      ├────────────────────────┤                                                                //
+//      │ Defunct │ Frozen [cr_] │                                                                //
+//      └───────────┬────────────┘                                                                //
+//                  │                                                                             //
+//                  v                                                                             //
+//      ┌────────────────────────┐                                                                //
+//      │        Complete        │                                                                //
+//      ├────────────────────────┤                                                                //
+//      │ Defunct │ Active [crw] │                                                                //
+//      └────────────────────────┘                                                                //
 //        * Transfer Succeeded! *                                                                 //
 #[derive(Eq, PartialEq, Clone, Copy, Debug)]
 pub(crate) enum TabletState {
-    None,
+    Defunct,
     Hydrating,
     Active,
     Frozen,
@@ -90,7 +80,7 @@ pub(crate) enum TabletState {
 impl From<TabletState> for pb::internal::TabletState {
     fn from(value: TabletState) -> Self {
         match value {
-            TabletState::None => pb::internal::TabletState::None,
+            TabletState::Defunct => pb::internal::TabletState::Defunct,
             TabletState::Hydrating => pb::internal::TabletState::Hydrating,
             TabletState::Active => pb::internal::TabletState::Active,
             TabletState::Frozen => pb::internal::TabletState::Frozen,
@@ -103,7 +93,7 @@ impl TryFrom<pb::internal::TabletState> for TabletState {
 
     fn try_from(value: pb::internal::TabletState) -> Result<Self, Self::Error> {
         Ok(match value {
-            pb::internal::TabletState::None => TabletState::None,
+            pb::internal::TabletState::Defunct => TabletState::Defunct,
             pb::internal::TabletState::Hydrating => TabletState::Hydrating,
             pb::internal::TabletState::Active => TabletState::Active,
             pb::internal::TabletState::Frozen => TabletState::Frozen,
@@ -115,7 +105,7 @@ impl TryFrom<pb::internal::TabletState> for TabletState {
 impl TabletState {
     pub(crate) fn properties(self) -> TabletStateProperties {
         match self {
-            TabletState::None => TabletStateProperties::none(),
+            TabletState::Defunct => TabletStateProperties::none(),
             TabletState::Hydrating => TabletStateProperties::Hydrating,
             TabletState::Active => {
                 TabletStateProperties::Complete
@@ -135,9 +125,9 @@ pub(crate) enum TransferState {
     Copy,     // Active     Hydrating
     Catchup,  // Frozen     Hydrating
     Synced,   // Frozen     Frozen
-    Handoff,  // None       Frozen
-    Complete, // None       Active
-    Aborted,  // Active     None
+    Handoff,  // Defunct    Frozen
+    Complete, // Defunct    Active
+    Aborted,  // Active     Defunct
 }
 
 impl TransferState {
@@ -145,10 +135,10 @@ impl TransferState {
         match self {
             TransferState::Copy => (TabletState::Active, TabletState::Hydrating),
             TransferState::Catchup => (TabletState::Frozen, TabletState::Hydrating),
-            TransferState::Handoff => (TabletState::None, TabletState::Frozen),
+            TransferState::Handoff => (TabletState::Defunct, TabletState::Frozen),
             TransferState::Synced => (TabletState::Frozen, TabletState::Frozen),
-            TransferState::Complete => (TabletState::None, TabletState::Active),
-            TransferState::Aborted => (TabletState::Active, TabletState::None),
+            TransferState::Complete => (TabletState::Defunct, TabletState::Active),
+            TransferState::Aborted => (TabletState::Active, TabletState::Defunct),
         }
     }
 
