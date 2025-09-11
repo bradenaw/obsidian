@@ -7,7 +7,7 @@ use tokio::io::AsyncWrite;
 #[async_trait]
 pub(crate) trait Storage: Clone + Sync + Send + 'static {
     type Writer: AsyncWrite + Send + 'static;
-    type Reader: FileReader + Clone + Sync + Send + 'static;
+    type Reader: FileReader;
 
     async fn put(&self, name: &str) -> anyhow::Result<Self::Writer>;
 
@@ -17,7 +17,7 @@ pub(crate) trait Storage: Clone + Sync + Send + 'static {
 }
 
 #[async_trait]
-pub(crate) trait FileReader {
+pub(crate) trait FileReader: Clone + Sync + Send + 'static {
     /// Fills `buf` with the bytes of the file starting at `offset`. Returns an error if the end of
     /// the file is reached before filling `buf`.
     async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()>;

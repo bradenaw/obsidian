@@ -189,7 +189,7 @@ where
 
 // Wraps read_exact_at in a cache.
 #[derive(Clone)]
-pub(crate) struct GetCacher<R: FileReader + Sync + Clone> {
+pub(crate) struct GetCacher<R: FileReader> {
     inner: R,
     page_size: usize,
     len: u64,
@@ -199,7 +199,10 @@ pub(crate) struct GetCacher<R: FileReader + Sync + Clone> {
 }
 
 #[async_trait]
-impl<R: FileReader + Sync + Clone> FileReader for GetCacher<R> {
+impl<R> FileReader for GetCacher<R>
+where
+    R: FileReader,
+{
     async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
         let end_offset = offset + (buf.len() as u64);
 

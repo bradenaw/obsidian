@@ -642,7 +642,7 @@ struct KeyspaceReader<'a, R>(&'a Keyspace<R>);
 
 impl<'a, R> KeyspaceReader<'a, R>
 where
-    R: FileReader + Clone + Sync + Send,
+    R: FileReader,
 {
     async fn get(
         &self,
@@ -1511,7 +1511,7 @@ mod test {
 
         let keyspace = keyspace_from_diagram(diagram).await?;
 
-        async fn check<R: FileReader + Clone + Send + Sync>(
+        async fn check<R: FileReader>(
             keyspace: &Keyspace<R>,
             key: &[u8],
             range: HistoryRange,
