@@ -89,9 +89,8 @@ impl FileReader for MemFile {
         Ok(buf.copy_from_slice(&content[(offset as usize)..(offset as usize) + buf.len()]))
     }
 
-    async fn len(&self) -> anyhow::Result<u64> {
-        self.content_or()?;
-        Ok(self.len)
+    fn len(&self) -> u64 {
+        self.len
     }
 }
 

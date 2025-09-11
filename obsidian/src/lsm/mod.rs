@@ -1029,8 +1029,8 @@ mod test {
             }
             Ok(buf.copy_from_slice(&self.inner[(offset as usize)..(offset as usize) + buf.len()]))
         }
-        async fn len(&self) -> anyhow::Result<u64> {
-            Ok(self.inner.len() as u64)
+        fn len(&self) -> u64 {
+            self.inner.len() as u64
         }
     }
 

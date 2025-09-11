@@ -22,7 +22,7 @@ pub(crate) trait FileReader: Clone + Sync + Send + 'static {
     /// the file is reached before filling `buf`.
     async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()>;
     /// Returns the length of the file in bytes.
-    async fn len(&self) -> anyhow::Result<u64>;
+    fn len(&self) -> u64;
 }
 
 #[allow(unused_imports)]

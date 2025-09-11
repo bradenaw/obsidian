@@ -78,7 +78,7 @@ impl<S: Storage + Sync> Storage for CachedStorage<S> {
 
     async fn get(&self, name: &str) -> anyhow::Result<Self::Reader> {
         let f = self.inner.get(name).await?;
-        let len = f.len().await?;
+        let len = f.len();
         Ok(GetCacher {
             inner: f,
             len: len,
@@ -261,8 +261,8 @@ where
         Ok(())
     }
 
-    async fn len(&self) -> anyhow::Result<u64> {
-        self.inner.len().await
+    fn len(&self) -> u64 {
+        self.inner.len()
     }
 }
 

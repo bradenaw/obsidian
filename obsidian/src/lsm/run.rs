@@ -71,7 +71,7 @@ impl<R: FileReader> Run<R> {
         };
 
         let min_key = index.get_key(0);
-        let size = reader.len().await? as usize;
+        let size = reader.len() as usize;
 
         Ok(Self {
             reader,
@@ -353,7 +353,7 @@ impl RunTrailer {
     const ENCODED_LEN: usize = 68;
 
     async fn open<R: FileReader>(reader: &R) -> anyhow::Result<Self> {
-        let file_len = reader.len().await?;
+        let file_len = reader.len();
         let mut trailer_offset_buf = [0u8; 4];
         reader
             .read_exact_at(&mut trailer_offset_buf[..], file_len - 4)
