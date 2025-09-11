@@ -1337,42 +1337,41 @@ where
 
                 for (keyspace_id, keyspace_manifest) in &manifest.keyspaces {
                     preloader.add_keyspace(*keyspace_id, keyspace_manifest.levels.len());
-                    for (i, level) in keyspace_manifest.levels.iter().enumerate() {
-                        if i == 0 {
-                            continue;
-                        }
+                }
 
-                        for run_manifest in &level.runs {
-                            if !self.range.contains_range(&run_manifest.range) {
-                                // If the run partially overlaps, compaction at the source will
-                                // eventually make it not.
-                                if self.range.intersects(&run_manifest.range) {
-                                    log::debug!(
-                                        "{:?} hydration not complete because {:?} partially overlaps",
-                                        self.tablet_id,
-                                        run_manifest.run_id,
-                                    );
-                                    complete = false;
-                                }
-                                continue;
-                            }
+                for (_, level, run_manifest) in manifest.runs() {
+                    if level == 0 {
+                        continue;
+                    }
 
-                            run_ids_seen.insert(run_manifest.run_id);
-
-                            if loaded.contains(&run_manifest.run_id) {
-                                continue;
-                            }
-
-                            preloader.queue(run_manifest.run_id, i);
-                            loaded.insert(run_manifest.run_id);
+                    if !self.range.contains_range(&run_manifest.range) {
+                        // If the run partially overlaps, compaction at the source will
+                        // eventually make it not.
+                        if self.range.intersects(&run_manifest.range) {
                             log::debug!(
-                                "{:?} queued {:?} {:?} for hydration",
+                                "{:?} hydration not complete because {:?} partially overlaps",
                                 self.tablet_id,
                                 run_manifest.run_id,
-                                run_manifest.range
                             );
+                            complete = false;
                         }
+                        continue;
                     }
+
+                    run_ids_seen.insert(run_manifest.run_id);
+
+                    if loaded.contains(&run_manifest.run_id) {
+                        continue;
+                    }
+
+                    preloader.queue(run_manifest.run_id, level);
+                    loaded.insert(run_manifest.run_id);
+                    log::debug!(
+                        "{:?} queued {:?} {:?} for hydration",
+                        self.tablet_id,
+                        run_manifest.run_id,
+                        run_manifest.range
+                    );
                 }
             }
 

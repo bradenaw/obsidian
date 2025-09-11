@@ -556,44 +556,34 @@ where
 fn check_manifests_equal(a: &[&Manifest], b: &[&Manifest]) -> anyhow::Result<()> {
     let mut a_runs = HashMap::new();
     for manifest in a {
-        for (keyspace_id, keyspace) in &manifest.keyspaces {
-            for (i, level) in keyspace.levels.iter().enumerate() {
-                for run_manifest in &level.runs {
-                    // There are duplicates of this run ID in a.
-                    if a_runs.contains_key(&run_manifest.run_id) {
-                        return Err(anyhow!("left has duplicate run {:?}", run_manifest.run_id));
-                    }
-
-                    a_runs.insert(run_manifest.run_id, (*keyspace_id, i));
-                }
+        for (keyspace_id, level, run_manifest) in manifest.runs() {
+            // There are duplicates of this run ID in a.
+            if a_runs.contains_key(&run_manifest.run_id) {
+                return Err(anyhow!("left has duplicate run {:?}", run_manifest.run_id));
             }
+
+            a_runs.insert(run_manifest.run_id, (keyspace_id, level));
         }
     }
 
     let mut found = HashSet::new();
     for manifest in b {
-        for (keyspace_id, keyspace) in &manifest.keyspaces {
-            for (i, level) in keyspace.levels.iter().enumerate() {
-                for run_manifest in &level.runs {
-                    if found.contains(&run_manifest.run_id) {
-                        // There are duplicates of this run ID in b.
-                        return Err(anyhow!("right has duplicate run {:?}", run_manifest.run_id));
-                    }
-
-                    if !a_runs
-                        .get(&run_manifest.run_id)
-                        .map(|(a_keyspace_id, a_level)| {
-                            (*keyspace_id, i) == (*a_keyspace_id, *a_level)
-                        })
-                        .unwrap_or(false)
-                    {
-                        // This run isn't in a or it's not in the same (keyspace, level).
-                        return Err(anyhow!("left is missing run {:?}", run_manifest.run_id));
-                    }
-
-                    found.insert(run_manifest.run_id);
-                }
+        for (keyspace_id, level, run_manifest) in manifest.runs() {
+            if found.contains(&run_manifest.run_id) {
+                // There are duplicates of this run ID in b.
+                return Err(anyhow!("right has duplicate run {:?}", run_manifest.run_id));
             }
+
+            if !a_runs
+                .get(&run_manifest.run_id)
+                .map(|(a_keyspace_id, a_level)| (keyspace_id, level) == (*a_keyspace_id, *a_level))
+                .unwrap_or(false)
+            {
+                // This run isn't in a or it's not in the same (keyspace, level).
+                return Err(anyhow!("left is missing run {:?}", run_manifest.run_id));
+            }
+
+            found.insert(run_manifest.run_id);
         }
     }
 

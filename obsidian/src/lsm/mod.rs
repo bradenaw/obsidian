@@ -379,7 +379,7 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
                     None => {
                         maybe_candidate = Some(lower.to_vec());
                         candidate_distance_from_mid = new_candidate_distance_from_mid;
-                    },
+                    }
                 }
             }
             if running_size > total_size * 4 / 5 {
@@ -581,6 +581,22 @@ impl Manifest {
     }
 }
 
+impl Manifest {
+    pub fn runs(&self) -> impl Iterator<Item = (KeyspaceId, usize, &RunManifest)> {
+        self.keyspaces
+            .iter()
+            .map(|(keyspace_id, keyspace)| {
+                keyspace
+                    .levels
+                    .iter()
+                    .enumerate()
+                    .map(move |(i, level)| level.runs.iter().map(move |run| (*keyspace_id, i, run)))
+                    .flatten()
+            })
+            .flatten()
+    }
+}
+
 impl Debug for Manifest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut keyspace_ids: Vec<_> = self.keyspaces.keys().collect();
@@ -593,7 +609,11 @@ impl Debug for Manifest {
             for (i, level) in keyspace.levels.iter().enumerate() {
                 write!(f, "    l{}\n", i)?;
                 for run_manifest in &level.runs {
-                    write!(f, "      {:?} {:?}\n", run_manifest.run_id, run_manifest.range)?;
+                    write!(
+                        f,
+                        "      {:?} {:?}\n",
+                        run_manifest.run_id, run_manifest.range
+                    )?;
                 }
             }
         }
