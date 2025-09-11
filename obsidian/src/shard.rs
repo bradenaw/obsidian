@@ -33,7 +33,7 @@ pub(crate) struct Shard<S, M> {
 
 impl<S, M> Shard<S, M>
 where
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
     M: Meta + Send + Sync + 'static,
 {
     pub(crate) async fn new(
@@ -153,7 +153,7 @@ where
 #[async_trait]
 impl<S, M> crate::obsidian::Shard for Shard<S, M>
 where
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
     M: Meta + Send + Sync + 'static,
 {
     fn id(&self) -> ShardId {
@@ -178,7 +178,7 @@ where
 #[async_trait]
 impl<S, M> crate::obsidian::Shard for Arc<Shard<S, M>>
 where
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
     M: Meta + Send + Sync + 'static,
 {
     fn id(&self) -> ShardId {
@@ -208,7 +208,7 @@ struct ShardInner<S, M> {
 impl<S, M> ShardInner<S, M>
 where
     M: Meta + Send + Sync + 'static,
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
 {
     async fn ensure_tablet(
         &self,

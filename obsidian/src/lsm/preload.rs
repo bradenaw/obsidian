@@ -32,7 +32,7 @@ enum PreloadRun<R> {
 
 impl<S> Preloader<S>
 where
-    S: Storage + Sync + Send + 'static,
+    S: Storage,
 {
     pub fn new(storage: Arc<S>) -> Self {
         Self {

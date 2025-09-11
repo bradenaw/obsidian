@@ -5,9 +5,9 @@ use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 
 #[async_trait]
-pub(crate) trait Storage {
-    type Writer: AsyncWrite + Send;
-    type Reader: FileReader + Clone + Sync + Send;
+pub(crate) trait Storage: Clone + Sync + Send + 'static {
+    type Writer: AsyncWrite + Send + 'static;
+    type Reader: FileReader + Clone + Sync + Send + 'static;
 
     async fn put(&self, name: &str) -> anyhow::Result<Self::Writer>;
 

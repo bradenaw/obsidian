@@ -39,7 +39,7 @@ pub(super) struct ProtectedLsm<S: Storage> {
 
 impl<S> ProtectedLsm<S>
 where
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
 {
     pub(super) fn new(tablet_id: TabletId, lsm: Lsm<S>, initial: TabletState) -> Self {
         let (on_change, changed) = watch::channel(());
@@ -208,7 +208,7 @@ pub(super) struct LsmReadGuard<'a, S: Storage> {
 
 impl<'a, S> LsmRead for LsmReadGuard<'a, S>
 where
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
 {
     async fn get(
         &self,
@@ -259,7 +259,7 @@ pub(super) struct LsmReadWriteGuard<'a, S: Storage> {
 
 impl<'a, S> LsmRead for LsmReadWriteGuard<'a, S>
 where
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
 {
     async fn get(
         &self,
@@ -305,7 +305,7 @@ where
 
 impl<'a, S> LsmReadWrite for LsmReadWriteGuard<'a, S>
 where
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
 {
     async fn write(
         &self,
@@ -328,7 +328,7 @@ pub(super) struct LsmLoadGuard<'a, S: Storage> {
 
 impl<'a, S> LsmLoadGuard<'a, S>
 where
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
 {
     pub async fn load(&self, preloaded: Preloaded<S::Reader>) -> anyhow::Result<()> {
         self.lsm.load(preloaded).await

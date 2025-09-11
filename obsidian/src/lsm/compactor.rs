@@ -43,7 +43,7 @@ where
 
 impl<S> Compactor<S>
 where
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
     S::Reader: 'static,
 {
     pub(super) fn new(
@@ -80,7 +80,7 @@ where
 
 impl<S> CompactorInner<S>
 where
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
     S::Reader: 'static,
 {
     async fn schedule(self: Arc<Self>, concurrency: usize) {

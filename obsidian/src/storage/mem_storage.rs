@@ -12,6 +12,7 @@ use tokio::io::AsyncWrite;
 use crate::storage::FileReader;
 use crate::storage::Storage;
 
+#[derive(Clone)]
 pub(crate) struct MemStorage {
     inner: Arc<Mutex<MemStorageInner>>,
 }

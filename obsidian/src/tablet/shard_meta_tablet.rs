@@ -44,7 +44,7 @@ use crate::util::Background;
 ///    try_commit/try_abort.
 pub(crate) struct ShardMetaTablet<S>
 where
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
 {
     inner: Arc<TabletInner<S>>,
     bg: Background,
@@ -52,7 +52,7 @@ where
 
 impl<S> ShardMetaTablet<S>
 where
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
 {
     pub(crate) async fn new(
         shard_id: ShardId,
@@ -103,7 +103,7 @@ where
 #[async_trait]
 impl<S> Tablet for ShardMetaTablet<S>
 where
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
 {
     async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
         self.inner.get(ts, key).await

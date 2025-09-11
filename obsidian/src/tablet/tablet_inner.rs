@@ -105,7 +105,7 @@ enum HydrationState {
 
 impl<S> TabletInner<S>
 where
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
 {
     pub(super) fn new(
         tablet_id: TabletId,

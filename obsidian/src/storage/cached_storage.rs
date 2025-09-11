@@ -19,7 +19,8 @@ use crate::storage::Storage;
 
 /// CachedStorage wraps another implementation of `Storage`, holding pages in an
 /// approximately-LRU in-memory cache.
-pub(crate) struct CachedStorage<S: Storage + Sync> {
+#[derive(Clone)]
+pub(crate) struct CachedStorage<S: Storage> {
     inner: S,
     page_size: usize,
 
@@ -29,7 +30,7 @@ pub(crate) struct CachedStorage<S: Storage + Sync> {
     cache: Arc<Cache<(Arc<String>, u64), Arc<Vec<u8>>>>,
 }
 
-impl<S: Storage + Sync> CachedStorage<S> {
+impl<S: Storage> CachedStorage<S> {
     /// `page_size` is the size of reads issued to `inner` and the size of the cached pages.
     ///
     /// The cache can hold up to `stripe_size_pages * n_stripes` pages.  Note that there is some

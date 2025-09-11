@@ -40,14 +40,14 @@ use crate::types::Timestamp;
 ///    implements those methods, but always errors.
 pub(crate) struct MetaTablet<S>
 where
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
 {
     inner: TabletInner<S>,
 }
 
 impl<S> MetaTablet<S>
 where
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
 {
     pub(crate) async fn new(lsm: Lsm<S>) -> anyhow::Result<Self> {
         lsm.create_keyspace(KeyspaceId::META).await?;
@@ -73,7 +73,7 @@ where
 #[async_trait]
 impl<S> Tablet for MetaTablet<S>
 where
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
 {
     async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
         self.inner.get(ts, key).await

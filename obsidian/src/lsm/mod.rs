@@ -59,7 +59,7 @@ pub(crate) struct LsmBuilder<S> {
     storage: Arc<S>,
 }
 
-impl<S: Storage + Send + Sync + 'static> LsmBuilder<S> {
+impl<S: Storage> LsmBuilder<S> {
     pub fn new(storage: Arc<S>) -> Self {
         LsmBuilder {
             l0_max_size: 8_000_000,
@@ -129,7 +129,7 @@ pub(crate) struct Lsm<S: Storage> {
     wal_processed: tokio::sync::watch::Receiver<wal::SeqNo>,
 }
 
-impl<S: Storage + Send + Sync + 'static> Lsm<S> {
+impl<S: Storage> Lsm<S> {
     pub async fn new(
         l0_max_size: u64,
         run_size_target: u64,
@@ -1405,7 +1405,7 @@ mod test {
             //expecteds.push(expected);
         }
 
-        async fn check<S: Storage + Send + Sync + 'static>(
+        async fn check<S: Storage>(
             lsm: &Lsm<S>,
             ts: Timestamp,
             keyspace_id: KeyspaceId,

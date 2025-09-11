@@ -42,7 +42,7 @@ pub(crate) struct DataTablet<S: Storage> {
 }
 
 #[async_trait]
-impl<S: Storage + Send + Sync + 'static> Tablet for DataTablet<S> {
+impl<S: Storage> Tablet for DataTablet<S> {
     async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
         self.inner.get(ts, key).await
     }
@@ -146,7 +146,7 @@ impl<S: Storage + Send + Sync + 'static> Tablet for DataTablet<S> {
     }
 }
 
-impl<S: Storage + Send + Sync + 'static> DataTablet<S> {
+impl<S: Storage> DataTablet<S> {
     pub async fn new(
         tablet_id: TabletId,
         colo_group_id: ColoGroupId,

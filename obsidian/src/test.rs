@@ -175,7 +175,7 @@ struct TestShards<S, M> {
 
 impl<S, M> TestShards<S, M>
 where
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
     M: Meta + Send + Sync + 'static,
 {
     fn new(storage: Arc<S>, meta_proxy: Arc<MetaProxy<M>>) -> Self {
@@ -211,7 +211,7 @@ where
 
 impl<S, M> Shards for Arc<TestShards<S, M>>
 where
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
     M: Meta + Send + Sync + 'static,
 {
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Box<dyn Shard + Send + Sync>> {
@@ -233,7 +233,7 @@ where
 
 impl<S, M> Shards for Weak<TestShards<S, M>>
 where
-    S: Storage + Send + Sync + 'static,
+    S: Storage,
     M: Meta + Send + Sync + 'static,
 {
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Box<dyn Shard + Send + Sync>> {
