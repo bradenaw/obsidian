@@ -55,7 +55,7 @@ impl<S: Storage + Sync> CachedStorage<S> {
 #[async_trait]
 impl<S: Storage + Sync> Storage for CachedStorage<S> {
     type Writer = PutCacher<Pin<Box<S::Writer>>>;
-    type R = GetCacher<S::R>;
+    type Reader = GetCacher<S::Reader>;
 
     // Assuming that:
     // 1. Objects are immutable, i.e. put() with an object that exists will fail.
@@ -75,7 +75,7 @@ impl<S: Storage + Sync> Storage for CachedStorage<S> {
         })
     }
 
-    async fn get(&self, name: &str) -> anyhow::Result<Self::R> {
+    async fn get(&self, name: &str) -> anyhow::Result<Self::Reader> {
         let f = self.inner.get(name).await?;
         let len = f.len().await?;
         Ok(GetCacher {

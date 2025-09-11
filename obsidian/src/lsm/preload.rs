@@ -21,7 +21,7 @@ where
     storage: Arc<S>,
 
     semaphore: Arc<tokio::sync::Semaphore>,
-    runs: HashMap<RunId, (usize, PreloadRun<S::R>)>,
+    runs: HashMap<RunId, (usize, PreloadRun<S::Reader>)>,
     keyspaces: HashMap<KeyspaceId, usize>,
 }
 
@@ -79,7 +79,7 @@ where
         self.runs.remove(&run_id);
     }
 
-    pub async fn wait(self) -> anyhow::Result<Preloaded<S::R>> {
+    pub async fn wait(self) -> anyhow::Result<Preloaded<S::Reader>> {
         let mut snapshot = IndexSnapshot {
             keyspaces: HashMap::new(),
             splits: vec![],
@@ -132,7 +132,7 @@ where
         Ok(Preloaded { snapshot })
     }
 
-    async fn fetch(storage: Arc<S>, run_id: RunId) -> anyhow::Result<Run<S::R>> {
+    async fn fetch(storage: Arc<S>, run_id: RunId) -> anyhow::Result<Run<S::Reader>> {
         let file = storage.get(&run_id.to_string()).await?;
         Ok(Run::open(file).await?)
     }

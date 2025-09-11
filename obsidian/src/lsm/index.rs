@@ -69,7 +69,7 @@ where
 
     pub(super) async fn from_manifest<S>(storage: &S, manifest: Manifest) -> anyhow::Result<Self>
     where
-        S: Storage<R = R>,
+        S: Storage<Reader = R>,
     {
         let index_snapshot = IndexSnapshot::from_manifest(storage, manifest).await?;
 
@@ -222,7 +222,7 @@ where
 {
     async fn from_manifest<S>(storage: &S, manifest: Manifest) -> anyhow::Result<Self>
     where
-        S: Storage<R = R>,
+        S: Storage<Reader = R>,
     {
         let mut keyspaces = HashMap::new();
         for (keyspace_id, keyspace_manifest) in manifest.keyspaces {
@@ -261,7 +261,7 @@ where
 {
     async fn from_manifest<S>(storage: &S, manifest: KeyspaceManifest) -> anyhow::Result<Self>
     where
-        S: Storage<R = R>,
+        S: Storage<Reader = R>,
     {
         if !manifest.levels[0].runs.is_empty() {
             return Err(anyhow!("manifest with non-empty l0"));

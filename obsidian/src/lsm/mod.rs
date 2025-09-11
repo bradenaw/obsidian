@@ -121,7 +121,7 @@ pub(crate) struct Lsm<S: Storage> {
     block_size_target: u64,
 
     wal: Arc<wal::Wal<WalEntry>>,
-    index: Arc<Index<S::R>>,
+    index: Arc<Index<S::Reader>>,
     compactor: Compactor<S>,
     storage: Arc<S>,
 
@@ -391,9 +391,9 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
     }
 
     fn keyspace(
-        snapshot: &IndexSnapshot<S::R>,
+        snapshot: &IndexSnapshot<S::Reader>,
         keyspace_id: KeyspaceId,
-    ) -> anyhow::Result<KeyspaceReader<'_, S::R>> {
+    ) -> anyhow::Result<KeyspaceReader<'_, S::Reader>> {
         Ok(KeyspaceReader(
             snapshot
                 .keyspaces
@@ -402,7 +402,7 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         ))
     }
 
-    pub async fn load(&self, preloaded: Preloaded<S::R>) -> anyhow::Result<()> {
+    pub async fn load(&self, preloaded: Preloaded<S::Reader>) -> anyhow::Result<()> {
         self.index.load(preloaded.snapshot)?;
         // We need to flush here otherwise after a crash and restart we'd lose track of the runs,
         // and could erroneously transition to Active with no data.
@@ -429,7 +429,7 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
         l0_max_size: u64,
         wal: &wal::Wal<WalEntry>,
         storage: &S,
-    ) -> anyhow::Result<(Index<S::R>, Option<wal::SeqNo>)> {
+    ) -> anyhow::Result<(Index<S::Reader>, Option<wal::SeqNo>)> {
         let oldest_seqno = wal.oldest_available();
         let mut newest_seqno = None;
         let mut wal_stream = wal.stream(oldest_seqno, false).boxed();
@@ -494,7 +494,7 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
     }
 
     async fn process_wal(
-        index: Arc<Index<S::R>>,
+        index: Arc<Index<S::Reader>>,
         wal: Arc<wal::Wal<WalEntry>>,
         start: wal::SeqNo,
         wal_processed: tokio::sync::watch::Sender<wal::SeqNo>,
@@ -507,7 +507,7 @@ impl<S: Storage + Send + Sync + 'static> Lsm<S> {
     }
 
     async fn process_wal_once(
-        index: &Index<S::R>,
+        index: &Index<S::Reader>,
         wal: &wal::Wal<WalEntry>,
         start: wal::SeqNo,
         wal_processed: tokio::sync::watch::Sender<wal::SeqNo>,

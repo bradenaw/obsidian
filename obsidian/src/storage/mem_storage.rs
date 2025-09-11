@@ -33,7 +33,7 @@ impl MemStorage {
 #[async_trait]
 impl Storage for MemStorage {
     type Writer = MemFileWriter;
-    type R = MemFile;
+    type Reader = MemFile;
 
     async fn put(&self, name: &str) -> anyhow::Result<Self::Writer> {
         Ok(MemFileWriter{
@@ -43,7 +43,7 @@ impl Storage for MemStorage {
         })
     }
 
-    async fn get(&self, name: &str) -> anyhow::Result<Self::R> {
+    async fn get(&self, name: &str) -> anyhow::Result<Self::Reader> {
         let inner = self.inner.lock().unwrap();
         let file_content = inner
             .files

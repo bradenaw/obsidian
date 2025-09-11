@@ -330,7 +330,7 @@ impl<'a, S> LsmLoadGuard<'a, S>
 where
     S: Storage + Send + Sync + 'static,
 {
-    pub async fn load(&self, preloaded: Preloaded<S::R>) -> anyhow::Result<()> {
+    pub async fn load(&self, preloaded: Preloaded<S::Reader>) -> anyhow::Result<()> {
         self.lsm.load(preloaded).await
     }
 }
