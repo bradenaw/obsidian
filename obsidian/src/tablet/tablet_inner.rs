@@ -38,7 +38,6 @@ pub(super) struct TabletInner<S: Storage> {
     pub tablet_id: TabletId,
     pub colo_group_id: ColoGroupId,
     pub range: Range<Vec<u8>>,
-    tablet_meta_range: Range<Vec<u8>>,
 
     pub lsm: ProtectedLsm<S>,
     pub sequencer: Sequencer,
@@ -55,15 +54,10 @@ where
         range: Range<Vec<u8>>,
         lsm: ProtectedLsm<S>,
     ) -> Self {
-        let tablet_meta_range = {
-            let encoded_tablet_id = tablet_id.encode_fixed();
-            Range::prefix(&encoded_tablet_id[..]).to_vec()
-        };
         Self {
             tablet_id,
             colo_group_id,
             range,
-            tablet_meta_range,
             lsm: lsm,
             sequencer: Sequencer::new(),
             lock_mgr: LockMgr::new(1),
