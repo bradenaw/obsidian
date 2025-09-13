@@ -69,7 +69,7 @@ where
 {
     inner: TabletInner<S>,
     meta_synced: Arc<MetaSynced>,
-    shards: Arc<dyn Shards + Sync + Send>,
+    shards: Arc<dyn Shards>,
     waiters: Waiters,
 
     commit_sender: mpsc::Sender<(Txid, Timestamp, BTreeSet<Key>, BTreeSet<Key>)>,
@@ -83,7 +83,7 @@ where
         shard_id: ShardId,
         lsm: Lsm<S>,
         meta_synced: Arc<MetaSynced>,
-        shards: Arc<dyn Shards + Sync + Send>,
+        shards: Arc<dyn Shards>,
     ) -> anyhow::Result<Self> {
         lsm.create_keyspace(KeyspaceId::TX_OUTCOMES).await?;
 

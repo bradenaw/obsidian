@@ -63,7 +63,7 @@ struct DataTabletInner<S: Storage> {
     inner: TabletInner<S>,
     meta_synced: Arc<MetaSynced>,
     storage: Arc<S>,
-    shards: Arc<dyn Shards + Sync + Send>,
+    shards: Arc<dyn Shards>,
     prepare_sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
 
     // Only Some when the TabletState::Hydrating.
@@ -331,7 +331,7 @@ impl<S: Storage> DataTablet<S> {
         lsm: Lsm<S>,
         meta_synced: Arc<MetaSynced>,
         storage: Arc<S>,
-        shards: Arc<dyn Shards + Sync + Send>,
+        shards: Arc<dyn Shards>,
     ) -> anyhow::Result<Self> {
         let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
 

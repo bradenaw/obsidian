@@ -120,7 +120,7 @@ impl<T: Obsidian + Sync> ObsidianExt for T {
 pub(crate) struct Frontend {
     meta: Box<dyn Meta>,
     meta_synced: MetaSynced,
-    shards: Box<dyn Shards + Send + Sync>,
+    shards: Box<dyn Shards>,
 }
 
 const MAX_CONFLICT_RETRIES: usize = 10;
@@ -388,7 +388,7 @@ impl Frontend {
     pub(crate) fn new(
         meta: Box<dyn Meta>,
         meta_synced: MetaSynced,
-        shards: Box<dyn Shards + Send + Sync>,
+        shards: Box<dyn Shards>,
     ) -> Self {
         Self {
             meta,
@@ -625,7 +625,7 @@ pub(crate) trait Router {
     ) -> anyhow::Result<TabletId>;
 }
 
-pub(crate) trait Shards {
+pub(crate) trait Shards: Send + Sync {
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Box<dyn Shard + Sync + Send>>;
 
     fn shards(&self) -> Vec<Box<dyn Shard + Sync + Send>>;

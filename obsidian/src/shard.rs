@@ -40,7 +40,7 @@ where
         shard_id: ShardId,
         storage: Arc<S>,
         meta: Arc<M>,
-        shards: Arc<dyn Shards + Send + Sync>,
+        shards: Arc<dyn Shards>,
         lsm_builder: LsmBuilder<S>,
     ) -> anyhow::Result<Self> {
         let meta_synced = Arc::new(MetaSynced::new(Arc::clone(&meta)));
@@ -199,7 +199,7 @@ struct ShardInner<S, M> {
     storage: Arc<S>,
     meta: Arc<M>,
     meta_synced: Arc<MetaSynced>,
-    shards: Arc<dyn Shards + Send + Sync>,
+    shards: Arc<dyn Shards>,
     lsm_builder: LsmBuilder<S>,
 
     tablets: ShardedLock<HashMap<TabletId, Arc<dyn Tablet + Send + Sync + 'static>>>,

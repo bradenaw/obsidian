@@ -36,14 +36,14 @@ pub(crate) struct Coordinator<T>(WithBackground<CoordinatorInner<T>>);
 
 struct CoordinatorInner<T> {
     meta: Arc<MetaImpl<T>>,
-    shards: Arc<dyn Shards + Send + Sync>,
+    shards: Arc<dyn Shards>,
 }
 
 impl<T> Coordinator<T>
 where
     T: Tablet + Sync + Send + 'static,
 {
-    pub(crate) fn new(meta: Arc<MetaImpl<T>>, shards: Arc<dyn Shards + Send + Sync>) -> Self {
+    pub(crate) fn new(meta: Arc<MetaImpl<T>>, shards: Arc<dyn Shards>) -> Self {
         // TODO: scan for transfers
         Self(WithBackground::new(Arc::new(CoordinatorInner {
             meta,

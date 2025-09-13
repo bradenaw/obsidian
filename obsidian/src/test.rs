@@ -381,7 +381,7 @@ impl ObsidianForTest {
 
         let coordinator = Coordinator::new(
             Arc::clone(&meta),
-            Arc::new(Arc::clone(&shards)) as Arc<dyn Shards + Send + Sync>,
+            Arc::new(Arc::clone(&shards)) as Arc<dyn Shards>,
         );
 
         for shard_id in shard_ids {
