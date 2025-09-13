@@ -176,7 +176,7 @@ struct TestShards<S, M> {
 impl<S, M> TestShards<S, M>
 where
     S: Storage,
-    M: Meta + Send + Sync + 'static,
+    M: Meta + 'static,
 {
     fn new(storage: Arc<S>, meta_proxy: Arc<MetaProxy<M>>) -> Self {
         Self {
@@ -212,7 +212,7 @@ where
 impl<S, M> Shards for Arc<TestShards<S, M>>
 where
     S: Storage,
-    M: Meta + Send + Sync + 'static,
+    M: Meta + 'static,
 {
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Box<dyn Shard + Send + Sync>> {
         let m = self.m.lock().unwrap();
@@ -234,7 +234,7 @@ where
 impl<S, M> Shards for Weak<TestShards<S, M>>
 where
     S: Storage,
-    M: Meta + Send + Sync + 'static,
+    M: Meta + 'static,
 {
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Box<dyn Shard + Send + Sync>> {
         let shards = Weak::upgrade(self).ok_or_else(|| anyhow!(""))?;
@@ -275,7 +275,7 @@ impl<T> MetaProxy<T> {
 }
 
 #[async_trait]
-impl<T: Meta + Send + Sync> Meta for Arc<MetaProxy<T>> {
+impl<T: Meta> Meta for Arc<MetaProxy<T>> {
     async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
         let inner = self.inner.load();
         if let Some(inner) = inner.deref() {

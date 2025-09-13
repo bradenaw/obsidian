@@ -55,7 +55,7 @@ struct MetaSyncedInner {
 }
 
 impl MetaSynced {
-    pub(crate) fn new<M: Meta + Sync + Send + 'static>(m: M) -> Self {
+    pub(crate) fn new<M: Meta + 'static>(m: M) -> Self {
         let bg = Background::new();
 
         let inner = Arc::new(RwLock::new(MetaSyncedInner {

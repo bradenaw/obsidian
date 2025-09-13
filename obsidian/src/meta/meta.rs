@@ -143,7 +143,7 @@ impl MetaKey {
 }
 
 #[async_trait]
-pub(crate) trait Meta {
+pub(crate) trait Meta: Send + Sync {
     async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()>;
     async fn create_colo_group(
         &self,
@@ -792,7 +792,7 @@ fn ranges_from_splits(splits: Vec<Bound<Vec<u8>>>) -> anyhow::Result<Vec<Range<V
 }
 
 #[async_trait]
-impl<T: Meta + Sync + Send + ?Sized> Meta for Box<T> {
+impl<T: Meta + ?Sized> Meta for Box<T> {
     async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
         T::add_shard(self, shard_id).await
     }
@@ -834,7 +834,7 @@ impl<T: Meta + Sync + Send + ?Sized> Meta for Box<T> {
 }
 
 #[async_trait]
-impl<T: Meta + Sync + Send + ?Sized> Meta for Arc<T> {
+impl<T: Meta + ?Sized> Meta for Arc<T> {
     async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
         T::add_shard(self, shard_id).await
     }

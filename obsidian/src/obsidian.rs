@@ -118,7 +118,7 @@ impl<T: Obsidian + Sync> ObsidianExt for T {
 }
 
 pub(crate) struct Frontend {
-    meta: Box<dyn Meta + Send + Sync>,
+    meta: Box<dyn Meta>,
     meta_synced: MetaSynced,
     shards: Box<dyn Shards + Send + Sync>,
 }
@@ -386,7 +386,7 @@ fn choose_shard<I: Iterator<Item = TabletId>>(iter: I) -> Option<ShardId> {
 
 impl Frontend {
     pub(crate) fn new(
-        meta: Box<dyn Meta + Send + Sync>,
+        meta: Box<dyn Meta>,
         meta_synced: MetaSynced,
         shards: Box<dyn Shards + Send + Sync>,
     ) -> Self {
