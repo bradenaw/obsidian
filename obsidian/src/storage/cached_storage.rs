@@ -54,7 +54,7 @@ impl<S: Storage> CachedStorage<S> {
 }
 
 #[async_trait]
-impl<S: Storage + Sync> Storage for CachedStorage<S> {
+impl<S: Storage> Storage for CachedStorage<S> {
     type Writer = PutCacher<Pin<Box<S::Writer>>>;
     type Reader = GetCacher<S::Reader>;
 
