@@ -3,7 +3,6 @@ use std::collections::BTreeSet;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
-use tokio::sync::mpsc;
 
 use crate::lsm::Lsm;
 use crate::lsm::Manifest;
@@ -52,19 +51,12 @@ where
     pub(crate) async fn new(lsm: Lsm<S>) -> anyhow::Result<Self> {
         lsm.create_keyspace(KeyspaceId::META).await?;
 
-        // These are not ever used because they only happen on 2PC participants, which the meta
-        // tablet never does.
-        let (prepare_sender, _) = mpsc::channel(1);
-        let (commit_sender, _) = mpsc::channel(1);
-
         Ok(Self {
             inner: TabletInner::new(
                 TabletId::META,
                 ColoGroupId::META,
                 Range::all(),
                 ProtectedLsm::new(TabletId::META, lsm, TabletState::Active),
-                prepare_sender,
-                commit_sender,
             ),
         })
     }
