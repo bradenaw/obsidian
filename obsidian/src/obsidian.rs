@@ -626,9 +626,9 @@ pub(crate) trait Router {
 }
 
 pub(crate) trait Shards: Send + Sync {
-    fn shard(&self, shard_id: ShardId) -> anyhow::Result<Box<dyn Shard + Sync + Send>>;
+    fn shard(&self, shard_id: ShardId) -> anyhow::Result<Box<dyn Shard>>;
 
-    fn shards(&self) -> Vec<Box<dyn Shard + Sync + Send>>;
+    fn shards(&self) -> Vec<Box<dyn Shard>>;
 
     fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet>> {
         self.shard(tablet_id.0)?.tablet(tablet_id)
@@ -636,7 +636,7 @@ pub(crate) trait Shards: Send + Sync {
 }
 
 #[async_trait]
-pub(crate) trait Shard {
+pub(crate) trait Shard: Send + Sync {
     fn id(&self) -> ShardId;
 
     fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet>>;

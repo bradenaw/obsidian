@@ -214,7 +214,7 @@ where
     S: Storage,
     M: Meta + 'static,
 {
-    fn shard(&self, shard_id: ShardId) -> anyhow::Result<Box<dyn Shard + Send + Sync>> {
+    fn shard(&self, shard_id: ShardId) -> anyhow::Result<Box<dyn Shard>> {
         let m = self.m.lock().unwrap();
         let shard_arc = m
             .get(&shard_id)
@@ -223,10 +223,10 @@ where
         Ok(Box::new(shard_arc.clone()))
     }
 
-    fn shards(&self) -> Vec<Box<dyn Shard + Sync + Send>> {
+    fn shards(&self) -> Vec<Box<dyn Shard>> {
         let m = self.m.lock().unwrap();
         m.values()
-            .map(|shard| -> Box<dyn Shard + Sync + Send> { Box::new(shard.clone()) })
+            .map(|shard| -> Box<dyn Shard> { Box::new(shard.clone()) })
             .collect()
     }
 }
@@ -236,7 +236,7 @@ where
     S: Storage,
     M: Meta + 'static,
 {
-    fn shard(&self, shard_id: ShardId) -> anyhow::Result<Box<dyn Shard + Send + Sync>> {
+    fn shard(&self, shard_id: ShardId) -> anyhow::Result<Box<dyn Shard>> {
         let shards = Weak::upgrade(self).ok_or_else(|| anyhow!(""))?;
         let m = shards.m.lock().unwrap();
         let shard_arc = m
@@ -246,14 +246,14 @@ where
         Ok(Box::new(shard_arc.clone()))
     }
 
-    fn shards(&self) -> Vec<Box<dyn Shard + Sync + Send>> {
+    fn shards(&self) -> Vec<Box<dyn Shard>> {
         let shards = match Weak::upgrade(self) {
             Some(shards) => shards,
             None => return vec![],
         };
         let m = shards.m.lock().unwrap();
         m.values()
-            .map(|shard| -> Box<dyn Shard + Sync + Send> { Box::new(shard.clone()) })
+            .map(|shard| -> Box<dyn Shard> { Box::new(shard.clone()) })
             .collect()
     }
 }
