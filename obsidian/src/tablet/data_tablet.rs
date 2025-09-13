@@ -413,6 +413,9 @@ where
                             MetaState::Stable(TabletState::Active),
                         ) {
                             for keyspace_id in snapshot.keyspace_ids().await? {
+                                if keyspace_id.0 != self.inner.colo_group_id {
+                                    continue;
+                                }
                                 self.inner.create_keyspace(keyspace_id).await?;
                             }
                         }
@@ -421,6 +424,10 @@ where
                         for meta_key in meta_keys {
                             match meta_key {
                                 MetaKey::Keyspace(keyspace_id) => {
+                                    if keyspace_id.0 != self.inner.colo_group_id {
+                                        continue;
+                                    }
+
                                     let tablet_metadata =
                                         snapshot.tablet_metadata(self.inner.tablet_id).await?;
 
