@@ -234,7 +234,7 @@ mod tests {
         Ok(client)
     });
 
-    async fn spawn_server<O: Obsidian + Send + Sync + 'static>(
+    async fn spawn_server<O: Obsidian + 'static>(
         obs: O,
     ) -> anyhow::Result<ObsidianClientServer> {
         let (shutdown, on_shutdown) = oneshot::channel::<()>();

@@ -31,7 +31,7 @@ impl<O> FrontendServer<O> {
 }
 
 #[async_trait]
-impl<O: Obsidian + Send + Sync + 'static> pb::obsidian_server::Obsidian for FrontendServer<O> {
+impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for FrontendServer<O> {
     async fn get(
         &self,
         req: tonic::Request<pb::GetReq>,

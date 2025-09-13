@@ -47,7 +47,7 @@ use crate::util::Retry;
 use crate::util::RetryResult;
 
 #[async_trait]
-pub trait Obsidian {
+pub trait Obsidian: Send + Sync {
     async fn get(&self, ts: Timestamp, key: &Key) -> anyhow::Result<Option<Record>>;
 
     async fn scan_page(
@@ -86,7 +86,7 @@ pub trait ObsidianExt {
     ) -> Box<dyn Stream<Item = anyhow::Result<Record>> + Send + '_>;
 }
 
-impl<T: Obsidian + Sync> ObsidianExt for T {
+impl<T: Obsidian> ObsidianExt for T {
     // TODO: This needs to give access to the underlying cursor in case it gets interrupted between
     // results (e.g. timing out between yielding two results).
     fn scan(

@@ -52,7 +52,7 @@ struct WorkloadAppend<O> {
 // customized for Obsidian.
 //
 // https://github.com/jepsen-io/elle/raw/master/paper/elle.pdf
-impl<O: Obsidian + Sync + Send + 'static> WorkloadAppend<O> {
+impl<O: Obsidian + 'static> WorkloadAppend<O> {
     fn new(obsidian: O) -> Self {
         Self {
             obsidian,
