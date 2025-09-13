@@ -41,7 +41,7 @@ struct CoordinatorInner<T> {
 
 impl<T> Coordinator<T>
 where
-    T: Tablet + Sync + Send + 'static,
+    T: Tablet + 'static,
 {
     pub(crate) fn new(meta: Arc<MetaImpl<T>>, shards: Arc<dyn Shards>) -> Self {
         // TODO: scan for transfers
@@ -254,7 +254,7 @@ where
 
 impl<T> CoordinatorInner<T>
 where
-    T: Tablet + Sync + Send + 'static,
+    T: Tablet + 'static,
 {
     async fn transfer(&self, transfer_id: TransferId) {
         Retry::new()

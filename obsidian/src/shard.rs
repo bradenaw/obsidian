@@ -45,13 +45,13 @@ where
     ) -> anyhow::Result<Self> {
         let meta_synced = Arc::new(MetaSynced::new(Arc::clone(&meta)));
 
-        let init_tablets: HashMap<TabletId, Arc<dyn Tablet + Send + Sync + 'static>> = {
+        let init_tablets: HashMap<TabletId, Arc<dyn Tablet + 'static>> = {
             let mut init_tablets = HashMap::new();
             if shard_id == TabletId::META.0 {
                 let meta_tablet = MetaTablet::new(lsm_builder.clone().build().await?).await?;
                 init_tablets.insert(
                     TabletId::META,
-                    Arc::new(meta_tablet) as Arc<dyn Tablet + Send + Sync>,
+                    Arc::new(meta_tablet) as Arc<dyn Tablet>,
                 );
             }
 
@@ -63,7 +63,7 @@ where
             ).await?;
             init_tablets.insert(
                 TabletId::shard_meta(shard_id),
-                Arc::new(shard_meta_tablet) as Arc<dyn Tablet + Send + Sync>,
+                Arc::new(shard_meta_tablet) as Arc<dyn Tablet>,
             );
 
             init_tablets
@@ -160,7 +160,7 @@ where
         self.inner.id
     }
 
-    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet + Send + Sync>> {
+    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet>> {
         let tablets = self.inner.tablets.read().unwrap();
         Ok(tablets
             .get(&tablet_id)
@@ -185,7 +185,7 @@ where
         Shard::id(self)
     }
 
-    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet + Send + Sync>> {
+    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet>> {
         Shard::tablet(self, tablet_id)
     }
 
@@ -202,7 +202,7 @@ struct ShardInner<S, M> {
     shards: Arc<dyn Shards>,
     lsm_builder: LsmBuilder<S>,
 
-    tablets: ShardedLock<HashMap<TabletId, Arc<dyn Tablet + Send + Sync + 'static>>>,
+    tablets: ShardedLock<HashMap<TabletId, Arc<dyn Tablet + 'static>>>,
 }
 
 impl<S, M> ShardInner<S, M>

@@ -66,7 +66,7 @@ impl<T: Router> Router for Arc<T> {
 }
 
 #[async_trait]
-impl<T: Tablet + Send + Sync + ?Sized> Tablet for Arc<T> {
+impl<T: Tablet + ?Sized> Tablet for Arc<T> {
     async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
         T::get(self, ts, key).await
     }
@@ -351,8 +351,8 @@ impl<T: Meta> Meta for Arc<MetaProxy<T>> {
 
 pub(crate) struct ObsidianForTest {
     pub frontend: Frontend,
-    pub coordinator: Coordinator<Arc<dyn Tablet + Send + Sync>>,
-    pub meta: Arc<MetaImpl<Arc<dyn Tablet + Send + Sync>>>,
+    pub coordinator: Coordinator<Arc<dyn Tablet>>,
+    pub meta: Arc<MetaImpl<Arc<dyn Tablet>>>,
 }
 
 impl ObsidianForTest {
@@ -405,7 +405,7 @@ impl ObsidianForTest {
 }
 
 #[async_trait]
-impl Tablet for Box<dyn Tablet + Send + Sync> {
+impl Tablet for Box<dyn Tablet> {
     async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
         Ok(self.deref().get(ts, key).await?)
     }

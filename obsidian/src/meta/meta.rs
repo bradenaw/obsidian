@@ -171,7 +171,7 @@ pub(crate) struct MetaImpl<T> {
 }
 
 #[async_trait]
-impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
+impl<T: Tablet> Meta for MetaImpl<T> {
     async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
         let snapshot = self.latest_snapshot_().await?;
 
@@ -341,7 +341,7 @@ impl<T: Tablet + Sync + Send> Meta for MetaImpl<T> {
     }
 }
 
-impl<T: Tablet + Sync + Send> MetaImpl<T> {
+impl<T: Tablet> MetaImpl<T> {
     pub(crate) fn new(tablet: T) -> Self {
         Self {
             tablet,
@@ -542,7 +542,7 @@ impl<'a, T> MetaSnapshot<'a, T> {
 }
 
 #[async_trait]
-impl<'a, T: Tablet + Sync> MetaReader for MetaSnapshot<'a, T> {
+impl<'a, T: Tablet> MetaReader for MetaSnapshot<'a, T> {
     async fn get(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(self
             .tablet

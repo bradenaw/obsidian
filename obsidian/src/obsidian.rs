@@ -630,7 +630,7 @@ pub(crate) trait Shards: Send + Sync {
 
     fn shards(&self) -> Vec<Box<dyn Shard + Sync + Send>>;
 
-    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet + Send + Sync>> {
+    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet>> {
         self.shard(tablet_id.0)?.tablet(tablet_id)
     }
 }
@@ -639,7 +639,7 @@ pub(crate) trait Shards: Send + Sync {
 pub(crate) trait Shard {
     fn id(&self) -> ShardId;
 
-    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet + Send + Sync>>;
+    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet>>;
 
     async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()>;
 }
