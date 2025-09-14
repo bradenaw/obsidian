@@ -13,7 +13,7 @@ use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::meta::SyncType;
 use crate::obsidian::Shards;
-use crate::obsidian::TabletId;
+use crate::tablet::TabletId;
 use crate::range::Range;
 use crate::storage::Storage;
 use crate::tablet::DataTablet;

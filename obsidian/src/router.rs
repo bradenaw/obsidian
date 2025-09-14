@@ -5,7 +5,7 @@ use byteorder::BigEndian;
 use byteorder::ByteOrder;
 
 use crate::obsidian::Router;
-use crate::obsidian::TabletId;
+use crate::tablet::TabletId;
 use crate::range::Bound;
 use crate::range::KeyOrBound;
 use crate::types::ColoGroupId;
@@ -132,7 +132,7 @@ mod tests {
 
     use super::StaticRouter;
     use crate::obsidian::Router;
-    use crate::obsidian::TabletId;
+    use crate::tablet::TabletId;
     use crate::range::Bound;
     use crate::types::ColoGroupId;
     use crate::types::Direction;

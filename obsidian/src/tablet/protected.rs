@@ -14,7 +14,7 @@ use crate::lsm::Preloaded;
 use crate::meta::TabletState;
 use crate::meta::TabletStateProperties;
 use crate::obsidian::InternalError;
-use crate::obsidian::TabletId;
+use crate::tablet::TabletId;
 use crate::range::Bound;
 use crate::range::Range;
 use crate::storage::Storage;

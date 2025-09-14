@@ -17,7 +17,7 @@ use crate::meta::MetaReader;
 use crate::meta::MetaState;
 use crate::meta::TabletState;
 use crate::obsidian::Router;
-use crate::obsidian::TabletId;
+use crate::tablet::TabletId;
 use crate::range::Bound;
 use crate::range::Range;
 use crate::router::StaticRouter;

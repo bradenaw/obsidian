@@ -10,7 +10,7 @@ use futures::Stream;
 
 use crate::lsm::Manifest;
 use crate::obsidian::InternalError;
-use crate::obsidian::TabletId;
+use crate::tablet::TabletId;
 use crate::obsidian::Txid;
 use crate::range::Range;
 use crate::storage::Storage;

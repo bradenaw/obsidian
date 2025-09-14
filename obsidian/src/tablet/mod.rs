@@ -4,6 +4,7 @@ mod meta_tablet;
 mod protected;
 mod sequencer;
 mod shard_meta_tablet;
+mod tablet_id;
 mod tablet_inner;
 
 use std::collections::BTreeMap;
@@ -26,6 +27,7 @@ use crate::types::Precondition;
 use crate::types::Record;
 use crate::types::Revision;
 use crate::types::Timestamp;
+pub(crate) use tablet_id::TabletId;
 
 #[async_trait]
 pub(crate) trait Tablet: Send + Sync {

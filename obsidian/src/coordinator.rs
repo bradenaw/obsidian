@@ -20,7 +20,7 @@ use crate::meta::TransferMetadata;
 use crate::meta::TransferState;
 use crate::meta::Value;
 use crate::obsidian::Shards;
-use crate::obsidian::TabletId;
+use crate::tablet::TabletId;
 use crate::range::Range;
 use crate::range::RangeSet;
 use crate::tablet::Tablet;

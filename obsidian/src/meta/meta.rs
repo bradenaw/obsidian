@@ -16,7 +16,7 @@ use rand::seq::SliceRandom;
 
 use crate::meta::TabletState;
 use crate::meta::TransferState;
-use crate::obsidian::TabletId;
+use crate::tablet::TabletId;
 use crate::pb;
 use crate::range::Bound;
 use crate::range::Range;
