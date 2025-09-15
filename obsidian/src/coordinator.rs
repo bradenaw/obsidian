@@ -363,6 +363,8 @@ where
                     .await?;
             }
             TransferState::Synced => {
+                // TODO: advance destination sequencers
+
                 // No action, we just have to transit this to ensure we add
                 // TabletStateProperties::Complete to the desinations before we remove it from the
                 // sources below.
