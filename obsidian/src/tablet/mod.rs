@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use async_trait::async_trait;
+pub(crate) use tablet_id::TabletId;
 
 use crate::lsm::Manifest;
 use crate::obsidian::InternalError;
@@ -27,7 +28,6 @@ use crate::types::Precondition;
 use crate::types::Record;
 use crate::types::Revision;
 use crate::types::Timestamp;
-pub(crate) use tablet_id::TabletId;
 
 #[async_trait]
 pub(crate) trait Tablet: Send + Sync {

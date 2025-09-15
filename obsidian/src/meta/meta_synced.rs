@@ -17,10 +17,10 @@ use crate::meta::MetaReader;
 use crate::meta::MetaState;
 use crate::meta::TabletState;
 use crate::obsidian::Router;
-use crate::tablet::TabletId;
 use crate::range::Bound;
 use crate::range::Range;
 use crate::router::StaticRouter;
+use crate::tablet::TabletId;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::RevisionValue;
@@ -356,7 +356,10 @@ impl MetaSyncedInner {
         for tablet_id in snapshot.tablet_ids().await? {
             let tablet_metadata = snapshot.tablet_metadata(tablet_id).await?;
 
-            if !matches!(tablet_metadata.state, MetaState::Stable(TabletState::Active)) {
+            if !matches!(
+                tablet_metadata.state,
+                MetaState::Stable(TabletState::Active)
+            ) {
                 continue;
             }
 

@@ -13,13 +13,13 @@ use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::meta::SyncType;
 use crate::obsidian::Shards;
-use crate::tablet::TabletId;
 use crate::range::Range;
 use crate::storage::Storage;
 use crate::tablet::DataTablet;
 use crate::tablet::MetaTablet;
 use crate::tablet::ShardMetaTablet;
 use crate::tablet::Tablet;
+use crate::tablet::TabletId;
 use crate::types::ColoGroupId;
 use crate::types::ShardId;
 use crate::types::Timestamp;
@@ -49,10 +49,7 @@ where
             let mut init_tablets = HashMap::new();
             if shard_id == TabletId::META.0 {
                 let meta_tablet = MetaTablet::new(lsm_builder.clone().build().await?).await?;
-                init_tablets.insert(
-                    TabletId::META,
-                    Arc::new(meta_tablet) as Arc<dyn Tablet>,
-                );
+                init_tablets.insert(TabletId::META, Arc::new(meta_tablet) as Arc<dyn Tablet>);
             }
 
             let shard_meta_tablet = ShardMetaTablet::new(
@@ -60,7 +57,8 @@ where
                 lsm_builder.clone().build().await?,
                 meta_synced.clone(),
                 shards.clone(),
-            ).await?;
+            )
+            .await?;
             init_tablets.insert(
                 TabletId::shard_meta(shard_id),
                 Arc::new(shard_meta_tablet) as Arc<dyn Tablet>,

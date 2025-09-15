@@ -37,7 +37,7 @@ impl Storage for MemStorage {
     type Reader = MemFile;
 
     async fn put(&self, name: &str) -> anyhow::Result<Self::Writer> {
-        Ok(MemFileWriter{
+        Ok(MemFileWriter {
             parent: Arc::clone(&self.inner),
             name: name.to_string(),
             content: Vec::new(),
@@ -123,7 +123,9 @@ impl AsyncWrite for MemFileWriter {
         _cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
         let mut parent = self.parent.lock().unwrap();
-        parent.files.insert(self.name.clone(), Arc::new(self.content.clone()));
+        parent
+            .files
+            .insert(self.name.clone(), Arc::new(self.content.clone()));
         Poll::Ready(Ok(()))
     }
 }

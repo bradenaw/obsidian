@@ -756,14 +756,19 @@ mod tests {
 
         let obs = crate::test::ObsidianForTest::new(2).await?;
 
-        obs.frontend.create_colo_group(
-            ColoGroupId(1),
-            vec![Bound::Before(vec![2]), Bound::Before(vec![3])],
-        )
-        .await?;
+        obs.frontend
+            .create_colo_group(
+                ColoGroupId(1),
+                vec![Bound::Before(vec![2]), Bound::Before(vec![3])],
+            )
+            .await?;
 
-        obs.frontend.create_keyspace(KeyspaceId(ColoGroupId(1), 1)).await?;
-        obs.frontend.create_keyspace(KeyspaceId(ColoGroupId(1), 2)).await?;
+        obs.frontend
+            .create_keyspace(KeyspaceId(ColoGroupId(1), 1))
+            .await?;
+        obs.frontend
+            .create_keyspace(KeyspaceId(ColoGroupId(1), 2))
+            .await?;
 
         let wl = WorkloadAppend::new(obs.frontend);
 

@@ -10,7 +10,6 @@ use futures::Stream;
 
 use crate::lsm::Manifest;
 use crate::obsidian::InternalError;
-use crate::tablet::TabletId;
 use crate::obsidian::Txid;
 use crate::range::Range;
 use crate::storage::Storage;
@@ -20,6 +19,7 @@ use crate::tablet::protected::LsmRead;
 use crate::tablet::protected::LsmReadWrite;
 use crate::tablet::protected::ProtectedLsm;
 use crate::tablet::sequencer::Sequencer;
+use crate::tablet::TabletId;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::HistoryRange;
@@ -400,7 +400,6 @@ where
         }
         Ok(None)
     }
-
 
     // Scans the entirety of `range` by calling scan_page repeatedly.
     pub(super) fn scan_all(

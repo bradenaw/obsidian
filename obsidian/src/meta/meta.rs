@@ -16,11 +16,11 @@ use rand::seq::SliceRandom;
 
 use crate::meta::TabletState;
 use crate::meta::TransferState;
-use crate::tablet::TabletId;
 use crate::pb;
 use crate::range::Bound;
 use crate::range::Range;
 use crate::tablet::Tablet;
+use crate::tablet::TabletId;
 use crate::tuple_encoding::tuple_decode;
 use crate::tuple_encoding::tuple_decode_prefix;
 use crate::tuple_encoding::tuple_encode;

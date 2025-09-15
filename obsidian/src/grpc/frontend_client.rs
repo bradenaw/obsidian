@@ -189,8 +189,8 @@ mod tests {
     use crate::grpc::FrontendServer;
     use crate::obsidian::Obsidian;
     use crate::pb;
-    use crate::test::ObsidianForTest;
     use crate::test::obsidian_test_suite;
+    use crate::test::ObsidianForTest;
     use crate::types::ColoGroupId;
     use crate::types::Key;
     use crate::types::KeyspaceId;
@@ -201,7 +201,8 @@ mod tests {
     async fn test_write() -> anyhow::Result<()> {
         let obs = ObsidianForTest::new(1).await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-        obs.frontend.create_colo_group(keyspace_id.0, vec![] /*splits*/)
+        obs.frontend
+            .create_colo_group(keyspace_id.0, vec![] /*splits*/)
             .await?;
         obs.frontend.create_keyspace(keyspace_id).await?;
 
@@ -234,9 +235,7 @@ mod tests {
         Ok(client)
     });
 
-    async fn spawn_server<O: Obsidian + 'static>(
-        obs: O,
-    ) -> anyhow::Result<ObsidianClientServer> {
+    async fn spawn_server<O: Obsidian + 'static>(obs: O) -> anyhow::Result<ObsidianClientServer> {
         let (shutdown, on_shutdown) = oneshot::channel::<()>();
         let listener = TcpListener::bind("[::1]:0").await?;
         let addr = listener.local_addr()?;
