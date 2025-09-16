@@ -27,16 +27,6 @@ use crate::meta::MetaReader;
 use crate::meta::MetaSynced;
 use crate::tablet::Tablet;
 use crate::tablet::TabletId;
-use crate::types::ColoGroupId;
-use crate::types::Direction;
-use crate::types::Key;
-use crate::types::KeyspaceId;
-use crate::types::Mutation;
-use crate::types::Precondition;
-use crate::types::Record;
-use crate::types::ShardId;
-use crate::types::Timestamp;
-use crate::types::WriteError;
 use crate::util::hexlify;
 use crate::util::sleep_for_retry;
 use crate::util::Decode;
@@ -44,7 +34,17 @@ use crate::util::Encode;
 use crate::util::Retry;
 use crate::util::RetryResult;
 use crate::Bound;
+use crate::ColoGroupId;
+use crate::Direction;
+use crate::Key;
+use crate::KeyspaceId;
+use crate::Mutation;
+use crate::Precondition;
 use crate::Range;
+use crate::Record;
+use crate::ShardId;
+use crate::Timestamp;
+use crate::WriteError;
 
 #[async_trait]
 pub trait Obsidian: Send + Sync {

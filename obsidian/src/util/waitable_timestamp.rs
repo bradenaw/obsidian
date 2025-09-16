@@ -1,8 +1,8 @@
 use std::collections::BinaryHeap;
 use std::sync::RwLock;
 
-use crate::types::Timestamp;
 use crate::util::OrdEqByFirst;
+use crate::Timestamp;
 
 pub(crate) struct WaitableTimestamp {
     inner: RwLock<WaitableTimestampInner>,

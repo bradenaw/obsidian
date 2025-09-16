@@ -5,10 +5,10 @@ use std::collections::HashMap;
 use anyhow::anyhow;
 
 use crate::pb;
-use crate::types::ColoGroupId;
-use crate::types::Key;
-use crate::types::KeyspaceId;
 use crate::util::longest_shared_prefix_len;
+use crate::ColoGroupId;
+use crate::Key;
+use crate::KeyspaceId;
 
 impl From<BTreeSet<Key>> for pb::internal::CompressedKeySet {
     fn from(set: BTreeSet<Key>) -> Self {

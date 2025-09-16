@@ -6,9 +6,9 @@ use std::ops::DerefMut;
 use anyhow::anyhow;
 
 use crate::pb;
-use crate::types::Key;
-use crate::types::KeyspaceId;
-use crate::types::Record;
+use crate::Key;
+use crate::KeyspaceId;
+use crate::Record;
 
 pub(super) fn options_to_get_results(values: Vec<Option<Record>>) -> Vec<pb::GetResult> {
     values

@@ -1,9 +1,9 @@
 use std::cmp::Ordering;
 use std::fmt::Debug;
 
-use crate::types::Key;
-use crate::types::Timestamp;
 use crate::util::hexlify;
+use crate::Key;
+use crate::Timestamp;
 
 #[derive(Eq, PartialEq, Clone)]
 pub struct Revision {

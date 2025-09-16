@@ -31,23 +31,23 @@ use crate::tablet::protected::ProtectedLsm;
 use crate::tablet::tablet_inner::TabletInner;
 use crate::tablet::Tablet;
 use crate::tablet::TabletId;
-use crate::types::ColoGroupId;
-use crate::types::Direction;
-use crate::types::HistoryRange;
-use crate::types::Key;
-use crate::types::KeyspaceId;
-use crate::types::Mutation;
-use crate::types::Precondition;
-use crate::types::Record;
-use crate::types::Revision;
-use crate::types::RevisionValue;
-use crate::types::ShardId;
-use crate::types::Timestamp;
 use crate::util::Decode;
 use crate::util::Retry;
 use crate::util::WithBackground;
 use crate::Bound;
+use crate::ColoGroupId;
+use crate::Direction;
+use crate::HistoryRange;
+use crate::Key;
+use crate::KeyspaceId;
+use crate::Mutation;
+use crate::Precondition;
 use crate::Range;
+use crate::Record;
+use crate::Revision;
+use crate::RevisionValue;
+use crate::ShardId;
+use crate::Timestamp;
 
 const WAIT_ABORT_TIMEOUT: Duration = Duration::from_millis(1_000);
 
@@ -605,9 +605,9 @@ mod tests {
     use super::TxOutcomeRecord;
     use crate::pb;
     use crate::test::assert_roundtrip_pb;
-    use crate::types::ColoGroupId;
-    use crate::types::KeyspaceId;
-    use crate::types::Timestamp;
+    use crate::ColoGroupId;
+    use crate::KeyspaceId;
+    use crate::Timestamp;
 
     #[test]
     fn test_tx_outcome_record_encoding() -> anyhow::Result<()> {

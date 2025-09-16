@@ -24,19 +24,19 @@ use rand::Rng;
 
 use crate::obsidian::Obsidian;
 use crate::obsidian::ObsidianExt;
-use crate::types::ColoGroupId;
-use crate::types::Direction;
-use crate::types::KeyspaceId;
-use crate::types::Mutation;
-use crate::types::Precondition;
-use crate::types::Timestamp;
 use crate::util::encode;
 use crate::util::merge_sorted;
 use crate::util::Decode;
 use crate::util::Encode;
 use crate::util::OrdEqByFirst;
 use crate::Bound;
+use crate::ColoGroupId;
+use crate::Direction;
+use crate::KeyspaceId;
+use crate::Mutation;
+use crate::Precondition;
 use crate::Range;
+use crate::Timestamp;
 
 struct WorkloadAppend<O> {
     obsidian: O,
@@ -746,9 +746,9 @@ mod tests {
     use super::Txid;
     use super::WorkloadAppend;
     use crate::obsidian::Obsidian;
-    use crate::types::ColoGroupId;
-    use crate::types::KeyspaceId;
     use crate::Bound;
+    use crate::ColoGroupId;
+    use crate::KeyspaceId;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_workload_append() -> anyhow::Result<()> {

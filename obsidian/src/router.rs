@@ -6,12 +6,12 @@ use byteorder::ByteOrder;
 
 use crate::obsidian::Router;
 use crate::tablet::TabletId;
-use crate::types::ColoGroupId;
-use crate::types::Direction;
-use crate::types::ShardId;
 use crate::util::hexlify;
 use crate::Bound;
+use crate::ColoGroupId;
+use crate::Direction;
 use crate::KeyOrBound;
+use crate::ShardId;
 
 pub(crate) struct StaticRouter {
     map: HashMap<ColoGroupId, (Vec<Bound<Vec<u8>>>, Vec<TabletId>)>,
@@ -133,11 +133,11 @@ mod tests {
     use super::StaticRouter;
     use crate::obsidian::Router;
     use crate::tablet::TabletId;
-    use crate::types::ColoGroupId;
-    use crate::types::Direction;
-    use crate::types::ShardId;
     use crate::util::encode;
     use crate::Bound;
+    use crate::ColoGroupId;
+    use crate::Direction;
+    use crate::ShardId;
 
     #[test]
     fn test_tablet_id_for_bound() -> anyhow::Result<()> {

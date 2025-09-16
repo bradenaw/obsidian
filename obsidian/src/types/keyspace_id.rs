@@ -4,7 +4,7 @@ use std::fmt::Display;
 use anyhow::anyhow;
 
 use crate::pb;
-use crate::types::ColoGroupId;
+use crate::ColoGroupId;
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
 /// Only the bottom 24 bits of the second item are usable by users.

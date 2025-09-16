@@ -31,16 +31,6 @@ use crate::lsm::run::Run;
 use crate::lsm::util::LsmRevision;
 use crate::storage::FileReader;
 use crate::storage::Storage;
-use crate::types::Direction;
-use crate::types::HistoryRange;
-use crate::types::Key;
-use crate::types::KeyspaceId;
-use crate::types::Mutation;
-use crate::types::Precondition;
-use crate::types::Revision;
-use crate::types::RevisionValue;
-use crate::types::Timestamp;
-use crate::types::WriteError;
 use crate::util::hexlify;
 use crate::util::merge_sorted_streams;
 use crate::util::shortest_between;
@@ -49,7 +39,17 @@ use crate::util::IteratorEither;
 use crate::util::OrdEqByFirst;
 use crate::wal;
 use crate::Bound;
+use crate::Direction;
+use crate::HistoryRange;
+use crate::Key;
+use crate::KeyspaceId;
+use crate::Mutation;
+use crate::Precondition;
 use crate::Range;
+use crate::Revision;
+use crate::RevisionValue;
+use crate::Timestamp;
+use crate::WriteError;
 
 pub(crate) struct LsmBuilder<S> {
     l0_max_size: u64,
@@ -980,21 +980,21 @@ mod test {
     use crate::storage::FileReader;
     use crate::storage::MemStorage;
     use crate::storage::Storage;
-    use crate::types::ColoGroupId;
-    use crate::types::Direction;
-    use crate::types::HistoryRange;
-    use crate::types::KeyspaceId;
-    use crate::types::Mutation;
-    use crate::types::Precondition;
-    use crate::types::Revision;
-    use crate::types::RevisionValue;
-    use crate::types::Timestamp;
-    use crate::types::WriteError;
     use crate::util::binary_search_by_idx;
     use crate::wal;
     use crate::wal::SeqNo;
     use crate::Bound;
+    use crate::ColoGroupId;
+    use crate::Direction;
+    use crate::HistoryRange;
+    use crate::KeyspaceId;
+    use crate::Mutation;
+    use crate::Precondition;
     use crate::Range;
+    use crate::Revision;
+    use crate::RevisionValue;
+    use crate::Timestamp;
+    use crate::WriteError;
 
     #[derive(Clone)]
     pub(super) struct TestFile {

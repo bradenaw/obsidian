@@ -3,9 +3,9 @@ use std::fmt::Debug;
 use anyhow::anyhow;
 
 use crate::pb;
-use crate::types::Key;
-use crate::types::KeyspaceId;
-use crate::types::Timestamp;
+use crate::Key;
+use crate::KeyspaceId;
+use crate::Timestamp;
 
 #[derive(Clone, Debug)]
 pub enum Precondition {

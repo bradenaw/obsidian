@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use crate::types::Timestamp;
+use crate::Timestamp;
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub enum HistoryRange {

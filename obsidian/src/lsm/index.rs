@@ -17,15 +17,15 @@ use crate::lsm::RunId;
 use crate::lsm::RunManifest;
 use crate::storage::FileReader;
 use crate::storage::Storage;
-use crate::types::KeyspaceId;
-use crate::types::RevisionValue;
-use crate::types::Timestamp;
 use crate::util::binary_search_by_idx;
 use crate::wal;
 use crate::Bound;
 use crate::KeyOrBound;
+use crate::KeyspaceId;
 use crate::Range;
 use crate::RangeMap;
+use crate::RevisionValue;
+use crate::Timestamp;
 
 const N_STRIPES: usize = 32;
 

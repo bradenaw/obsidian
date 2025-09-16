@@ -6,9 +6,9 @@ use std::iter::FromIterator;
 use std::iter::IntoIterator;
 use std::ops::Deref;
 
-use crate::types::bound::Key;
-use crate::types::Bound;
-use crate::types::Range;
+use crate::bound::Key;
+use crate::Bound;
+use crate::Range;
 
 #[derive(Clone)]
 pub struct RangeSet<K> {
@@ -352,8 +352,8 @@ mod tests {
     use proptest::prelude::*;
 
     use super::RangeSet;
-    use crate::types::Bound;
-    use crate::types::Range;
+    use crate::Bound;
+    use crate::Range;
 
     fn range_set_intersection(
         a_ranges: Vec<Range<Vec<u8>>>,

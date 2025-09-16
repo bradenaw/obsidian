@@ -22,23 +22,23 @@ use crate::tablet::TabletId;
 use crate::tuple_encoding::tuple_decode;
 use crate::tuple_encoding::tuple_decode_prefix;
 use crate::tuple_encoding::tuple_encode;
-use crate::types::ColoGroupId;
-use crate::types::Direction;
-use crate::types::HistoryRange;
-use crate::types::Key;
-use crate::types::KeyspaceId;
-use crate::types::Mutation;
-use crate::types::Precondition;
-use crate::types::Record;
-use crate::types::Revision;
-use crate::types::RevisionValue;
-use crate::types::ShardId;
-use crate::types::Timestamp;
-use crate::types::TransferId;
 use crate::util::hexlify;
 use crate::util::WaitableTimestamp;
 use crate::Bound;
+use crate::ColoGroupId;
+use crate::Direction;
+use crate::HistoryRange;
+use crate::Key;
+use crate::KeyspaceId;
+use crate::Mutation;
+use crate::Precondition;
 use crate::Range;
+use crate::Record;
+use crate::Revision;
+use crate::RevisionValue;
+use crate::ShardId;
+use crate::Timestamp;
+use crate::TransferId;
 
 #[derive(Clone, Hash, Eq, PartialEq)]
 pub(crate) enum MetaKey {

@@ -2,12 +2,12 @@ use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::iter::IntoIterator;
 
-use crate::types::bound::Key;
-use crate::types::Bound;
-use crate::types::Range;
-use crate::types::RangeByLowerBound;
-use crate::types::RangeSet;
+use crate::bound::Key;
 use crate::util::binary_search_by_idx;
+use crate::Bound;
+use crate::Range;
+use crate::RangeByLowerBound;
+use crate::RangeSet;
 
 #[derive(Clone)]
 pub(crate) struct RangeMap<K, V> {
@@ -157,8 +157,8 @@ pub(crate) fn intersect_in_ranges_by_key<'a, T: 'a, F: Fn(&'a T) -> Range<Vec<u8
 mod tests {
     use super::intersect_in_ranges_by_key;
     use super::RangeMap;
-    use crate::types::Bound;
-    use crate::types::Range;
+    use crate::Bound;
+    use crate::Range;
 
     #[test]
     fn test_intersect_in_ranges_by_key() {

@@ -8,14 +8,14 @@ use anyhow::anyhow;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 
-use crate::types::RevisionValue;
-use crate::types::Timestamp;
 use crate::util::binary_search_by_idx;
 use crate::util::byte_width;
 use crate::util::hexlify;
 use crate::util::longest_shared_prefix;
+use crate::RevisionValue;
+use crate::Timestamp;
 
-// Distinct from crate::types::Revision because the internals of the LSM aren't aware of keyspace
+// Distinct from crate::Revision because the internals of the LSM aren't aware of keyspace
 // IDs. Here the keys are just Vec<u8>.
 #[derive(Clone, Eq, PartialEq)]
 pub(super) struct LsmRevision {

@@ -29,22 +29,22 @@ use crate::storage::MemStorage;
 use crate::storage::Storage;
 use crate::tablet::Tablet;
 use crate::tablet::TabletId;
-use crate::types::ColoGroupId;
-use crate::types::Direction;
-use crate::types::HistoryRange;
-use crate::types::Key;
-use crate::types::KeyspaceId;
-use crate::types::Mutation;
-use crate::types::Precondition;
-use crate::types::Record;
-use crate::types::Revision;
-use crate::types::ShardId;
-use crate::types::Timestamp;
 use crate::util::encode;
 use crate::util::Decode;
 use crate::util::Encode;
 use crate::Bound;
+use crate::ColoGroupId;
+use crate::Direction;
+use crate::HistoryRange;
+use crate::Key;
+use crate::KeyspaceId;
+use crate::Mutation;
+use crate::Precondition;
 use crate::Range;
+use crate::Record;
+use crate::Revision;
+use crate::ShardId;
+use crate::Timestamp;
 
 impl<T: Router> Router for Arc<T> {
     fn tablet_id_for_key(
@@ -556,12 +556,12 @@ macro_rules! obsidian_test_suite {
             use crate::obsidian::Obsidian;
             use crate::Bound;
             use crate::Range;
-            use crate::types::ColoGroupId;
-            use crate::types::Direction;
-            use crate::types::KeyspaceId;
-            use crate::types::Mutation;
-            use crate::types::Record;
-            use crate::types::Timestamp;
+            use crate::ColoGroupId;
+            use crate::Direction;
+            use crate::KeyspaceId;
+            use crate::Mutation;
+            use crate::Record;
+            use crate::Timestamp;
 
             #[tokio::test]
             async fn test_2pc() -> anyhow::Result<()> {

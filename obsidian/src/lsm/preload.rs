@@ -10,9 +10,9 @@ use crate::lsm::Keyspace;
 use crate::lsm::Run;
 use crate::lsm::RunId;
 use crate::storage::Storage;
-use crate::types::KeyspaceId;
 use crate::util::spawn_owned;
 use crate::util::OwnedJoinHandle;
+use crate::KeyspaceId;
 
 pub(crate) struct Preloader<S>
 where

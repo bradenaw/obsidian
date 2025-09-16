@@ -16,18 +16,18 @@ use crate::meta::TabletStateProperties;
 use crate::obsidian::InternalError;
 use crate::storage::Storage;
 use crate::tablet::TabletId;
-use crate::types::Direction;
-use crate::types::HistoryRange;
-use crate::types::Key;
-use crate::types::KeyspaceId;
-use crate::types::Mutation;
-use crate::types::Precondition;
-use crate::types::Revision;
-use crate::types::RevisionValue;
-use crate::types::Timestamp;
-use crate::types::WriteError;
 use crate::Bound;
+use crate::Direction;
+use crate::HistoryRange;
+use crate::Key;
+use crate::KeyspaceId;
+use crate::Mutation;
+use crate::Precondition;
 use crate::Range;
+use crate::Revision;
+use crate::RevisionValue;
+use crate::Timestamp;
+use crate::WriteError;
 
 pub(super) struct ProtectedLsm<S: Storage> {
     tablet_id: TabletId,

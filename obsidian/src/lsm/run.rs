@@ -19,18 +19,18 @@ use crate::lsm::util::LsmRevision;
 use crate::lsm::util::PrefixCompressedKV;
 use crate::lsm::RunId;
 use crate::storage::FileReader;
-use crate::types::ColoGroupId;
-use crate::types::Direction;
-use crate::types::HistoryRange;
-use crate::types::KeyspaceId;
-use crate::types::RevisionValue;
-use crate::types::Timestamp;
 use crate::util::binary_search_by_idx;
 use crate::util::hexlify;
 use crate::util::IteratorEither;
 use crate::Bound;
+use crate::ColoGroupId;
+use crate::Direction;
+use crate::HistoryRange;
 use crate::KeyOrBound;
+use crate::KeyspaceId;
 use crate::Range;
+use crate::RevisionValue;
+use crate::Timestamp;
 
 #[derive(Clone)]
 pub(super) struct Run<R> {
@@ -458,13 +458,13 @@ mod test {
     use crate::lsm::test::TestFile;
     use crate::lsm::util::LsmRevision;
     use crate::lsm::RunId;
-    use crate::types::ColoGroupId;
-    use crate::types::Direction;
-    use crate::types::KeyspaceId;
-    use crate::types::RevisionValue;
-    use crate::types::Timestamp;
     use crate::Bound;
+    use crate::ColoGroupId;
+    use crate::Direction;
+    use crate::KeyspaceId;
     use crate::Range;
+    use crate::RevisionValue;
+    use crate::Timestamp;
 
     #[tokio::test]
     async fn test_run_file() -> anyhow::Result<()> {

@@ -19,17 +19,17 @@ use crate::meta::TabletState;
 use crate::obsidian::Router;
 use crate::router::StaticRouter;
 use crate::tablet::TabletId;
-use crate::types::ColoGroupId;
-use crate::types::Direction;
-use crate::types::RevisionValue;
-use crate::types::Timestamp;
 use crate::util::hexlify;
 use crate::util::wait_all;
 use crate::util::Background;
 use crate::util::Retry;
 use crate::util::WaitableTimestamp;
 use crate::Bound;
+use crate::ColoGroupId;
+use crate::Direction;
 use crate::Range;
+use crate::RevisionValue;
+use crate::Timestamp;
 
 pub(crate) struct MetaSynced {
     bg: Background,

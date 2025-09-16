@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 
 use crate::pb;
-use crate::types::KeyspaceId;
+use crate::KeyspaceId;
 
 pub type Key = (KeyspaceId, Vec<u8>);
 

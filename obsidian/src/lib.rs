@@ -56,8 +56,22 @@ mod pb {
 #[cfg(test)]
 mod test;
 
-pub(crate) use crate::types::Bound;
-pub(crate) use crate::types::KeyOrBound;
-pub(crate) use crate::types::Range;
-pub(crate) use crate::types::RangeMap;
-pub(crate) use crate::types::RangeSet;
+pub(crate) use crate::Bound;
+pub(crate) use crate::ColoGroupId;
+pub(crate) use crate::Direction;
+pub(crate) use crate::HistoryRange;
+pub(crate) use crate::Key;
+pub(crate) use crate::KeyOrBound;
+pub(crate) use crate::KeyspaceId;
+pub(crate) use crate::Mutation;
+pub(crate) use crate::Precondition;
+pub(crate) use crate::Range;
+pub(crate) use crate::RangeMap;
+pub(crate) use crate::RangeSet;
+pub(crate) use crate::Record;
+pub(crate) use crate::Revision;
+pub(crate) use crate::RevisionValue;
+pub(crate) use crate::ShardId;
+pub(crate) use crate::Timestamp;
+pub(crate) use crate::TransferId;
+pub(crate) use crate::WriteError;

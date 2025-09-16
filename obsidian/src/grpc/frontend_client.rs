@@ -7,17 +7,17 @@ use async_trait::async_trait;
 use crate::grpc::util::Pool;
 use crate::obsidian::Obsidian;
 use crate::pb;
-use crate::types::ColoGroupId;
-use crate::types::Direction;
-use crate::types::Key;
-use crate::types::KeyspaceId;
-use crate::types::Mutation;
-use crate::types::Precondition;
-use crate::types::Record;
-use crate::types::Timestamp;
-use crate::types::WriteError;
 use crate::Bound;
+use crate::ColoGroupId;
+use crate::Direction;
+use crate::Key;
+use crate::KeyspaceId;
+use crate::Mutation;
+use crate::Precondition;
 use crate::Range;
+use crate::Record;
+use crate::Timestamp;
+use crate::WriteError;
 
 pub struct FrontendClient {
     inner: Pool<pb::obsidian_client::ObsidianClient<tonic::transport::Channel>>,
@@ -191,11 +191,11 @@ mod tests {
     use crate::pb;
     use crate::test::obsidian_test_suite;
     use crate::test::ObsidianForTest;
-    use crate::types::ColoGroupId;
-    use crate::types::Key;
-    use crate::types::KeyspaceId;
-    use crate::types::Mutation;
-    use crate::types::Record;
+    use crate::ColoGroupId;
+    use crate::Key;
+    use crate::KeyspaceId;
+    use crate::Mutation;
+    use crate::Record;
 
     #[tokio::test]
     async fn test_write() -> anyhow::Result<()> {
@@ -271,20 +271,16 @@ mod tests {
 
     #[async_trait]
     impl Obsidian for ObsidianClientServer {
-        async fn get(
-            &self,
-            ts: crate::types::Timestamp,
-            key: &Key,
-        ) -> anyhow::Result<Option<Record>> {
+        async fn get(&self, ts: crate::Timestamp, key: &Key) -> anyhow::Result<Option<Record>> {
             self.inner.get(ts, key).await
         }
 
         async fn scan_page(
             &self,
-            ts: crate::types::Timestamp,
+            ts: crate::Timestamp,
             keyspace_id: KeyspaceId,
             range: crate::Range<&[u8]>,
-            direction: crate::types::Direction,
+            direction: crate::Direction,
             limit: usize,
         ) -> anyhow::Result<(Vec<Record>, Option<crate::Range<Vec<u8>>>)> {
             self.inner
@@ -292,18 +288,15 @@ mod tests {
                 .await
         }
 
-        async fn latest_snapshot(
-            &self,
-            keys: BTreeSet<Key>,
-        ) -> anyhow::Result<crate::types::Timestamp> {
+        async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> anyhow::Result<crate::Timestamp> {
             self.inner.latest_snapshot(keys).await
         }
 
         async fn write(
             &self,
-            preconds: Vec<crate::types::Precondition>,
-            muts: BTreeMap<Key, crate::types::Mutation>,
-        ) -> Result<crate::types::Timestamp, crate::types::WriteError> {
+            preconds: Vec<crate::Precondition>,
+            muts: BTreeMap<Key, crate::Mutation>,
+        ) -> Result<crate::Timestamp, crate::WriteError> {
             self.inner.write(preconds, muts).await
         }
 

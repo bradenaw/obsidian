@@ -24,14 +24,14 @@ use crate::lsm::Memtable;
 use crate::lsm::Run;
 use crate::lsm::RunId;
 use crate::storage::Storage;
-use crate::types::KeyspaceId;
-use crate::types::RevisionValue;
-use crate::types::Timestamp;
 use crate::util::merge_sorted_streams;
 use crate::util::spawn_owned;
 use crate::util::WithBackground;
 use crate::Bound;
+use crate::KeyspaceId;
 use crate::Range;
+use crate::RevisionValue;
+use crate::Timestamp;
 
 /// The compactor's purpose is to mutate an `Index` to a more efficient physical represesentation,
 /// but with the same logical content, as well as persisting from memory (where new writes go in

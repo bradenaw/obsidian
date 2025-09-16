@@ -13,17 +13,17 @@ use crate::lsm::util::LsmRevision;
 use crate::lsm::util::PackedVec2;
 use crate::lsm::util::PrefixCompressedKV;
 use crate::storage::FileReader;
-use crate::types::Direction;
-use crate::types::HistoryRange;
-use crate::types::RevisionValue;
-use crate::types::Timestamp;
 use crate::util::binary_search_by_idx;
 use crate::util::byte_width;
 use crate::util::hexlify;
 use crate::util::longest_shared_prefix_len;
 use crate::util::IteratorEither;
+use crate::Direction;
+use crate::HistoryRange;
 use crate::KeyOrBound;
 use crate::Range;
+use crate::RevisionValue;
+use crate::Timestamp;
 
 /// A Block is conceptually a BTreeMap<Vec<u8>, BTreeMap<Timestamp, RevisionValue>>, but it is
 /// compactly serialized and can be used as-is without fully deserializing.
@@ -701,12 +701,12 @@ mod test {
     use crate::lsm::test::TestFile;
     use crate::lsm::util::LsmRevision;
     use crate::storage::FileReader;
-    use crate::types::Direction;
-    use crate::types::HistoryRange;
-    use crate::types::RevisionValue;
-    use crate::types::Timestamp;
     use crate::Bound;
+    use crate::Direction;
+    use crate::HistoryRange;
     use crate::Range;
+    use crate::RevisionValue;
+    use crate::Timestamp;
 
     #[tokio::test]
     async fn test_get() -> anyhow::Result<()> {

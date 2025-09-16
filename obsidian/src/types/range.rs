@@ -5,9 +5,9 @@ use std::ops::Deref;
 
 use anyhow::anyhow;
 
+use crate::bound::Key;
 use crate::pb;
-use crate::types::bound::Key;
-use crate::types::Bound;
+use crate::Bound;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct Range<K> {

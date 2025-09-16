@@ -3,9 +3,9 @@ use std::fmt::Debug;
 use anyhow::anyhow;
 
 use crate::pb;
-use crate::types::Key;
-use crate::types::Timestamp;
 use crate::util::hexlify;
+use crate::Key;
+use crate::Timestamp;
 
 #[derive(Eq, PartialEq, Clone)]
 pub struct Record {

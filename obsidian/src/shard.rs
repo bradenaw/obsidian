@@ -19,12 +19,12 @@ use crate::tablet::MetaTablet;
 use crate::tablet::ShardMetaTablet;
 use crate::tablet::Tablet;
 use crate::tablet::TabletId;
-use crate::types::ColoGroupId;
-use crate::types::ShardId;
-use crate::types::Timestamp;
 use crate::util::Background;
 use crate::util::Retry;
+use crate::ColoGroupId;
 use crate::Range;
+use crate::ShardId;
+use crate::Timestamp;
 
 pub(crate) struct Shard<S, M> {
     bg: Background,
