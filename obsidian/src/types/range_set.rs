@@ -6,7 +6,7 @@ use std::iter::FromIterator;
 use std::iter::IntoIterator;
 use std::ops::Deref;
 
-use crate::bound::Key;
+use crate::types::bound::Key;
 use crate::Bound;
 use crate::Range;
 

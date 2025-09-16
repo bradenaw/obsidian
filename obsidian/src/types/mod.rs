@@ -28,7 +28,6 @@ pub(crate) use mutation::Mutation;
 pub(crate) use precondition::Precondition;
 pub(crate) use range::Range;
 pub(crate) use range_map::RangeMap;
-use range_set::RangeByLowerBound;
 pub(crate) use range_set::RangeSet;
 pub(crate) use record::Record;
 pub(crate) use revision::Revision;

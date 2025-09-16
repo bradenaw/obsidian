@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::fmt::Debug;
 use std::ops::Deref;
 
-use crate::bound::Key;
+use crate::types::bound::Key;
 use crate::util::hexlify;
 use crate::Bound;
 

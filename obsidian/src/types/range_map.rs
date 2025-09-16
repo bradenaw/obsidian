@@ -2,11 +2,11 @@ use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::iter::IntoIterator;
 
-use crate::bound::Key;
+use crate::types::bound::Key;
+use crate::types::range_set::RangeByLowerBound;
 use crate::util::binary_search_by_idx;
 use crate::Bound;
 use crate::Range;
-use crate::RangeByLowerBound;
 use crate::RangeSet;
 
 #[derive(Clone)]
