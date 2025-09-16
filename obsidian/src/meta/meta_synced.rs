@@ -17,8 +17,6 @@ use crate::meta::MetaReader;
 use crate::meta::MetaState;
 use crate::meta::TabletState;
 use crate::obsidian::Router;
-use crate::range::Bound;
-use crate::range::Range;
 use crate::router::StaticRouter;
 use crate::tablet::TabletId;
 use crate::types::ColoGroupId;
@@ -30,6 +28,8 @@ use crate::util::wait_all;
 use crate::util::Background;
 use crate::util::Retry;
 use crate::util::WaitableTimestamp;
+use crate::Bound;
+use crate::Range;
 
 pub(crate) struct MetaSynced {
     bg: Background,

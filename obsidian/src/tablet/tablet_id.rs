@@ -3,11 +3,11 @@ use byteorder::BigEndian;
 use byteorder::ByteOrder;
 
 use crate::pb;
-use crate::range::Range;
 use crate::types::ShardId;
 use crate::util::hexlify;
 use crate::util::Decode;
 use crate::util::Encode;
+use crate::Range;
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct TabletId(pub ShardId, pub u64);

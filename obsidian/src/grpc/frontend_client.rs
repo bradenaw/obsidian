@@ -7,8 +7,6 @@ use async_trait::async_trait;
 use crate::grpc::util::Pool;
 use crate::obsidian::Obsidian;
 use crate::pb;
-use crate::range::Bound;
-use crate::range::Range;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::Key;
@@ -18,6 +16,8 @@ use crate::types::Precondition;
 use crate::types::Record;
 use crate::types::Timestamp;
 use crate::types::WriteError;
+use crate::Bound;
+use crate::Range;
 
 pub struct FrontendClient {
     inner: Pool<pb::obsidian_client::ObsidianClient<tonic::transport::Channel>>,
@@ -283,10 +283,10 @@ mod tests {
             &self,
             ts: crate::types::Timestamp,
             keyspace_id: KeyspaceId,
-            range: crate::range::Range<&[u8]>,
+            range: crate::Range<&[u8]>,
             direction: crate::types::Direction,
             limit: usize,
-        ) -> anyhow::Result<(Vec<Record>, Option<crate::range::Range<Vec<u8>>>)> {
+        ) -> anyhow::Result<(Vec<Record>, Option<crate::Range<Vec<u8>>>)> {
             self.inner
                 .scan_page(ts, keyspace_id, range, direction, limit)
                 .await
@@ -310,7 +310,7 @@ mod tests {
         async fn create_colo_group(
             &self,
             colo_group_id: ColoGroupId,
-            initial_splits: Vec<crate::range::Bound<Vec<u8>>>,
+            initial_splits: Vec<crate::Bound<Vec<u8>>>,
         ) -> anyhow::Result<()> {
             self.inner
                 .create_colo_group(colo_group_id, initial_splits)

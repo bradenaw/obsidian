@@ -15,10 +15,6 @@ use crate::lsm::Memtable;
 use crate::lsm::Run;
 use crate::lsm::RunId;
 use crate::lsm::RunManifest;
-use crate::range::Bound;
-use crate::range::KeyOrBound;
-use crate::range::Range;
-use crate::range::RangeMap;
 use crate::storage::FileReader;
 use crate::storage::Storage;
 use crate::types::KeyspaceId;
@@ -26,6 +22,10 @@ use crate::types::RevisionValue;
 use crate::types::Timestamp;
 use crate::util::binary_search_by_idx;
 use crate::wal;
+use crate::Bound;
+use crate::KeyOrBound;
+use crate::Range;
+use crate::RangeMap;
 
 const N_STRIPES: usize = 32;
 

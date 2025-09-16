@@ -8,7 +8,6 @@ mod grpc;
 mod lsm;
 mod meta;
 mod obsidian;
-mod range;
 mod router;
 mod rtest;
 mod shard;
@@ -56,3 +55,9 @@ mod pb {
 
 #[cfg(test)]
 mod test;
+
+pub(crate) use crate::types::Bound;
+pub(crate) use crate::types::KeyOrBound;
+pub(crate) use crate::types::Range;
+pub(crate) use crate::types::RangeMap;
+pub(crate) use crate::types::RangeSet;

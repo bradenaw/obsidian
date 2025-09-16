@@ -191,7 +191,7 @@ impl TryFrom<pb::Range> for Range<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::Range;
-    use crate::range::Bound;
+    use crate::Bound;
 
     #[test]
     fn test_range_contains() {

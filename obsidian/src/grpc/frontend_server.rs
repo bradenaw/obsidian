@@ -10,8 +10,6 @@ use crate::grpc::util::options_to_get_results;
 use crate::grpc::util::required;
 use crate::obsidian::Obsidian;
 use crate::pb;
-use crate::range::Bound;
-use crate::range::Range;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
 use crate::types::Key;
@@ -19,6 +17,8 @@ use crate::types::KeyspaceId;
 use crate::types::Mutation;
 use crate::types::Precondition;
 use crate::types::Timestamp;
+use crate::Bound;
+use crate::Range;
 
 pub struct FrontendServer<O> {
     inner: O,

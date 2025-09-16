@@ -13,7 +13,6 @@ use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::meta::SyncType;
 use crate::obsidian::Shards;
-use crate::range::Range;
 use crate::storage::Storage;
 use crate::tablet::DataTablet;
 use crate::tablet::MetaTablet;
@@ -25,6 +24,7 @@ use crate::types::ShardId;
 use crate::types::Timestamp;
 use crate::util::Background;
 use crate::util::Retry;
+use crate::Range;
 
 pub(crate) struct Shard<S, M> {
     bg: Background,

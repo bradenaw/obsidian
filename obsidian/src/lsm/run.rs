@@ -18,9 +18,6 @@ use crate::lsm::block::BlockBuilder;
 use crate::lsm::util::LsmRevision;
 use crate::lsm::util::PrefixCompressedKV;
 use crate::lsm::RunId;
-use crate::range::Bound;
-use crate::range::KeyOrBound;
-use crate::range::Range;
 use crate::storage::FileReader;
 use crate::types::ColoGroupId;
 use crate::types::Direction;
@@ -31,6 +28,9 @@ use crate::types::Timestamp;
 use crate::util::binary_search_by_idx;
 use crate::util::hexlify;
 use crate::util::IteratorEither;
+use crate::Bound;
+use crate::KeyOrBound;
+use crate::Range;
 
 #[derive(Clone)]
 pub(super) struct Run<R> {
@@ -458,13 +458,13 @@ mod test {
     use crate::lsm::test::TestFile;
     use crate::lsm::util::LsmRevision;
     use crate::lsm::RunId;
-    use crate::range::Bound;
-    use crate::range::Range;
     use crate::types::ColoGroupId;
     use crate::types::Direction;
     use crate::types::KeyspaceId;
     use crate::types::RevisionValue;
     use crate::types::Timestamp;
+    use crate::Bound;
+    use crate::Range;
 
     #[tokio::test]
     async fn test_run_file() -> anyhow::Result<()> {

@@ -10,8 +10,6 @@ use crate::meta::TabletState;
 use crate::obsidian::InternalError;
 use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
-use crate::range::Bound;
-use crate::range::Range;
 use crate::storage::Storage;
 use crate::tablet::protected::ProtectedLsm;
 use crate::tablet::tablet_inner::TabletInner;
@@ -27,6 +25,8 @@ use crate::types::Precondition;
 use crate::types::Record;
 use crate::types::Revision;
 use crate::types::Timestamp;
+use crate::Bound;
+use crate::Range;
 
 /// MetaTablets are special from LsmTablets in two necessary ways:
 ///

@@ -20,8 +20,6 @@ use crate::meta::TransferMetadata;
 use crate::meta::TransferState;
 use crate::meta::Value;
 use crate::obsidian::Shards;
-use crate::range::Range;
-use crate::range::RangeSet;
 use crate::tablet::Tablet;
 use crate::tablet::TabletId;
 use crate::types::Mutation;
@@ -29,6 +27,8 @@ use crate::types::ShardId;
 use crate::types::TransferId;
 use crate::util::Retry;
 use crate::util::WithBackground;
+use crate::Range;
+use crate::RangeSet;
 
 const CATCHUP_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -613,11 +613,11 @@ mod tests {
 
     use crate::meta::MetaReader;
     use crate::obsidian::Obsidian;
-    use crate::range::Bound;
     use crate::test::ObsidianForTest;
     use crate::types::ColoGroupId;
     use crate::types::KeyspaceId;
     use crate::types::Mutation;
+    use crate::Bound;
 
     #[tokio::test]
     async fn test_move() -> anyhow::Result<()> {

@@ -24,8 +24,6 @@ use crate::obsidian::Shard;
 use crate::obsidian::Shards;
 use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
-use crate::range::Bound;
-use crate::range::Range;
 use crate::storage::CachedStorage;
 use crate::storage::MemStorage;
 use crate::storage::Storage;
@@ -45,6 +43,8 @@ use crate::types::Timestamp;
 use crate::util::encode;
 use crate::util::Decode;
 use crate::util::Encode;
+use crate::Bound;
+use crate::Range;
 
 impl<T: Router> Router for Arc<T> {
     fn tablet_id_for_key(
@@ -554,8 +554,8 @@ macro_rules! obsidian_test_suite {
             use std::collections::BTreeMap;
 
             use crate::obsidian::Obsidian;
-            use crate::range::Bound;
-            use crate::range::Range;
+            use crate::Bound;
+            use crate::Range;
             use crate::types::ColoGroupId;
             use crate::types::Direction;
             use crate::types::KeyspaceId;

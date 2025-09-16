@@ -17,8 +17,6 @@ use rand::seq::SliceRandom;
 use crate::meta::TabletState;
 use crate::meta::TransferState;
 use crate::pb;
-use crate::range::Bound;
-use crate::range::Range;
 use crate::tablet::Tablet;
 use crate::tablet::TabletId;
 use crate::tuple_encoding::tuple_decode;
@@ -39,6 +37,8 @@ use crate::types::Timestamp;
 use crate::types::TransferId;
 use crate::util::hexlify;
 use crate::util::WaitableTimestamp;
+use crate::Bound;
+use crate::Range;
 
 #[derive(Clone, Hash, Eq, PartialEq)]
 pub(crate) enum MetaKey {

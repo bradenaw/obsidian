@@ -25,8 +25,6 @@ use thiserror::Error;
 use crate::meta::Meta;
 use crate::meta::MetaReader;
 use crate::meta::MetaSynced;
-use crate::range::Bound;
-use crate::range::Range;
 use crate::tablet::Tablet;
 use crate::tablet::TabletId;
 use crate::types::ColoGroupId;
@@ -45,6 +43,8 @@ use crate::util::Decode;
 use crate::util::Encode;
 use crate::util::Retry;
 use crate::util::RetryResult;
+use crate::Bound;
+use crate::Range;
 
 #[async_trait]
 pub trait Obsidian: Send + Sync {

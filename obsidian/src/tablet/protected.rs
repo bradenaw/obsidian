@@ -14,8 +14,6 @@ use crate::lsm::Preloaded;
 use crate::meta::TabletState;
 use crate::meta::TabletStateProperties;
 use crate::obsidian::InternalError;
-use crate::range::Bound;
-use crate::range::Range;
 use crate::storage::Storage;
 use crate::tablet::TabletId;
 use crate::types::Direction;
@@ -28,6 +26,8 @@ use crate::types::Revision;
 use crate::types::RevisionValue;
 use crate::types::Timestamp;
 use crate::types::WriteError;
+use crate::Bound;
+use crate::Range;
 
 pub(super) struct ProtectedLsm<S: Storage> {
     tablet_id: TabletId,

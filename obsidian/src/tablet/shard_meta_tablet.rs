@@ -25,8 +25,6 @@ use crate::obsidian::Shards;
 use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
 use crate::pb;
-use crate::range::Bound;
-use crate::range::Range;
 use crate::storage::Storage;
 use crate::tablet::protected::LsmReadWrite;
 use crate::tablet::protected::ProtectedLsm;
@@ -48,6 +46,8 @@ use crate::types::Timestamp;
 use crate::util::Decode;
 use crate::util::Retry;
 use crate::util::WithBackground;
+use crate::Bound;
+use crate::Range;
 
 const WAIT_ABORT_TIMEOUT: Duration = Duration::from_millis(1_000);
 

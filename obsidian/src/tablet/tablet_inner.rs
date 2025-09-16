@@ -11,7 +11,6 @@ use futures::Stream;
 use crate::lsm::Manifest;
 use crate::obsidian::InternalError;
 use crate::obsidian::Txid;
-use crate::range::Range;
 use crate::storage::Storage;
 use crate::tablet::lock_mgr::Guard;
 use crate::tablet::lock_mgr::LockMgr;
@@ -33,6 +32,7 @@ use crate::types::RevisionValue;
 use crate::types::Timestamp;
 use crate::util::Decode;
 use crate::util::Encode;
+use crate::Range;
 
 pub(super) struct TabletInner<S: Storage> {
     pub tablet_id: TabletId,

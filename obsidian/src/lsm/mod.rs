@@ -29,8 +29,6 @@ pub(crate) use crate::lsm::preload::Preloaded;
 pub(crate) use crate::lsm::preload::Preloader;
 use crate::lsm::run::Run;
 use crate::lsm::util::LsmRevision;
-use crate::range::Bound;
-use crate::range::Range;
 use crate::storage::FileReader;
 use crate::storage::Storage;
 use crate::types::Direction;
@@ -50,6 +48,8 @@ use crate::util::Background;
 use crate::util::IteratorEither;
 use crate::util::OrdEqByFirst;
 use crate::wal;
+use crate::Bound;
+use crate::Range;
 
 pub(crate) struct LsmBuilder<S> {
     l0_max_size: u64,
@@ -977,8 +977,6 @@ mod test {
     use crate::lsm::run::RunBuilder;
     use crate::lsm::util::LsmRevision;
     use crate::lsm::RunId;
-    use crate::range::Bound;
-    use crate::range::Range;
     use crate::storage::FileReader;
     use crate::storage::MemStorage;
     use crate::storage::Storage;
@@ -995,6 +993,8 @@ mod test {
     use crate::util::binary_search_by_idx;
     use crate::wal;
     use crate::wal::SeqNo;
+    use crate::Bound;
+    use crate::Range;
 
     #[derive(Clone)]
     pub(super) struct TestFile {

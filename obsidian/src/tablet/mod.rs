@@ -17,8 +17,6 @@ use crate::lsm::Manifest;
 use crate::obsidian::InternalError;
 use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
-use crate::range::Bound;
-use crate::range::Range;
 use crate::types::Direction;
 use crate::types::HistoryRange;
 use crate::types::Key;
@@ -28,6 +26,8 @@ use crate::types::Precondition;
 use crate::types::Record;
 use crate::types::Revision;
 use crate::types::Timestamp;
+use crate::Bound;
+use crate::Range;
 
 #[async_trait]
 pub(crate) trait Tablet: Send + Sync {

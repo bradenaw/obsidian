@@ -26,8 +26,6 @@ use crate::obsidian::InternalError;
 use crate::obsidian::Shards;
 use crate::obsidian::TxOutcome;
 use crate::obsidian::Txid;
-use crate::range::Bound;
-use crate::range::Range;
 use crate::storage::Storage;
 use crate::tablet::protected::LsmRead;
 use crate::tablet::protected::LsmReadWrite;
@@ -54,6 +52,8 @@ use crate::util::Decode;
 use crate::util::OwnedJoinHandle;
 use crate::util::Retry;
 use crate::util::WithBackground;
+use crate::Bound;
+use crate::Range;
 
 const MAX_PRECOND_VALUE_LEN: usize = 256;
 
