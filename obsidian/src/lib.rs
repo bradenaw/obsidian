@@ -74,4 +74,5 @@ pub(crate) use crate::types::RevisionValue;
 pub(crate) use crate::types::ShardId;
 pub(crate) use crate::types::Timestamp;
 pub(crate) use crate::types::TransferId;
+pub(crate) use crate::types::Txid;
 pub(crate) use crate::types::WriteError;

@@ -16,7 +16,6 @@ pub(crate) use tablet_id::TabletId;
 use crate::lsm::Manifest;
 use crate::obsidian::InternalError;
 use crate::obsidian::TxOutcome;
-use crate::obsidian::Txid;
 use crate::Bound;
 use crate::Direction;
 use crate::HistoryRange;
@@ -28,6 +27,7 @@ use crate::Range;
 use crate::Record;
 use crate::Revision;
 use crate::Timestamp;
+use crate::Txid;
 
 #[async_trait]
 pub(crate) trait Tablet: Send + Sync {

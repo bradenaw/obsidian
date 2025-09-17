@@ -7,13 +7,10 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
-use std::time::SystemTime;
 
 use anyhow::anyhow;
 use async_stream::try_stream;
 use async_trait::async_trait;
-use byteorder::BigEndian;
-use byteorder::ByteOrder;
 use futures::future;
 use futures::stream::FuturesUnordered;
 use futures::Stream;
@@ -27,10 +24,7 @@ use crate::meta::MetaReader;
 use crate::meta::MetaSynced;
 use crate::tablet::Tablet;
 use crate::tablet::TabletId;
-use crate::util::hexlify;
 use crate::util::sleep_for_retry;
-use crate::util::Decode;
-use crate::util::Encode;
 use crate::util::Retry;
 use crate::util::RetryResult;
 use crate::Bound;
@@ -44,6 +38,7 @@ use crate::Range;
 use crate::Record;
 use crate::ShardId;
 use crate::Timestamp;
+use crate::Txid;
 use crate::WriteError;
 
 #[async_trait]
@@ -552,93 +547,6 @@ pub(crate) trait Shard: Send + Sync {
     fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet>>;
 
     async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()>;
-}
-
-#[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
-pub(crate) struct Txid {
-    ts: u64,
-    rand: [u8; 16],
-    owner: TabletId,
-}
-
-impl Txid {
-    pub const ENCODED_LEN: usize = 36;
-
-    pub fn new(owner: TabletId) -> Self {
-        Txid {
-            ts: SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos() as u64,
-            rand: rand::random(),
-            owner,
-        }
-    }
-
-    pub fn next(mut self) -> Self {
-        self.rand = rand::random();
-        self.ts -= 1;
-        return self;
-    }
-
-    pub fn can_preempt(&self, other: &Txid) -> bool {
-        self < other
-    }
-
-    pub fn owner(&self) -> TabletId {
-        self.owner
-    }
-
-    pub(crate) fn encode_fixed(&self) -> [u8; Self::ENCODED_LEN] {
-        // Encode with tablet ID first so that they're routed properly as a part of TABLET_META
-        // when used as a key.
-        let mut out = [0u8; Self::ENCODED_LEN];
-        BigEndian::write_u32(&mut out[0..4], self.owner.0 .0);
-        BigEndian::write_u64(&mut out[4..12], self.owner.1);
-        BigEndian::write_u64(&mut out[12..20], self.ts);
-        out[20..36].copy_from_slice(&self.rand[..]);
-        out
-    }
-}
-
-impl Encode for Txid {
-    fn encoded_size_estimate(&self) -> usize {
-        Self::ENCODED_LEN
-    }
-
-    fn encode(&self, w: &mut Vec<u8>) {
-        w.extend_from_slice(&self.encode_fixed()[..]);
-    }
-}
-
-impl Decode for Txid {
-    fn decode(value: &[u8]) -> anyhow::Result<Self> {
-        if value.len() != Txid::ENCODED_LEN {
-            anyhow::bail!("txid not {} bytes", Txid::ENCODED_LEN);
-        }
-        let owner = TabletId(
-            ShardId(BigEndian::read_u32(&value[0..4])),
-            BigEndian::read_u64(&value[4..12]),
-        );
-        let ts = BigEndian::read_u64(&value[12..20]);
-        let mut rand = [0u8; 16];
-        rand.copy_from_slice(&value[20..36]);
-
-        Ok(Self { ts, rand, owner })
-    }
-}
-
-impl Debug for Txid {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "tx:{}/{}/{}/{}",
-            self.ts,
-            hexlify(&self.rand),
-            self.owner.0 .0,
-            self.owner.1
-        )
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
