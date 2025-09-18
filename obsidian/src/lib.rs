@@ -60,6 +60,7 @@ pub(crate) use crate::types::Bound;
 pub(crate) use crate::types::ColoGroupId;
 pub(crate) use crate::types::Direction;
 pub(crate) use crate::types::HistoryRange;
+pub(crate) use crate::types::InternalError;
 pub(crate) use crate::types::Key;
 pub(crate) use crate::types::KeyOrBound;
 pub(crate) use crate::types::KeyspaceId;

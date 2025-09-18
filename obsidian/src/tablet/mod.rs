@@ -14,10 +14,10 @@ use async_trait::async_trait;
 pub(crate) use tablet_id::TabletId;
 
 use crate::lsm::Manifest;
-use crate::obsidian::InternalError;
 use crate::Bound;
 use crate::Direction;
 use crate::HistoryRange;
+use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
 use crate::Mutation;

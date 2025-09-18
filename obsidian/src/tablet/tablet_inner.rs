@@ -9,7 +9,6 @@ use futures::future;
 use futures::Stream;
 
 use crate::lsm::Manifest;
-use crate::obsidian::InternalError;
 use crate::storage::Storage;
 use crate::tablet::lock_mgr::Guard;
 use crate::tablet::lock_mgr::LockMgr;
@@ -23,6 +22,7 @@ use crate::util::Encode;
 use crate::ColoGroupId;
 use crate::Direction;
 use crate::HistoryRange;
+use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
 use crate::Mutation;

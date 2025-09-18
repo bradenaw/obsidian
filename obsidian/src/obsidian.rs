@@ -2,7 +2,6 @@ use std::cmp;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
-use std::fmt::Debug;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -17,7 +16,6 @@ use futures::Stream;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use rand::seq::SliceRandom;
-use thiserror::Error;
 
 use crate::meta::Meta;
 use crate::meta::MetaReader;
@@ -30,6 +28,7 @@ use crate::util::RetryResult;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
+use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
 use crate::Mutation;
@@ -548,30 +547,6 @@ pub(crate) trait Shard: Send + Sync {
     fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet>>;
 
     async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()>;
-}
-
-#[derive(Error, Debug)]
-pub(crate) enum InternalError {
-    #[error("conflict")]
-    Conflict(Txid),
-    #[error("already committed")]
-    AlreadyCommitted,
-    #[error("already aborted")]
-    AlreadyAborted,
-    #[error("precondition failed")]
-    PreconditionFailed,
-    // Can happen on an attempt at a wait() if Tablet::cleanup_committed_outcomes already
-    // cleaned everything up and removed the TxOutcome.
-    #[error("TxOutcome missing")]
-    TxOutcomeMissing,
-    #[error("tablet not currently readable")]
-    TabletNotReadable(TabletId),
-    #[error("tablet not currently writable")]
-    TabletNotWriteable(TabletId),
-    #[error("tablet not currently hydrating")]
-    TabletNotHydrating(TabletId),
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
 }
 
 #[cfg(test)]
