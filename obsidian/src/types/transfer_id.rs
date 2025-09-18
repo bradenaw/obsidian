@@ -8,7 +8,7 @@ pub(crate) struct TransferId(pub(crate) uuid::Uuid);
 
 impl TransferId {
     pub(crate) fn new() -> Self {
-        Self(uuid::Uuid::new_v4())
+        Self(uuid::Uuid::now_v7())
     }
 }
 
