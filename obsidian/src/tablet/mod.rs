@@ -15,7 +15,6 @@ pub(crate) use tablet_id::TabletId;
 
 use crate::lsm::Manifest;
 use crate::obsidian::InternalError;
-use crate::obsidian::TxOutcome;
 use crate::Bound;
 use crate::Direction;
 use crate::HistoryRange;
@@ -27,6 +26,7 @@ use crate::Range;
 use crate::Record;
 use crate::Revision;
 use crate::Timestamp;
+use crate::TxOutcome;
 use crate::Txid;
 
 #[async_trait]

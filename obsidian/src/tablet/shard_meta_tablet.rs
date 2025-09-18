@@ -22,7 +22,6 @@ use crate::meta::TabletState;
 use crate::obsidian::InternalError;
 use crate::obsidian::Router;
 use crate::obsidian::Shards;
-use crate::obsidian::TxOutcome;
 use crate::pb;
 use crate::storage::Storage;
 use crate::tablet::protected::LsmReadWrite;
@@ -47,6 +46,7 @@ use crate::Revision;
 use crate::RevisionValue;
 use crate::ShardId;
 use crate::Timestamp;
+use crate::TxOutcome;
 use crate::Txid;
 
 const WAIT_ABORT_TIMEOUT: Duration = Duration::from_millis(1_000);

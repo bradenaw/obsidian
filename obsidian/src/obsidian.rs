@@ -38,6 +38,7 @@ use crate::Range;
 use crate::Record;
 use crate::ShardId;
 use crate::Timestamp;
+use crate::TxOutcome;
 use crate::Txid;
 use crate::WriteError;
 
@@ -547,12 +548,6 @@ pub(crate) trait Shard: Send + Sync {
     fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet>>;
 
     async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()>;
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum TxOutcome {
-    Committed(Timestamp),
-    Aborted,
 }
 
 #[derive(Error, Debug)]

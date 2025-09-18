@@ -15,6 +15,7 @@ mod revision;
 mod shard_id;
 mod timestamp;
 mod transfer_id;
+mod tx_outcome;
 mod txid;
 mod write_error;
 
@@ -36,5 +37,6 @@ pub(crate) use revision::RevisionValue;
 pub(crate) use shard_id::ShardId;
 pub(crate) use timestamp::Timestamp;
 pub(crate) use transfer_id::TransferId;
+pub(crate) use tx_outcome::TxOutcome;
 pub(crate) use txid::Txid;
 pub(crate) use write_error::WriteError;

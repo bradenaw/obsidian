@@ -22,7 +22,6 @@ use crate::obsidian::InternalError;
 use crate::obsidian::Router;
 use crate::obsidian::Shard;
 use crate::obsidian::Shards;
-use crate::obsidian::TxOutcome;
 use crate::storage::CachedStorage;
 use crate::storage::MemStorage;
 use crate::storage::Storage;
@@ -44,6 +43,7 @@ use crate::Record;
 use crate::Revision;
 use crate::ShardId;
 use crate::Timestamp;
+use crate::TxOutcome;
 use crate::Txid;
 
 impl<T: Router> Router for Arc<T> {

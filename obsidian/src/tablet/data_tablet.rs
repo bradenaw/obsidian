@@ -24,7 +24,6 @@ use crate::meta::SyncType;
 use crate::meta::TabletState;
 use crate::obsidian::InternalError;
 use crate::obsidian::Shards;
-use crate::obsidian::TxOutcome;
 use crate::storage::Storage;
 use crate::tablet::protected::LsmRead;
 use crate::tablet::protected::LsmReadWrite;
@@ -53,6 +52,7 @@ use crate::Record;
 use crate::Revision;
 use crate::RevisionValue;
 use crate::Timestamp;
+use crate::TxOutcome;
 use crate::Txid;
 
 const MAX_PRECOND_VALUE_LEN: usize = 256;
