@@ -15,7 +15,6 @@ use crate::meta::MetaKey;
 use crate::meta::MetaReader;
 use crate::meta::MetaState;
 use crate::meta::TabletState;
-use crate::frontend::Router;
 use crate::router::StaticRouter;
 use crate::runtime::Meta;
 use crate::util::hexlify;
@@ -146,10 +145,8 @@ impl MetaSynced {
         synced_ts.wait(ts).await?;
         Ok(())
     }
-}
 
-impl Router for MetaSynced {
-    fn tablet_id_for_key(
+    pub(crate) fn tablet_id_for_key(
         &self,
         colo_group_id: ColoGroupId,
         key: &[u8],
@@ -158,7 +155,7 @@ impl Router for MetaSynced {
         return inner.router.tablet_id_for_key(colo_group_id, key);
     }
 
-    fn tablet_id_for_bound(
+    pub(crate) fn tablet_id_for_bound(
         &self,
         colo_group_id: ColoGroupId,
         bound: Bound<&[u8]>,

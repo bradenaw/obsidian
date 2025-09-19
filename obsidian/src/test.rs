@@ -17,7 +17,6 @@ use crate::lsm::Manifest;
 use crate::meta::MetaImpl;
 use crate::meta::MetaSynced;
 use crate::frontend::Frontend;
-use crate::frontend::Router;
 use crate::runtime::Meta;
 use crate::runtime::Shard;
 use crate::runtime::Shards;
@@ -45,25 +44,6 @@ use crate::TabletId;
 use crate::Timestamp;
 use crate::TxOutcome;
 use crate::Txid;
-
-impl<T: Router> Router for Arc<T> {
-    fn tablet_id_for_key(
-        &self,
-        colo_group_id: ColoGroupId,
-        key: &[u8],
-    ) -> anyhow::Result<TabletId> {
-        T::tablet_id_for_key(&self, colo_group_id, key)
-    }
-
-    fn tablet_id_for_bound(
-        &self,
-        colo_group_id: ColoGroupId,
-        bound: Bound<&[u8]>,
-        direction: Direction,
-    ) -> anyhow::Result<TabletId> {
-        T::tablet_id_for_bound(&self, colo_group_id, bound, direction)
-    }
-}
 
 #[async_trait]
 impl<T: Tablet + ?Sized> Tablet for Arc<T> {

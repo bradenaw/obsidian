@@ -4,7 +4,6 @@ use anyhow::anyhow;
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
 
-use crate::frontend::Router;
 use crate::util::hexlify;
 use crate::Bound;
 use crate::ColoGroupId;
@@ -25,10 +24,8 @@ impl StaticRouter {
         }
         Self { map: m }
     }
-}
 
-impl Router for StaticRouter {
-    fn tablet_id_for_key(
+    pub fn tablet_id_for_key(
         &self,
         colo_group_id: ColoGroupId,
         key: &[u8],
@@ -63,7 +60,7 @@ impl Router for StaticRouter {
         Ok(tablet_ids[idx])
     }
 
-    fn tablet_id_for_bound(
+    pub fn tablet_id_for_bound(
         &self,
         colo_group_id: ColoGroupId,
         bound: Bound<&[u8]>,
@@ -131,7 +128,6 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use super::StaticRouter;
-    use crate::frontend::Router;
     use crate::util::encode;
     use crate::Bound;
     use crate::ColoGroupId;

@@ -19,7 +19,6 @@ use crate::lsm::Lsm;
 use crate::lsm::Manifest;
 use crate::meta::MetaSynced;
 use crate::meta::TabletState;
-use crate::frontend::Router;
 use crate::pb;
 use crate::runtime::Shards;
 use crate::runtime::Storage;

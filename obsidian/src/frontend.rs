@@ -445,18 +445,6 @@ impl Frontend {
     }
 }
 
-pub(crate) trait Router {
-    fn tablet_id_for_key(&self, colo_group_id: ColoGroupId, key: &[u8])
-        -> anyhow::Result<TabletId>;
-
-    fn tablet_id_for_bound(
-        &self,
-        colo_group_id: ColoGroupId,
-        bound: Bound<&[u8]>,
-        direction: Direction,
-    ) -> anyhow::Result<TabletId>;
-}
-
 #[cfg(test)]
 mod test {
     use crate::test::obsidian_test_suite;
