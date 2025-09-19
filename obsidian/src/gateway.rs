@@ -39,7 +39,7 @@ use crate::TxOutcome;
 use crate::Txid;
 use crate::WriteError;
 
-pub(crate) struct Frontend {
+pub(crate) struct Gateway {
     meta: Box<dyn Meta>,
     meta_synced: MetaSynced,
     shards: Box<dyn Shards>,
@@ -48,7 +48,7 @@ pub(crate) struct Frontend {
 const MAX_CONFLICT_RETRIES: usize = 10;
 
 #[async_trait]
-impl Obsidian for Frontend {
+impl Obsidian for Gateway {
     async fn get(&self, ts: Timestamp, key: &Key) -> anyhow::Result<Option<Record>> {
         let keyspace_id = key.0;
         self.with_resolve_conflicts(|| async move {
@@ -306,7 +306,7 @@ fn choose_shard<I: Iterator<Item = TabletId>>(iter: I) -> Option<ShardId> {
     shard_ids.choose(&mut rand::thread_rng()).copied()
 }
 
-impl Frontend {
+impl Gateway {
     pub(crate) fn new(
         meta: Box<dyn Meta>,
         meta_synced: MetaSynced,
@@ -450,8 +450,8 @@ mod test {
     use crate::test::obsidian_test_suite;
 
     obsidian_test_suite!(
-        async |n_tablets: usize| -> anyhow::Result<crate::frontend::Frontend> {
-            Ok(crate::test::ObsidianForTest::new(n_tablets).await?.frontend)
+        async |n_tablets: usize| -> anyhow::Result<crate::gateway::Gateway> {
+            Ok(crate::test::ObsidianForTest::new(n_tablets).await?.gateway)
         }
     );
 }

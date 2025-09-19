@@ -4,7 +4,7 @@
 #![feature(thread_id_value)]
 
 mod coordinator;
-mod frontend;
+mod gateway;
 mod grpc;
 mod lsm;
 mod meta;

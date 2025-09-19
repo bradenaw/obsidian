@@ -19,11 +19,11 @@ use crate::Record;
 use crate::Timestamp;
 use crate::WriteError;
 
-pub struct FrontendClient {
+pub struct GatewayClient {
     inner: Pool<pb::obsidian_client::ObsidianClient<tonic::transport::Channel>>,
 }
 
-impl FrontendClient {
+impl GatewayClient {
     fn new(inner: &pb::obsidian_client::ObsidianClient<tonic::transport::Channel>) -> Self {
         Self {
             inner: Pool::new(32, inner),
@@ -32,7 +32,7 @@ impl FrontendClient {
 }
 
 #[async_trait]
-impl Obsidian for FrontendClient {
+impl Obsidian for GatewayClient {
     async fn get(&self, ts: Timestamp, key: &Key) -> anyhow::Result<Option<Record>> {
         let resp = self
             .inner
@@ -186,7 +186,7 @@ mod tests {
     use tokio::sync::oneshot;
     use tonic::transport::server::TcpIncoming;
 
-    use crate::grpc::FrontendServer;
+    use crate::grpc::GatewayServer;
     use crate::pb;
     use crate::Obsidian;
     use crate::test::obsidian_test_suite;
@@ -201,12 +201,12 @@ mod tests {
     async fn test_write() -> anyhow::Result<()> {
         let obs = ObsidianForTest::new(1).await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-        obs.frontend
+        obs.gateway
             .create_colo_group(keyspace_id.0, vec![] /*splits*/)
             .await?;
-        obs.frontend.create_keyspace(keyspace_id).await?;
+        obs.gateway.create_keyspace(keyspace_id).await?;
 
-        let client = spawn_server(obs.frontend).await?;
+        let client = spawn_server(obs.gateway).await?;
 
         let key = (keyspace_id, b"abc".to_vec());
 
@@ -225,13 +225,13 @@ mod tests {
     }
 
     obsidian_test_suite!(async |n_tablets: usize| -> anyhow::Result<
-        crate::grpc::frontend_client::tests::ObsidianClientServer,
+        crate::grpc::gateway_client::tests::ObsidianClientServer,
     > {
         use super::spawn_server;
         use crate::test::ObsidianForTest;
 
         let obs = ObsidianForTest::new(n_tablets).await?;
-        let client = spawn_server(obs.frontend).await?;
+        let client = spawn_server(obs.gateway).await?;
         Ok(client)
     });
 
@@ -239,7 +239,7 @@ mod tests {
         let (shutdown, on_shutdown) = oneshot::channel::<()>();
         let listener = TcpListener::bind("[::1]:0").await?;
         let addr = listener.local_addr()?;
-        let server = FrontendServer::new(obs);
+        let server = GatewayServer::new(obs);
         let serve = tonic::transport::Server::builder()
             .add_service(pb::obsidian_server::ObsidianServer::new(server))
             .serve_with_incoming_shutdown(
@@ -256,7 +256,7 @@ mod tests {
         let url = "http://".to_string() + &addr.to_string();
 
         let client =
-            super::FrontendClient::new(&pb::obsidian_client::ObsidianClient::connect(url).await?);
+            super::GatewayClient::new(&pb::obsidian_client::ObsidianClient::connect(url).await?);
 
         Ok(ObsidianClientServer {
             inner: client,
@@ -265,7 +265,7 @@ mod tests {
     }
 
     struct ObsidianClientServer {
-        inner: super::FrontendClient,
+        inner: super::GatewayClient,
         shutdown: Option<oneshot::Sender<()>>,
     }
 

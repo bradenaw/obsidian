@@ -626,13 +626,13 @@ mod tests {
         let obs = ObsidianForTest::new(2 /*n_shards*/).await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
 
-        obs.frontend
+        obs.gateway
             .create_colo_group(
                 keyspace_id.0,
                 vec![Bound::Before(b"b".to_vec())], // splits
             )
             .await?;
-        obs.frontend.create_keyspace(keyspace_id).await?;
+        obs.gateway.create_keyspace(keyspace_id).await?;
 
         let kvs = [
             (b"aa", b"foo"),
@@ -642,7 +642,7 @@ mod tests {
         ];
 
         for (key, value) in &kvs {
-            obs.frontend
+            obs.gateway
                 .write(
                     vec![],
                     BTreeMap::from([((keyspace_id, key.to_vec()), Mutation::Put(value.to_vec()))]),
@@ -669,16 +669,16 @@ mod tests {
 
         obs.coordinator.wait_transfer(transfer_id).await?;
 
-        // TODO: jank, because we need to wait for the frontend to find out about the routing
+        // TODO: jank, because we need to wait for the gateway to find out about the routing
         // change
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let ts = obs
-            .frontend
+            .gateway
             .latest_snapshot(kvs.iter().map(|(k, _)| (keyspace_id, k.to_vec())).collect())
             .await?;
         for (key, value) in &kvs {
-            let actual = obs.frontend.get(ts, &(keyspace_id, key.to_vec())).await?;
+            let actual = obs.gateway.get(ts, &(keyspace_id, key.to_vec())).await?;
 
             assert_eq!(
                 Some(&value.to_vec()),
@@ -696,13 +696,13 @@ mod tests {
         let obs = ObsidianForTest::new(3 /*n_shards*/).await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
 
-        obs.frontend
+        obs.gateway
             .create_colo_group(
                 keyspace_id.0,
                 vec![Bound::Before(b"b".to_vec())], // splits
             )
             .await?;
-        obs.frontend.create_keyspace(keyspace_id).await?;
+        obs.gateway.create_keyspace(keyspace_id).await?;
 
         let kvs = [
             (b"aa", b"foo"),
@@ -712,7 +712,7 @@ mod tests {
         ];
 
         for (key, value) in &kvs {
-            obs.frontend
+            obs.gateway
                 .write(
                     vec![],
                     BTreeMap::from([((keyspace_id, key.to_vec()), Mutation::Put(value.to_vec()))]),
@@ -738,16 +738,16 @@ mod tests {
 
         obs.coordinator.wait_transfer(transfer_id).await?;
 
-        // TODO: jank, because we need to wait for the frontend to find out about the routing
+        // TODO: jank, because we need to wait for the gateway to find out about the routing
         // change
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let ts = obs
-            .frontend
+            .gateway
             .latest_snapshot(kvs.iter().map(|(k, _)| (keyspace_id, k.to_vec())).collect())
             .await?;
         for (key, value) in &kvs {
-            let actual = obs.frontend.get(ts, &(keyspace_id, key.to_vec())).await?;
+            let actual = obs.gateway.get(ts, &(keyspace_id, key.to_vec())).await?;
 
             assert_eq!(
                 Some(&value.to_vec()),
@@ -765,13 +765,13 @@ mod tests {
         let obs = ObsidianForTest::new(3 /*n_shards*/).await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
 
-        obs.frontend
+        obs.gateway
             .create_colo_group(
                 keyspace_id.0,
                 vec![], // splits
             )
             .await?;
-        obs.frontend.create_keyspace(keyspace_id).await?;
+        obs.gateway.create_keyspace(keyspace_id).await?;
 
         let mut expected = HashMap::new();
         let mut writes_done = 0;
@@ -795,7 +795,7 @@ mod tests {
                     }
                 }
 
-                obs.frontend.write(vec![], muts).await?;
+                obs.gateway.write(vec![], muts).await?;
             }
         }
 
@@ -816,17 +816,17 @@ mod tests {
 
         obs.coordinator.wait_transfer(transfer_id).await?;
 
-        // TODO: jank, because we need to wait for the frontend to find out about the routing
+        // TODO: jank, because we need to wait for the gateway to find out about the routing
         // change
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         for (key, value) in &expected {
             let ts = obs
-                .frontend
+                .gateway
                 .latest_snapshot(BTreeSet::from([(keyspace_id, key.clone())]))
                 .await?;
 
-            let actual = obs.frontend.get(ts, &(keyspace_id, key.to_vec())).await?;
+            let actual = obs.gateway.get(ts, &(keyspace_id, key.to_vec())).await?;
 
             assert_eq!(
                 Some(&value.to_vec()),

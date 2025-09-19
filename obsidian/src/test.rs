@@ -16,7 +16,7 @@ use crate::lsm::LsmBuilder;
 use crate::lsm::Manifest;
 use crate::meta::MetaImpl;
 use crate::meta::MetaSynced;
-use crate::frontend::Frontend;
+use crate::gateway::Gateway;
 use crate::runtime::Meta;
 use crate::runtime::Shard;
 use crate::runtime::Shards;
@@ -330,7 +330,7 @@ impl<T: Meta> Meta for Arc<MetaProxy<T>> {
 }
 
 pub(crate) struct ObsidianForTest {
-    pub frontend: Frontend,
+    pub gateway: Gateway,
     pub coordinator: Coordinator<Arc<dyn Tablet>>,
     pub meta: Arc<MetaImpl<Arc<dyn Tablet>>>,
 }
@@ -370,14 +370,14 @@ impl ObsidianForTest {
 
         meta_proxy.put(Arc::clone(&meta));
 
-        let frontend = Frontend::new(
+        let gateway = Gateway::new(
             Box::new(meta_proxy.clone()),
             MetaSynced::new(meta_proxy),
             Box::new(shards),
         );
 
         Ok(Self {
-            frontend,
+            gateway,
             meta,
             coordinator,
         })

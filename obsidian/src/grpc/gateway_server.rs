@@ -20,18 +20,18 @@ use crate::Precondition;
 use crate::Range;
 use crate::Timestamp;
 
-pub struct FrontendServer<O> {
+pub struct GatewayServer<O> {
     inner: O,
 }
 
-impl<O> FrontendServer<O> {
+impl<O> GatewayServer<O> {
     pub(crate) fn new(inner: O) -> Self {
         Self { inner }
     }
 }
 
 #[async_trait]
-impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for FrontendServer<O> {
+impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for GatewayServer<O> {
     async fn get(
         &self,
         req: tonic::Request<pb::GetReq>,
