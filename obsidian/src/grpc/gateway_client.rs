@@ -6,13 +6,13 @@ use async_trait::async_trait;
 
 use crate::grpc::util::Pool;
 use crate::pb;
-use crate::Obsidian;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
 use crate::Key;
 use crate::KeyspaceId;
 use crate::Mutation;
+use crate::Obsidian;
 use crate::Precondition;
 use crate::Range;
 use crate::Record;
@@ -188,13 +188,13 @@ mod tests {
 
     use crate::grpc::GatewayServer;
     use crate::pb;
-    use crate::Obsidian;
     use crate::test::obsidian_test_suite;
     use crate::test::ObsidianForTest;
     use crate::ColoGroupId;
     use crate::Key;
     use crate::KeyspaceId;
     use crate::Mutation;
+    use crate::Obsidian;
     use crate::Record;
 
     #[tokio::test]

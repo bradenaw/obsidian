@@ -12,11 +12,11 @@ use arc_atomic::AtomicArc;
 use async_trait::async_trait;
 
 use crate::coordinator::Coordinator;
+use crate::gateway::Gateway;
 use crate::lsm::LsmBuilder;
 use crate::lsm::Manifest;
 use crate::meta::MetaImpl;
 use crate::meta::MetaSynced;
-use crate::gateway::Gateway;
 use crate::runtime::Meta;
 use crate::runtime::Shard;
 use crate::runtime::Shards;

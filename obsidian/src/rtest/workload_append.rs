@@ -22,8 +22,6 @@ use futures::TryStreamExt;
 use rand::thread_rng;
 use rand::Rng;
 
-use crate::Obsidian;
-use crate::ObsidianExt;
 use crate::util::encode;
 use crate::util::merge_sorted;
 use crate::util::Decode;
@@ -34,6 +32,8 @@ use crate::ColoGroupId;
 use crate::Direction;
 use crate::KeyspaceId;
 use crate::Mutation;
+use crate::Obsidian;
+use crate::ObsidianExt;
 use crate::Precondition;
 use crate::Range;
 use crate::Timestamp;
@@ -745,10 +745,10 @@ mod tests {
     use super::EdgeType;
     use super::Txid;
     use super::WorkloadAppend;
-    use crate::Obsidian;
     use crate::Bound;
     use crate::ColoGroupId;
     use crate::KeyspaceId;
+    use crate::Obsidian;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_workload_append() -> anyhow::Result<()> {

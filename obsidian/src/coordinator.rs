@@ -612,12 +612,12 @@ mod tests {
     use rand::RngCore;
 
     use crate::meta::MetaReader;
-    use crate::Obsidian;
     use crate::test::ObsidianForTest;
     use crate::Bound;
     use crate::ColoGroupId;
     use crate::KeyspaceId;
     use crate::Mutation;
+    use crate::Obsidian;
 
     #[tokio::test]
     async fn test_move() -> anyhow::Result<()> {
