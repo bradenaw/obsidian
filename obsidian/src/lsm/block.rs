@@ -12,7 +12,7 @@ use futures::Stream;
 use crate::lsm::util::LsmRevision;
 use crate::lsm::util::PackedVec2;
 use crate::lsm::util::PrefixCompressedKV;
-use crate::storage::FileReader;
+use crate::runtime::FileReader;
 use crate::util::binary_search_by_idx;
 use crate::util::byte_width;
 use crate::util::hexlify;
@@ -700,7 +700,7 @@ mod test {
     use super::Block;
     use crate::lsm::test::TestFile;
     use crate::lsm::util::LsmRevision;
-    use crate::storage::FileReader;
+    use crate::runtime::FileReader;
     use crate::Bound;
     use crate::Direction;
     use crate::HistoryRange;

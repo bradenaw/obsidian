@@ -1,0 +1,25 @@
+//! The runtime module's purpose is to abstract away all of the parts of the system that do not run
+//! inside this process in a real environment, but tests can use these traits to do something
+//! different.
+//!
+//! For example, the Tablet trait is what the real tablet implements, and also what all code
+//! talking to a tablet uses. In reality, the caller will have a network client and the server will
+//! be wrapped in a network server. In some tests, these two parts can just talk directly to each
+//! other without any network in the middle, which simplifies debugging because callstacks get
+//! preserved and also speeds up the tests.
+//!
+//! Some of the traits here are also third-party dependencies that are expected to be provided for
+//! the system, like Storage.
+
+mod meta;
+mod shard;
+mod shards;
+mod storage;
+mod tablet;
+
+pub(crate) use meta::Meta;
+pub(crate) use shard::Shard;
+pub(crate) use shards::Shards;
+pub(crate) use storage::FileReader;
+pub(crate) use storage::Storage;
+pub(crate) use tablet::Tablet;

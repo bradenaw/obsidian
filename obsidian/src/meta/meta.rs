@@ -17,8 +17,8 @@ use rand::seq::SliceRandom;
 use crate::meta::TabletState;
 use crate::meta::TransferState;
 use crate::pb;
-use crate::tablet::Tablet;
-use crate::tablet::TabletId;
+use crate::runtime::Meta;
+use crate::runtime::Tablet;
 use crate::tuple_encoding::tuple_decode;
 use crate::tuple_encoding::tuple_decode_prefix;
 use crate::tuple_encoding::tuple_encode;
@@ -37,6 +37,7 @@ use crate::Record;
 use crate::Revision;
 use crate::RevisionValue;
 use crate::ShardId;
+use crate::TabletId;
 use crate::Timestamp;
 use crate::TransferId;
 
@@ -140,28 +141,6 @@ impl MetaKey {
     fn tablets() -> Range<Vec<u8>> {
         Range::prefix(tuple_encode(&(Self::PFX_TABLETS,)))
     }
-}
-
-#[async_trait]
-pub(crate) trait Meta: Send + Sync {
-    async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()>;
-    async fn create_colo_group(
-        &self,
-        colo_group_id: ColoGroupId,
-        initial_splits: Vec<Bound<Vec<u8>>>,
-    ) -> anyhow::Result<()>;
-    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()>;
-
-    async fn latest_snapshot(&self) -> anyhow::Result<Timestamp>;
-    async fn wait_for_newer(&self, ts: Timestamp) -> anyhow::Result<()>;
-    async fn scan_page(
-        &self,
-        ts: Timestamp,
-        range: Range<Vec<u8>>,
-    ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)>;
-    async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Revision>, Timestamp)>;
-
-    async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>>;
 }
 
 pub(crate) struct MetaImpl<T> {

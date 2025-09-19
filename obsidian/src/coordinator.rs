@@ -19,15 +19,15 @@ use crate::meta::TabletState;
 use crate::meta::TransferMetadata;
 use crate::meta::TransferState;
 use crate::meta::Value;
-use crate::obsidian::Shards;
-use crate::tablet::Tablet;
-use crate::tablet::TabletId;
+use crate::runtime::Shards;
+use crate::runtime::Tablet;
 use crate::util::Retry;
 use crate::util::WithBackground;
 use crate::Mutation;
 use crate::Range;
 use crate::RangeSet;
 use crate::ShardId;
+use crate::TabletId;
 use crate::TransferId;
 
 const CATCHUP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -612,7 +612,7 @@ mod tests {
     use rand::RngCore;
 
     use crate::meta::MetaReader;
-    use crate::obsidian::Obsidian;
+    use crate::Obsidian;
     use crate::test::ObsidianForTest;
     use crate::Bound;
     use crate::ColoGroupId;

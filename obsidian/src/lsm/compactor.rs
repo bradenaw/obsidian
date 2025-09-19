@@ -23,7 +23,7 @@ use crate::lsm::LsmRevision;
 use crate::lsm::Memtable;
 use crate::lsm::Run;
 use crate::lsm::RunId;
-use crate::storage::Storage;
+use crate::runtime::Storage;
 use crate::util::merge_sorted_streams;
 use crate::util::spawn_owned;
 use crate::util::WithBackground;

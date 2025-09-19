@@ -11,14 +11,13 @@ use futures::Stream;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
-use crate::meta::Meta;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
 use crate::meta::MetaState;
 use crate::meta::TabletState;
-use crate::obsidian::Router;
+use crate::frontend::Router;
 use crate::router::StaticRouter;
-use crate::tablet::TabletId;
+use crate::runtime::Meta;
 use crate::util::hexlify;
 use crate::util::wait_all;
 use crate::util::Background;
@@ -29,6 +28,7 @@ use crate::ColoGroupId;
 use crate::Direction;
 use crate::Range;
 use crate::RevisionValue;
+use crate::TabletId;
 use crate::Timestamp;
 
 pub(crate) struct MetaSynced {

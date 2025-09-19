@@ -18,7 +18,7 @@ use crate::lsm::block::BlockBuilder;
 use crate::lsm::util::LsmRevision;
 use crate::lsm::util::PrefixCompressedKV;
 use crate::lsm::RunId;
-use crate::storage::FileReader;
+use crate::runtime::FileReader;
 use crate::util::binary_search_by_idx;
 use crate::util::hexlify;
 use crate::util::IteratorEither;

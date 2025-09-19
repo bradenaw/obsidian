@@ -4,12 +4,14 @@
 #![feature(thread_id_value)]
 
 mod coordinator;
+mod frontend;
 mod grpc;
 mod lsm;
 mod meta;
 mod obsidian;
 mod router;
 mod rtest;
+mod runtime;
 mod shard;
 mod storage;
 mod tablet;
@@ -56,6 +58,8 @@ mod pb {
 #[cfg(test)]
 mod test;
 
+pub(crate) use crate::obsidian::Obsidian;
+pub(crate) use crate::obsidian::ObsidianExt;
 pub(crate) use crate::types::Bound;
 pub(crate) use crate::types::ColoGroupId;
 pub(crate) use crate::types::Direction;
@@ -73,6 +77,7 @@ pub(crate) use crate::types::Record;
 pub(crate) use crate::types::Revision;
 pub(crate) use crate::types::RevisionValue;
 pub(crate) use crate::types::ShardId;
+pub(crate) use crate::types::TabletId;
 pub(crate) use crate::types::Timestamp;
 pub(crate) use crate::types::TransferId;
 pub(crate) use crate::types::TxOutcome;

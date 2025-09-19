@@ -5,8 +5,8 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 
 use crate::grpc::util::Pool;
-use crate::obsidian::Obsidian;
 use crate::pb;
+use crate::Obsidian;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -187,8 +187,8 @@ mod tests {
     use tonic::transport::server::TcpIncoming;
 
     use crate::grpc::FrontendServer;
-    use crate::obsidian::Obsidian;
     use crate::pb;
+    use crate::Obsidian;
     use crate::test::obsidian_test_suite;
     use crate::test::ObsidianForTest;
     use crate::ColoGroupId;

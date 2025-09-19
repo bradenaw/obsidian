@@ -14,8 +14,8 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 
-use crate::storage::FileReader;
-use crate::storage::Storage;
+use crate::runtime::FileReader;
+use crate::runtime::Storage;
 
 /// CachedStorage wraps another implementation of `Storage`, holding pages in an
 /// approximately-LRU in-memory cache.

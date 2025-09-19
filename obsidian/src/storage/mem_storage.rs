@@ -9,8 +9,8 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 
-use crate::storage::FileReader;
-use crate::storage::Storage;
+use crate::runtime::FileReader;
+use crate::runtime::Storage;
 
 #[derive(Clone)]
 pub(crate) struct MemStorage {

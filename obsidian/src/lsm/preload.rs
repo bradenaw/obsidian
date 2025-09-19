@@ -9,7 +9,7 @@ use crate::lsm::IndexSnapshot;
 use crate::lsm::Keyspace;
 use crate::lsm::Run;
 use crate::lsm::RunId;
-use crate::storage::Storage;
+use crate::runtime::Storage;
 use crate::util::spawn_owned;
 use crate::util::OwnedJoinHandle;
 use crate::KeyspaceId;

@@ -4,14 +4,14 @@ use anyhow::anyhow;
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
 
-use crate::obsidian::Router;
-use crate::tablet::TabletId;
+use crate::frontend::Router;
 use crate::util::hexlify;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
 use crate::KeyOrBound;
 use crate::ShardId;
+use crate::TabletId;
 
 pub(crate) struct StaticRouter {
     map: HashMap<ColoGroupId, (Vec<Bound<Vec<u8>>>, Vec<TabletId>)>,
@@ -131,13 +131,13 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use super::StaticRouter;
-    use crate::obsidian::Router;
-    use crate::tablet::TabletId;
+    use crate::frontend::Router;
     use crate::util::encode;
     use crate::Bound;
     use crate::ColoGroupId;
     use crate::Direction;
     use crate::ShardId;
+    use crate::TabletId;
 
     #[test]
     fn test_tablet_id_for_bound() -> anyhow::Result<()> {

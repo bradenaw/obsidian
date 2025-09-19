@@ -13,8 +13,7 @@ use crate::lsm::Manifest;
 use crate::lsm::Preloaded;
 use crate::meta::TabletState;
 use crate::meta::TabletStateProperties;
-use crate::storage::Storage;
-use crate::tablet::TabletId;
+use crate::runtime::Storage;
 use crate::Bound;
 use crate::Direction;
 use crate::HistoryRange;
@@ -26,6 +25,7 @@ use crate::Precondition;
 use crate::Range;
 use crate::Revision;
 use crate::RevisionValue;
+use crate::TabletId;
 use crate::Timestamp;
 use crate::WriteError;
 

@@ -2,7 +2,6 @@ mod meta;
 mod meta_synced;
 mod transfer;
 
-pub(crate) use meta::Meta;
 pub(crate) use meta::MetaImpl;
 pub(crate) use meta::MetaKey;
 pub(crate) use meta::MetaReader;

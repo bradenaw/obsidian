@@ -6,24 +6,24 @@ use async_trait::async_trait;
 use crossbeam::sync::ShardedLock;
 
 use crate::lsm::LsmBuilder;
-use crate::meta::Meta;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::meta::SyncType;
-use crate::obsidian::Shards;
-use crate::storage::Storage;
+use crate::runtime::Meta;
+use crate::runtime::Shards;
+use crate::runtime::Storage;
+use crate::runtime::Tablet;
 use crate::tablet::DataTablet;
 use crate::tablet::MetaTablet;
 use crate::tablet::ShardMetaTablet;
-use crate::tablet::Tablet;
-use crate::tablet::TabletId;
 use crate::util::Background;
 use crate::util::Retry;
 use crate::ColoGroupId;
 use crate::Range;
 use crate::ShardId;
+use crate::TabletId;
 use crate::Timestamp;
 
 pub(crate) struct Shard<S, M> {
@@ -149,7 +149,7 @@ where
 }
 
 #[async_trait]
-impl<S, M> crate::obsidian::Shard for Shard<S, M>
+impl<S, M> crate::runtime::Shard for Shard<S, M>
 where
     S: Storage,
     M: Meta + 'static,
@@ -174,7 +174,7 @@ where
 }
 
 #[async_trait]
-impl<S, M> crate::obsidian::Shard for Arc<Shard<S, M>>
+impl<S, M> crate::runtime::Shard for Arc<Shard<S, M>>
 where
     S: Storage,
     M: Meta + 'static,

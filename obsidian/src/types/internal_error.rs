@@ -2,7 +2,7 @@ use std::fmt::Debug;
 
 use thiserror::Error;
 
-use crate::tablet::TabletId;
+use crate::TabletId;
 use crate::Txid;
 
 #[derive(Error, Debug)]

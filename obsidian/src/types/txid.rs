@@ -4,11 +4,11 @@ use std::time::SystemTime;
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
 
-use crate::tablet::TabletId;
 use crate::util::hexlify;
 use crate::util::Decode;
 use crate::util::Encode;
 use crate::ShardId;
+use crate::TabletId;
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct Txid {
