@@ -1,34 +1,31 @@
+mod meta_proxy;
+mod shards;
+
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::ops::Deref;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::Weak;
 
 use anyhow::anyhow;
-use arc_atomic::AtomicArc;
 use async_trait::async_trait;
 
 use crate::coordinator::Coordinator;
 use crate::gateway::Gateway;
-use crate::lsm::LsmBuilder;
 use crate::lsm::Manifest;
 use crate::meta::MetaImpl;
 use crate::meta::MetaSynced;
 use crate::runtime::Meta;
-use crate::runtime::Shard;
 use crate::runtime::Shards;
-use crate::runtime::Storage;
 use crate::runtime::Tablet;
 use crate::storage::CachedStorage;
 use crate::storage::MemStorage;
+use crate::test::meta_proxy::MetaProxy;
+use crate::test::shards::TestShards;
 use crate::util::encode;
 use crate::util::Decode;
 use crate::util::Encode;
 use crate::Bound;
-use crate::ColoGroupId;
 use crate::Direction;
 use crate::HistoryRange;
 use crate::InternalError;
@@ -39,7 +36,6 @@ use crate::Precondition;
 use crate::Range;
 use crate::Record;
 use crate::Revision;
-use crate::ShardId;
 use crate::TabletId;
 use crate::Timestamp;
 use crate::TxOutcome;
@@ -143,189 +139,6 @@ impl<T: Tablet + ?Sized> Tablet for Arc<T> {
 
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
         T::find_split(self).await
-    }
-}
-
-struct TestShards<S, M> {
-    storage: Arc<S>,
-    meta_proxy: Arc<MetaProxy<M>>,
-
-    m: Mutex<HashMap<ShardId, Arc<crate::shard::Shard<S, Arc<MetaProxy<M>>>>>>,
-}
-
-impl<S, M> TestShards<S, M>
-where
-    S: Storage,
-    M: Meta + 'static,
-{
-    fn new(storage: Arc<S>, meta_proxy: Arc<MetaProxy<M>>) -> Self {
-        Self {
-            storage,
-            meta_proxy,
-            m: Mutex::new(HashMap::new()),
-        }
-    }
-
-    async fn create_shard(self: &Arc<Self>) -> anyhow::Result<ShardId> {
-        let mut m = self.m.lock().unwrap();
-        let shard_id = ShardId((m.len() + 1) as u32);
-        m.insert(
-            shard_id,
-            Arc::new(
-                crate::shard::Shard::new(
-                    shard_id,
-                    self.storage.clone(),
-                    Arc::new(self.meta_proxy.clone()),
-                    Arc::new(Arc::downgrade(&self)),
-                    LsmBuilder::new(self.storage.clone())
-                        .l0_max_size(256)
-                        .run_size_target(65536)
-                        .block_size_target(4096),
-                )
-                .await?,
-            ),
-        );
-        Ok(shard_id)
-    }
-}
-
-impl<S, M> Shards for Arc<TestShards<S, M>>
-where
-    S: Storage,
-    M: Meta + 'static,
-{
-    fn shard(&self, shard_id: ShardId) -> anyhow::Result<Box<dyn Shard>> {
-        let m = self.m.lock().unwrap();
-        let shard_arc = m
-            .get(&shard_id)
-            .ok_or_else(|| anyhow::anyhow!("{:?} does not exist", shard_id))?;
-
-        Ok(Box::new(shard_arc.clone()))
-    }
-
-    fn shards(&self) -> Vec<Box<dyn Shard>> {
-        let m = self.m.lock().unwrap();
-        m.values()
-            .map(|shard| -> Box<dyn Shard> { Box::new(shard.clone()) })
-            .collect()
-    }
-}
-
-impl<S, M> Shards for Weak<TestShards<S, M>>
-where
-    S: Storage,
-    M: Meta + 'static,
-{
-    fn shard(&self, shard_id: ShardId) -> anyhow::Result<Box<dyn Shard>> {
-        let shards = Weak::upgrade(self).ok_or_else(|| anyhow!(""))?;
-        let m = shards.m.lock().unwrap();
-        let shard_arc = m
-            .get(&shard_id)
-            .ok_or_else(|| anyhow::anyhow!("{:?} does not exist", shard_id))?;
-
-        Ok(Box::new(shard_arc.clone()))
-    }
-
-    fn shards(&self) -> Vec<Box<dyn Shard>> {
-        let shards = match Weak::upgrade(self) {
-            Some(shards) => shards,
-            None => return vec![],
-        };
-        let m = shards.m.lock().unwrap();
-        m.values()
-            .map(|shard| -> Box<dyn Shard> { Box::new(shard.clone()) })
-            .collect()
-    }
-}
-
-struct MetaProxy<T> {
-    inner: AtomicArc<Option<T>>,
-}
-
-impl<T> MetaProxy<T> {
-    fn new() -> Self {
-        Self {
-            inner: AtomicArc::new(Arc::new(None)),
-        }
-    }
-
-    fn put(&self, t: T) {
-        self.inner.store(Arc::new(Some(t)))
-    }
-}
-
-#[async_trait]
-impl<T: Meta> Meta for Arc<MetaProxy<T>> {
-    async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
-        let inner = self.inner.load();
-        if let Some(inner) = inner.deref() {
-            return T::add_shard(inner, shard_id).await;
-        }
-        Err(anyhow!("MetaProxy not filled yet"))
-    }
-
-    async fn create_colo_group(
-        &self,
-        colo_group_id: ColoGroupId,
-        initial_splits: Vec<Bound<Vec<u8>>>,
-    ) -> anyhow::Result<()> {
-        let inner = self.inner.load();
-        if let Some(inner) = inner.deref() {
-            return T::create_colo_group(inner, colo_group_id, initial_splits).await;
-        }
-        Err(anyhow!("MetaProxy not filled yet"))
-    }
-
-    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
-        let inner = self.inner.load();
-        if let Some(inner) = inner.deref() {
-            return T::create_keyspace(inner, keyspace_id).await;
-        }
-        Err(anyhow!("MetaProxy not filled yet"))
-    }
-
-    async fn latest_snapshot(&self) -> anyhow::Result<Timestamp> {
-        let inner = self.inner.load();
-        if let Some(inner) = inner.deref() {
-            return T::latest_snapshot(inner).await;
-        }
-        Err(anyhow!("MetaProxy not filled yet"))
-    }
-
-    async fn wait_for_newer(&self, ts: Timestamp) -> anyhow::Result<()> {
-        let inner = self.inner.load();
-        if let Some(inner) = inner.deref() {
-            return T::wait_for_newer(inner, ts).await;
-        }
-        Err(anyhow!("MetaProxy not filled yet"))
-    }
-
-    async fn scan_page(
-        &self,
-        ts: Timestamp,
-        range: Range<Vec<u8>>,
-    ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
-        let inner = self.inner.load();
-        if let Some(inner) = inner.deref() {
-            return T::scan_page(inner, ts, range).await;
-        }
-        Err(anyhow!("MetaProxy not filled yet"))
-    }
-
-    async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Revision>, Timestamp)> {
-        let inner = self.inner.load();
-        if let Some(inner) = inner.deref() {
-            return T::sync(inner, ts).await;
-        }
-        Err(anyhow!("MetaProxy not filled yet"))
-    }
-
-    async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
-        let inner = self.inner.load();
-        if let Some(inner) = inner.deref() {
-            return T::tablet_ids(inner, ts).await;
-        }
-        Err(anyhow!("MetaProxy not filled yet"))
     }
 }
 
