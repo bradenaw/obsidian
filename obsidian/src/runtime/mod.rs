@@ -16,6 +16,7 @@ mod shard;
 mod shards;
 mod storage;
 mod tablet;
+mod wal;
 
 pub(crate) use meta::Meta;
 pub(crate) use shard::Shard;
@@ -23,3 +24,5 @@ pub(crate) use shards::Shards;
 pub(crate) use storage::FileReader;
 pub(crate) use storage::Storage;
 pub(crate) use tablet::Tablet;
+pub(crate) use wal::Wal;
+pub(crate) use wal::WalSeq;

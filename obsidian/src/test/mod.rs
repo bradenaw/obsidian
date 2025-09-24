@@ -1,5 +1,6 @@
 mod meta_proxy;
 mod shards;
+mod mem_wal;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
