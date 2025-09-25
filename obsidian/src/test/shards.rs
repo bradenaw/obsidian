@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -6,18 +5,21 @@ use std::sync::Weak;
 
 use anyhow::anyhow;
 
-use crate::lsm::LsmBuilder;
+use crate::lsm::WalEntry;
 use crate::runtime::Meta;
 use crate::runtime::Shard;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
-use crate::test::MemWal;
-use crate::ShardId;
+use crate::runtime::Wal;
+use crate::runtime::Wals;
 use crate::test::meta_proxy::MetaProxy;
+use crate::test::MemWals;
+use crate::ShardId;
 
 pub(super) struct TestShards<S, M> {
     storage: Arc<S>,
     meta_proxy: Arc<MetaProxy<M>>,
+    wals: MemWals,
 
     m: Mutex<HashMap<ShardId, Arc<crate::shard::Shard<S, Arc<MetaProxy<M>>>>>>,
 }
@@ -31,6 +33,7 @@ where
         Self {
             storage,
             meta_proxy,
+            wals: MemWals::new(),
             m: Mutex::new(HashMap::new()),
         }
     }
@@ -46,10 +49,10 @@ where
                     self.storage.clone(),
                     Arc::new(self.meta_proxy.clone()),
                     Arc::new(Arc::downgrade(&self)),
-                    LsmBuilder::new(Arc::new(MemWal::new()), self.storage.clone())
-                        .l0_max_size(256)
-                        .run_size_target(65536)
-                        .block_size_target(4096),
+                    Box::new(self.wals.clone()) as Box<dyn Wals<Arc<dyn Wal<WalEntry>>>>,
+                    256,   // l0_max_size
+                    65536, // run_size_target
+                    4096,  // block_size_target
                 )
                 .await?,
             ),
@@ -106,4 +109,3 @@ where
             .collect()
     }
 }
-
