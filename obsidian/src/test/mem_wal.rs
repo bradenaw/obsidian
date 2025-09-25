@@ -9,20 +9,21 @@ use futures::StreamExt;
 use tokio::sync::watch;
 
 use crate::runtime::Wal;
+use crate::WalEntry;
 use crate::WalSeq;
 
-pub(crate) struct MemWal<E> {
-    inner: Mutex<MemWalInner<E>>,
+pub(crate) struct MemWal {
+    inner: Mutex<MemWalInner>,
     highest_seqno_send: watch::Sender<WalSeq>,
     highest_seqno: watch::Receiver<WalSeq>,
 }
 
-struct MemWalInner<E> {
-    entries: VecDeque<E>,
+struct MemWalInner {
+    entries: VecDeque<WalEntry>,
     offset: WalSeq,
 }
 
-impl<E> MemWal<E> {
+impl MemWal {
     pub fn new() -> Self {
         let (highest_seqno_send, highest_seqno) = watch::channel(WalSeq(0));
         Self {
@@ -38,15 +39,11 @@ impl<E> MemWal<E> {
 }
 
 #[async_trait]
-impl<E> Wal<E> for MemWal<E>
-where
-    // TODO: TryFrom<bytes> + Into<bytes>
-    E: Clone + Send + Sync + 'static,
-{
-    async fn append(&self, e: E) -> anyhow::Result<WalSeq> {
+impl Wal for MemWal {
+    async fn append(&self, entry: WalEntry) -> anyhow::Result<WalSeq> {
         let mut inner = self.inner.lock().unwrap();
         let seqno = WalSeq(inner.offset.0 + (inner.entries.len() as u64));
-        inner.entries.push_back(e);
+        inner.entries.push_back(entry);
         let _ = self.highest_seqno_send.send(seqno);
         Ok(seqno)
     }
@@ -54,7 +51,7 @@ where
     fn read(
         &self,
         first: WalSeq,
-    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(WalSeq, E)>> + Send + '_>> {
+    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(WalSeq, WalEntry)>> + Send + '_>> {
         Box::pin(try_stream! {
             let mut i = first;
             loop {
@@ -79,7 +76,7 @@ where
     fn tail(
         &self,
         first: WalSeq,
-    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(WalSeq, E)>> + Send + '_>> {
+    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(WalSeq, WalEntry)>> + Send + '_>> {
         Box::pin(try_stream! {
             let mut i = first;
             loop {
@@ -119,42 +116,71 @@ mod tests {
     use futures::TryStreamExt;
 
     use crate::runtime::Wal;
-    use crate::WalSeq;
     use crate::test::MemWal;
+    use crate::Timestamp;
+    use crate::WalEntry;
+    use crate::WalSeq;
+
+    fn wal_entry(i: usize) -> WalEntry {
+        WalEntry::Write(Timestamp(i as u64), vec![])
+    }
+
+    fn write_timestamp(x: (WalSeq, WalEntry)) -> (WalSeq, Timestamp) {
+        if let WalEntry::Write(ts, _) = x.1 {
+            (x.0, ts)
+        } else {
+            panic!();
+        }
+    }
+
+    fn write_timestamps(
+        iter: impl IntoIterator<Item = (WalSeq, WalEntry)>,
+    ) -> Vec<(WalSeq, Timestamp)> {
+        iter.into_iter().map(write_timestamp).collect()
+    }
 
     #[tokio::test]
     async fn test_mem_wal() -> anyhow::Result<()> {
         let wal = MemWal::new();
 
-        assert_eq!(wal.append(1).await?, WalSeq(1));
-        assert_eq!(wal.append(2).await?, WalSeq(2));
-        assert_eq!(wal.append(3).await?, WalSeq(3));
+        assert_eq!(wal.append(wal_entry(1)).await?, WalSeq(1));
+        assert_eq!(wal.append(wal_entry(2)).await?, WalSeq(2));
+        assert_eq!(wal.append(wal_entry(3)).await?, WalSeq(3));
 
         assert_eq!(wal.oldest_available().await?, WalSeq(1));
 
         assert_eq!(
-            wal.read(WalSeq(2)).try_collect::<Vec<_>>().await?,
-            vec![(WalSeq(2), 2), (WalSeq(3), 3)]
+            write_timestamps(wal.read(WalSeq(2)).try_collect::<Vec<_>>().await?),
+            vec![(WalSeq(2), Timestamp(2)), (WalSeq(3), Timestamp(3))]
         );
 
         let mut tail = wal.tail(WalSeq(2));
 
-        assert_eq!(tail.try_next().await?, Some((WalSeq(2), 2)));
-        assert_eq!(tail.try_next().await?, Some((WalSeq(3), 3)));
+        assert_eq!(
+            tail.try_next().await?.map(write_timestamp),
+            Some((WalSeq(2), Timestamp(2)))
+        );
+        assert_eq!(
+            tail.try_next().await?.map(write_timestamp),
+            Some((WalSeq(3), Timestamp(3)))
+        );
 
         assert_matches!(futures::poll!(tail.next()), Poll::Pending);
 
-        assert_eq!(wal.append(4).await?, WalSeq(4));
+        assert_eq!(wal.append(wal_entry(4)).await?, WalSeq(4));
 
-        assert_eq!(tail.try_next().await?, Some((WalSeq(4), 4)));
+        assert_eq!(
+            tail.try_next().await?.map(write_timestamp),
+            Some((WalSeq(4), Timestamp(4)))
+        );
 
         wal.trim(WalSeq(3)).await?;
 
         assert_eq!(wal.oldest_available().await?, WalSeq(3));
         assert_matches!(wal.read(WalSeq(2)).next().await, Some(Err(_)));
         assert_eq!(
-            wal.read(WalSeq(3)).try_collect::<Vec<_>>().await?,
-            vec![(WalSeq(3), 3), (WalSeq(4), 4)]
+            write_timestamps(wal.read(WalSeq(3)).try_collect::<Vec<_>>().await?),
+            vec![(WalSeq(3), Timestamp(3)), (WalSeq(4), Timestamp(4))]
         );
 
         Ok(())

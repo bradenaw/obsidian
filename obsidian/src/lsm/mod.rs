@@ -56,12 +56,12 @@ pub(crate) struct LsmBuilder<S> {
     l0_max_size: u64,
     run_size_target: u64,
     block_size_target: u64,
-    wal: Arc<dyn Wal<WalEntry>>,
+    wal: Arc<dyn Wal>,
     storage: Arc<S>,
 }
 
 impl<S: Storage> LsmBuilder<S> {
-    pub fn new(wal: Arc<dyn Wal<WalEntry>>, storage: Arc<S>) -> Self {
+    pub fn new(wal: Arc<dyn Wal>, storage: Arc<S>) -> Self {
         LsmBuilder {
             l0_max_size: 8_000_000,
             run_size_target: 64_000_000,
@@ -86,7 +86,7 @@ impl<S: Storage> LsmBuilder<S> {
         self
     }
 
-    pub fn wal(mut self, wal: Arc<dyn Wal<WalEntry>>) -> Self {
+    pub fn wal(mut self, wal: Arc<dyn Wal>) -> Self {
         self.wal = wal;
         self
     }
@@ -120,7 +120,7 @@ pub(crate) struct Lsm<S: Storage> {
     run_size_target: u64,
     block_size_target: u64,
 
-    wal: Arc<dyn Wal<WalEntry>>,
+    wal: Arc<dyn Wal>,
     index: Arc<Index<S::Reader>>,
     compactor: Compactor<S>,
     storage: Arc<S>,
@@ -134,7 +134,7 @@ impl<S: Storage> Lsm<S> {
         l0_max_size: u64,
         run_size_target: u64,
         block_size_target: u64,
-        wal: Arc<dyn Wal<WalEntry>>,
+        wal: Arc<dyn Wal>,
         storage: Arc<S>,
     ) -> anyhow::Result<Self> {
         let (index, newest_seqno) = Self::recovery(l0_max_size, &wal, &storage).await?;
@@ -431,7 +431,7 @@ impl<S: Storage> Lsm<S> {
 
     async fn recovery(
         l0_max_size: u64,
-        wal: &Arc<dyn Wal<WalEntry>>,
+        wal: &Arc<dyn Wal>,
         storage: &S,
     ) -> anyhow::Result<(Index<S::Reader>, Option<WalSeq>)> {
         let oldest_seqno = wal.oldest_available().await?;
@@ -499,7 +499,7 @@ impl<S: Storage> Lsm<S> {
 
     async fn process_wal(
         index: Arc<Index<S::Reader>>,
-        wal: Arc<dyn Wal<WalEntry>>,
+        wal: Arc<dyn Wal>,
         start: WalSeq,
         wal_processed: tokio::sync::watch::Sender<WalSeq>,
         l0_max_size: u64,
@@ -512,7 +512,7 @@ impl<S: Storage> Lsm<S> {
 
     async fn process_wal_once(
         index: &Index<S::Reader>,
-        wal: &Arc<dyn Wal<WalEntry>>,
+        wal: &Arc<dyn Wal>,
         start: WalSeq,
         wal_processed: tokio::sync::watch::Sender<WalSeq>,
         l0_max_size: u64,
@@ -1228,7 +1228,7 @@ mod test {
 
     #[tokio::test]
     async fn test_recovery() -> anyhow::Result<()> {
-        let wal = Arc::new(MemWal::new()) as Arc<dyn Wal<_>>;
+        let wal = Arc::new(MemWal::new()) as Arc<dyn Wal>;
         let storage = Arc::new(MemStorage::new());
 
         let lsm = LsmBuilder::new(Arc::clone(&wal), storage.clone())

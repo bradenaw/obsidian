@@ -5,7 +5,6 @@ use std::sync::Weak;
 
 use anyhow::anyhow;
 
-use crate::WalEntry;
 use crate::runtime::Meta;
 use crate::runtime::Shard;
 use crate::runtime::Shards;
@@ -49,7 +48,7 @@ where
                     self.storage.clone(),
                     Arc::new(self.meta_proxy.clone()),
                     Arc::new(Arc::downgrade(&self)),
-                    Box::new(self.wals.clone()) as Box<dyn Wals<Arc<dyn Wal<WalEntry>>>>,
+                    Box::new(self.wals.clone()) as Box<dyn Wals<Arc<dyn Wal>>>,
                     256,   // l0_max_size
                     65536, // run_size_target
                     4096,  // block_size_target

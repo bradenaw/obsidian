@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use crossbeam::sync::ShardedLock;
 
 use crate::lsm::LsmBuilder;
-use crate::WalEntry;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
 use crate::meta::MetaSynced;
@@ -44,7 +43,7 @@ where
         storage: Arc<S>,
         meta: Arc<M>,
         shards: Arc<dyn Shards>,
-        wals: Box<dyn Wals<Arc<dyn Wal<WalEntry>>>>,
+        wals: Box<dyn Wals<Arc<dyn Wal>>>,
         l0_max_size: u64,
         run_size_target: u64,
         block_size_target: u64,
@@ -217,7 +216,7 @@ struct ShardInner<S, M> {
     meta: Arc<M>,
     meta_synced: Arc<MetaSynced>,
     shards: Arc<dyn Shards>,
-    wals: Box<dyn Wals<Arc<dyn Wal<WalEntry>>>>,
+    wals: Box<dyn Wals<Arc<dyn Wal>>>,
     l0_max_size: u64,
     run_size_target: u64,
     block_size_target: u64,

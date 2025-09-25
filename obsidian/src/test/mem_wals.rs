@@ -4,7 +4,6 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use crate::WalEntry;
 use crate::runtime::Wal;
 use crate::runtime::Wals;
 use crate::test::MemWal;
@@ -12,7 +11,7 @@ use crate::TabletId;
 
 #[derive(Clone)]
 pub(crate) struct MemWals {
-    m: Arc<Mutex<HashMap<TabletId, Arc<dyn Wal<WalEntry>>>>>,
+    m: Arc<Mutex<HashMap<TabletId, Arc<dyn Wal>>>>,
 }
 
 impl MemWals {
@@ -24,8 +23,8 @@ impl MemWals {
 }
 
 #[async_trait]
-impl Wals<Arc<dyn Wal<WalEntry>>> for MemWals {
-    async fn wal(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Wal<WalEntry>>> {
+impl Wals<Arc<dyn Wal>> for MemWals {
+    async fn wal(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Wal>> {
         let mut m = self.m.lock().unwrap();
 
         Ok(Arc::clone(
