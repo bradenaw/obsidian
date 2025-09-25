@@ -17,7 +17,7 @@ use crate::lsm::RunId;
 use crate::lsm::RunManifest;
 use crate::runtime::FileReader;
 use crate::runtime::Storage;
-use crate::runtime::WalSeq;
+use crate::WalSeq;
 use crate::util::binary_search_by_idx;
 use crate::Bound;
 use crate::KeyOrBound;

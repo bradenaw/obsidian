@@ -31,8 +31,9 @@ use crate::lsm::util::LsmRevision;
 use crate::runtime::FileReader;
 use crate::runtime::Storage;
 use crate::runtime::Wal;
-use crate::runtime::WalSeq;
+use crate::WalSeq;
 use crate::util::hexlify;
+use crate::WalEntry;
 use crate::util::merge_sorted_streams;
 use crate::util::shortest_between;
 use crate::util::Background;
@@ -921,15 +922,6 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) enum WalEntry {
-    NoOp,
-    Write(Timestamp, Vec<(KeyspaceId, Vec<u8>, RevisionValue)>),
-    /// The given manifest contains at least all of the writes through this sequence number. It may
-    /// contain more.
-    Manifest(WalSeq, Manifest),
-}
-
 #[cfg(test)]
 mod test {
     use std::collections::BTreeMap;
@@ -956,7 +948,7 @@ mod test {
     use crate::runtime::FileReader;
     use crate::runtime::Storage;
     use crate::runtime::Wal;
-    use crate::runtime::WalSeq;
+    use crate::WalSeq;
     use crate::storage::MemStorage;
     use crate::test::MemWal;
     use crate::util::binary_search_by_idx;

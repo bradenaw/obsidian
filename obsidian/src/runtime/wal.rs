@@ -3,8 +3,7 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use futures::Stream;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct WalSeq(pub u64);
+use crate::WalSeq;
 
 #[async_trait]
 pub(crate) trait Wal<E>: Send + Sync + 'static

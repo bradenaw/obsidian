@@ -9,7 +9,7 @@ use futures::StreamExt;
 use tokio::sync::watch;
 
 use crate::runtime::Wal;
-use crate::runtime::WalSeq;
+use crate::WalSeq;
 
 pub(crate) struct MemWal<E> {
     inner: Mutex<MemWalInner<E>>,
@@ -119,7 +119,7 @@ mod tests {
     use futures::TryStreamExt;
 
     use crate::runtime::Wal;
-    use crate::runtime::WalSeq;
+    use crate::WalSeq;
     use crate::test::MemWal;
 
     #[tokio::test]

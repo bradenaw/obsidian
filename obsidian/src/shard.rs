@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use crossbeam::sync::ShardedLock;
 
 use crate::lsm::LsmBuilder;
-use crate::lsm::WalEntry;
+use crate::WalEntry;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
 use crate::meta::MetaSynced;

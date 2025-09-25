@@ -19,6 +19,8 @@ mod timestamp;
 mod transfer_id;
 mod tx_outcome;
 mod txid;
+mod wal_entry;
+mod wal_seq;
 mod write_error;
 
 pub(crate) use bound::Bound;
@@ -43,4 +45,6 @@ pub(crate) use timestamp::Timestamp;
 pub(crate) use transfer_id::TransferId;
 pub(crate) use tx_outcome::TxOutcome;
 pub(crate) use txid::Txid;
+pub(crate) use wal_entry::WalEntry;
+pub(crate) use wal_seq::WalSeq;
 pub(crate) use write_error::WriteError;

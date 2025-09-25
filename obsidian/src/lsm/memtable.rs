@@ -5,7 +5,7 @@ use crossbeam_skiplist::SkipMap;
 
 use crate::lsm::util::LsmRevision;
 use crate::lsm::RunId;
-use crate::runtime::WalSeq;
+use crate::WalSeq;
 use crate::util::hexlify;
 use crate::util::IteratorEither;
 use crate::Bound;

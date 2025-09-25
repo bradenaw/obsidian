@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use crate::lsm::WalEntry;
+use crate::WalEntry;
 use crate::runtime::Wal;
 use crate::runtime::Wals;
 use crate::test::MemWal;

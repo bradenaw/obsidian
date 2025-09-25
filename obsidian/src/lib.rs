@@ -81,4 +81,6 @@ pub(crate) use crate::types::Timestamp;
 pub(crate) use crate::types::TransferId;
 pub(crate) use crate::types::TxOutcome;
 pub(crate) use crate::types::Txid;
+pub(crate) use crate::types::WalEntry;
+pub(crate) use crate::types::WalSeq;
 pub(crate) use crate::types::WriteError;

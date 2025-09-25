@@ -5,7 +5,7 @@ use std::sync::Weak;
 
 use anyhow::anyhow;
 
-use crate::lsm::WalEntry;
+use crate::WalEntry;
 use crate::runtime::Meta;
 use crate::runtime::Shard;
 use crate::runtime::Shards;
