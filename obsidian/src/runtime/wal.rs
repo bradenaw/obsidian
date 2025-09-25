@@ -1,3 +1,5 @@
+use std::pin::Pin;
+
 use async_trait::async_trait;
 use futures::Stream;
 
@@ -15,12 +17,12 @@ where
     fn read(
         &self,
         first: WalSeq,
-    ) -> impl Stream<Item = anyhow::Result<(WalSeq, E)>> + Send + '_;
+    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(WalSeq, E)>> + Send + '_>>;
 
     fn tail(
         &self,
         first: WalSeq,
-    ) -> impl Stream<Item = anyhow::Result<(WalSeq, E)>> + Send + '_;
+    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(WalSeq, E)>> + Send + '_>>;
 
     async fn oldest_available(&self) -> anyhow::Result<WalSeq>;
 

@@ -18,7 +18,6 @@ mod tablet;
 mod tuple_encoding;
 mod types;
 mod util;
-mod wal;
 
 mod pb {
     mod obsidian {

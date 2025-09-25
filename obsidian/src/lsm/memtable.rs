@@ -5,9 +5,9 @@ use crossbeam_skiplist::SkipMap;
 
 use crate::lsm::util::LsmRevision;
 use crate::lsm::RunId;
+use crate::runtime::WalSeq;
 use crate::util::hexlify;
 use crate::util::IteratorEither;
-use crate::wal;
 use crate::Bound;
 use crate::Direction;
 use crate::HistoryRange;
@@ -29,7 +29,7 @@ pub(crate) struct Memtable {
 
 struct MemtableStats {
     size: u64,
-    max_seqno: wal::SeqNo,
+    max_seqno: WalSeq,
     max_key_len: usize,
 }
 
@@ -41,7 +41,7 @@ impl Memtable {
             stats: RwLock::new(MemtableStats {
                 size: 0,
                 max_key_len: 0,
-                max_seqno: wal::SeqNo(0),
+                max_seqno: WalSeq(0),
             }),
         }
     }
@@ -50,7 +50,7 @@ impl Memtable {
         self.id
     }
 
-    pub fn max_seqno(&self) -> wal::SeqNo {
+    pub fn max_seqno(&self) -> WalSeq {
         self.stats.read().unwrap().max_seqno
     }
 
@@ -70,7 +70,7 @@ impl Memtable {
         Some((*revision_ts, revision_v.clone()))
     }
 
-    pub fn insert(&self, seqno: wal::SeqNo, k: Vec<u8>, ts: Timestamp, v: RevisionValue) -> u64 {
+    pub fn insert(&self, seqno: WalSeq, k: Vec<u8>, ts: Timestamp, v: RevisionValue) -> u64 {
         log::trace!("memtable {}: insert {}@{}", self.id, hexlify(&k[..]), ts);
 
         let mut stats = self.stats.write().unwrap();

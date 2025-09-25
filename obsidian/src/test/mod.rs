@@ -16,6 +16,7 @@ use crate::gateway::Gateway;
 use crate::lsm::Manifest;
 use crate::meta::MetaImpl;
 use crate::meta::MetaSynced;
+pub(crate) use mem_wal::MemWal;
 use crate::runtime::Meta;
 use crate::runtime::Shards;
 use crate::runtime::Tablet;

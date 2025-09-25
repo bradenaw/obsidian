@@ -11,6 +11,7 @@ use crate::runtime::Meta;
 use crate::runtime::Shard;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
+use crate::test::MemWal;
 use crate::ShardId;
 use crate::test::meta_proxy::MetaProxy;
 
@@ -45,7 +46,7 @@ where
                     self.storage.clone(),
                     Arc::new(self.meta_proxy.clone()),
                     Arc::new(Arc::downgrade(&self)),
-                    LsmBuilder::new(self.storage.clone())
+                    LsmBuilder::new(Arc::new(MemWal::new()), self.storage.clone())
                         .l0_max_size(256)
                         .run_size_target(65536)
                         .block_size_target(4096),
