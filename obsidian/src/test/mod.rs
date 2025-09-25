@@ -1,5 +1,7 @@
 mod meta_proxy;
 mod shards;
+mod mem_wal;
+mod mem_wals;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -15,6 +17,8 @@ use crate::gateway::Gateway;
 use crate::lsm::Manifest;
 use crate::meta::MetaImpl;
 use crate::meta::MetaSynced;
+pub(crate) use mem_wal::MemWal;
+pub(crate) use mem_wals::MemWals;
 use crate::runtime::Meta;
 use crate::runtime::Shards;
 use crate::runtime::Tablet;

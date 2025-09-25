@@ -17,8 +17,8 @@ use crate::lsm::RunId;
 use crate::lsm::RunManifest;
 use crate::runtime::FileReader;
 use crate::runtime::Storage;
+use crate::runtime::WalSeq;
 use crate::util::binary_search_by_idx;
-use crate::wal;
 use crate::Bound;
 use crate::KeyOrBound;
 use crate::KeyspaceId;
@@ -94,7 +94,7 @@ where
     pub(super) fn insert(
         &self,
         keyspace_id: KeyspaceId,
-        seqno: wal::SeqNo,
+        seqno: WalSeq,
         k: Vec<u8>,
         ts: Timestamp,
         v: RevisionValue,

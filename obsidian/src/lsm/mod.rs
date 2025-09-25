@@ -13,7 +13,6 @@ use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::anyhow;
 use futures::stream::StreamExt;
@@ -31,13 +30,14 @@ use crate::lsm::run::Run;
 use crate::lsm::util::LsmRevision;
 use crate::runtime::FileReader;
 use crate::runtime::Storage;
+use crate::runtime::Wal;
+use crate::runtime::WalSeq;
 use crate::util::hexlify;
 use crate::util::merge_sorted_streams;
 use crate::util::shortest_between;
 use crate::util::Background;
 use crate::util::IteratorEither;
 use crate::util::OrdEqByFirst;
-use crate::wal;
 use crate::Bound;
 use crate::Direction;
 use crate::HistoryRange;
@@ -55,17 +55,17 @@ pub(crate) struct LsmBuilder<S> {
     l0_max_size: u64,
     run_size_target: u64,
     block_size_target: u64,
-    wal: Option<Arc<wal::Wal<WalEntry>>>,
+    wal: Arc<dyn Wal<WalEntry>>,
     storage: Arc<S>,
 }
 
 impl<S: Storage> LsmBuilder<S> {
-    pub fn new(storage: Arc<S>) -> Self {
+    pub fn new(wal: Arc<dyn Wal<WalEntry>>, storage: Arc<S>) -> Self {
         LsmBuilder {
             l0_max_size: 8_000_000,
             run_size_target: 64_000_000,
             block_size_target: 32768,
-            wal: None,
+            wal: wal,
             storage: storage,
         }
     }
@@ -85,8 +85,8 @@ impl<S: Storage> LsmBuilder<S> {
         self
     }
 
-    pub fn wal(mut self, wal: Arc<wal::Wal<WalEntry>>) -> Self {
-        self.wal = Some(wal);
+    pub fn wal(mut self, wal: Arc<dyn Wal<WalEntry>>) -> Self {
+        self.wal = wal;
         self
     }
 
@@ -95,8 +95,7 @@ impl<S: Storage> LsmBuilder<S> {
             self.l0_max_size,
             self.run_size_target,
             self.block_size_target,
-            self.wal
-                .unwrap_or_else(|| Arc::new(wal::Wal::new(16384, Duration::from_millis(5)))),
+            self.wal,
             self.storage,
         )
         .await
@@ -120,13 +119,13 @@ pub(crate) struct Lsm<S: Storage> {
     run_size_target: u64,
     block_size_target: u64,
 
-    wal: Arc<wal::Wal<WalEntry>>,
+    wal: Arc<dyn Wal<WalEntry>>,
     index: Arc<Index<S::Reader>>,
     compactor: Compactor<S>,
     storage: Arc<S>,
 
     bg: Background,
-    wal_processed: tokio::sync::watch::Receiver<wal::SeqNo>,
+    wal_processed: tokio::sync::watch::Receiver<WalSeq>,
 }
 
 impl<S: Storage> Lsm<S> {
@@ -134,7 +133,7 @@ impl<S: Storage> Lsm<S> {
         l0_max_size: u64,
         run_size_target: u64,
         block_size_target: u64,
-        wal: Arc<wal::Wal<WalEntry>>,
+        wal: Arc<dyn Wal<WalEntry>>,
         storage: Arc<S>,
     ) -> anyhow::Result<Self> {
         let (index, newest_seqno) = Self::recovery(l0_max_size, &wal, &storage).await?;
@@ -142,11 +141,11 @@ impl<S: Storage> Lsm<S> {
         let index_arc = Arc::new(index);
 
         let bg = Background::new();
-        let (wal_processed_send, wal_processed_recv) = tokio::sync::watch::channel(wal::SeqNo(0));
+        let (wal_processed_send, wal_processed_recv) = tokio::sync::watch::channel(WalSeq(0));
         bg.spawn(Self::process_wal(
             Arc::clone(&index_arc),
             Arc::clone(&wal),
-            newest_seqno.unwrap_or(wal::SeqNo(0)),
+            newest_seqno.unwrap_or(WalSeq(1)),
             wal_processed_send,
             l0_max_size,
         ));
@@ -245,6 +244,10 @@ impl<S: Storage> Lsm<S> {
                     }
                 }
             }
+        }
+
+        for key in muts.keys() {
+            Self::keyspace(&index_snapshot, key.0)?;
         }
 
         let seqno = self
@@ -414,7 +417,7 @@ impl<S: Storage> Lsm<S> {
     }
 
     /// Waits until at least the given sequence number has been processed.
-    async fn wait_processed(&self, seqno: wal::SeqNo) -> anyhow::Result<()> {
+    async fn wait_processed(&self, seqno: WalSeq) -> anyhow::Result<()> {
         let mut wal_processed = self.wal_processed.clone();
         while *wal_processed.borrow_and_update() < seqno {
             wal_processed
@@ -427,12 +430,12 @@ impl<S: Storage> Lsm<S> {
 
     async fn recovery(
         l0_max_size: u64,
-        wal: &wal::Wal<WalEntry>,
+        wal: &Arc<dyn Wal<WalEntry>>,
         storage: &S,
-    ) -> anyhow::Result<(Index<S::Reader>, Option<wal::SeqNo>)> {
-        let oldest_seqno = wal.oldest_available();
+    ) -> anyhow::Result<(Index<S::Reader>, Option<WalSeq>)> {
+        let oldest_seqno = wal.oldest_available().await?;
         let mut newest_seqno = None;
-        let mut wal_stream = wal.stream(oldest_seqno, false).boxed();
+        let mut wal_stream = wal.read(oldest_seqno);
 
         let mut entries = VecDeque::new();
         let mut index = Index::new();
@@ -495,9 +498,9 @@ impl<S: Storage> Lsm<S> {
 
     async fn process_wal(
         index: Arc<Index<S::Reader>>,
-        wal: Arc<wal::Wal<WalEntry>>,
-        start: wal::SeqNo,
-        wal_processed: tokio::sync::watch::Sender<wal::SeqNo>,
+        wal: Arc<dyn Wal<WalEntry>>,
+        start: WalSeq,
+        wal_processed: tokio::sync::watch::Sender<WalSeq>,
         l0_max_size: u64,
     ) {
         // TODO: retry
@@ -508,12 +511,12 @@ impl<S: Storage> Lsm<S> {
 
     async fn process_wal_once(
         index: &Index<S::Reader>,
-        wal: &wal::Wal<WalEntry>,
-        start: wal::SeqNo,
-        wal_processed: tokio::sync::watch::Sender<wal::SeqNo>,
+        wal: &Arc<dyn Wal<WalEntry>>,
+        start: WalSeq,
+        wal_processed: tokio::sync::watch::Sender<WalSeq>,
         l0_max_size: u64,
     ) -> anyhow::Result<()> {
-        let mut log = wal.stream(start, true).boxed();
+        let mut log = wal.tail(start);
         while let Some((seqno, entry)) = log.try_next().await? {
             match entry {
                 WalEntry::NoOp => {}
@@ -924,33 +927,7 @@ pub(crate) enum WalEntry {
     Write(Timestamp, Vec<(KeyspaceId, Vec<u8>, RevisionValue)>),
     /// The given manifest contains at least all of the writes through this sequence number. It may
     /// contain more.
-    Manifest(wal::SeqNo, Manifest),
-}
-
-impl wal::Entry for WalEntry {
-    fn size(&self) -> u64 {
-        match self {
-            WalEntry::NoOp => 0,
-            WalEntry::Write(_, kvs) => {
-                8 + kvs.iter().map(|(_, k, v)| k.len() + v.len()).sum::<usize>() as u64
-            }
-            WalEntry::Manifest(_, manifest) => {
-                16u64
-                    + manifest
-                        .keyspaces
-                        .values()
-                        .map(|keyspace_manifest| {
-                            keyspace_manifest
-                                .levels
-                                .iter()
-                                .map(|level| level.runs.len() as u64)
-                                .sum::<u64>()
-                                * 16u64
-                        })
-                        .sum::<u64>()
-            }
-        }
-    }
+    Manifest(WalSeq, Manifest),
 }
 
 #[cfg(test)]
@@ -958,7 +935,6 @@ mod test {
     use std::collections::BTreeMap;
     use std::collections::HashSet;
     use std::sync::Arc;
-    use std::time::Duration;
 
     use async_trait::async_trait;
     use byteorder::BigEndian;
@@ -979,10 +955,11 @@ mod test {
     use crate::lsm::RunId;
     use crate::runtime::FileReader;
     use crate::runtime::Storage;
+    use crate::runtime::Wal;
+    use crate::runtime::WalSeq;
     use crate::storage::MemStorage;
+    use crate::test::MemWal;
     use crate::util::binary_search_by_idx;
-    use crate::wal;
-    use crate::wal::SeqNo;
     use crate::Bound;
     use crate::ColoGroupId;
     use crate::Direction;
@@ -1036,7 +1013,9 @@ mod test {
 
     #[tokio::test]
     async fn test_put_get() -> anyhow::Result<()> {
-        let lsm = LsmBuilder::new(Arc::new(MemStorage::new())).build().await?;
+        let lsm = LsmBuilder::new(Arc::new(MemWal::new()), Arc::new(MemStorage::new()))
+            .build()
+            .await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
         let k = b"abc";
         let not_k = b"def";
@@ -1068,7 +1047,9 @@ mod test {
 
     #[tokio::test]
     async fn test_write_tx() -> anyhow::Result<()> {
-        let lsm = LsmBuilder::new(Arc::new(MemStorage::new())).build().await?;
+        let lsm = LsmBuilder::new(Arc::new(MemWal::new()), Arc::new(MemStorage::new()))
+            .build()
+            .await?;
 
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
         let ka = b"a";
@@ -1139,7 +1120,7 @@ mod test {
     #[tokio::test]
     async fn test_compact_l0() -> anyhow::Result<()> {
         _ = pretty_env_logger::try_init();
-        let lsm = LsmBuilder::new(Arc::new(MemStorage::new()))
+        let lsm = LsmBuilder::new(Arc::new(MemWal::new()), Arc::new(MemStorage::new()))
             .l0_max_size(128)
             .block_size_target(128)
             .run_size_target(512)
@@ -1195,7 +1176,7 @@ mod test {
     async fn test_compact_l1() -> anyhow::Result<()> {
         _ = pretty_env_logger::try_init();
 
-        let lsm = LsmBuilder::new(Arc::new(MemStorage::new()))
+        let lsm = LsmBuilder::new(Arc::new(MemWal::new()), Arc::new(MemStorage::new()))
             .l0_max_size(128)
             .block_size_target(128)
             .run_size_target(512)
@@ -1255,14 +1236,13 @@ mod test {
 
     #[tokio::test]
     async fn test_recovery() -> anyhow::Result<()> {
-        let wal = Arc::new(wal::Wal::new(16, Duration::from_millis(2)));
+        let wal = Arc::new(MemWal::new()) as Arc<dyn Wal<_>>;
         let storage = Arc::new(MemStorage::new());
 
-        let lsm = LsmBuilder::new(storage.clone())
+        let lsm = LsmBuilder::new(Arc::clone(&wal), storage.clone())
             .l0_max_size(128)
             .block_size_target(128)
             .run_size_target(512)
-            .wal(wal.clone())
             .build()
             .await?;
 
@@ -1316,7 +1296,7 @@ mod test {
         drop(lsm);
 
         // Rebuild the LSM from the same WAL and storage, this should recover everything.
-        let lsm = LsmBuilder::new(storage).wal(wal).build().await?;
+        let lsm = LsmBuilder::new(wal, storage).build().await?;
 
         for (k, v) in &map {
             assert_eq!(
@@ -1346,7 +1326,7 @@ mod test {
 
     #[tokio::test]
     async fn test_scan_page() -> anyhow::Result<()> {
-        let lsm = LsmBuilder::new(Arc::new(MemStorage::new()))
+        let lsm = LsmBuilder::new(Arc::new(MemWal::new()), Arc::new(MemStorage::new()))
             .l0_max_size(32)
             .block_size_target(48)
             .run_size_target(96)
@@ -1638,7 +1618,7 @@ mod test {
 
                 let mut writes = vec![];
 
-                let lsm = LsmBuilder::new(Arc::new(MemStorage::new()))
+                let lsm = LsmBuilder::new(Arc::new(MemWal::new()), Arc::new(MemStorage::new()))
                     .l0_max_size(128)
                     .block_size_target(128)
                     .run_size_target(512)
@@ -1955,7 +1935,7 @@ mod test {
         let l0_active_revisions = find_touching(&diagram[..], &mut visited, x_max, 0);
         let l0_active = Memtable::new();
         for revision in l0_active_revisions {
-            l0_active.insert(SeqNo(1), revision.key, revision.ts, revision.value);
+            l0_active.insert(WalSeq(1), revision.key, revision.ts, revision.value);
         }
         let mut keyspace = Keyspace {
             l0_active: Arc::new(l0_active),
@@ -1973,7 +1953,7 @@ mod test {
                 if keyspace.l0_sealed[0].is_empty() {
                     for revision in revisions {
                         keyspace.l0_sealed[0].insert(
-                            SeqNo(1),
+                            WalSeq(1),
                             revision.key,
                             revision.ts,
                             revision.value,
