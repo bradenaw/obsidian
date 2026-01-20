@@ -11,6 +11,7 @@
 //! Some of the traits here are also third-party dependencies that are expected to be provided for
 //! the system, like Storage.
 
+mod journal;
 mod meta;
 mod shard;
 mod shards;
@@ -19,6 +20,7 @@ mod tablet;
 mod wal;
 mod wals;
 
+pub(crate) use journal::Journal;
 pub(crate) use meta::Meta;
 pub(crate) use shard::Shard;
 pub(crate) use shards::Shards;

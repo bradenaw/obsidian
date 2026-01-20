@@ -9,6 +9,7 @@ mod grpc;
 mod lsm;
 mod meta;
 mod obsidian;
+mod replica;
 mod router;
 mod rtest;
 mod runtime;
