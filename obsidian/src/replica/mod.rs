@@ -1,4 +1,7 @@
+mod shareable_revokable;
+
 use std::cmp::max;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,23 +10,48 @@ use async_stream::try_stream;
 use futures::future::OptionFuture;
 use futures::Stream;
 use futures::StreamExt;
-use futures::TryStreamExt;
 use rand::Rng;
 use tokio::select;
 use tokio::time::interval;
 use tokio::time::sleep_until;
+use tokio::time::Instant;
 use tokio::time::Sleep;
 use tokio_stream::wrappers::IntervalStream;
 use uuid::Uuid;
 
+use crate::replica::shareable_revokable::ShareableRevokable;
 use crate::runtime::Journal;
 use crate::Timestamp;
 use crate::WalSeq;
 
+/// A Replica is a participant in a replica group, which all hold copies of the same logical data.
+/// Replicas join the group and elect a leader. The leader executes writes and has the most
+/// up-to-date copy of the data. The followers also have a copy of this data, but at any given time
+/// likely will not have the most recent few writes. Followers thus can serve stale reads
+/// (timestamps that are older than some amount, probably tens to hundreds of milliseconds at
+/// minimum), but cannot serve get_latest and friends.
+///
+/// Replicas transition back and forth between leaders and followers. If the leader departs
+/// (intentionally or accidentally), the followers will elect a new leader.
+///
+/// For any of this to work, we need to guarantee that there is at most one leader at any point in
+/// time. "Point in time" is defined along two dimensions:
+///
+/// - Logical, that is, that segments of the journal have at most one leader. This prevents
+///   split-braining where different replicas apply a different set of writes from each other. This
+///   is absolutely guaranteed by the rules of proposal acceptance below. Writes are guaranteed not
+///   to split brain.
+/// - Real-time. We also need to guarantee that there is only one replica behaving as a leader for
+///   the purpose of reads at any given time, otherwise we get split-brains where writes that have
+///   been applied to one leader are not visible on another replica claiming to serve latest reads.
+///   This is resolved with timing assumptions, which assumes some (loose) amount of clock
+///   synchronization for correctness. This is on the order of seconds, which is generally an
+///   achievable guarantee to provide, but it's still worth noting that if the clocks in the system
+///   get far out of sync the system may not behave correctly.
 struct Replica<Leader, Follower> {
     replica_id: ReplicaId,
     journal: Arc<dyn Journal<Proposal>>,
-    state: ReplicaState<Leader, Follower>,
+    state: ShareableRevokable<ReplicaState<Leader, Follower>>,
     campaign_splay: Duration,
     heartbeat_interval: Duration,
     renew_interval: Duration,
@@ -32,9 +60,11 @@ struct Replica<Leader, Follower> {
 }
 
 enum ReplicaState<Leader, Follower> {
-    Leader(Leader),
+    Leader {
+        leader: Leader,
+        last_confirmation: tokio::time::Instant,
+    },
     Follower(Follower),
-    Transitioning,
 }
 
 #[derive(Eq, PartialEq, Clone, Copy)]
@@ -72,10 +102,37 @@ trait Leader<Follower> {
 
 trait Follower<Leader> {
     fn process(&self, entry: Entry);
-    fn promote(self) -> Leader;
+    async fn promote(self) -> Leader;
 }
 
-impl<Leader, Follower> Replica<Leader, Follower> {
+impl<TLeader, TFollower> Replica<TLeader, TFollower>
+where
+    TLeader: Leader<TFollower> + Send + Sync + 'static,
+    TFollower: Follower<TLeader> + Send + Sync + 'static,
+{
+    async fn with_state<F, Fut, T>(&self, f: F) -> anyhow::Result<T>
+    where
+        F: FnOnce(&ReplicaState<TLeader, TFollower>) -> Fut + Send + 'static,
+        Fut: Future<Output = anyhow::Result<T>> + Send,
+        T: Send + 'static,
+    {
+        let lease_duration = self.lease_duration;
+        self.state
+            .share(move |state| async move {
+                if let ReplicaState::Leader {
+                    ref last_confirmation,
+                    ..
+                } = state
+                {
+                    if Instant::now().duration_since(*last_confirmation) > lease_duration / 2 {
+                        return Err(anyhow!(""));
+                    }
+                }
+                f(state).await
+            })
+            .await?
+    }
+
     fn propose_at(&self, ts: Timestamp, proposal_type: ProposalType) {
         todo!();
         //self.journal
@@ -88,6 +145,29 @@ impl<Leader, Follower> Replica<Leader, Follower> {
 
     fn next_timestamp(&self) -> Timestamp {
         todo!();
+    }
+
+    async fn promote_or_renew(&self, confirmation: Instant) -> anyhow::Result<()> {
+        self.state
+            .revoke_and_modify(|state: &mut ReplicaState<TLeader, TFollower>| async {
+                match state {
+                    ReplicaState::Leader {
+                        ref mut last_confirmation,
+                        ..
+                    } => {
+                        *last_confirmation = confirmation;
+                    }
+                    ReplicaState::Follower(follower) => {
+                        let leader = follower.promote().await;
+                        *state = ReplicaState::Leader {
+                            last_confirmation: confirmation,
+                            leader,
+                        };
+                    }
+                }
+            })
+            .await;
+        Ok(())
     }
 
     async fn process(&self) -> anyhow::Result<()> {
@@ -104,6 +184,7 @@ impl<Leader, Follower> Replica<Leader, Follower> {
         let mut heartbeat_ticker = ticker(self.heartbeat_interval);
         // True if we've published a heartbeat that we haven't observed in the stream yet.
         let mut pending_heartbeat = false;
+        let mut pending_acquire = None;
 
         let mut current_lease = None;
 
@@ -151,9 +232,10 @@ impl<Leader, Follower> Replica<Leader, Follower> {
                     self.propose_at(self.next_timestamp(), ProposalType::Heartbeat);
                     pending_heartbeat = true;
                 },
-                _ = maybe_sleep_until(max(next_campaign, next_renew)) => {
+                _ = maybe_sleep_until(max(next_campaign, next_renew)), if pending_acquire.is_none() => {
                     let ts = self.next_timestamp();
                     let lease_end = Timestamp::from_nanos(ts.as_nanos() + (self.lease_duration.as_nanos() as u64));
+                    pending_acquire = Some(tokio::time::Instant::now());
                     self.propose_at(ts, ProposalType::Acquire{ safe_read: todo!(), lease_end });
                 },
             }
