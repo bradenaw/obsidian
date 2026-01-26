@@ -1,4 +1,5 @@
 mod meta_proxy;
+mod mem_journal;
 mod shards;
 mod mem_wal;
 mod mem_wals;
@@ -19,6 +20,7 @@ use crate::meta::MetaImpl;
 use crate::meta::MetaSynced;
 pub(crate) use mem_wal::MemWal;
 pub(crate) use mem_wals::MemWals;
+pub(crate) use mem_journal::MemJournal;
 use crate::runtime::Meta;
 use crate::runtime::Shards;
 use crate::runtime::Tablet;

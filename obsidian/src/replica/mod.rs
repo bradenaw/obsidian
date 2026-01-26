@@ -1,3 +1,6 @@
+#![cfg(test)]
+mod tests;
+
 use std::cmp::max;
 use std::future::Future;
 use std::ops::Deref;
@@ -139,6 +142,7 @@ where
     {
         let state = self.state.read().await;
 
+        // TODO: select! against a future that fills if we need to promote/demote
         let out = f(state
             .as_ref()
             .ok_or_else(|| anyhow!("no replica state present"))?)
