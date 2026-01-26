@@ -1,7 +1,8 @@
-mod shareable_revokable;
-
 use std::cmp::max;
 use std::future::Future;
+use std::ops::Deref;
+use std::sync::atomic::AtomicI64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,6 +13,7 @@ use futures::Stream;
 use futures::StreamExt;
 use rand::Rng;
 use tokio::select;
+use tokio::sync::RwLock;
 use tokio::time::interval;
 use tokio::time::sleep_until;
 use tokio::time::Instant;
@@ -19,7 +21,6 @@ use tokio::time::Sleep;
 use tokio_stream::wrappers::IntervalStream;
 use uuid::Uuid;
 
-use crate::replica::shareable_revokable::ShareableRevokable;
 use crate::runtime::Journal;
 use crate::Timestamp;
 use crate::WalSeq;
@@ -51,24 +52,31 @@ use crate::WalSeq;
 struct Replica<Leader, Follower> {
     replica_id: ReplicaId,
     journal: Arc<dyn Journal<Proposal>>,
-    state: ShareableRevokable<ReplicaState<Leader, Follower>>,
+
     campaign_splay: Duration,
     heartbeat_interval: Duration,
     renew_interval: Duration,
-    recency_window: Duration,
     lease_duration: Duration,
+
+    state: RwLock<Option<ReplicaState<Leader, Follower>>>,
+    // The timestamp of the write of the last seen Acquire by self, stored as the duration since
+    // self.epoch in nanoseconds.
+    last_confirmation: AtomicInstant,
 }
 
 enum ReplicaState<Leader, Follower> {
-    Leader {
-        leader: Leader,
-        last_confirmation: tokio::time::Instant,
-    },
+    Leader(Leader),
     Follower(Follower),
 }
 
 #[derive(Eq, PartialEq, Clone, Copy)]
 struct ReplicaId(Uuid);
+
+impl ReplicaId {
+    fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
 
 struct Proposal {
     replica_id: ReplicaId,
@@ -82,7 +90,7 @@ enum ProposalType {
     // Acquires are only accepted if their timestamp is greater than the last non-relinquished
     // lease_end.
     Acquire {
-        // No further writes will happen with a lower timestamp, so any
+        // TODO: Actually, would be smart to piggyback this on Entry instead.
         safe_read: Timestamp,
         lease_end: Timestamp,
     },
@@ -97,7 +105,7 @@ struct Entry {}
 
 trait Leader<Follower> {
     fn process(&self, entry: Entry);
-    fn demote(self) -> Follower;
+    async fn demote(self) -> Follower;
 }
 
 trait Follower<Leader> {
@@ -110,63 +118,85 @@ where
     TLeader: Leader<TFollower> + Send + Sync + 'static,
     TFollower: Follower<TLeader> + Send + Sync + 'static,
 {
+    pub fn new(journal: Arc<dyn Journal<Proposal>>, follower: TFollower) -> Self {
+        Self {
+            replica_id: ReplicaId::new(),
+            journal,
+            campaign_splay: Duration::from_millis(2000),
+            heartbeat_interval: Duration::from_millis(1000),
+            renew_interval: Duration::from_millis(2000),
+            lease_duration: Duration::from_millis(10000),
+            state: RwLock::new(Some(ReplicaState::Follower(follower))),
+            last_confirmation: AtomicInstant::new(),
+        }
+    }
+
     async fn with_state<F, Fut, T>(&self, f: F) -> anyhow::Result<T>
     where
         F: FnOnce(&ReplicaState<TLeader, TFollower>) -> Fut + Send + 'static,
         Fut: Future<Output = anyhow::Result<T>> + Send,
         T: Send + 'static,
     {
-        let lease_duration = self.lease_duration;
-        self.state
-            .share(move |state| async move {
-                if let ReplicaState::Leader {
-                    ref last_confirmation,
-                    ..
-                } = state
-                {
-                    if Instant::now().duration_since(*last_confirmation) > lease_duration / 2 {
-                        return Err(anyhow!(""));
-                    }
-                }
-                f(state).await
-            })
-            .await?
+        let state = self.state.read().await;
+
+        let out = f(state
+            .as_ref()
+            .ok_or_else(|| anyhow!("no replica state present"))?)
+        .await?;
+
+        if matches!(state.deref(), Some(ReplicaState::Leader(_))) {
+            let last_confirmation = self.last_confirmation.load();
+
+            // TODO: Quantify the slop factor somewhere.
+            if Instant::now().duration_since(last_confirmation) > self.lease_duration / 2 {
+                return Err(anyhow!("lease expired before operation completed"));
+            }
+        }
+
+        Ok(out)
     }
 
     fn propose_at(&self, ts: Timestamp, proposal_type: ProposalType) {
-        todo!();
-        //self.journal
-        //    .append(Proposal {
-        //        replica_id: self.replica_id,
-        //        timestamp: Timestamp::now(), // order
-        //        proposal_type,
-        //    })
+        // TODO: Make sure ts is before lease_end!
+        tokio::spawn({
+            let journal = Arc::clone(&self.journal);
+            let replica_id = self.replica_id;
+
+            async move {
+                let _ = journal
+                    .append(Proposal {
+                        replica_id: replica_id,
+                        timestamp: ts,
+                        proposal_type,
+                    })
+                    .await;
+            }
+        });
     }
 
     fn next_timestamp(&self) -> Timestamp {
         todo!();
     }
 
-    async fn promote_or_renew(&self, confirmation: Instant) -> anyhow::Result<()> {
-        self.state
-            .revoke_and_modify(|state: &mut ReplicaState<TLeader, TFollower>| async {
-                match state {
-                    ReplicaState::Leader {
-                        ref mut last_confirmation,
-                        ..
-                    } => {
-                        *last_confirmation = confirmation;
-                    }
-                    ReplicaState::Follower(follower) => {
-                        let leader = follower.promote().await;
-                        *state = ReplicaState::Leader {
-                            last_confirmation: confirmation,
-                            leader,
-                        };
-                    }
-                }
-            })
-            .await;
+    async fn promote(&self) -> anyhow::Result<()> {
+        let mut maybe_state = self.state.write().await;
+        let state = maybe_state.take().unwrap();
+        let leader = match state {
+            ReplicaState::Leader(leader) => leader,
+            ReplicaState::Follower(follower) => follower.promote().await,
+        };
+        *maybe_state = Some(ReplicaState::Leader(leader));
+        Ok(())
+    }
+
+    async fn demote(&self) -> anyhow::Result<()> {
+        let mut maybe_state = self.state.write().await;
+        let state = maybe_state.take().unwrap();
+        let follower = match state {
+            ReplicaState::Leader(leader) => leader.demote().await,
+            ReplicaState::Follower(follower) => follower,
+        };
+        *maybe_state = Some(ReplicaState::Follower(follower));
         Ok(())
     }
 
@@ -178,13 +208,16 @@ where
         )
         .boxed();
 
-        // TODO: next expire
-        let mut next_renew: Option<tokio::time::Instant> = None;
-        let mut next_campaign: Option<tokio::time::Instant> = None;
+        // TODO: next expire, will still work without since receiving a heartbeat will trigger
+        // campaigning
+
+        let mut next_renew: Option<Instant> = None;
+        let mut next_campaign: Option<Instant> = None;
         let mut heartbeat_ticker = ticker(self.heartbeat_interval);
-        // True if we've published a heartbeat that we haven't observed in the stream yet.
+        // True if we've published a Heartbeat that we haven't observed in the stream yet.
         let mut pending_heartbeat = false;
-        let mut pending_acquire = None;
+        // Some if we've published an Acquire message that we haven't observed in the stream yet.
+        let mut pending_acquire: Option<Instant> = None;
 
         let mut current_lease = None;
 
@@ -201,12 +234,20 @@ where
                             next_campaign = None;
 
                             if proposal.replica_id == self.replica_id {
-                                next_renew = Some(tokio::time::Instant::now() + self.renew_interval);
+                                next_renew = Some(Instant::now() + self.renew_interval);
+
+                                self.last_confirmation.store(
+                                    pending_acquire
+                                        .ok_or_else(|| {
+                                            anyhow!("received acquire that was not pending")
+                                        })?,
+                                );
                                 // TODO: possibly promote self
                             }
                         },
                         ProposalType::Relinquish => {
                             current_lease = None;
+                            // TODO: possibly demote self
                         },
                         ProposalType::Append(entry) => {},
                         ProposalType::Heartbeat => {
@@ -214,7 +255,8 @@ where
                                 pending_heartbeat = false;
 
                                 // Receiving a heartbeat of our own means we're as close to 'now'
-                                // in the journal as we can be.
+                                // in the journal as we can be, since we only ever have one in
+                                // flight.
                                 let current_lease_expired = match current_lease {
                                     Some((_, lease_end)) => Timestamp::now() > lease_end,
                                     None => true,
@@ -222,7 +264,7 @@ where
                                 if next_campaign.is_none() && current_lease_expired {
                                     let wait_time =
                                         rand::thread_rng().gen_range(Duration::ZERO..self.campaign_splay);
-                                    next_campaign = Some(tokio::time::Instant::now() + wait_time);
+                                    next_campaign = Some(Instant::now() + wait_time);
                                 }
                             }
                         },
@@ -234,8 +276,10 @@ where
                 },
                 _ = maybe_sleep_until(max(next_campaign, next_renew)), if pending_acquire.is_none() => {
                     let ts = self.next_timestamp();
-                    let lease_end = Timestamp::from_nanos(ts.as_nanos() + (self.lease_duration.as_nanos() as u64));
-                    pending_acquire = Some(tokio::time::Instant::now());
+                    let lease_end = Timestamp::from_nanos(
+                        ts.as_nanos() + (self.lease_duration.as_nanos() as u64),
+                    );
+                    pending_acquire = Some(Instant::now());
                     self.propose_at(ts, ProposalType::Acquire{ safe_read: todo!(), lease_end });
                 },
             }
@@ -253,7 +297,7 @@ fn ticker(x: Duration) -> IntervalStream {
     IntervalStream::new(s)
 }
 
-fn maybe_sleep_until(x: Option<tokio::time::Instant>) -> OptionFuture<Sleep> {
+fn maybe_sleep_until(x: Option<Instant>) -> OptionFuture<Sleep> {
     OptionFuture::from(x.map(|instant| sleep_until(instant)))
 }
 
@@ -304,6 +348,44 @@ where
             }
 
             yield (seq, proposal);
+        }
+    }
+}
+
+struct AtomicInstant {
+    epoch: Instant,
+    elapsed: AtomicI64,
+}
+
+impl AtomicInstant {
+    fn new() -> Self {
+        Self {
+            epoch: Instant::now(),
+            elapsed: AtomicI64::new(0),
+        }
+    }
+
+    fn load(&self) -> Instant {
+        let x = self.elapsed.load(Ordering::SeqCst);
+        if x >= 0 {
+            self.epoch
+                .checked_add(Duration::from_nanos(x as u64))
+                .unwrap()
+        } else {
+            self.epoch
+                .checked_sub(Duration::from_nanos(-x as u64))
+                .unwrap()
+        }
+    }
+
+    fn store(&self, x: Instant) {
+        if let Some(elapsed) = x.checked_duration_since(self.epoch) {
+            self.elapsed
+                .store(elapsed.as_nanos() as i64, Ordering::SeqCst);
+        } else {
+            let elapsed = self.epoch.duration_since(x);
+            self.elapsed
+                .store(elapsed.as_nanos() as i64, Ordering::SeqCst);
         }
     }
 }
