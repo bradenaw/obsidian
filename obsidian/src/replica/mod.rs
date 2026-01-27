@@ -81,6 +81,7 @@ impl ReplicaId {
     }
 }
 
+#[derive(Clone)]
 struct Proposal {
     replica_id: ReplicaId,
     // Timestamps are not necessarily ordered the same way as WalSeqs, since the leader may submit
@@ -89,6 +90,7 @@ struct Proposal {
     proposal_type: ProposalType,
 }
 
+#[derive(Clone)]
 enum ProposalType {
     // Acquires are only accepted if their timestamp is greater than the last non-relinquished
     // lease_end.
@@ -104,6 +106,7 @@ enum ProposalType {
     Heartbeat,
 }
 
+#[derive(Clone)]
 struct Entry {}
 
 trait Leader<Follower> {
@@ -132,6 +135,10 @@ where
             state: RwLock::new(Some(ReplicaState::Follower(follower))),
             last_confirmation: AtomicInstant::new(),
         }
+    }
+
+    pub fn replica_id(&self) -> ReplicaId {
+        self.replica_id
     }
 
     async fn with_state<F, Fut, T>(&self, f: F) -> anyhow::Result<T>
