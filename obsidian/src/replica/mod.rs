@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
+use async_stream::stream;
 use async_stream::try_stream;
 use futures::future::OptionFuture;
 use futures::Stream;
@@ -25,6 +26,7 @@ use tokio_stream::wrappers::IntervalStream;
 use uuid::Uuid;
 
 use crate::runtime::Journal;
+use crate::util::WithBackground;
 use crate::Timestamp;
 use crate::WalSeq;
 
@@ -52,7 +54,9 @@ use crate::WalSeq;
 ///   synchronization for correctness. This is on the order of seconds, which is generally an
 ///   achievable guarantee to provide, but it's still worth noting that if the clocks in the system
 ///   get far out of sync the system may not behave correctly.
-struct Replica<Leader, Follower> {
+struct Replica<Leader, Follower>(WithBackground<ReplicaInner<Leader, Follower>>);
+
+struct ReplicaInner<Leader, Follower> {
     replica_id: ReplicaId,
     journal: Arc<dyn Journal<Proposal>>,
 
@@ -72,7 +76,7 @@ enum ReplicaState<Leader, Follower> {
     Follower(Follower),
 }
 
-#[derive(Eq, PartialEq, Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ReplicaId(Uuid);
 
 impl ReplicaId {
@@ -94,11 +98,7 @@ struct Proposal {
 enum ProposalType {
     // Acquires are only accepted if their timestamp is greater than the last non-relinquished
     // lease_end.
-    Acquire {
-        // TODO: Actually, would be smart to piggyback this on Entry instead.
-        safe_read: Timestamp,
-        lease_end: Timestamp,
-    },
+    Acquire { lease_end: Timestamp },
     Relinquish,
     // Appends are only accepted if they're made by the current leader.
     Append(Entry),
@@ -125,29 +125,42 @@ where
     TFollower: Follower<TLeader> + Send + Sync + 'static,
 {
     pub fn new(journal: Arc<dyn Journal<Proposal>>, follower: TFollower) -> Self {
-        Self {
+        let inner = WithBackground::new(Arc::new(ReplicaInner {
             replica_id: ReplicaId::new(),
             journal,
             campaign_splay: Duration::from_millis(2000),
             heartbeat_interval: Duration::from_millis(1000),
-            renew_interval: Duration::from_millis(2000),
+            renew_interval: Duration::from_millis(10000),
             lease_duration: Duration::from_millis(10000),
             state: RwLock::new(Some(ReplicaState::Follower(follower))),
             last_confirmation: AtomicInstant::new(),
-        }
+        }));
+        inner.spawn(async |replica| {
+            // XXX: Do something with this error.
+            replica.background_process().await.unwrap();
+        });
+        Self(inner)
     }
 
     pub fn replica_id(&self) -> ReplicaId {
-        self.replica_id
+        self.0.replica_id
     }
 
-    async fn with_state<F, Fut, T>(&self, f: F) -> anyhow::Result<T>
+    pub fn try_append(&self, entry: Entry) -> anyhow::Result<()> {
+        self.0.journal.append(Proposal {
+            replica_id: self.0.replica_id,
+            timestamp: todo!(),
+            proposal_type: ProposalType::Append(entry),
+        });
+    }
+
+    pub async fn with_state<F, Fut, T>(&self, f: F) -> anyhow::Result<T>
     where
         F: FnOnce(&ReplicaState<TLeader, TFollower>) -> Fut + Send + 'static,
         Fut: Future<Output = anyhow::Result<T>> + Send,
         T: Send + 'static,
     {
-        let state = self.state.read().await;
+        let state = self.0.state.read().await;
 
         // TODO: select! against a future that fills if we need to promote/demote
         let out = f(state
@@ -156,15 +169,25 @@ where
         .await?;
 
         if matches!(state.deref(), Some(ReplicaState::Leader(_))) {
-            let last_confirmation = self.last_confirmation.load();
+            let last_confirmation = self.0.last_confirmation.load();
 
             // TODO: Quantify the slop factor somewhere.
-            if Instant::now().duration_since(last_confirmation) > self.lease_duration / 2 {
+            if Instant::now().duration_since(last_confirmation) > self.0.lease_duration / 2 {
                 return Err(anyhow!("lease expired before operation completed"));
             }
         }
 
         Ok(out)
+    }
+}
+
+impl<TLeader, TFollower> ReplicaInner<TLeader, TFollower>
+where
+    TLeader: Leader<TFollower> + Send + Sync + 'static,
+    TFollower: Follower<TLeader> + Send + Sync + 'static,
+{
+    fn next_timestamp(&self) -> Timestamp {
+        Timestamp::now()
     }
 
     fn propose_at(&self, ts: Timestamp, proposal_type: ProposalType) {
@@ -183,10 +206,6 @@ where
                     .await;
             }
         });
-    }
-
-    fn next_timestamp(&self) -> Timestamp {
-        todo!();
     }
 
     async fn promote(&self) -> anyhow::Result<()> {
@@ -211,10 +230,10 @@ where
         Ok(())
     }
 
-    async fn process(&self) -> anyhow::Result<()> {
+    async fn background_process(&self) -> anyhow::Result<()> {
         let mut accepted = accepted_proposals(
             self.journal
-                .read(self.journal.oldest_available().await?)
+                .tail(self.journal.oldest_available().await?)
                 .boxed(),
         )
         .boxed();
@@ -224,7 +243,7 @@ where
 
         let mut next_renew: Option<Instant> = None;
         let mut next_campaign: Option<Instant> = None;
-        let mut heartbeat_ticker = ticker(self.heartbeat_interval);
+        let mut heartbeat_ticker = Box::pin(jittered_ticker(self.heartbeat_interval));
         // True if we've published a Heartbeat that we haven't observed in the stream yet.
         let mut pending_heartbeat = false;
         // Some if we've published an Acquire message that we haven't observed in the stream yet.
@@ -246,6 +265,7 @@ where
 
                             if proposal.replica_id == self.replica_id {
                                 next_renew = Some(Instant::now() + self.renew_interval);
+                                //next_renew = None;
 
                                 self.last_confirmation.store(
                                     pending_acquire
@@ -253,6 +273,7 @@ where
                                             anyhow!("received acquire that was not pending")
                                         })?,
                                 );
+                                pending_acquire = None;
                                 // TODO: possibly promote self
                             }
                         },
@@ -273,6 +294,7 @@ where
                                     None => true,
                                 };
                                 if next_campaign.is_none() && current_lease_expired {
+                                    // eh, we may as well just go for it
                                     let wait_time =
                                         rand::thread_rng().gen_range(Duration::ZERO..self.campaign_splay);
                                     next_campaign = Some(Instant::now() + wait_time);
@@ -291,7 +313,7 @@ where
                         ts.as_nanos() + (self.lease_duration.as_nanos() as u64),
                     );
                     pending_acquire = Some(Instant::now());
-                    self.propose_at(ts, ProposalType::Acquire{ safe_read: todo!(), lease_end });
+                    self.propose_at(ts, ProposalType::Acquire{ lease_end });
                 },
             }
         }
@@ -300,6 +322,17 @@ where
 
 fn duration_until(ts: Timestamp) -> Duration {
     ts.saturating_duration_since(Timestamp::now())
+}
+
+fn jittered_ticker(x: Duration) -> impl Stream<Item = ()> {
+    let mut next = Instant::now();
+    stream! {
+        loop {
+            next = next + rand::thread_rng().gen_range(x / 2..x * 3/2);
+            yield ();
+            sleep_until(next).await;
+        }
+    }
 }
 
 fn ticker(x: Duration) -> IntervalStream {
@@ -336,8 +369,10 @@ where
                 };
 
                 if accept_acquire {
+                    log::info!("{:?} is leader for {:?} - {:?}", proposal.replica_id, proposal.timestamp, new_lease_end);
                     current_leader = Some((proposal.replica_id, new_lease_end));
                 } else {
+                    log::info!("acquire at {:?} {:?} by {:?} rejected", seq, proposal.timestamp, proposal.replica_id);
                     continue;
                 }
             }
@@ -348,6 +383,7 @@ where
                     .map(|(leader_replica_id, _)| proposal.replica_id != leader_replica_id)
                     .unwrap_or(true)
             {
+                log::info!("proposal at {:?} {:?} by {:?} rejected", seq, proposal.timestamp, proposal.replica_id);
                 continue;
             }
 
