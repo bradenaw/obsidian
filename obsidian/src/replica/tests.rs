@@ -23,6 +23,7 @@ impl TestLeader {
     }
 }
 
+#[async_trait]
 impl Leader<TestFollower> for TestLeader {
     fn process(&self, entry: super::Entry) {
         todo!()
@@ -43,6 +44,7 @@ impl TestFollower {
     }
 }
 
+#[async_trait]
 impl Follower<TestLeader> for TestFollower {
     fn process(&self, entry: super::Entry) {
         todo!()
@@ -79,9 +81,9 @@ where
             proposal.replica_id,
             proposal.timestamp,
             match proposal.proposal_type {
-                crate::replica::ProposalType::Acquire { lease_end } => "Acquire",
+                crate::replica::ProposalType::Acquire { .. } => "Acquire",
                 crate::replica::ProposalType::Relinquish => "Relinquish",
-                crate::replica::ProposalType::Append(entry) => "Append",
+                crate::replica::ProposalType::Append(_) => "Append",
                 crate::replica::ProposalType::Heartbeat => "Heartbeat",
             }
         );

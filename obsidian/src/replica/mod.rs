@@ -12,6 +12,7 @@ use std::time::Duration;
 use anyhow::anyhow;
 use async_stream::stream;
 use async_stream::try_stream;
+use async_trait::async_trait;
 use futures::future::OptionFuture;
 use futures::Stream;
 use futures::StreamExt;
@@ -65,15 +66,33 @@ struct ReplicaInner<Leader, Follower> {
     renew_interval: Duration,
     lease_duration: Duration,
 
-    state: RwLock<Option<ReplicaState<Leader, Follower>>>,
+    // This is Option just for the convenience of take() when promoting/demoting.
+    state: RwLock<Option<InnerReplicaState<Leader, Follower>>>,
     // The timestamp of the write of the last seen Acquire by self, stored as the duration since
     // self.epoch in nanoseconds.
     last_confirmation: AtomicInstant,
 }
 
-enum ReplicaState<Leader, Follower> {
-    Leader(Leader),
+enum InnerReplicaState<Leader, Follower> {
+    Leader {
+        leader: Leader,
+        lease_end: Timestamp,
+    },
     Follower(Follower),
+}
+
+impl<Leader, Follower> InnerReplicaState<Leader, Follower> {
+    fn as_replica_state(&self) -> ReplicaState<'_, Leader, Follower> {
+        match self {
+            InnerReplicaState::Leader { leader, .. } => ReplicaState::Leader(&leader),
+            InnerReplicaState::Follower(follower) => ReplicaState::Follower(&follower),
+        }
+    }
+}
+
+enum ReplicaState<'a, Leader, Follower> {
+    Leader(&'a Leader),
+    Follower(&'a Follower),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -109,11 +128,13 @@ enum ProposalType {
 #[derive(Clone)]
 struct Entry {}
 
+#[async_trait]
 trait Leader<Follower> {
     fn process(&self, entry: Entry);
     async fn demote(self) -> Follower;
 }
 
+#[async_trait]
 trait Follower<Leader> {
     fn process(&self, entry: Entry);
     async fn promote(self) -> Leader;
@@ -132,7 +153,7 @@ where
             heartbeat_interval: Duration::from_millis(1000),
             renew_interval: Duration::from_millis(10000),
             lease_duration: Duration::from_millis(10000),
-            state: RwLock::new(Some(ReplicaState::Follower(follower))),
+            state: RwLock::new(Some(InnerReplicaState::Follower(follower))),
             last_confirmation: AtomicInstant::new(),
         }));
         inner.spawn(async |replica| {
@@ -146,17 +167,30 @@ where
         self.0.replica_id
     }
 
-    pub fn try_append(&self, entry: Entry) -> anyhow::Result<()> {
-        self.0.journal.append(Proposal {
-            replica_id: self.0.replica_id,
-            timestamp: todo!(),
-            proposal_type: ProposalType::Append(entry),
-        });
+    pub async fn try_append(&self, entry: Entry) -> anyhow::Result<()> {
+        let state = self.0.state.read().await;
+        if let Some(InnerReplicaState::Leader { lease_end, .. }) = state.deref() {
+            let ts = Timestamp::now();
+            if ts > *lease_end {
+                return Err(anyhow!("cannot append: lease expired"));
+            }
+            self.0
+                .journal
+                .append(Proposal {
+                    replica_id: self.0.replica_id,
+                    timestamp: ts,
+                    proposal_type: ProposalType::Append(entry),
+                })
+                .await?;
+            // XXX: Actually  make sure the proposal is accepted.
+        }
+
+        Err(anyhow!("cannot append: not currently leader"))
     }
 
     pub async fn with_state<F, Fut, T>(&self, f: F) -> anyhow::Result<T>
     where
-        F: FnOnce(&ReplicaState<TLeader, TFollower>) -> Fut + Send + 'static,
+        F: FnOnce(ReplicaState<TLeader, TFollower>) -> Fut + Send + 'static,
         Fut: Future<Output = anyhow::Result<T>> + Send,
         T: Send + 'static,
     {
@@ -165,10 +199,11 @@ where
         // TODO: select! against a future that fills if we need to promote/demote
         let out = f(state
             .as_ref()
-            .ok_or_else(|| anyhow!("no replica state present"))?)
+            .ok_or_else(|| anyhow!("no replica state present"))?
+            .as_replica_state())
         .await?;
 
-        if matches!(state.deref(), Some(ReplicaState::Leader(_))) {
+        if matches!(state.deref(), Some(InnerReplicaState::Leader { .. })) {
             let last_confirmation = self.0.last_confirmation.load();
 
             // TODO: Quantify the slop factor somewhere.
@@ -191,7 +226,6 @@ where
     }
 
     fn propose_at(&self, ts: Timestamp, proposal_type: ProposalType) {
-        // TODO: Make sure ts is before lease_end!
         tokio::spawn({
             let journal = Arc::clone(&self.journal);
             let replica_id = self.replica_id;
@@ -208,26 +242,46 @@ where
         });
     }
 
-    async fn promote(&self) -> anyhow::Result<()> {
+    async fn maybe_promote(&self, lease_end: Timestamp) {
+        {
+            let maybe_state = self.state.read().await;
+            if matches!(maybe_state.deref(), Some(InnerReplicaState::Leader { .. })) {
+                return;
+            }
+        }
+
         let mut maybe_state = self.state.write().await;
+        if matches!(maybe_state.deref(), Some(InnerReplicaState::Leader { .. })) {
+            return;
+        }
+
         let state = maybe_state.take().unwrap();
         let leader = match state {
-            ReplicaState::Leader(leader) => leader,
-            ReplicaState::Follower(follower) => follower.promote().await,
+            InnerReplicaState::Leader { .. } => unreachable!(),
+            InnerReplicaState::Follower(follower) => follower.promote().await,
         };
-        *maybe_state = Some(ReplicaState::Leader(leader));
-        Ok(())
+        *maybe_state = Some(InnerReplicaState::Leader { leader, lease_end });
     }
 
-    async fn demote(&self) -> anyhow::Result<()> {
+    async fn maybe_demote(&self) {
+        {
+            let maybe_state = self.state.read().await;
+            if matches!(maybe_state.deref(), Some(InnerReplicaState::Follower(_))) {
+                return;
+            }
+        }
+
         let mut maybe_state = self.state.write().await;
+        if matches!(maybe_state.deref(), Some(InnerReplicaState::Follower(_))) {
+            return;
+        }
+
         let state = maybe_state.take().unwrap();
         let follower = match state {
-            ReplicaState::Leader(leader) => leader.demote().await,
-            ReplicaState::Follower(follower) => follower,
+            InnerReplicaState::Leader { leader, .. } => leader.demote().await,
+            InnerReplicaState::Follower(_) => unreachable!(),
         };
-        *maybe_state = Some(ReplicaState::Follower(follower));
-        Ok(())
+        *maybe_state = Some(InnerReplicaState::Follower(follower));
     }
 
     async fn background_process(&self) -> anyhow::Result<()> {
@@ -238,9 +292,6 @@ where
         )
         .boxed();
 
-        // TODO: next expire, will still work without since receiving a heartbeat will trigger
-        // campaigning
-
         let mut next_renew: Option<Instant> = None;
         let mut next_campaign: Option<Instant> = None;
         let mut heartbeat_ticker = Box::pin(jittered_ticker(self.heartbeat_interval));
@@ -250,6 +301,8 @@ where
         let mut pending_acquire: Option<Instant> = None;
 
         let mut current_lease = None;
+
+        let mut last_ts = Timestamp::now();
 
         loop {
             select! {
@@ -265,7 +318,6 @@ where
 
                             if proposal.replica_id == self.replica_id {
                                 next_renew = Some(Instant::now() + self.renew_interval);
-                                //next_renew = None;
 
                                 self.last_confirmation.store(
                                     pending_acquire
@@ -274,12 +326,17 @@ where
                                         })?,
                                 );
                                 pending_acquire = None;
-                                // TODO: possibly promote self
+                                self.maybe_promote(lease_end).await;
+                                // XXX: Advance lease_end!
+                            } else {
+                                self.maybe_demote().await;
                             }
                         },
                         ProposalType::Relinquish => {
                             current_lease = None;
-                            // TODO: possibly demote self
+                            if proposal.replica_id == self.replica_id {
+                                self.maybe_demote().await;
+                            }
                         },
                         ProposalType::Append(entry) => {},
                         ProposalType::Heartbeat => {
@@ -304,11 +361,14 @@ where
                     }
                 },
                 _ = StreamExt::next(&mut heartbeat_ticker), if !pending_heartbeat => {
-                    self.propose_at(self.next_timestamp(), ProposalType::Heartbeat);
+                    let ts = Timestamp::now_after(last_ts);
+                    last_ts = ts;
+                    self.propose_at(ts, ProposalType::Heartbeat);
                     pending_heartbeat = true;
                 },
                 _ = maybe_sleep_until(max(next_campaign, next_renew)), if pending_acquire.is_none() => {
-                    let ts = self.next_timestamp();
+                    let ts = Timestamp::now_after(last_ts);
+                    last_ts = ts;
                     let lease_end = Timestamp::from_nanos(
                         ts.as_nanos() + (self.lease_duration.as_nanos() as u64),
                     );
