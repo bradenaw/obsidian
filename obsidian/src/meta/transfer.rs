@@ -11,19 +11,14 @@ use crate::pb;
 // In a range transfer, the source tablet starts at Active and the destination starts at Hydrating.
 // The goal is to get the source to Defunct and the destination to Active.
 //
-//                                          ┌─────────┐                                           //
-//                                          │ Defunct │<──────────────────────┐                   //
-//                                          └────┬────┘                       │                   //
-//                                               │                            │                   //
-//                                               v                            │                   //
-//                                      ┌──────────────────┐                  │                   //
-//       new transfer destination╶─────>│ Hydrating [h___] ├──────────────────┤                   //
+//                                      ┌──────────────────┐                                      //
+//       new transfer destination╶─────>│ Hydrating [h___] ├──────────────────┐                   //
 //                                      └────────┬─────────┘                  │                   //
 //                                               │                            │                   //
-//                                               v                            │                   //
-//                                       ┌─────────────────┐                  │                   //
-//                                       │ Frozen   [_cr_] ├──────────────────┘                   //
-//                                       └────┬────────────┘                                      //
+//                                               v                            v                   //
+//                                       ┌─────────────────┐             ┌─────────┐              //
+//                                       │ Frozen   [_cr_] ├────────────>│ Defunct │              //
+//                                       └────┬────────────┘             └─────────┘              //
 //                                            │     ^                                             //
 //                                            v     │                                             //
 //                                       ┌──────────┴──────┐                                      //
