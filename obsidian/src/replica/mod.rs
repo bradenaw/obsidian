@@ -55,7 +55,7 @@ use crate::WalSeq;
 ///   synchronization for correctness. This is on the order of seconds, which is generally an
 ///   achievable guarantee to provide, but it's still worth noting that if the clocks in the system
 ///   get far out of sync the system may not behave correctly.
-struct Replica<Leader, Follower>(WithBackground<ReplicaInner<Leader, Follower>>);
+pub struct Replica<Leader, Follower>(WithBackground<ReplicaInner<Leader, Follower>>);
 
 struct ReplicaInner<Leader, Follower> {
     replica_id: ReplicaId,
@@ -90,13 +90,13 @@ impl<Leader, Follower> InnerReplicaState<Leader, Follower> {
     }
 }
 
-enum ReplicaState<'a, Leader, Follower> {
+pub enum ReplicaState<'a, Leader, Follower> {
     Leader(&'a Leader),
     Follower(&'a Follower),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ReplicaId(Uuid);
+pub struct ReplicaId(Uuid);
 
 impl ReplicaId {
     fn new() -> Self {
@@ -105,7 +105,7 @@ impl ReplicaId {
 }
 
 #[derive(Clone)]
-struct Proposal {
+pub struct Proposal {
     replica_id: ReplicaId,
     // Timestamps are not necessarily ordered the same way as WalSeqs, since the leader may submit
     // proposals concurrently that can be accepted by the journal in any order.
@@ -126,17 +126,17 @@ enum ProposalType {
 }
 
 #[derive(Clone)]
-struct Entry {}
+pub struct Entry {}
 
 #[async_trait]
-trait Leader<Follower> {
-    fn process(&self, entry: Entry);
+pub trait Leader<Follower> {
+    async fn process(&self, entry: Entry);
     async fn demote(self) -> Follower;
 }
 
 #[async_trait]
-trait Follower<Leader> {
-    fn process(&self, entry: Entry);
+pub trait Follower<Leader> {
+    async fn process(&self, entry: Entry);
     async fn promote(self) -> Leader;
 }
 
@@ -284,6 +284,15 @@ where
         *maybe_state = Some(InnerReplicaState::Follower(follower));
     }
 
+    async fn process(&self, entry: Entry) {
+        let maybe_state = self.state.read().await;
+        let state = maybe_state.as_ref().unwrap();
+        match state {
+            InnerReplicaState::Leader { leader, .. } => leader.process(entry).await,
+            InnerReplicaState::Follower(follower) => follower.process(entry).await,
+        }
+    }
+
     async fn background_process(&self) -> anyhow::Result<()> {
         let mut accepted = accepted_proposals(
             self.journal
@@ -338,7 +347,9 @@ where
                                 self.maybe_demote().await;
                             }
                         },
-                        ProposalType::Append(entry) => {},
+                        ProposalType::Append(entry) => {
+                            self.process(entry).await;
+                        },
                         ProposalType::Heartbeat => {
                             if proposal.replica_id == self.replica_id {
                                 pending_heartbeat = false;

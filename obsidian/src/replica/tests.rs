@@ -25,7 +25,7 @@ impl TestLeader {
 
 #[async_trait]
 impl Leader<TestFollower> for TestLeader {
-    fn process(&self, entry: super::Entry) {
+    async fn process(&self, entry: super::Entry) {
         todo!()
     }
 
@@ -46,7 +46,7 @@ impl TestFollower {
 
 #[async_trait]
 impl Follower<TestLeader> for TestFollower {
-    fn process(&self, entry: super::Entry) {
+    async fn process(&self, entry: super::Entry) {
         todo!()
     }
 
@@ -123,6 +123,6 @@ async fn test_election() -> anyhow::Result<()> {
         Replica::new(Arc::clone(&journal), TestFollower::new(3)),
     ];
 
-    tokio::time::sleep(Duration::from_secs(60)).await;
+    tokio::time::sleep(Duration::from_secs(4)).await;
     Ok(())
 }
