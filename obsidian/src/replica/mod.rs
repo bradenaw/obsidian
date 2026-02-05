@@ -1,7 +1,6 @@
 #![cfg(test)]
 mod tests;
 
-use std::cmp::max;
 use std::future::Future;
 use std::ops::Deref;
 use std::sync::atomic::AtomicI64;
@@ -13,7 +12,6 @@ use anyhow::anyhow;
 use async_stream::stream;
 use async_stream::try_stream;
 use async_trait::async_trait;
-use futures::future::OptionFuture;
 use futures::Stream;
 use futures::StreamExt;
 use rand::Rng;
@@ -23,7 +21,6 @@ use tokio::sync::RwLock;
 use tokio::time::interval;
 use tokio::time::sleep_until;
 use tokio::time::Instant;
-use tokio::time::Sleep;
 use tokio_stream::wrappers::IntervalStream;
 use uuid::Uuid;
 
@@ -69,7 +66,7 @@ pub struct ReplicaBuilder {
 
 impl ReplicaBuilder {
     pub fn new() -> Self {
-        Self{
+        Self {
             campaign_splay: Duration::from_millis(2000),
             heartbeat_interval: Duration::from_millis(1000),
             renew_interval: Duration::from_millis(10000),
@@ -384,7 +381,6 @@ where
         .boxed();
 
         let mut next_renew: Option<Instant> = None;
-        let mut next_campaign: Option<Instant> = None;
         let mut heartbeat_ticker = Box::pin(jittered_ticker(self.heartbeat_interval));
         // True if we've published a Heartbeat that we haven't observed in the stream yet.
         let mut pending_heartbeat = false;
@@ -394,62 +390,77 @@ where
         let mut current_lease = None;
 
         let mut last_ts = Timestamp::now();
+        let mut try_acquire = false;
 
         loop {
+            if try_acquire && pending_acquire.is_none() {
+                let ts = Timestamp::now_after(last_ts);
+                last_ts = ts;
+                let lease_end =
+                    Timestamp::from_nanos(ts.as_nanos() + (self.lease_duration.as_nanos() as u64));
+                pending_acquire = Some(Instant::now());
+                self.propose_at(ts, ProposalType::Acquire { lease_end });
+                try_acquire = false;
+            }
+
             select! {
                 next = StreamExt::next(&mut accepted) => {
-                    let (_seq, proposal) = next
+                    let (_seq, ratification) = next
                         .transpose()?
                         .ok_or_else(|| anyhow!("replication stream ended"))?;
 
-                    match proposal.proposal_type {
-                        ProposalType::Acquire{lease_end, ..} => {
-                            current_lease = Some((proposal.replica_id, lease_end));
-                            next_campaign = None;
+                    match ratification {
+                        Ratification::Accepted(proposal) => match proposal.proposal_type {
+                            ProposalType::Acquire{lease_end, ..} => {
+                                current_lease = Some((proposal.replica_id, lease_end));
+                                if proposal.replica_id == self.replica_id {
+                                    next_renew = Some(Instant::now() + self.renew_interval);
 
-                            if proposal.replica_id == self.replica_id {
-                                next_renew = Some(Instant::now() + self.renew_interval);
+                                    self.last_confirmation.store(
+                                        pending_acquire
+                                            .ok_or_else(|| {
+                                                anyhow!("received acquire that was not pending")
+                                            })?,
+                                    );
+                                    pending_acquire = None;
+                                    self.maybe_promote(lease_end).await;
+                                } else {
+                                    self.maybe_demote().await;
+                                }
+                            },
+                            ProposalType::Relinquish => {
+                                current_lease = None;
+                                if proposal.replica_id == self.replica_id {
+                                    self.maybe_demote().await;
+                                }
+                            },
+                            ProposalType::Append(entry) => {
+                                self.process(entry).await;
+                            },
+                            ProposalType::Heartbeat => {
+                                if proposal.replica_id == self.replica_id {
+                                    pending_heartbeat = false;
 
-                                self.last_confirmation.store(
-                                    pending_acquire
-                                        .ok_or_else(|| {
-                                            anyhow!("received acquire that was not pending")
-                                        })?,
-                                );
-                                // XXX shit, if the Acquire isn't accepted we won't see it here
-                                pending_acquire = None;
-                                self.maybe_promote(lease_end).await;
-                            } else {
-                                self.maybe_demote().await;
-                            }
+                                    // Receiving a heartbeat of our own means we're as close to 'now'
+                                    // in the journal as we can be, since we only ever have one in
+                                    // flight.
+                                    let current_lease_expired = match current_lease {
+                                        Some((_, lease_end)) => Timestamp::now() > lease_end,
+                                        None => true,
+                                    };
+                                    if current_lease_expired && pending_acquire.is_none() {
+                                        try_acquire = true;
+                                    }
+                                }
+                            },
                         },
-                        ProposalType::Relinquish => {
-                            current_lease = None;
-                            if proposal.replica_id == self.replica_id {
-                                self.maybe_demote().await;
-                            }
-                        },
-                        ProposalType::Append(entry) => {
-                            self.process(entry).await;
-                        },
-                        ProposalType::Heartbeat => {
-                            if proposal.replica_id == self.replica_id {
-                                pending_heartbeat = false;
-
-                                // Receiving a heartbeat of our own means we're as close to 'now'
-                                // in the journal as we can be, since we only ever have one in
-                                // flight.
-                                let current_lease_expired = match current_lease {
-                                    Some((_, lease_end)) => Timestamp::now() > lease_end,
-                                    None => true,
-                                };
-                                if next_campaign.is_none() && current_lease_expired {
-                                    // eh, we may as well just go for it
-                                    let wait_time =
-                                        rand::thread_rng().gen_range(Duration::ZERO..self.campaign_splay);
-                                    next_campaign = Some(Instant::now() + wait_time);
+                        Ratification::Rejected(proposal) => match proposal.proposal_type {
+                            ProposalType::Acquire{..} => {
+                                if proposal.replica_id == self.replica_id {
+                                    pending_acquire = None;
                                 }
                             }
+                            _ => {},
                         },
                     }
                 },
@@ -459,14 +470,9 @@ where
                     self.propose_at(ts, ProposalType::Heartbeat);
                     pending_heartbeat = true;
                 },
-                _ = maybe_sleep_until(max(next_campaign, next_renew)), if pending_acquire.is_none() => {
-                    let ts = Timestamp::now_after(last_ts);
-                    last_ts = ts;
-                    let lease_end = Timestamp::from_nanos(
-                        ts.as_nanos() + (self.lease_duration.as_nanos() as u64),
-                    );
-                    pending_acquire = Some(Instant::now());
-                    self.propose_at(ts, ProposalType::Acquire{ lease_end });
+                _ = maybe_sleep_until(next_renew), if pending_acquire.is_none() => {
+                    try_acquire = true;
+                    next_renew = None;
                 },
             }
         }
@@ -494,11 +500,21 @@ fn ticker(x: Duration) -> IntervalStream {
     IntervalStream::new(s)
 }
 
-fn maybe_sleep_until(x: Option<Instant>) -> OptionFuture<Sleep> {
-    OptionFuture::from(x.map(|instant| sleep_until(instant)))
+async fn maybe_sleep_until(x: Option<Instant>) {
+    match x {
+        Some(instant) => sleep_until(instant).await,
+        None => futures::future::pending().await,
+    }
 }
 
-fn accepted_proposals<S>(mut proposals: S) -> impl Stream<Item = anyhow::Result<(WalSeq, Proposal)>>
+enum Ratification {
+    Accepted(Proposal),
+    Rejected(Proposal),
+}
+
+fn accepted_proposals<S>(
+    mut proposals: S,
+) -> impl Stream<Item = anyhow::Result<(WalSeq, Ratification)>>
 where
     S: Stream<Item = anyhow::Result<(WalSeq, Proposal)>> + Send + Unpin,
 {
@@ -526,6 +542,7 @@ where
                     current_leader = Some((proposal.replica_id, new_lease_end));
                 } else {
                     log::info!("acquire at {:?} {:?} by {:?} rejected", seq, proposal.timestamp, proposal.replica_id);
+                    yield (seq, Ratification::Rejected(proposal));
                     continue;
                 }
             }
@@ -537,6 +554,7 @@ where
                     .unwrap_or(true)
             {
                 log::info!("proposal at {:?} {:?} by {:?} rejected", seq, proposal.timestamp, proposal.replica_id);
+                yield (seq, Ratification::Rejected(proposal));
                 continue;
             }
 
@@ -547,7 +565,7 @@ where
                 current_leader = None;
             }
 
-            yield (seq, proposal);
+            yield (seq, Ratification::Accepted(proposal));
         }
     }
 }

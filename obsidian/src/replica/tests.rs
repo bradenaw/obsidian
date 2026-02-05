@@ -27,11 +27,11 @@ use crate::WalSeq;
 async fn test_election() -> anyhow::Result<()> {
     let _ = pretty_env_logger::try_init();
 
-    let builder = ReplicaBuilder::new()
-        .lease_duration(Duration::from_millis(1000))
-        .heartbeat_interval(Duration::from_millis(500))
-        .renew_interval(Duration::from_millis(100));
-    //let builder = ReplicaBuilder::new();
+    //let builder = ReplicaBuilder::new()
+    //    .lease_duration(Duration::from_millis(1000))
+    //    .heartbeat_interval(Duration::from_millis(500))
+    //    .renew_interval(Duration::from_millis(100));
+    let builder = ReplicaBuilder::new();
 
     let mut replica_group = TestReplicaGroup::new(builder);
 
