@@ -27,11 +27,10 @@ use crate::WalSeq;
 async fn test_election() -> anyhow::Result<()> {
     let _ = pretty_env_logger::try_init();
 
-    //let builder = ReplicaBuilder::new()
-    //    .lease_duration(Duration::from_millis(1000))
-    //    .heartbeat_interval(Duration::from_millis(500))
-    //    .renew_interval(Duration::from_millis(100));
-    let builder = ReplicaBuilder::new();
+    let builder = ReplicaBuilder::new()
+        .lease_duration(Duration::from_millis(100))
+        .heartbeat_interval(Duration::from_millis(50))
+        .renew_interval(Duration::from_millis(10));
 
     let mut replica_group = TestReplicaGroup::new(builder);
 
@@ -39,15 +38,23 @@ async fn test_election() -> anyhow::Result<()> {
     replica_group.add_replica();
     replica_group.add_replica();
 
-    replica_group.leader().await.journal_view.pause_tail();
+    let first_leader_id = {
+        let first_leader = replica_group.leader().await;
+        first_leader.journal_view.pause_tail();
+        first_leader.replica.replica_id()
+    };
 
-    // Wait for a leader
-    // Use them to append some stuff
-    // Append with a follower
-    // Stall the leader
-    //
+    // Because the leader can't observe its own Acquires, it will eventually stop making them, and
+    // someone else will need to take over.
 
-    tokio::time::sleep(Duration::from_secs(30)).await;
+    for _ in 0..10 {
+        let leader_id = replica_group.leader().await.replica.replica_id();
+        if leader_id != first_leader_id {
+            continue;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
     Ok(())
 }
 
