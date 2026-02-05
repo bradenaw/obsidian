@@ -380,7 +380,7 @@ where
         )
         .boxed();
 
-        let mut next_renew: Option<Instant> = None;
+        let mut renew_ticker = ticker(self.renew_interval);
         let mut heartbeat_ticker = Box::pin(jittered_ticker(self.heartbeat_interval));
         // True if we've published a Heartbeat that we haven't observed in the stream yet.
         let mut pending_heartbeat = false;
@@ -403,6 +403,11 @@ where
                 try_acquire = false;
             }
 
+            let self_leader = match current_lease {
+                Some((replica_id, _)) => replica_id == self.replica_id,
+                _ => false,
+            };
+
             select! {
                 next = StreamExt::next(&mut accepted) => {
                     let (_seq, ratification) = next
@@ -414,8 +419,6 @@ where
                             ProposalType::Acquire{lease_end, ..} => {
                                 current_lease = Some((proposal.replica_id, lease_end));
                                 if proposal.replica_id == self.replica_id {
-                                    next_renew = Some(Instant::now() + self.renew_interval);
-
                                     self.last_confirmation.store(
                                         pending_acquire
                                             .ok_or_else(|| {
@@ -470,9 +473,8 @@ where
                     self.propose_at(ts, ProposalType::Heartbeat);
                     pending_heartbeat = true;
                 },
-                _ = maybe_sleep_until(next_renew), if pending_acquire.is_none() => {
+                _ = StreamExt::next(&mut renew_ticker), if self_leader && pending_acquire.is_none() => {
                     try_acquire = true;
-                    next_renew = None;
                 },
             }
         }
