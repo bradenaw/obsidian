@@ -18,6 +18,7 @@ use futures::Stream;
 use futures::StreamExt;
 use rand::Rng;
 use tokio::select;
+use tokio::sync::Notify;
 use tokio::sync::RwLock;
 use tokio::time::interval;
 use tokio::time::sleep_until;
@@ -27,6 +28,7 @@ use tokio_stream::wrappers::IntervalStream;
 use uuid::Uuid;
 
 use crate::runtime::Journal;
+use crate::util::AtomicTimestamp;
 use crate::util::WithBackground;
 use crate::Timestamp;
 use crate::WalSeq;
@@ -57,6 +59,81 @@ use crate::WalSeq;
 ///   get far out of sync the system may not behave correctly.
 pub struct Replica<Leader, Follower>(WithBackground<ReplicaInner<Leader, Follower>>);
 
+pub struct ReplicaBuilder {
+    campaign_splay: Duration,
+    heartbeat_interval: Duration,
+    renew_interval: Duration,
+    lease_duration: Duration,
+    lease_grace_period: Duration,
+}
+
+impl ReplicaBuilder {
+    pub fn new() -> Self {
+        Self{
+            campaign_splay: Duration::from_millis(2000),
+            heartbeat_interval: Duration::from_millis(1000),
+            renew_interval: Duration::from_millis(10000),
+            lease_duration: Duration::from_millis(10000),
+            lease_grace_period: Duration::from_millis(5000),
+        }
+    }
+
+    pub fn campaign_splay(mut self, x: Duration) -> Self {
+        self.campaign_splay = x;
+        self
+    }
+
+    pub fn heartbeat_interval(mut self, x: Duration) -> Self {
+        self.heartbeat_interval = x;
+        self
+    }
+
+    pub fn renew_interval(mut self, x: Duration) -> Self {
+        self.renew_interval = x;
+        self
+    }
+
+    pub fn lease_duration(mut self, x: Duration) -> Self {
+        self.lease_duration = x;
+        self
+    }
+
+    pub fn lease_grace_period(mut self, x: Duration) -> Self {
+        self.lease_grace_period = x;
+        self
+    }
+
+    pub fn build<TLeader, TFollower>(
+        &self,
+        journal: Arc<dyn Journal<Proposal>>,
+        follower: TFollower,
+    ) -> Replica<TLeader, TFollower>
+    where
+        TLeader: Leader<TFollower> + Send + Sync + 'static,
+        TFollower: Follower<TLeader> + Send + Sync + 'static,
+    {
+        let inner = WithBackground::new(Arc::new(ReplicaInner {
+            replica_id: ReplicaId::new(),
+            journal,
+            campaign_splay: self.campaign_splay,
+            heartbeat_interval: self.heartbeat_interval,
+            renew_interval: self.renew_interval,
+            lease_duration: self.lease_duration,
+            lease_grace_period: self.lease_grace_period,
+            state: RwLock::new(Some(InnerReplicaState::Follower(follower))),
+            state_change_request: Notify::new(),
+            last_confirmation: AtomicInstant::new(),
+        }));
+
+        inner.spawn(async |replica| {
+            // XXX: Do something with this error.
+            replica.background_process().await.unwrap();
+        });
+
+        Replica(inner)
+    }
+}
+
 struct ReplicaInner<Leader, Follower> {
     replica_id: ReplicaId,
     journal: Arc<dyn Journal<Proposal>>,
@@ -65,9 +142,12 @@ struct ReplicaInner<Leader, Follower> {
     heartbeat_interval: Duration,
     renew_interval: Duration,
     lease_duration: Duration,
+    lease_grace_period: Duration,
 
     // This is Option just for the convenience of take() when promoting/demoting.
     state: RwLock<Option<InnerReplicaState<Leader, Follower>>>,
+    // Notified when the replica needs to be promoted or demoted, so that with_state can early exit.
+    state_change_request: Notify,
     // The timestamp of the write of the last seen Acquire by self, stored as the duration since
     // self.epoch in nanoseconds.
     last_confirmation: AtomicInstant,
@@ -76,7 +156,7 @@ struct ReplicaInner<Leader, Follower> {
 enum InnerReplicaState<Leader, Follower> {
     Leader {
         leader: Leader,
-        lease_end: Timestamp,
+        lease_end: AtomicTimestamp,
     },
     Follower(Follower),
 }
@@ -108,7 +188,7 @@ impl ReplicaId {
 pub struct Proposal {
     replica_id: ReplicaId,
     // Timestamps are not necessarily ordered the same way as WalSeqs, since the leader may submit
-    // proposals concurrently that can be accepted by the journal in any order.
+    // proposals concurrently that can be committed by the journal in any order.
     timestamp: Timestamp,
     proposal_type: ProposalType,
 }
@@ -145,33 +225,19 @@ where
     TLeader: Leader<TFollower> + Send + Sync + 'static,
     TFollower: Follower<TLeader> + Send + Sync + 'static,
 {
-    pub fn new(journal: Arc<dyn Journal<Proposal>>, follower: TFollower) -> Self {
-        let inner = WithBackground::new(Arc::new(ReplicaInner {
-            replica_id: ReplicaId::new(),
-            journal,
-            campaign_splay: Duration::from_millis(2000),
-            heartbeat_interval: Duration::from_millis(1000),
-            renew_interval: Duration::from_millis(10000),
-            lease_duration: Duration::from_millis(10000),
-            state: RwLock::new(Some(InnerReplicaState::Follower(follower))),
-            last_confirmation: AtomicInstant::new(),
-        }));
-        inner.spawn(async |replica| {
-            // XXX: Do something with this error.
-            replica.background_process().await.unwrap();
-        });
-        Self(inner)
-    }
-
     pub fn replica_id(&self) -> ReplicaId {
         self.0.replica_id
     }
 
+    /// Attempt to append an entry to the log.
+    ///
+    /// It is possible for try_append to succeed but for the entry not to be accepted. Use
+    /// Leader::process / Follower::process to learn if the entry is accepted.
     pub async fn try_append(&self, entry: Entry) -> anyhow::Result<()> {
         let state = self.0.state.read().await;
         if let Some(InnerReplicaState::Leader { lease_end, .. }) = state.deref() {
             let ts = Timestamp::now();
-            if ts > *lease_end {
+            if ts > lease_end.load() {
                 return Err(anyhow!("cannot append: lease expired"));
             }
             self.0
@@ -194,20 +260,27 @@ where
         Fut: Future<Output = anyhow::Result<T>> + Send,
         T: Send + 'static,
     {
+        let state_change_request = self.0.state_change_request.notified();
         let state = self.0.state.read().await;
 
-        // TODO: select! against a future that fills if we need to promote/demote
-        let out = f(state
-            .as_ref()
-            .ok_or_else(|| anyhow!("no replica state present"))?
-            .as_replica_state())
-        .await?;
+        let out = select! {
+            out = f(state
+                .as_ref()
+                .ok_or_else(|| anyhow!("no replica state present"))?
+                .as_replica_state()) => {
+                out?
+            },
+            _ = state_change_request => {
+                return Err(anyhow!("aborted: replica state change requested"));
+            },
+        };
 
         if matches!(state.deref(), Some(InnerReplicaState::Leader { .. })) {
             let last_confirmation = self.0.last_confirmation.load();
 
-            // TODO: Quantify the slop factor somewhere.
-            if Instant::now().duration_since(last_confirmation) > self.0.lease_duration / 2 {
+            if Instant::now().duration_since(last_confirmation)
+                > self.0.lease_duration - self.0.lease_grace_period
+            {
                 return Err(anyhow!("lease expired before operation completed"));
             }
         }
@@ -242,16 +315,20 @@ where
         });
     }
 
-    async fn maybe_promote(&self, lease_end: Timestamp) {
+    async fn maybe_promote(&self, new_lease_end: Timestamp) {
         {
             let maybe_state = self.state.read().await;
-            if matches!(maybe_state.deref(), Some(InnerReplicaState::Leader { .. })) {
+            if let Some(InnerReplicaState::Leader { lease_end, .. }) = maybe_state.deref() {
+                lease_end.store(new_lease_end);
                 return;
             }
         }
 
+        self.state_change_request.notify_waiters();
+
         let mut maybe_state = self.state.write().await;
-        if matches!(maybe_state.deref(), Some(InnerReplicaState::Leader { .. })) {
+        if let Some(InnerReplicaState::Leader { lease_end, .. }) = maybe_state.deref() {
+            lease_end.store(new_lease_end);
             return;
         }
 
@@ -260,7 +337,10 @@ where
             InnerReplicaState::Leader { .. } => unreachable!(),
             InnerReplicaState::Follower(follower) => follower.promote().await,
         };
-        *maybe_state = Some(InnerReplicaState::Leader { leader, lease_end });
+        *maybe_state = Some(InnerReplicaState::Leader {
+            leader,
+            lease_end: AtomicTimestamp::new(new_lease_end),
+        });
     }
 
     async fn maybe_demote(&self) {
@@ -270,6 +350,8 @@ where
                 return;
             }
         }
+
+        self.state_change_request.notify_waiters();
 
         let mut maybe_state = self.state.write().await;
         if matches!(maybe_state.deref(), Some(InnerReplicaState::Follower(_))) {
@@ -334,9 +416,9 @@ where
                                             anyhow!("received acquire that was not pending")
                                         })?,
                                 );
+                                // XXX shit, if the Acquire isn't accepted we won't see it here
                                 pending_acquire = None;
                                 self.maybe_promote(lease_end).await;
-                                // XXX: Advance lease_end!
                             } else {
                                 self.maybe_demote().await;
                             }

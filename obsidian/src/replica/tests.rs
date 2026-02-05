@@ -1,85 +1,219 @@
+use std::iter;
+use std::ops::Deref;
 use std::pin::Pin;
-use std::time::Duration;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 
+use async_stream::try_stream;
 use async_trait::async_trait;
+use futures::future;
+use futures::future::Either;
 use futures::Stream;
+use futures::StreamExt;
+use tokio::sync::Notify;
 
+use crate::replica::Entry;
 use crate::replica::Follower;
 use crate::replica::Leader;
 use crate::replica::Proposal;
 use crate::replica::Replica;
+use crate::replica::ReplicaBuilder;
 use crate::runtime::Journal;
 use crate::test::MemJournal;
 use crate::WalSeq;
 
-struct TestLeader {
-    id: usize,
+#[tokio::test]
+async fn test_election() -> anyhow::Result<()> {
+    let _ = pretty_env_logger::try_init();
+
+    let builder = ReplicaBuilder::new()
+        .lease_duration(Duration::from_millis(1000))
+        .heartbeat_interval(Duration::from_millis(500))
+        .renew_interval(Duration::from_millis(100));
+    //let builder = ReplicaBuilder::new();
+
+    let mut replica_group = TestReplicaGroup::new(builder);
+
+    replica_group.add_replica();
+    replica_group.add_replica();
+    replica_group.add_replica();
+
+    replica_group.leader().await.journal_view.pause_tail();
+
+    // Wait for a leader
+    // Use them to append some stuff
+    // Append with a follower
+    // Stall the leader
+    //
+
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    Ok(())
 }
 
-impl TestLeader {
-    fn new(id: usize) -> Self {
-        Self { id }
+struct TestReplicaGroup {
+    journal: Arc<MemJournal<Proposal>>,
+    replicas: Vec<TestReplica>,
+    builder: ReplicaBuilder,
+}
+
+impl TestReplicaGroup {
+    fn new(builder: ReplicaBuilder) -> Self {
+        Self {
+            journal: Arc::new(MemJournal::new()),
+            replicas: vec![],
+            builder,
+        }
     }
+
+    fn add_replica(&mut self) {
+        let offset = self.replicas.len();
+        let journal_view = Arc::new(TestJournal::new(
+            offset,
+            Arc::clone(&self.journal) as Arc<dyn Journal<Proposal>>,
+        ));
+
+        let replica_inner = Arc::new(Mutex::new(ReplicaInner {
+            leader: false,
+            processed_entries: vec![],
+        }));
+
+        self.replicas.push(TestReplica {
+            journal_view: Arc::clone(&journal_view),
+            inner: Arc::clone(&replica_inner),
+            replica: self.builder.build(
+                journal_view as Arc<dyn Journal<Proposal>>,
+                TestFollower::new(offset, replica_inner),
+            ),
+        });
+    }
+
+    async fn leader(&self) -> &TestReplica {
+        for _ in 0..5 {
+            for replica in &self.replicas {
+                let inner = replica.inner.lock().unwrap();
+                if inner.leader {
+                    return replica;
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("no leader");
+    }
+}
+
+struct TestReplica {
+    journal_view: Arc<TestJournal<Arc<dyn Journal<Proposal>>>>,
+    inner: Arc<Mutex<ReplicaInner>>,
+    replica: Replica<TestLeader, TestFollower>,
+}
+
+struct ReplicaInner {
+    leader: bool,
+    processed_entries: Vec<Entry>,
+}
+
+struct TestLeader {
+    id: usize,
+    inner: Arc<Mutex<ReplicaInner>>,
 }
 
 #[async_trait]
 impl Leader<TestFollower> for TestLeader {
     async fn process(&self, entry: super::Entry) {
-        todo!()
+        let mut inner = self.inner.lock().unwrap();
+        inner.processed_entries.push(entry);
     }
 
     async fn demote(self) -> TestFollower {
-        TestFollower { id: self.id }
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.leader = false;
+        }
+
+        TestFollower {
+            id: self.id,
+            inner: self.inner,
+        }
     }
 }
 
 struct TestFollower {
     id: usize,
+    inner: Arc<Mutex<ReplicaInner>>,
 }
 
 impl TestFollower {
-    fn new(id: usize) -> Self {
-        Self { id }
+    fn new(id: usize, inner: Arc<Mutex<ReplicaInner>>) -> Self {
+        Self { id, inner }
     }
 }
 
 #[async_trait]
 impl Follower<TestLeader> for TestFollower {
     async fn process(&self, entry: super::Entry) {
-        todo!()
+        let mut inner = self.inner.lock().unwrap();
+        inner.processed_entries.push(entry);
     }
 
     async fn promote(self) -> TestLeader {
-        TestLeader { id: self.id }
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.leader = true;
+        }
+
+        TestLeader {
+            id: self.id,
+            inner: self.inner,
+        }
     }
 }
 
-struct LoggingJournal<J> {
+struct TestJournal<J> {
     inner: J,
+    offset: usize,
+    paused: Mutex<Option<Arc<Notify>>>,
 }
 
-impl<J> LoggingJournal<J>
+impl<J> TestJournal<J>
 where
     J: Journal<Proposal>,
 {
-    fn new(inner: J) -> Self {
-        Self { inner }
+    fn new(offset: usize, inner: J) -> Self {
+        Self {
+            offset,
+            inner,
+            paused: Mutex::new(None),
+        }
+    }
+
+    fn pause_tail(&self) {
+        let mut paused = self.paused.lock().unwrap();
+        *paused = Some(Arc::new(Notify::new()));
+    }
+
+    fn unpause_tail(&self) {
+        let mut paused = self.paused.lock().unwrap();
+        if let Some(unpause) = paused.deref() {
+            unpause.notify_waiters();
+        }
+        *paused = None;
     }
 }
 
 #[async_trait]
-impl<J> Journal<Proposal> for LoggingJournal<J>
+impl<J> Journal<Proposal> for TestJournal<J>
 where
     J: Journal<Proposal>,
 {
     async fn append(&self, proposal: Proposal) -> anyhow::Result<WalSeq> {
         let seq = self.inner.append(proposal.clone()).await?;
         log::info!(
-            "Journal append {:?} {:?} {:?} {}",
-            seq,
-            proposal.replica_id,
-            proposal.timestamp,
+            "{} {:<8} {:<4} {}",
+            iter::repeat_n(" ", 40 * self.offset).collect::<String>(),
+            "append",
+            seq.0,
             match proposal.proposal_type {
                 crate::replica::ProposalType::Acquire { .. } => "Acquire",
                 crate::replica::ProposalType::Relinquish => "Relinquish",
@@ -92,16 +226,44 @@ where
 
     fn read(
         &self,
-        first: WalSeq,
+        _first: WalSeq,
     ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(WalSeq, Proposal)>> + Send + '_>> {
-        self.inner.read(first)
+        todo!();
     }
 
     fn tail(
         &self,
         first: WalSeq,
     ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(WalSeq, Proposal)>> + Send + '_>> {
-        self.inner.tail(first)
+        let mut stream = self.inner.tail(first);
+
+        Box::pin(try_stream! {
+            while let Some((seq, proposal)) = stream.next().await.transpose()? {
+                log::info!(
+                    "{} {:<8} {:<4} {}",
+                    iter::repeat_n(" ", 40 * self.offset).collect::<String>(),
+                    "tail",
+                    seq.0,
+                    match proposal.proposal_type {
+                        crate::replica::ProposalType::Acquire { .. } => "Acquire",
+                        crate::replica::ProposalType::Relinquish => "Relinquish",
+                        crate::replica::ProposalType::Append(_) => "Append",
+                        crate::replica::ProposalType::Heartbeat => "Heartbeat",
+                    }
+                );
+
+                {
+                    let paused = self.paused.lock().unwrap();
+                    if let Some(unpause) = paused.deref() {
+                        Either::Left(Arc::clone(unpause).notified_owned())
+                    } else {
+                        Either::Right(future::ready(()))
+                    }
+                }.await;
+
+                yield (seq, proposal);
+            }
+        })
     }
 
     async fn oldest_available(&self) -> anyhow::Result<WalSeq> {
@@ -113,16 +275,34 @@ where
     }
 }
 
-#[tokio::test]
-async fn test_election() -> anyhow::Result<()> {
-    let _ = pretty_env_logger::try_init();
-    let journal = Arc::new(LoggingJournal::new(MemJournal::new())) as Arc<dyn Journal<Proposal>>;
-    let replicas = [
-        Replica::new(Arc::clone(&journal), TestFollower::new(1)),
-        Replica::new(Arc::clone(&journal), TestFollower::new(2)),
-        Replica::new(Arc::clone(&journal), TestFollower::new(3)),
-    ];
+#[async_trait]
+impl<E> Journal<E> for Arc<dyn Journal<E>>
+where
+    E: Send + 'static,
+{
+    async fn append(&self, entry: E) -> anyhow::Result<WalSeq> {
+        Journal::append(self.deref(), entry).await
+    }
 
-    tokio::time::sleep(Duration::from_secs(4)).await;
-    Ok(())
+    fn read(
+        &self,
+        first: WalSeq,
+    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(WalSeq, E)>> + Send + '_>> {
+        Journal::read(self.deref(), first)
+    }
+
+    fn tail(
+        &self,
+        first: WalSeq,
+    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(WalSeq, E)>> + Send + '_>> {
+        Journal::tail(self.deref(), first)
+    }
+
+    async fn oldest_available(&self) -> anyhow::Result<WalSeq> {
+        Journal::oldest_available(self.deref()).await
+    }
+
+    async fn trim(&self, before: WalSeq) -> anyhow::Result<()> {
+        Journal::trim(self.deref(), before).await
+    }
 }

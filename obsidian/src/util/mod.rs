@@ -1,3 +1,4 @@
+mod atomic_timestamp;
 mod background;
 mod bytes;
 mod compressed_key_set;
@@ -11,6 +12,7 @@ mod watchable;
 
 use std::cmp::Ordering;
 
+pub(crate) use atomic_timestamp::AtomicTimestamp;
 pub(crate) use background::spawn_owned;
 pub(crate) use background::Background;
 pub(crate) use background::OwnedJoinHandle;
