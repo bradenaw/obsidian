@@ -69,6 +69,7 @@ pub(crate) use crate::types::Key;
 pub(crate) use crate::types::KeyOrBound;
 pub(crate) use crate::types::KeyspaceId;
 pub(crate) use crate::types::Mutation;
+pub(crate) use crate::types::NodeId;
 pub(crate) use crate::types::Precondition;
 pub(crate) use crate::types::Range;
 pub(crate) use crate::types::RangeMap;

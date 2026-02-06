@@ -22,6 +22,7 @@ use crate::runtime::Tablet;
 use crate::tuple_encoding::tuple_decode;
 use crate::tuple_encoding::tuple_decode_prefix;
 use crate::tuple_encoding::tuple_encode;
+use crate::NodeId;
 use crate::util::hexlify;
 use crate::util::WaitableTimestamp;
 use crate::Bound;
@@ -45,6 +46,7 @@ use crate::TransferId;
 pub(crate) enum MetaKey {
     Sync,
     Shard(ShardId),
+    Node(NodeId),
     ColoGroup(ColoGroupId),
     Keyspace(KeyspaceId),
     Tablet(TabletId),
@@ -57,6 +59,9 @@ impl MetaKey {
 
     // (PFX_SHARDS, shard_id) => []
     const PFX_SHARDS: u64 = 2;
+
+    // (PFX_NODES, node_id) => []
+    const PFX_NODES: u64 = 7;
 
     // (PFX_COLO_GROUPS, colo_group_id) -> []
     const PFX_COLO_GROUPS: u64 = 3;
@@ -74,6 +79,7 @@ impl MetaKey {
         match self {
             Self::Sync => tuple_encode(&(Self::PFX_SYNC,)),
             Self::Shard(shard_id) => tuple_encode(&(Self::PFX_SHARDS, shard_id.0 as u64)),
+            Self::Node(node_id) => tuple_encode(&(Self::PFX_NODES, node_id.0.as_bytes().to_vec())),
             Self::ColoGroup(colo_group_id) => {
                 tuple_encode(&(Self::PFX_COLO_GROUPS, colo_group_id.0 as u64))
             }
@@ -96,6 +102,10 @@ impl MetaKey {
             Self::PFX_SHARDS => {
                 let (_, shard_id_raw): (u64, u64) = tuple_decode(b)?;
                 Ok(Self::Shard(ShardId(u32::try_from(shard_id_raw)?)))
+            }
+            Self::PFX_NODES => {
+                let (_, node_id_raw): (u64, Vec<u8>) = tuple_decode(b)?;
+                Ok(Self::Node(NodeId(String::from_utf8(node_id_raw)?)))
             }
             Self::PFX_COLO_GROUPS => {
                 let (_, colo_group_id_raw): (u64, u64) = tuple_decode(b)?;
@@ -161,6 +171,22 @@ impl<T: Tablet> Meta for MetaImpl<T> {
         self.write_syncable(
             snapshot,
             HashMap::from([(MetaKey::Shard(shard_id), Mutation::Put(vec![]))]),
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn add_node(&self, node_id: NodeId) -> anyhow::Result<()> {
+        let snapshot = self.latest_snapshot_().await?;
+
+        if snapshot.node_exists(&node_id).await? {
+            return Err(anyhow!("{:?} already exists", node_id));
+        }
+
+        self.write_syncable(
+            snapshot,
+            HashMap::from([(MetaKey::Node(node_id), Mutation::Put(vec![]))]),
         )
         .await?;
 
@@ -420,6 +446,10 @@ pub(crate) trait MetaReader {
 
     async fn shard_exists(&self, shard_id: ShardId) -> anyhow::Result<bool> {
         self.exists(&MetaKey::Shard(shard_id)).await
+    }
+
+    async fn node_exists(&self, node_id: &NodeId) -> anyhow::Result<bool> {
+        self.exists(&MetaKey::Node(node_id.clone())).await
     }
 
     async fn next_tablet_id(&self, shard_id: ShardId) -> anyhow::Result<TabletId> {
@@ -775,6 +805,11 @@ impl<T: Meta + ?Sized> Meta for Box<T> {
     async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
         T::add_shard(self, shard_id).await
     }
+
+    async fn add_node(&self, node_id: NodeId) -> anyhow::Result<()> {
+        T::add_node(self, node_id).await
+    }
+
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,
@@ -817,6 +852,11 @@ impl<T: Meta + ?Sized> Meta for Arc<T> {
     async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
         T::add_shard(self, shard_id).await
     }
+
+    async fn add_node(&self, node_id: NodeId) -> anyhow::Result<()> {
+        T::add_node(self, node_id).await
+    }
+
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,
