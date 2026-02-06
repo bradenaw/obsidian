@@ -51,7 +51,9 @@ use crate::WalSeq;
 ///   clock synchronization for correctness. This is on the order of seconds, which is generally an
 ///   achievable guarantee to provide, but it's still worth noting that if the clocks in the system
 ///   get far out of sync the system may not behave correctly.
-pub struct Participant<Leader, Follower>(WithBackground<ParticipantInner<Leader, Follower>>);
+pub struct Participant<TEntry, TLeader, TFollower>(
+    WithBackground<ParticipantInner<TEntry, TLeader, TFollower>>,
+);
 
 pub struct ParticipantBuilder {
     campaign_splay: Duration,
@@ -97,14 +99,15 @@ impl ParticipantBuilder {
         self
     }
 
-    pub fn build<TLeader, TFollower>(
+    pub fn build<TEntry, TLeader, TFollower>(
         &self,
-        journal: Arc<dyn Journal<Proposal>>,
+        journal: Arc<dyn Journal<Proposal<TEntry>>>,
         follower: TFollower,
-    ) -> Participant<TLeader, TFollower>
+    ) -> Participant<TEntry, TLeader, TFollower>
     where
-        TLeader: Leader<TFollower> + Send + Sync + 'static,
-        TFollower: Follower<TLeader> + Send + Sync + 'static,
+        TEntry: Send + Sync + 'static,
+        TLeader: Leader<TEntry, TFollower> + Send + Sync + 'static,
+        TFollower: Follower<TEntry, TLeader> + Send + Sync + 'static,
     {
         let inner = WithBackground::new(Arc::new(ParticipantInner {
             participant_id: ParticipantId::new(),
@@ -128,9 +131,9 @@ impl ParticipantBuilder {
     }
 }
 
-struct ParticipantInner<Leader, Follower> {
+struct ParticipantInner<TEntry, TLeader, TFollower> {
     participant_id: ParticipantId,
-    journal: Arc<dyn Journal<Proposal>>,
+    journal: Arc<dyn Journal<Proposal<TEntry>>>,
 
     campaign_splay: Duration,
     heartbeat_interval: Duration,
@@ -139,7 +142,7 @@ struct ParticipantInner<Leader, Follower> {
     lease_grace_period: Duration,
 
     // This is Option just for the convenience of take() when promoting/demoting.
-    state: RwLock<Option<InnerParticipantState<Leader, Follower>>>,
+    state: RwLock<Option<InnerParticipantState<TLeader, TFollower>>>,
     // Notified when the participant needs to be promoted or demoted, so that with_state can early
     // exit.
     state_change_request: Notify,
@@ -148,16 +151,16 @@ struct ParticipantInner<Leader, Follower> {
     last_confirmation: AtomicInstant,
 }
 
-enum InnerParticipantState<Leader, Follower> {
+enum InnerParticipantState<TLeader, TFollower> {
     Leader {
-        leader: Leader,
+        leader: TLeader,
         lease_end: AtomicTimestamp,
     },
-    Follower(Follower),
+    Follower(TFollower),
 }
 
-impl<Leader, Follower> InnerParticipantState<Leader, Follower> {
-    fn as_participant_state(&self) -> ParticipantState<'_, Leader, Follower> {
+impl<TLeader, TFollower> InnerParticipantState<TLeader, TFollower> {
+    fn as_participant_state(&self) -> ParticipantState<'_, TLeader, TFollower> {
         match self {
             InnerParticipantState::Leader { leader, .. } => ParticipantState::Leader(&leader),
             InnerParticipantState::Follower(follower) => ParticipantState::Follower(&follower),
@@ -165,9 +168,9 @@ impl<Leader, Follower> InnerParticipantState<Leader, Follower> {
     }
 }
 
-pub enum ParticipantState<'a, Leader, Follower> {
-    Leader(&'a Leader),
-    Follower(&'a Follower),
+pub enum ParticipantState<'a, TLeader, TFollower> {
+    Leader(&'a TLeader),
+    Follower(&'a TFollower),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -180,45 +183,43 @@ impl ParticipantId {
 }
 
 #[derive(Clone)]
-pub struct Proposal {
+pub struct Proposal<TEntry> {
     participant_id: ParticipantId,
     // Timestamps are not necessarily ordered the same way as WalSeqs, since the leader may submit
     // proposals concurrently that can be committed by the journal in any order.
     timestamp: Timestamp,
-    proposal_type: ProposalType,
+    proposal_type: ProposalType<TEntry>,
 }
 
 #[derive(Clone)]
-enum ProposalType {
+enum ProposalType<TEntry> {
     // Acquires are only accepted if their timestamp is greater than the last non-relinquished
     // lease_end.
     Acquire { lease_end: Timestamp },
     Relinquish,
     // Appends are only accepted if they're made by the current leader.
-    Append(Entry),
+    Append(TEntry),
     // Heartbeats are always accepted since they have no effect.
     Heartbeat,
 }
 
-#[derive(Clone)]
-pub struct Entry {}
-
 #[async_trait]
-pub trait Leader<Follower> {
-    async fn process(&self, entry: Entry);
-    async fn demote(self) -> Follower;
+pub trait Leader<TEntry, TFollower> {
+    async fn process(&self, entry: TEntry);
+    async fn demote(self) -> TFollower;
 }
 
 #[async_trait]
-pub trait Follower<Leader> {
-    async fn process(&self, entry: Entry);
-    async fn promote(self) -> Leader;
+pub trait Follower<TEntry, TLeader> {
+    async fn process(&self, entry: TEntry);
+    async fn promote(self) -> TLeader;
 }
 
-impl<TLeader, TFollower> Participant<TLeader, TFollower>
+impl<TEntry, TLeader, TFollower> Participant<TEntry, TLeader, TFollower>
 where
-    TLeader: Leader<TFollower> + Send + Sync + 'static,
-    TFollower: Follower<TLeader> + Send + Sync + 'static,
+    TEntry: Send + Sync + 'static,
+    TLeader: Leader<TEntry, TFollower> + Send + Sync + 'static,
+    TFollower: Follower<TEntry, TLeader> + Send + Sync + 'static,
 {
     pub fn participant_id(&self) -> ParticipantId {
         self.0.participant_id
@@ -228,7 +229,7 @@ where
     ///
     /// It is possible for try_append to succeed but for the entry not to be accepted. Use
     /// Leader::process / Follower::process to learn if the entry is accepted.
-    pub async fn try_append(&self, entry: Entry) -> anyhow::Result<()> {
+    pub async fn try_append(&self, entry: TEntry) -> anyhow::Result<()> {
         let state = self.0.state.read().await;
         if let Some(InnerParticipantState::Leader { lease_end, .. }) = state.deref() {
             let ts = Timestamp::now();
@@ -283,16 +284,17 @@ where
     }
 }
 
-impl<TLeader, TFollower> ParticipantInner<TLeader, TFollower>
+impl<TEntry, TLeader, TFollower> ParticipantInner<TEntry, TLeader, TFollower>
 where
-    TLeader: Leader<TFollower> + Send + Sync + 'static,
-    TFollower: Follower<TLeader> + Send + Sync + 'static,
+    TEntry: Send + Sync + 'static,
+    TLeader: Leader<TEntry, TFollower> + Send + Sync + 'static,
+    TFollower: Follower<TEntry, TLeader> + Send + Sync + 'static,
 {
     fn next_timestamp(&self) -> Timestamp {
         Timestamp::now()
     }
 
-    fn propose_at(&self, ts: Timestamp, proposal_type: ProposalType) {
+    fn propose_at(&self, ts: Timestamp, proposal_type: ProposalType<TEntry>) {
         tokio::spawn({
             let journal = Arc::clone(&self.journal);
             let participant_id = self.participant_id;
@@ -366,7 +368,7 @@ where
         *maybe_state = Some(InnerParticipantState::Follower(follower));
     }
 
-    async fn process(&self, entry: Entry) {
+    async fn process(&self, entry: TEntry) {
         let maybe_state = self.state.read().await;
         let state = maybe_state.as_ref().unwrap();
         match state {
@@ -513,16 +515,16 @@ async fn maybe_sleep_until(x: Option<Instant>) {
     }
 }
 
-enum Ratification {
-    Accepted(Proposal),
-    Rejected(Proposal),
+enum Ratification<Entry> {
+    Accepted(Proposal<Entry>),
+    Rejected(Proposal<Entry>),
 }
 
-fn accepted_proposals<S>(
+fn accepted_proposals<S, Entry>(
     mut proposals: S,
-) -> impl Stream<Item = anyhow::Result<(WalSeq, Ratification)>>
+) -> impl Stream<Item = anyhow::Result<(WalSeq, Ratification<Entry>)>>
 where
-    S: Stream<Item = anyhow::Result<(WalSeq, Proposal)>> + Send + Unpin,
+    S: Stream<Item = anyhow::Result<(WalSeq, Proposal<Entry>)>> + Send + Unpin,
 {
     try_stream! {
         // NOTE: If we start anywhere in the middle we might accept an acquire that shouldn't have

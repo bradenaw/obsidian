@@ -13,7 +13,6 @@ use futures::Stream;
 use futures::StreamExt;
 use tokio::sync::Notify;
 
-use crate::election::Entry;
 use crate::election::Follower;
 use crate::election::Leader;
 use crate::election::Participant;
@@ -23,6 +22,9 @@ use crate::election::ProposalType;
 use crate::runtime::Journal;
 use crate::test::MemJournal;
 use crate::WalSeq;
+
+#[derive(Clone)]
+struct TestEntry {}
 
 #[tokio::test]
 async fn test_election() -> anyhow::Result<()> {
@@ -60,7 +62,7 @@ async fn test_election() -> anyhow::Result<()> {
 }
 
 struct TestReplicaGroup {
-    journal: Arc<MemJournal<Proposal>>,
+    journal: Arc<MemJournal<Proposal<TestEntry>>>,
     replicas: Vec<TestReplica>,
     builder: ParticipantBuilder,
 }
@@ -78,7 +80,7 @@ impl TestReplicaGroup {
         let offset = self.replicas.len();
         let journal_view = Arc::new(TestJournal::new(
             offset,
-            Arc::clone(&self.journal) as Arc<dyn Journal<Proposal>>,
+            Arc::clone(&self.journal) as Arc<dyn Journal<Proposal<TestEntry>>>,
         ));
 
         let replica_inner = Arc::new(Mutex::new(ReplicaInner {
@@ -90,7 +92,7 @@ impl TestReplicaGroup {
             journal_view: Arc::clone(&journal_view),
             inner: Arc::clone(&replica_inner),
             replica: self.builder.build(
-                journal_view as Arc<dyn Journal<Proposal>>,
+                journal_view as Arc<dyn Journal<Proposal<TestEntry>>>,
                 TestFollower::new(offset, replica_inner),
             ),
         });
@@ -112,14 +114,14 @@ impl TestReplicaGroup {
 }
 
 struct TestReplica {
-    journal_view: Arc<TestJournal<Arc<dyn Journal<Proposal>>>>,
+    journal_view: Arc<TestJournal<Arc<dyn Journal<Proposal<TestEntry>>>>>,
     inner: Arc<Mutex<ReplicaInner>>,
-    replica: Participant<TestLeader, TestFollower>,
+    replica: Participant<TestEntry, TestLeader, TestFollower>,
 }
 
 struct ReplicaInner {
     leader: bool,
-    processed_entries: Vec<Entry>,
+    processed_entries: Vec<TestEntry>,
 }
 
 struct TestLeader {
@@ -128,8 +130,8 @@ struct TestLeader {
 }
 
 #[async_trait]
-impl Leader<TestFollower> for TestLeader {
-    async fn process(&self, entry: super::Entry) {
+impl Leader<TestEntry, TestFollower> for TestLeader {
+    async fn process(&self, entry: TestEntry) {
         let mut inner = self.inner.lock().unwrap();
         inner.processed_entries.push(entry);
     }
@@ -159,8 +161,8 @@ impl TestFollower {
 }
 
 #[async_trait]
-impl Follower<TestLeader> for TestFollower {
-    async fn process(&self, entry: super::Entry) {
+impl Follower<TestEntry, TestLeader> for TestFollower {
+    async fn process(&self, entry: TestEntry) {
         let mut inner = self.inner.lock().unwrap();
         inner.processed_entries.push(entry);
     }
@@ -186,7 +188,7 @@ struct TestJournal<J> {
 
 impl<J> TestJournal<J>
 where
-    J: Journal<Proposal>,
+    J: Journal<Proposal<TestEntry>>,
 {
     fn new(offset: usize, inner: J) -> Self {
         Self {
@@ -211,11 +213,11 @@ where
 }
 
 #[async_trait]
-impl<J> Journal<Proposal> for TestJournal<J>
+impl<J> Journal<Proposal<TestEntry>> for TestJournal<J>
 where
-    J: Journal<Proposal>,
+    J: Journal<Proposal<TestEntry>>,
 {
-    async fn append(&self, proposal: Proposal) -> anyhow::Result<WalSeq> {
+    async fn append(&self, proposal: Proposal<TestEntry>) -> anyhow::Result<WalSeq> {
         let seq = self.inner.append(proposal.clone()).await?;
         log::info!(
             "{} {:<8} {:<4} {}",
@@ -235,14 +237,16 @@ where
     fn read(
         &self,
         _first: WalSeq,
-    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(WalSeq, Proposal)>> + Send + '_>> {
+    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(WalSeq, Proposal<TestEntry>)>> + Send + '_>>
+    {
         todo!();
     }
 
     fn tail(
         &self,
         first: WalSeq,
-    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(WalSeq, Proposal)>> + Send + '_>> {
+    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(WalSeq, Proposal<TestEntry>)>> + Send + '_>>
+    {
         let mut stream = self.inner.tail(first);
 
         Box::pin(try_stream! {
