@@ -30,33 +30,30 @@ use crate::util::WithBackground;
 use crate::Timestamp;
 use crate::WalSeq;
 
-/// A Replica is a participant in a replica group, which all hold copies of the same logical data.
-/// Replicas join the group and elect a leader. The leader executes writes and has the most
-/// up-to-date copy of the data. The followers also have a copy of this data, but at any given time
-/// likely will not have the most recent few writes. Followers thus can serve stale reads
-/// (timestamps that are older than some amount, probably tens to hundreds of milliseconds at
-/// minimum), but cannot serve get_latest and friends.
+/// A Participant is a member of a replica group. The purpose of election is to select a single
+/// leader, who then has the right to append to a journal and serve reads without consulting any
+/// other participants.
 ///
-/// Replicas transition back and forth between leaders and followers. If the leader departs
-/// (intentionally or accidentally), the followers will elect a new leader.
+/// Participants transition back and forth between leaders and followers. If the leader departs
+/// (intentionally or accidentally), the remaining participants will elect a new leader.
 ///
 /// For any of this to work, we need to guarantee that there is at most one leader at any point in
 /// time. "Point in time" is defined along two dimensions:
 ///
 /// - Logical, that is, that segments of the journal have at most one leader. This prevents
-///   split-braining where different replicas apply a different set of writes from each other. This
-///   is absolutely guaranteed by the rules of proposal acceptance below. Writes are guaranteed not
-///   to split brain.
-/// - Real-time. We also need to guarantee that there is only one replica behaving as a leader for
-///   the purpose of reads at any given time, otherwise we get split-brains where writes that have
-///   been applied to one leader are not visible on another replica claiming to serve latest reads.
-///   This is resolved with timing assumptions, which assumes some (loose) amount of clock
-///   synchronization for correctness. This is on the order of seconds, which is generally an
+///   split-braining where different participants apply a different set of writes from each other.
+///   This is absolutely guaranteed by the rules of proposal acceptance below. Writes are
+///   guaranteed not to split brain.
+/// - Real-time. We also need to guarantee that there is only one participant behaving as a leader
+///   for the purpose of reads at any given time, otherwise we get split-brains where writes that
+///   have been applied to one leader are not visible on another participant claiming to serve
+///   latest reads. This is resolved with timing assumptions, which assumes some (loose) amount of
+///   clock synchronization for correctness. This is on the order of seconds, which is generally an
 ///   achievable guarantee to provide, but it's still worth noting that if the clocks in the system
 ///   get far out of sync the system may not behave correctly.
-pub struct Replica<Leader, Follower>(WithBackground<ReplicaInner<Leader, Follower>>);
+pub struct Participant<Leader, Follower>(WithBackground<ParticipantInner<Leader, Follower>>);
 
-pub struct ReplicaBuilder {
+pub struct ParticipantBuilder {
     campaign_splay: Duration,
     heartbeat_interval: Duration,
     renew_interval: Duration,
@@ -64,7 +61,7 @@ pub struct ReplicaBuilder {
     lease_grace_period: Duration,
 }
 
-impl ReplicaBuilder {
+impl ParticipantBuilder {
     pub fn new() -> Self {
         Self {
             campaign_splay: Duration::from_millis(2000),
@@ -104,35 +101,35 @@ impl ReplicaBuilder {
         &self,
         journal: Arc<dyn Journal<Proposal>>,
         follower: TFollower,
-    ) -> Replica<TLeader, TFollower>
+    ) -> Participant<TLeader, TFollower>
     where
         TLeader: Leader<TFollower> + Send + Sync + 'static,
         TFollower: Follower<TLeader> + Send + Sync + 'static,
     {
-        let inner = WithBackground::new(Arc::new(ReplicaInner {
-            replica_id: ReplicaId::new(),
+        let inner = WithBackground::new(Arc::new(ParticipantInner {
+            participant_id: ParticipantId::new(),
             journal,
             campaign_splay: self.campaign_splay,
             heartbeat_interval: self.heartbeat_interval,
             renew_interval: self.renew_interval,
             lease_duration: self.lease_duration,
             lease_grace_period: self.lease_grace_period,
-            state: RwLock::new(Some(InnerReplicaState::Follower(follower))),
+            state: RwLock::new(Some(InnerParticipantState::Follower(follower))),
             state_change_request: Notify::new(),
             last_confirmation: AtomicInstant::new(),
         }));
 
-        inner.spawn(async |replica| {
+        inner.spawn(async |participant| {
             // XXX: Do something with this error.
-            replica.background_process().await.unwrap();
+            participant.background_process().await.unwrap();
         });
 
-        Replica(inner)
+        Participant(inner)
     }
 }
 
-struct ReplicaInner<Leader, Follower> {
-    replica_id: ReplicaId,
+struct ParticipantInner<Leader, Follower> {
+    participant_id: ParticipantId,
     journal: Arc<dyn Journal<Proposal>>,
 
     campaign_splay: Duration,
@@ -142,15 +139,16 @@ struct ReplicaInner<Leader, Follower> {
     lease_grace_period: Duration,
 
     // This is Option just for the convenience of take() when promoting/demoting.
-    state: RwLock<Option<InnerReplicaState<Leader, Follower>>>,
-    // Notified when the replica needs to be promoted or demoted, so that with_state can early exit.
+    state: RwLock<Option<InnerParticipantState<Leader, Follower>>>,
+    // Notified when the participant needs to be promoted or demoted, so that with_state can early
+    // exit.
     state_change_request: Notify,
     // The timestamp of the write of the last seen Acquire by self, stored as the duration since
     // self.epoch in nanoseconds.
     last_confirmation: AtomicInstant,
 }
 
-enum InnerReplicaState<Leader, Follower> {
+enum InnerParticipantState<Leader, Follower> {
     Leader {
         leader: Leader,
         lease_end: AtomicTimestamp,
@@ -158,24 +156,24 @@ enum InnerReplicaState<Leader, Follower> {
     Follower(Follower),
 }
 
-impl<Leader, Follower> InnerReplicaState<Leader, Follower> {
-    fn as_replica_state(&self) -> ReplicaState<'_, Leader, Follower> {
+impl<Leader, Follower> InnerParticipantState<Leader, Follower> {
+    fn as_participant_state(&self) -> ParticipantState<'_, Leader, Follower> {
         match self {
-            InnerReplicaState::Leader { leader, .. } => ReplicaState::Leader(&leader),
-            InnerReplicaState::Follower(follower) => ReplicaState::Follower(&follower),
+            InnerParticipantState::Leader { leader, .. } => ParticipantState::Leader(&leader),
+            InnerParticipantState::Follower(follower) => ParticipantState::Follower(&follower),
         }
     }
 }
 
-pub enum ReplicaState<'a, Leader, Follower> {
+pub enum ParticipantState<'a, Leader, Follower> {
     Leader(&'a Leader),
     Follower(&'a Follower),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ReplicaId(Uuid);
+pub struct ParticipantId(Uuid);
 
-impl ReplicaId {
+impl ParticipantId {
     fn new() -> Self {
         Self(Uuid::new_v4())
     }
@@ -183,7 +181,7 @@ impl ReplicaId {
 
 #[derive(Clone)]
 pub struct Proposal {
-    replica_id: ReplicaId,
+    participant_id: ParticipantId,
     // Timestamps are not necessarily ordered the same way as WalSeqs, since the leader may submit
     // proposals concurrently that can be committed by the journal in any order.
     timestamp: Timestamp,
@@ -217,13 +215,13 @@ pub trait Follower<Leader> {
     async fn promote(self) -> Leader;
 }
 
-impl<TLeader, TFollower> Replica<TLeader, TFollower>
+impl<TLeader, TFollower> Participant<TLeader, TFollower>
 where
     TLeader: Leader<TFollower> + Send + Sync + 'static,
     TFollower: Follower<TLeader> + Send + Sync + 'static,
 {
-    pub fn replica_id(&self) -> ReplicaId {
-        self.0.replica_id
+    pub fn participant_id(&self) -> ParticipantId {
+        self.0.participant_id
     }
 
     /// Attempt to append an entry to the log.
@@ -232,7 +230,7 @@ where
     /// Leader::process / Follower::process to learn if the entry is accepted.
     pub async fn try_append(&self, entry: Entry) -> anyhow::Result<()> {
         let state = self.0.state.read().await;
-        if let Some(InnerReplicaState::Leader { lease_end, .. }) = state.deref() {
+        if let Some(InnerParticipantState::Leader { lease_end, .. }) = state.deref() {
             let ts = Timestamp::now();
             if ts > lease_end.load() {
                 return Err(anyhow!("cannot append: lease expired"));
@@ -240,12 +238,11 @@ where
             self.0
                 .journal
                 .append(Proposal {
-                    replica_id: self.0.replica_id,
+                    participant_id: self.0.participant_id,
                     timestamp: ts,
                     proposal_type: ProposalType::Append(entry),
                 })
                 .await?;
-            // XXX: Actually  make sure the proposal is accepted.
         }
 
         Err(anyhow!("cannot append: not currently leader"))
@@ -253,7 +250,7 @@ where
 
     pub async fn with_state<F, Fut, T>(&self, f: F) -> anyhow::Result<T>
     where
-        F: FnOnce(ReplicaState<TLeader, TFollower>) -> Fut + Send + 'static,
+        F: FnOnce(ParticipantState<TLeader, TFollower>) -> Fut + Send + 'static,
         Fut: Future<Output = anyhow::Result<T>> + Send,
         T: Send + 'static,
     {
@@ -263,16 +260,16 @@ where
         let out = select! {
             out = f(state
                 .as_ref()
-                .ok_or_else(|| anyhow!("no replica state present"))?
-                .as_replica_state()) => {
+                .ok_or_else(|| anyhow!("no participant state present"))?
+                .as_participant_state()) => {
                 out?
             },
             _ = state_change_request => {
-                return Err(anyhow!("aborted: replica state change requested"));
+                return Err(anyhow!("aborted: participant state change requested"));
             },
         };
 
-        if matches!(state.deref(), Some(InnerReplicaState::Leader { .. })) {
+        if matches!(state.deref(), Some(InnerParticipantState::Leader { .. })) {
             let last_confirmation = self.0.last_confirmation.load();
 
             if Instant::now().duration_since(last_confirmation)
@@ -286,7 +283,7 @@ where
     }
 }
 
-impl<TLeader, TFollower> ReplicaInner<TLeader, TFollower>
+impl<TLeader, TFollower> ParticipantInner<TLeader, TFollower>
 where
     TLeader: Leader<TFollower> + Send + Sync + 'static,
     TFollower: Follower<TLeader> + Send + Sync + 'static,
@@ -298,12 +295,12 @@ where
     fn propose_at(&self, ts: Timestamp, proposal_type: ProposalType) {
         tokio::spawn({
             let journal = Arc::clone(&self.journal);
-            let replica_id = self.replica_id;
+            let participant_id = self.participant_id;
 
             async move {
                 let _ = journal
                     .append(Proposal {
-                        replica_id: replica_id,
+                        participant_id: participant_id,
                         timestamp: ts,
                         proposal_type,
                     })
@@ -315,7 +312,7 @@ where
     async fn maybe_promote(&self, new_lease_end: Timestamp) {
         {
             let maybe_state = self.state.read().await;
-            if let Some(InnerReplicaState::Leader { lease_end, .. }) = maybe_state.deref() {
+            if let Some(InnerParticipantState::Leader { lease_end, .. }) = maybe_state.deref() {
                 lease_end.store(new_lease_end);
                 return;
             }
@@ -324,17 +321,17 @@ where
         self.state_change_request.notify_waiters();
 
         let mut maybe_state = self.state.write().await;
-        if let Some(InnerReplicaState::Leader { lease_end, .. }) = maybe_state.deref() {
+        if let Some(InnerParticipantState::Leader { lease_end, .. }) = maybe_state.deref() {
             lease_end.store(new_lease_end);
             return;
         }
 
         let state = maybe_state.take().unwrap();
         let leader = match state {
-            InnerReplicaState::Leader { .. } => unreachable!(),
-            InnerReplicaState::Follower(follower) => follower.promote().await,
+            InnerParticipantState::Leader { .. } => unreachable!(),
+            InnerParticipantState::Follower(follower) => follower.promote().await,
         };
-        *maybe_state = Some(InnerReplicaState::Leader {
+        *maybe_state = Some(InnerParticipantState::Leader {
             leader,
             lease_end: AtomicTimestamp::new(new_lease_end),
         });
@@ -343,7 +340,10 @@ where
     async fn maybe_demote(&self) {
         {
             let maybe_state = self.state.read().await;
-            if matches!(maybe_state.deref(), Some(InnerReplicaState::Follower(_))) {
+            if matches!(
+                maybe_state.deref(),
+                Some(InnerParticipantState::Follower(_))
+            ) {
                 return;
             }
         }
@@ -351,24 +351,27 @@ where
         self.state_change_request.notify_waiters();
 
         let mut maybe_state = self.state.write().await;
-        if matches!(maybe_state.deref(), Some(InnerReplicaState::Follower(_))) {
+        if matches!(
+            maybe_state.deref(),
+            Some(InnerParticipantState::Follower(_))
+        ) {
             return;
         }
 
         let state = maybe_state.take().unwrap();
         let follower = match state {
-            InnerReplicaState::Leader { leader, .. } => leader.demote().await,
-            InnerReplicaState::Follower(_) => unreachable!(),
+            InnerParticipantState::Leader { leader, .. } => leader.demote().await,
+            InnerParticipantState::Follower(_) => unreachable!(),
         };
-        *maybe_state = Some(InnerReplicaState::Follower(follower));
+        *maybe_state = Some(InnerParticipantState::Follower(follower));
     }
 
     async fn process(&self, entry: Entry) {
         let maybe_state = self.state.read().await;
         let state = maybe_state.as_ref().unwrap();
         match state {
-            InnerReplicaState::Leader { leader, .. } => leader.process(entry).await,
-            InnerReplicaState::Follower(follower) => follower.process(entry).await,
+            InnerParticipantState::Leader { leader, .. } => leader.process(entry).await,
+            InnerParticipantState::Follower(follower) => follower.process(entry).await,
         }
     }
 
@@ -404,7 +407,7 @@ where
             }
 
             let self_leader = match current_lease {
-                Some((replica_id, _)) => replica_id == self.replica_id,
+                Some((participant_id, _)) => participant_id == self.participant_id,
                 _ => false,
             };
 
@@ -412,13 +415,13 @@ where
                 next = StreamExt::next(&mut accepted) => {
                     let (_seq, ratification) = next
                         .transpose()?
-                        .ok_or_else(|| anyhow!("replication stream ended"))?;
+                        .ok_or_else(|| anyhow!("journal tail ended"))?;
 
                     match ratification {
                         Ratification::Accepted(proposal) => match proposal.proposal_type {
                             ProposalType::Acquire{lease_end, ..} => {
-                                current_lease = Some((proposal.replica_id, lease_end));
-                                if proposal.replica_id == self.replica_id {
+                                current_lease = Some((proposal.participant_id, lease_end));
+                                if proposal.participant_id == self.participant_id {
                                     self.last_confirmation.store(
                                         pending_acquire
                                             .ok_or_else(|| {
@@ -433,7 +436,7 @@ where
                             },
                             ProposalType::Relinquish => {
                                 current_lease = None;
-                                if proposal.replica_id == self.replica_id {
+                                if proposal.participant_id == self.participant_id {
                                     self.maybe_demote().await;
                                 }
                             },
@@ -441,12 +444,12 @@ where
                                 self.process(entry).await;
                             },
                             ProposalType::Heartbeat => {
-                                if proposal.replica_id == self.replica_id {
+                                if proposal.participant_id == self.participant_id {
                                     pending_heartbeat = false;
 
-                                    // Receiving a heartbeat of our own means we're as close to 'now'
-                                    // in the journal as we can be, since we only ever have one in
-                                    // flight.
+                                    // Receiving a heartbeat of our own means we're as close to
+                                    // 'now' in the journal as we can be, since we only ever have
+                                    // one in flight.
                                     let current_lease_expired = match current_lease {
                                         Some((_, lease_end)) => Timestamp::now() > lease_end,
                                         None => true,
@@ -459,7 +462,7 @@ where
                         },
                         Ratification::Rejected(proposal) => match proposal.proposal_type {
                             ProposalType::Acquire{..} => {
-                                if proposal.replica_id == self.replica_id {
+                                if proposal.participant_id == self.participant_id {
                                     pending_acquire = None;
                                 }
                             }
@@ -473,7 +476,8 @@ where
                     self.propose_at(ts, ProposalType::Heartbeat);
                     pending_heartbeat = true;
                 },
-                _ = StreamExt::next(&mut renew_ticker), if self_leader && pending_acquire.is_none() => {
+                _ = StreamExt::next(&mut renew_ticker),
+                    if self_leader && pending_acquire.is_none() => {
                     try_acquire = true;
                 },
             }
@@ -521,29 +525,39 @@ where
     S: Stream<Item = anyhow::Result<(WalSeq, Proposal)>> + Send + Unpin,
 {
     try_stream! {
-        // XXX: If we start anywhere in the middle we might accept an acquire that shouldn't have
-        // been... Probably means we just need to guarantee that a trim always happens at a
-        // position with a successful acquire in it.
+        // NOTE: If we start anywhere in the middle we might accept an acquire that shouldn't have
+        // been. We need to guarantee that a trim always happens at a position with a successful
+        // acquire in it.
 
         let mut current_leader = None;
 
         while let Some((seq, proposal)) = proposals.next().await.transpose()? {
             if let ProposalType::Acquire { lease_end: new_lease_end, ..} = proposal.proposal_type {
                 let accept_acquire = match current_leader {
-                    Some((leader_replica_id, current_lease_end)) => {
+                    Some((leader_participant_id, current_lease_end)) => {
                         // Accept if it's either a renewal by the previous leader, or if it's a new
                         // lease term after the previous one expired.
-                        proposal.replica_id == leader_replica_id
+                        proposal.participant_id == leader_participant_id
                             || proposal.timestamp > current_lease_end
                     },
                     None => true,
                 };
 
                 if accept_acquire {
-                    log::info!("{:?} is leader for {:?} - {:?}", proposal.replica_id, proposal.timestamp, new_lease_end);
-                    current_leader = Some((proposal.replica_id, new_lease_end));
+                    log::info!(
+                        "{:?} is leader for {:?} - {:?}",
+                        proposal.participant_id,
+                        proposal.timestamp,
+                        new_lease_end,
+                    );
+                    current_leader = Some((proposal.participant_id, new_lease_end));
                 } else {
-                    log::info!("acquire at {:?} {:?} by {:?} rejected", seq, proposal.timestamp, proposal.replica_id);
+                    log::info!(
+                        "acquire at {:?} {:?} by {:?} rejected",
+                        seq,
+                        proposal.timestamp,
+                        proposal.participant_id,
+                    );
                     yield (seq, Ratification::Rejected(proposal));
                     continue;
                 }
@@ -552,10 +566,17 @@ where
             // If this entry wasn't proposed by the current leader, or there is no leader, skip it.
             if !matches!(proposal.proposal_type, ProposalType::Heartbeat)
                 && current_leader
-                    .map(|(leader_replica_id, _)| proposal.replica_id != leader_replica_id)
+                    .map(|(leader_participant_id, _)| {
+                        proposal.participant_id != leader_participant_id
+                    })
                     .unwrap_or(true)
             {
-                log::info!("proposal at {:?} {:?} by {:?} rejected", seq, proposal.timestamp, proposal.replica_id);
+                log::info!(
+                    "proposal at {:?} {:?} by {:?} rejected",
+                    seq,
+                    proposal.timestamp,
+                    proposal.participant_id,
+                );
                 yield (seq, Ratification::Rejected(proposal));
                 continue;
             }

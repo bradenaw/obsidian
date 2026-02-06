@@ -13,12 +13,13 @@ use futures::Stream;
 use futures::StreamExt;
 use tokio::sync::Notify;
 
-use crate::replica::Entry;
-use crate::replica::Follower;
-use crate::replica::Leader;
-use crate::replica::Proposal;
-use crate::replica::Replica;
-use crate::replica::ReplicaBuilder;
+use crate::election::Entry;
+use crate::election::Follower;
+use crate::election::Leader;
+use crate::election::Participant;
+use crate::election::ParticipantBuilder;
+use crate::election::Proposal;
+use crate::election::ProposalType;
 use crate::runtime::Journal;
 use crate::test::MemJournal;
 use crate::WalSeq;
@@ -27,7 +28,7 @@ use crate::WalSeq;
 async fn test_election() -> anyhow::Result<()> {
     let _ = pretty_env_logger::try_init();
 
-    let builder = ReplicaBuilder::new()
+    let builder = ParticipantBuilder::new()
         .lease_duration(Duration::from_millis(100))
         .heartbeat_interval(Duration::from_millis(50))
         .renew_interval(Duration::from_millis(10));
@@ -41,14 +42,14 @@ async fn test_election() -> anyhow::Result<()> {
     let first_leader_id = {
         let first_leader = replica_group.leader().await;
         first_leader.journal_view.pause_tail();
-        first_leader.replica.replica_id()
+        first_leader.replica.participant_id()
     };
 
     // Because the leader can't observe its own Acquires, it will eventually stop making them, and
     // someone else will need to take over.
 
     for _ in 0..10 {
-        let leader_id = replica_group.leader().await.replica.replica_id();
+        let leader_id = replica_group.leader().await.replica.participant_id();
         if leader_id != first_leader_id {
             continue;
         }
@@ -61,11 +62,11 @@ async fn test_election() -> anyhow::Result<()> {
 struct TestReplicaGroup {
     journal: Arc<MemJournal<Proposal>>,
     replicas: Vec<TestReplica>,
-    builder: ReplicaBuilder,
+    builder: ParticipantBuilder,
 }
 
 impl TestReplicaGroup {
-    fn new(builder: ReplicaBuilder) -> Self {
+    fn new(builder: ParticipantBuilder) -> Self {
         Self {
             journal: Arc::new(MemJournal::new()),
             replicas: vec![],
@@ -113,7 +114,7 @@ impl TestReplicaGroup {
 struct TestReplica {
     journal_view: Arc<TestJournal<Arc<dyn Journal<Proposal>>>>,
     inner: Arc<Mutex<ReplicaInner>>,
-    replica: Replica<TestLeader, TestFollower>,
+    replica: Participant<TestLeader, TestFollower>,
 }
 
 struct ReplicaInner {
@@ -222,10 +223,10 @@ where
             "append",
             seq.0,
             match proposal.proposal_type {
-                crate::replica::ProposalType::Acquire { .. } => "Acquire",
-                crate::replica::ProposalType::Relinquish => "Relinquish",
-                crate::replica::ProposalType::Append(_) => "Append",
-                crate::replica::ProposalType::Heartbeat => "Heartbeat",
+                ProposalType::Acquire { .. } => "Acquire",
+                ProposalType::Relinquish => "Relinquish",
+                ProposalType::Append(_) => "Append",
+                ProposalType::Heartbeat => "Heartbeat",
             }
         );
         Ok(seq)
@@ -252,10 +253,10 @@ where
                     "tail",
                     seq.0,
                     match proposal.proposal_type {
-                        crate::replica::ProposalType::Acquire { .. } => "Acquire",
-                        crate::replica::ProposalType::Relinquish => "Relinquish",
-                        crate::replica::ProposalType::Append(_) => "Append",
-                        crate::replica::ProposalType::Heartbeat => "Heartbeat",
+                        ProposalType::Acquire { .. } => "Acquire",
+                        ProposalType::Relinquish => "Relinquish",
+                        ProposalType::Append(_) => "Append",
+                        ProposalType::Heartbeat => "Heartbeat",
                     }
                 );
 

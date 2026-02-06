@@ -4,12 +4,12 @@
 #![feature(thread_id_value)]
 
 mod coordinator;
+mod election;
 mod gateway;
 mod grpc;
 mod lsm;
 mod meta;
 mod obsidian;
-mod replica;
 mod router;
 mod rtest;
 mod runtime;
