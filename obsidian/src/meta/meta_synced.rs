@@ -419,11 +419,11 @@ impl MetaSyncedSnapshot {
 
 #[async_trait]
 impl MetaReader for MetaSyncedSnapshot {
-    async fn get(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+    async fn get_raw(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(self.m.get(key).cloned())
     }
 
-    fn scan(
+    fn scan_raw(
         &self,
         range: Range<Vec<u8>>,
         direction: Direction,

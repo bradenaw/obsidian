@@ -294,7 +294,7 @@ impl<'a, T> MetaSnapshot<'a, T> {
 
 #[async_trait]
 impl<'a, T: Tablet> MetaReader for MetaSnapshot<'a, T> {
-    async fn get(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+    async fn get_raw(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(self
             .tablet
             .get(self.ts, &(KeyspaceId::META, key.to_vec()))
@@ -302,7 +302,7 @@ impl<'a, T: Tablet> MetaReader for MetaSnapshot<'a, T> {
             .map(|record| record.value))
     }
 
-    fn scan(
+    fn scan_raw(
         &self,
         range: Range<Vec<u8>>,
         direction: Direction,

@@ -21,16 +21,16 @@ use crate::TransferId;
 
 #[async_trait]
 pub(crate) trait MetaReader {
-    async fn get(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>>;
+    async fn get_raw(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>>;
 
-    fn scan(
+    fn scan_raw(
         &self,
         range: Range<Vec<u8>>,
         direction: Direction,
     ) -> Box<dyn Stream<Item = anyhow::Result<(Vec<u8>, Vec<u8>)>> + Unpin + Send + '_>;
 
     async fn exists(&self, meta_key: &MetaKey) -> anyhow::Result<bool> {
-        Ok(self.get(&meta_key.encode()).await?.is_some())
+        Ok(self.get_raw(&meta_key.encode()).await?.is_some())
     }
 
     async fn empty(&self) -> anyhow::Result<bool> {
@@ -39,7 +39,7 @@ pub(crate) trait MetaReader {
 
     async fn shard_ids(&self) -> anyhow::Result<Vec<ShardId>> {
         let mut out = vec![];
-        let mut s = self.scan(MetaKey::shards(), Direction::Asc);
+        let mut s = self.scan_raw(MetaKey::shards(), Direction::Asc);
         while let Some((key, _)) = s.try_next().await? {
             if let MetaKey::Shard(shard_id) = MetaKey::decode(&key[..])? {
                 out.push(shard_id);
@@ -82,7 +82,7 @@ pub(crate) trait MetaReader {
 
     async fn tablet_ids(&self) -> anyhow::Result<Vec<TabletId>> {
         let mut out = vec![];
-        let mut s = self.scan(MetaKey::tablets(), Direction::Asc);
+        let mut s = self.scan_raw(MetaKey::tablets(), Direction::Asc);
         while let Some((key, _)) = s.try_next().await? {
             if let MetaKey::Tablet(tablet_id) = MetaKey::decode(&key[..])? {
                 out.push(tablet_id);
@@ -95,7 +95,7 @@ pub(crate) trait MetaReader {
 
     async fn keyspace_ids(&self) -> anyhow::Result<Vec<KeyspaceId>> {
         let mut out = vec![];
-        let mut s = self.scan(MetaKey::keyspaces(), Direction::Asc);
+        let mut s = self.scan_raw(MetaKey::keyspaces(), Direction::Asc);
         while let Some((key, _)) = s.try_next().await? {
             if let MetaKey::Keyspace(keyspace_id) = MetaKey::decode(&key[..])? {
                 out.push(keyspace_id);
@@ -135,7 +135,7 @@ async fn get_meta_key<R: MetaReader, V: MetaValue<PB = PB> + TryFrom<PB, Error =
     reader: &R,
     meta_key: &MetaKey,
 ) -> anyhow::Result<Option<V>> {
-    if let Some(value) = reader.get(&meta_key.encode()).await? {
+    if let Some(value) = reader.get_raw(&meta_key.encode()).await? {
         return Ok(Some(V::decode(&value[..])?));
     }
     Ok(None)
