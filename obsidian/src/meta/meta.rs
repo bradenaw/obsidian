@@ -15,6 +15,7 @@ use crate::meta::MetaKey;
 use crate::meta::MetaReader;
 use crate::meta::MetaState;
 use crate::meta::MetaValue;
+use crate::meta::ShardMetadata;
 use crate::meta::TabletMetadata;
 use crate::meta::TabletState;
 use crate::pb;
@@ -28,6 +29,7 @@ use crate::HistoryRange;
 use crate::Key;
 use crate::KeyspaceId;
 use crate::Mutation;
+use crate::NodeId;
 use crate::Precondition;
 use crate::Range;
 use crate::Record;
@@ -54,7 +56,31 @@ impl<T: Tablet> Meta for MetaImpl<T> {
 
         self.write(
             snapshot.ts,
-            HashMap::from([(MetaKey::Shard(shard_id), Mutation::Put(vec![]))]),
+            HashMap::from([(
+                MetaKey::Shard(shard_id),
+                Mutation::Put(
+                    ShardMetadata {
+                        assigned_node_id: None,
+                    }
+                    .encode_to_vec(),
+                ),
+            )]),
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn add_node(&self, node_id: NodeId) -> anyhow::Result<()> {
+        let snapshot = self.latest_snapshot_().await?;
+
+        if snapshot.node_exists(&node_id).await? {
+            return Err(anyhow!("{:?} already exists", node_id));
+        }
+
+        self.write(
+            snapshot.ts,
+            HashMap::from([(MetaKey::Node(node_id), Mutation::Put(vec![]))]),
         )
         .await?;
 
@@ -373,6 +399,11 @@ impl<T: Meta + ?Sized> Meta for Box<T> {
     async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
         T::add_shard(self, shard_id).await
     }
+
+    async fn add_node(&self, node_id: NodeId) -> anyhow::Result<()> {
+        T::add_node(self, node_id).await
+    }
+
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,
@@ -423,6 +454,11 @@ impl<T: Meta + ?Sized> Meta for Arc<T> {
     async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
         T::add_shard(self, shard_id).await
     }
+
+    async fn add_node(&self, node_id: NodeId) -> anyhow::Result<()> {
+        T::add_node(self, node_id).await
+    }
+
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,

@@ -1,12 +1,14 @@
 use std::convert::TryFrom;
 
 use anyhow::anyhow;
+use uuid::Uuid;
 
 use crate::tuple_encoding::tuple_decode;
 use crate::tuple_encoding::tuple_decode_prefix;
 use crate::tuple_encoding::tuple_encode;
 use crate::ColoGroupId;
 use crate::KeyspaceId;
+use crate::NodeId;
 use crate::Range;
 use crate::ShardId;
 use crate::TabletId;
@@ -15,6 +17,7 @@ use crate::TransferId;
 #[derive(Clone, Hash, Eq, PartialEq, Debug)]
 pub(crate) enum MetaKey {
     Sync,
+    Node(NodeId),
     Shard(ShardId),
     ColoGroup(ColoGroupId),
     Keyspace(KeyspaceId),
@@ -28,6 +31,9 @@ impl MetaKey {
 
     // (PFX_SHARDS, shard_id) => []
     const PFX_SHARDS: u64 = 2;
+
+    // (PFX_NODES, node_id) => []
+    const PFX_NODES: u64 = 7;
 
     // (PFX_COLO_GROUPS, colo_group_id) -> []
     const PFX_COLO_GROUPS: u64 = 3;
@@ -44,6 +50,12 @@ impl MetaKey {
     pub(crate) fn encode(&self) -> Vec<u8> {
         match self {
             Self::Sync => tuple_encode(&(Self::PFX_SYNC,)),
+            Self::Node(node_id) => tuple_encode(&(
+                Self::PFX_NODES,
+                node_id.hostname.as_bytes().to_vec(),
+                node_id.port as u64,
+                node_id.uuid,
+            )),
             Self::Shard(shard_id) => tuple_encode(&(Self::PFX_SHARDS, shard_id.0 as u64)),
             Self::ColoGroup(colo_group_id) => {
                 tuple_encode(&(Self::PFX_COLO_GROUPS, colo_group_id.0 as u64))
@@ -64,6 +76,14 @@ impl MetaKey {
         let prefix = tuple_decode_prefix::<(u64,)>(b)?.0;
         match prefix {
             Self::PFX_SYNC => Ok(Self::Sync),
+            Self::PFX_NODES => {
+                let (_, hostname_raw, port_raw, uuid): (u64, Vec<u8>, u64, Uuid) = tuple_decode(b)?;
+                Ok(Self::Node(NodeId {
+                    hostname: String::from_utf8(hostname_raw)?,
+                    port: u16::try_from(port_raw)?,
+                    uuid,
+                }))
+            }
             Self::PFX_SHARDS => {
                 let (_, shard_id_raw): (u64, u64) = tuple_decode(b)?;
                 Ok(Self::Shard(ShardId(u32::try_from(shard_id_raw)?)))

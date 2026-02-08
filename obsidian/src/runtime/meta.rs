@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 
+use crate::NodeId;
 use crate::meta::MetaKey;
 use crate::Bound;
 use crate::ColoGroupId;
@@ -17,6 +18,9 @@ use crate::Timestamp;
 #[async_trait]
 pub(crate) trait Meta: Send + Sync {
     async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()>;
+
+    async fn add_node(&self, node_id: NodeId) -> anyhow::Result<()>;
+
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,

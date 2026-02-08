@@ -2,6 +2,8 @@ use std::fmt::Debug;
 use std::fmt::Display;
 
 use crate::pb;
+use crate::types::uuid_from_proto;
+use crate::types::uuid_to_proto;
 
 #[derive(Eq, PartialEq, Ord, PartialOrd, Hash, Clone, Copy)]
 pub(crate) struct TransferId(pub(crate) uuid::Uuid);
@@ -14,17 +16,13 @@ impl TransferId {
 
 impl From<TransferId> for pb::internal::Uuid {
     fn from(value: TransferId) -> Self {
-        let (high, low) = value.0.as_u64_pair();
-        Self {
-            high: high,
-            low: low,
-        }
+        uuid_to_proto(value.0)
     }
 }
 
 impl From<pb::internal::Uuid> for TransferId {
     fn from(value: pb::internal::Uuid) -> Self {
-        Self(uuid::Uuid::from_u64_pair(value.high, value.low))
+        Self(uuid_from_proto(value))
     }
 }
 

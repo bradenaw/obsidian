@@ -5,6 +5,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use anyhow::anyhow;
+use async_trait::async_trait;
 use futures::stream::FuturesUnordered;
 use futures::TryStreamExt;
 
@@ -15,6 +16,8 @@ use crate::meta::MetaState;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::meta::MetaValue;
+use crate::meta::MetaWatcher;
+use crate::meta::SyncType;
 use crate::meta::TabletMetadata;
 use crate::meta::TabletState;
 use crate::meta::TransferMetadata;
@@ -47,11 +50,15 @@ impl Supervisor {
         shards: Arc<dyn Shards>,
     ) -> Self {
         // TODO: scan for transfers
-        Self(WithBackground::new(Arc::new(SupervisorInner {
+        let supervisor = Self(WithBackground::new(Arc::new(SupervisorInner {
             meta,
-            meta_synced,
+            meta_synced: Arc::clone(&meta_synced),
             shards,
-        })))
+        })));
+
+        meta_synced.subscribe2(&supervisor.0);
+
+        supervisor
     }
 
     pub(crate) async fn start_move(
@@ -559,6 +566,12 @@ impl SupervisorInner {
         self.meta_synced.wait(ts).await?;
         Ok(self.meta_synced.snapshot())
     }
+}
+
+#[async_trait]
+impl MetaWatcher for SupervisorInner
+{
+    async fn sync_meta(&self, sync_type: SyncType, snapshot: MetaSyncedSnapshot) {}
 }
 
 fn check_manifests_equal(a: &[&Manifest], b: &[&Manifest]) -> anyhow::Result<()> {

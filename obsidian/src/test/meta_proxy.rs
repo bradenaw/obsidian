@@ -7,6 +7,7 @@ use arc_atomic::AtomicArc;
 use async_trait::async_trait;
 
 use crate::Mutation;
+use crate::NodeId;
 use crate::meta::MetaKey;
 use crate::runtime::Meta;
 use crate::Bound;
@@ -41,6 +42,14 @@ impl<T: Meta> Meta for Arc<MetaProxy<T>> {
         let inner = self.inner.load();
         if let Some(inner) = inner.deref() {
             return T::add_shard(inner, shard_id).await;
+        }
+        Err(anyhow!("MetaProxy not filled yet"))
+    }
+
+    async fn add_node(&self, node_id: NodeId) -> anyhow::Result<()> {
+        let inner = self.inner.load();
+        if let Some(inner) = inner.deref() {
+            return T::add_node(inner, node_id).await;
         }
         Err(anyhow!("MetaProxy not filled yet"))
     }

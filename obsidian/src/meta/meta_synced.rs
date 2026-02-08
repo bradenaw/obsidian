@@ -14,6 +14,7 @@ use tokio::sync::oneshot;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
 use crate::meta::MetaState;
+use crate::meta::MetaWatcher;
 use crate::meta::TabletState;
 use crate::router::StaticRouter;
 use crate::runtime::Meta;
@@ -22,6 +23,7 @@ use crate::util::wait_all;
 use crate::util::Background;
 use crate::util::Retry;
 use crate::util::WaitableTimestamp;
+use crate::util::WithBackground;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -125,6 +127,35 @@ impl MetaSynced {
         self.bg.spawn(async move {
             while let Some((sync_type, snapshot, done)) = rx.recv().await {
                 f(sync_type, snapshot).await;
+                // This only errors if the other side hung up, which means they're gone and we don't
+                // care about them for the purposes of synced_ts.
+                let _ = done.send(());
+            }
+        });
+    }
+
+    pub(crate) fn subscribe2<T>(&self, w: &WithBackground<T>)
+    where
+        T: MetaWatcher + Send + Sync + 'static,
+    {
+        let (maybe_initial, mut rx) = {
+            let mut inner = self.inner.write().unwrap();
+            let (tx, rx) = mpsc::channel(1);
+            inner.subscribers.push(tx);
+
+            if inner.synced_ts.get() > Timestamp::ZERO {
+                (Some(inner.kv.clone()), rx)
+            } else {
+                (None, rx)
+            }
+        };
+
+        w.spawn(async move |inner| {
+            if let Some(initial) = maybe_initial {
+                inner.sync_meta(SyncType::Initial, initial).await;
+            }
+            while let Some((sync_type, snapshot, done)) = rx.recv().await {
+                inner.sync_meta(sync_type, snapshot).await;
                 // This only errors if the other side hung up, which means they're gone and we don't
                 // care about them for the purposes of synced_ts.
                 let _ = done.send(());

@@ -15,6 +15,7 @@ use crate::Range;
 use crate::ShardId;
 use crate::TabletId;
 use crate::TransferId;
+use crate::NodeId;
 
 #[async_trait]
 pub(crate) trait MetaReader {
@@ -75,6 +76,10 @@ pub(crate) trait MetaReader {
             }
         }
         Ok(out)
+    }
+
+    async fn node_exists(&self, node_id: &NodeId) -> anyhow::Result<bool> {
+        self.exists(&MetaKey::Node(node_id.clone())).await
     }
 
     async fn shard_exists(&self, shard_id: ShardId) -> anyhow::Result<bool> {

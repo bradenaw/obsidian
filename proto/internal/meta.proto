@@ -45,9 +45,19 @@ enum TransferState {
     TRANSFER_STATE_ABORTED = 6;
 }
 
+message ShardMetadata {
+    NodeId assigned_node_id = 1;
+}
+
 message TabletId {
     uint32 shard_id = 1;
     uint64 id = 2;
+}
+
+message NodeId {
+    string hostname = 1;
+    uint32 port = 2;
+    Uuid uuid = 3;
 }
 
 message Uuid {
