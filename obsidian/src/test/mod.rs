@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use async_trait::async_trait;
 
-use crate::coordinator::Coordinator;
+use crate::supervisor::Supervisor;
 use crate::gateway::Gateway;
 use crate::lsm::Manifest;
 use crate::meta::MetaImpl;
@@ -148,7 +148,7 @@ impl<T: Tablet + ?Sized> Tablet for Arc<T> {
 
 pub(crate) struct ObsidianForTest {
     pub gateway: Gateway,
-    pub coordinator: Coordinator<Arc<dyn Tablet>>,
+    pub supervisor: Supervisor<Arc<dyn Tablet>>,
     pub meta: Arc<MetaImpl<Arc<dyn Tablet>>>,
 }
 
@@ -176,7 +176,7 @@ impl ObsidianForTest {
         let meta_tablet = shards.tablet(TabletId::META)?;
         let meta = Arc::new(MetaImpl::new(meta_tablet));
 
-        let coordinator = Coordinator::new(
+        let supervisor = Supervisor::new(
             Arc::clone(&meta),
             Arc::new(Arc::clone(&shards)) as Arc<dyn Shards>,
         );
@@ -196,7 +196,7 @@ impl ObsidianForTest {
         Ok(Self {
             gateway,
             meta,
-            coordinator,
+            supervisor,
         })
     }
 }

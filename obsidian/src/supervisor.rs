@@ -32,20 +32,20 @@ use crate::TransferId;
 
 const CATCHUP_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(crate) struct Coordinator<T>(WithBackground<CoordinatorInner<T>>);
+pub(crate) struct Supervisor<T>(WithBackground<SupervisorInner<T>>);
 
-struct CoordinatorInner<T> {
+struct SupervisorInner<T> {
     meta: Arc<MetaImpl<T>>,
     shards: Arc<dyn Shards>,
 }
 
-impl<T> Coordinator<T>
+impl<T> Supervisor<T>
 where
     T: Tablet + 'static,
 {
     pub(crate) fn new(meta: Arc<MetaImpl<T>>, shards: Arc<dyn Shards>) -> Self {
         // TODO: scan for transfers
-        Self(WithBackground::new(Arc::new(CoordinatorInner {
+        Self(WithBackground::new(Arc::new(SupervisorInner {
             meta,
             shards,
         })))
@@ -252,7 +252,7 @@ where
     }
 }
 
-impl<T> CoordinatorInner<T>
+impl<T> SupervisorInner<T>
 where
     T: Tablet + 'static,
 {
@@ -655,7 +655,7 @@ mod tests {
         let shard_ids = meta_snapshot.shard_ids().await?;
 
         let transfer_id = obs
-            .coordinator
+            .supervisor
             .start_move(
                 tablet_ids[0],
                 shard_ids
@@ -667,7 +667,7 @@ mod tests {
             )
             .await?;
 
-        obs.coordinator.wait_transfer(transfer_id).await?;
+        obs.supervisor.wait_transfer(transfer_id).await?;
 
         // TODO: jank, because we need to wait for the gateway to find out about the routing
         // change
@@ -732,11 +732,11 @@ mod tests {
             .unwrap();
 
         let transfer_id = obs
-            .coordinator
+            .supervisor
             .start_merge(tablet_ids, target_shard_id)
             .await?;
 
-        obs.coordinator.wait_transfer(transfer_id).await?;
+        obs.supervisor.wait_transfer(transfer_id).await?;
 
         // TODO: jank, because we need to wait for the gateway to find out about the routing
         // change
@@ -810,11 +810,11 @@ mod tests {
             .collect();
 
         let transfer_id = obs
-            .coordinator
+            .supervisor
             .start_split(tablet_ids[0], target_shard_ids[0], target_shard_ids[1])
             .await?;
 
-        obs.coordinator.wait_transfer(transfer_id).await?;
+        obs.supervisor.wait_transfer(transfer_id).await?;
 
         // TODO: jank, because we need to wait for the gateway to find out about the routing
         // change

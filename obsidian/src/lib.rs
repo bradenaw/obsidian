@@ -3,7 +3,7 @@
 #![feature(coroutines)]
 #![feature(thread_id_value)]
 
-mod coordinator;
+mod supervisor;
 mod gateway;
 mod grpc;
 mod lsm;
