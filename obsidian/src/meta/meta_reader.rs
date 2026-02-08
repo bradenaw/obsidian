@@ -1,15 +1,12 @@
-use std::convert::TryFrom;
-
 use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::Stream;
 use futures::TryStreamExt;
 
 use crate::meta::MetaKey;
+use crate::meta::MetaValue;
 use crate::meta::TabletMetadata;
 use crate::meta::TransferMetadata;
-use crate::meta::MetaValue;
-use crate::pb;
 use crate::util::hexlify;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -28,6 +25,13 @@ pub(crate) trait MetaReader {
         range: Range<Vec<u8>>,
         direction: Direction,
     ) -> Box<dyn Stream<Item = anyhow::Result<(Vec<u8>, Vec<u8>)>> + Unpin + Send + '_>;
+
+    async fn get<V: MetaValue>(&self, meta_key: &MetaKey) -> anyhow::Result<Option<V>> {
+        if let Some(value) = self.get_raw(&meta_key.encode()).await? {
+            return Ok(Some(V::decode(&value[..])?));
+        }
+        Ok(None)
+    }
 
     async fn exists(&self, meta_key: &MetaKey) -> anyhow::Result<bool> {
         Ok(self.get_raw(&meta_key.encode()).await?.is_some())
@@ -110,33 +114,17 @@ pub(crate) trait MetaReader {
     where
         Self: Sized,
     {
-        get_meta_key::<Self, TabletMetadata, pb::internal::TabletMetadata>(
-            self,
-            &MetaKey::Tablet(tablet_id),
-        )
-        .await?
-        .ok_or_else(|| anyhow!("{:?} not found", tablet_id))
+        self.get::<TabletMetadata>(&MetaKey::Tablet(tablet_id))
+            .await?
+            .ok_or_else(|| anyhow!("{:?} not found", tablet_id))
     }
 
     async fn transfer_metadata(&self, transfer_id: TransferId) -> anyhow::Result<TransferMetadata>
     where
         Self: Sized,
     {
-        get_meta_key::<Self, TransferMetadata, pb::internal::TransferMetadata>(
-            self,
-            &MetaKey::Transfer(transfer_id),
-        )
-        .await?
-        .ok_or_else(|| anyhow!("{:?} not found", transfer_id))
+        self.get::<TransferMetadata>(&MetaKey::Transfer(transfer_id))
+            .await?
+            .ok_or_else(|| anyhow!("{:?} not found", transfer_id))
     }
-}
-
-async fn get_meta_key<R: MetaReader, V: MetaValue<PB = PB> + TryFrom<PB, Error = anyhow::Error>, PB>(
-    reader: &R,
-    meta_key: &MetaKey,
-) -> anyhow::Result<Option<V>> {
-    if let Some(value) = reader.get_raw(&meta_key.encode()).await? {
-        return Ok(Some(V::decode(&value[..])?));
-    }
-    Ok(None)
 }
