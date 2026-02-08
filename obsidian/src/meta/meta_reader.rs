@@ -1,13 +1,13 @@
 use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::Stream;
+use futures::StreamExt;
 use futures::TryStreamExt;
 
 use crate::meta::MetaKey;
 use crate::meta::MetaValue;
 use crate::meta::TabletMetadata;
 use crate::meta::TransferMetadata;
-use crate::util::hexlify;
 use crate::ColoGroupId;
 use crate::Direction;
 use crate::KeyspaceId;
@@ -33,6 +33,29 @@ pub(crate) trait MetaReader {
         Ok(None)
     }
 
+    fn scan<V: MetaValue>(
+        &self,
+        range: Range<Vec<u8>>,
+        direction: Direction,
+    ) -> Box<dyn Stream<Item = anyhow::Result<(MetaKey, V)>> + Unpin + Send + '_> {
+        Box::new(self.scan_raw(range, direction).map(|result| {
+            result
+                .map(|(k, v)| Ok((MetaKey::decode(&k)?, V::decode(&v)?)))
+                .flatten()
+        }))
+    }
+
+    fn scan_keys(&self,
+        range: Range<Vec<u8>>,
+        direction: Direction,
+    ) -> Box<dyn Stream<Item = anyhow::Result<MetaKey>> + Unpin + Send + '_> {
+        Box::new(self.scan_raw(range, direction).map(|result| {
+            result
+                .map(|(k, _)| Ok(MetaKey::decode(&k)?))
+                .flatten()
+        }))
+    }
+
     async fn exists(&self, meta_key: &MetaKey) -> anyhow::Result<bool> {
         Ok(self.get_raw(&meta_key.encode()).await?.is_some())
     }
@@ -43,12 +66,12 @@ pub(crate) trait MetaReader {
 
     async fn shard_ids(&self) -> anyhow::Result<Vec<ShardId>> {
         let mut out = vec![];
-        let mut s = self.scan_raw(MetaKey::shards(), Direction::Asc);
-        while let Some((key, _)) = s.try_next().await? {
-            if let MetaKey::Shard(shard_id) = MetaKey::decode(&key[..])? {
+        let mut s = self.scan_keys(MetaKey::shards(), Direction::Asc);
+        while let Some(key) = s.try_next().await? {
+            if let MetaKey::Shard(shard_id) = key {
                 out.push(shard_id);
             } else {
-                return Err(anyhow!("invalid shard key {}", hexlify(&key)));
+                return Err(anyhow!("invalid shard key {:?}", key));
             }
         }
         Ok(out)
@@ -86,12 +109,12 @@ pub(crate) trait MetaReader {
 
     async fn tablet_ids(&self) -> anyhow::Result<Vec<TabletId>> {
         let mut out = vec![];
-        let mut s = self.scan_raw(MetaKey::tablets(), Direction::Asc);
-        while let Some((key, _)) = s.try_next().await? {
-            if let MetaKey::Tablet(tablet_id) = MetaKey::decode(&key[..])? {
+        let mut s = self.scan_keys(MetaKey::tablets(), Direction::Asc);
+        while let Some(key) = s.try_next().await? {
+            if let MetaKey::Tablet(tablet_id) = key {
                 out.push(tablet_id);
             } else {
-                return Err(anyhow!("invalid tablet key {}", hexlify(&key)));
+                return Err(anyhow!("invalid tablet key {:?}", key));
             }
         }
         Ok(out)
@@ -99,12 +122,12 @@ pub(crate) trait MetaReader {
 
     async fn keyspace_ids(&self) -> anyhow::Result<Vec<KeyspaceId>> {
         let mut out = vec![];
-        let mut s = self.scan_raw(MetaKey::keyspaces(), Direction::Asc);
-        while let Some((key, _)) = s.try_next().await? {
-            if let MetaKey::Keyspace(keyspace_id) = MetaKey::decode(&key[..])? {
+        let mut s = self.scan_keys(MetaKey::keyspaces(), Direction::Asc);
+        while let Some(key) = s.try_next().await? {
+            if let MetaKey::Keyspace(keyspace_id) = key {
                 out.push(keyspace_id);
             } else {
-                return Err(anyhow!("invalid tablet key {}", hexlify(&key)));
+                return Err(anyhow!("invalid tablet key {:?}", key));
             }
         }
         Ok(out)

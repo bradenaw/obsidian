@@ -12,7 +12,7 @@ use crate::ShardId;
 use crate::TabletId;
 use crate::TransferId;
 
-#[derive(Clone, Hash, Eq, PartialEq)]
+#[derive(Clone, Hash, Eq, PartialEq, Debug)]
 pub(crate) enum MetaKey {
     Sync,
     Shard(ShardId),
