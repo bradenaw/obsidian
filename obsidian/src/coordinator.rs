@@ -18,7 +18,7 @@ use crate::meta::TabletMetadata;
 use crate::meta::TabletState;
 use crate::meta::TransferMetadata;
 use crate::meta::TransferState;
-use crate::meta::Value;
+use crate::meta::MetaValue;
 use crate::runtime::Shards;
 use crate::runtime::Tablet;
 use crate::util::Retry;
