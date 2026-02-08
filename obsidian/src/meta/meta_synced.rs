@@ -313,6 +313,7 @@ impl MetaSyncedInner {
                     }
                 }
             }
+            inner.kv.ts = ts;
             inner.kv.clone()
         };
 
@@ -392,6 +393,7 @@ impl MetaSyncedInner {
 pub(crate) struct MetaSyncedSnapshot {
     // We have to clone these a lot, im::OrdMap makes this cheap.
     m: im::OrdMap<Vec<u8>, Vec<u8>>,
+    ts: Timestamp,
     // Keeping track of the maximum key length that exists in m is necessary to transform
     // Bound::AfterPrefix to a std::ops::Bound, since we need to be able to make an actual key
     // that's at the end of the prefix, which is done by padding the prefix to the maximum length
@@ -403,8 +405,13 @@ impl MetaSyncedSnapshot {
     fn new() -> Self {
         Self {
             m: im::OrdMap::new(),
+            ts: Timestamp::ZERO,
             max_key_len: 0,
         }
+    }
+
+    pub fn ts(&self) -> Timestamp {
+        self.ts
     }
 
     fn insert(&mut self, k: Vec<u8>, v: Vec<u8>) {

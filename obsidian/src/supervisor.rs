@@ -9,18 +9,18 @@ use futures::stream::FuturesUnordered;
 use futures::TryStreamExt;
 
 use crate::lsm::Manifest;
-use crate::meta::MetaImpl;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
-use crate::meta::MetaSnapshot;
 use crate::meta::MetaState;
+use crate::meta::MetaSynced;
+use crate::meta::MetaSyncedSnapshot;
+use crate::meta::MetaValue;
 use crate::meta::TabletMetadata;
 use crate::meta::TabletState;
 use crate::meta::TransferMetadata;
 use crate::meta::TransferState;
-use crate::meta::MetaValue;
+use crate::runtime::Meta;
 use crate::runtime::Shards;
-use crate::runtime::Tablet;
 use crate::util::Retry;
 use crate::util::WithBackground;
 use crate::Mutation;
@@ -32,21 +32,24 @@ use crate::TransferId;
 
 const CATCHUP_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(crate) struct Supervisor<T>(WithBackground<SupervisorInner<T>>);
+pub(crate) struct Supervisor(WithBackground<SupervisorInner>);
 
-struct SupervisorInner<T> {
-    meta: Arc<MetaImpl<T>>,
+struct SupervisorInner {
+    meta: Arc<dyn Meta>,
+    meta_synced: Arc<MetaSynced>,
     shards: Arc<dyn Shards>,
 }
 
-impl<T> Supervisor<T>
-where
-    T: Tablet + 'static,
-{
-    pub(crate) fn new(meta: Arc<MetaImpl<T>>, shards: Arc<dyn Shards>) -> Self {
+impl Supervisor {
+    pub(crate) fn new(
+        meta: Arc<dyn Meta>,
+        meta_synced: Arc<MetaSynced>,
+        shards: Arc<dyn Shards>,
+    ) -> Self {
         // TODO: scan for transfers
         Self(WithBackground::new(Arc::new(SupervisorInner {
             meta,
+            meta_synced,
             shards,
         })))
     }
@@ -56,7 +59,7 @@ where
         src: TabletId,
         dst: ShardId,
     ) -> anyhow::Result<TransferId> {
-        let snapshot = self.0.meta.latest_snapshot_().await?;
+        let snapshot = self.0.latest_snapshot().await?;
         let src_metadata = snapshot.tablet_metadata(src).await?;
 
         Ok(self
@@ -70,7 +73,7 @@ where
         dst_a: ShardId,
         dst_b: ShardId,
     ) -> anyhow::Result<TransferId> {
-        let snapshot = self.0.meta.latest_snapshot_().await?;
+        let snapshot = self.0.latest_snapshot().await?;
         let src_metadata = snapshot.tablet_metadata(src).await?;
 
         let src_tablet = self.0.shards.tablet(src)?;
@@ -89,7 +92,7 @@ where
         srcs: Vec<TabletId>,
         dst: ShardId,
     ) -> anyhow::Result<TransferId> {
-        let snapshot = self.0.meta.latest_snapshot_().await?;
+        let snapshot = self.0.latest_snapshot().await?;
         let mut src_range_set = RangeSet::new();
         for src in &srcs {
             let src_metadata = snapshot.tablet_metadata(*src).await?;
@@ -109,7 +112,7 @@ where
 
     pub(crate) async fn wait_transfer(&self, transfer_id: TransferId) -> anyhow::Result<()> {
         loop {
-            let snapshot = self.0.meta.latest_snapshot_().await?;
+            let snapshot = self.0.latest_snapshot().await?;
             let transfer_metadata = snapshot.transfer_metadata(transfer_id).await?;
 
             match transfer_metadata.state {
@@ -131,7 +134,7 @@ where
         srcs: Vec<TabletId>,
         dsts: Vec<(ShardId, Range<Vec<u8>>)>,
     ) -> anyhow::Result<TransferId> {
-        let snapshot = self.0.meta.latest_snapshot_().await?;
+        let snapshot = self.0.latest_snapshot().await?;
 
         if !((srcs.len() == 1 && dsts.len() >= 1) || (srcs.len() >= 1 && dsts.len() == 1)) {
             return Err(anyhow!(
@@ -235,7 +238,7 @@ where
             ),
         );
 
-        self.0.meta.write_syncable(snapshot, muts).await?;
+        self.0.meta.write(snapshot.ts(), muts).await?;
 
         log::info!(
             "{:?} started {:?} -> {:?}",
@@ -252,10 +255,7 @@ where
     }
 }
 
-impl<T> SupervisorInner<T>
-where
-    T: Tablet + 'static,
-{
+impl SupervisorInner {
     async fn transfer(&self, transfer_id: TransferId) {
         Retry::new()
             .indefinitely(&async || -> anyhow::Result<()> {
@@ -270,7 +270,7 @@ where
     }
 
     async fn transfer_step(&self, transfer_id: TransferId) -> anyhow::Result<bool> {
-        let snapshot = self.meta.latest_snapshot_().await?;
+        let snapshot = self.latest_snapshot().await?;
         let transfer_metadata = snapshot.transfer_metadata(transfer_id).await?;
 
         let transfer_state = match transfer_metadata.state {
@@ -385,9 +385,9 @@ where
         Ok(true)
     }
 
-    async fn transition_transfer<'a>(
-        &'a self,
-        snapshot: MetaSnapshot<'a, T>,
+    async fn transition_transfer(
+        &self,
+        snapshot: MetaSyncedSnapshot,
         transfer_id: TransferId,
         next_state: TransferState,
     ) -> anyhow::Result<()> {
@@ -463,7 +463,7 @@ where
 
         log::info!("{:?} transitioning to {:?}", transfer_id, next_state);
 
-        let _ = self.meta.write_syncable(snapshot, muts).await?;
+        let _ = self.meta.write(snapshot.ts(), muts).await?;
 
         log::info!("{:?} transition to {:?} persisted", transfer_id, next_state);
 
@@ -479,7 +479,7 @@ where
     }
 
     async fn roll_transition_forward(&self, transfer_id: TransferId) -> anyhow::Result<()> {
-        let snapshot = self.meta.latest_snapshot_().await?;
+        let snapshot = self.latest_snapshot().await?;
         let transfer_metadata = snapshot.transfer_metadata(transfer_id).await?;
 
         let (curr_state, next_state) = match transfer_metadata.state {
@@ -547,11 +547,17 @@ where
             }
         }
 
-        let _ = self.meta.write_syncable(snapshot, muts).await?;
+        let _ = self.meta.write(snapshot.ts(), muts).await?;
 
         log::info!("{:?} transitioned to {:?}", transfer_id, next_state);
 
         Ok(())
+    }
+
+    async fn latest_snapshot(&self) -> anyhow::Result<MetaSyncedSnapshot> {
+        let ts = self.meta.latest_snapshot().await?;
+        self.meta_synced.wait(ts).await?;
+        Ok(self.meta_synced.snapshot())
     }
 }
 

@@ -52,8 +52,8 @@ impl<T: Tablet> Meta for MetaImpl<T> {
             return Err(anyhow!("{:?} already exists", shard_id));
         }
 
-        self.write_syncable(
-            snapshot,
+        self.write(
+            snapshot.ts,
             HashMap::from([(MetaKey::Shard(shard_id), Mutation::Put(vec![]))]),
         )
         .await?;
@@ -107,7 +107,7 @@ impl<T: Tablet> Meta for MetaImpl<T> {
             );
         }
 
-        let write_ts = self.write_syncable(snapshot, muts).await?;
+        let write_ts = self.write(snapshot.ts, muts).await?;
 
         log::info!("create_colo_group({:?}) -> {:?}", colo_group_id, write_ts);
 
@@ -127,8 +127,8 @@ impl<T: Tablet> Meta for MetaImpl<T> {
             return Err(anyhow!("{:?} already exists", keyspace_id));
         }
 
-        self.write_syncable(
-            snapshot,
+        self.write(
+            snapshot.ts,
             HashMap::from([(keyspace_key, Mutation::Put(vec![]))]),
         )
         .await?;
@@ -212,6 +212,47 @@ impl<T: Tablet> Meta for MetaImpl<T> {
         let snapshot = self.snapshot_at(ts);
         snapshot.tablet_ids().await
     }
+
+    /// Writes the given mutations if `Meta` has not changed since the given snapshot.
+    ///
+    /// Also includes a write to MetaKey::Sync.
+    async fn write(
+        &self,
+        snapshot_ts: Timestamp,
+        muts: HashMap<MetaKey, Mutation>,
+    ) -> anyhow::Result<Timestamp> {
+        if muts.contains_key(&MetaKey::Sync) {
+            return Err(anyhow!("write contains a mutation to sync_key already"));
+        }
+
+        let preconds = vec![Precondition::NotChangedSince(
+            KeyspaceId::META,
+            self.sync_key.clone(),
+            snapshot_ts,
+        )];
+
+        let mut raw_muts = muts
+            .into_iter()
+            .map(|(meta_key, mutation)| ((KeyspaceId::META, meta_key.encode()), mutation))
+            .collect::<BTreeMap<Key, Mutation>>();
+
+        raw_muts.insert(
+            (KeyspaceId::META, MetaKey::Sync.encode()),
+            Mutation::Put(
+                pb::internal::MetaTx {
+                    keys: Some(pb::internal::CompressedKeySet::from(
+                        raw_muts.keys().cloned().collect::<BTreeSet<_>>(),
+                    )),
+                }
+                .encode_to_vec(),
+            ),
+        );
+
+        let ts = self.tablet.write(preconds, raw_muts).await?;
+        // TODO: Periodically poll in case we have a success-but-error above.
+        _ = self.ts.set(ts);
+        Ok(ts)
+    }
 }
 
 impl<T: Tablet> MetaImpl<T> {
@@ -237,47 +278,6 @@ impl<T: Tablet> MetaImpl<T> {
             tablet: &self.tablet,
             ts,
         }
-    }
-
-    /// Writes the given mutations if `Meta` has not changed since the given snapshot.
-    pub(crate) async fn write_syncable<'a>(
-        &'a self,
-        snapshot: MetaSnapshot<'a, T>,
-        muts: HashMap<MetaKey, Mutation>,
-    ) -> anyhow::Result<Timestamp> {
-        if muts.contains_key(&MetaKey::Sync) {
-            return Err(anyhow!(
-                "write_syncable contains a mutation to sync_key already"
-            ));
-        }
-
-        let preconds = vec![Precondition::NotChangedSince(
-            KeyspaceId::META,
-            self.sync_key.clone(),
-            snapshot.ts,
-        )];
-
-        let mut raw_muts = muts
-            .into_iter()
-            .map(|(meta_key, mutation)| ((KeyspaceId::META, meta_key.encode()), mutation))
-            .collect::<BTreeMap<Key, Mutation>>();
-
-        raw_muts.insert(
-            (KeyspaceId::META, MetaKey::Sync.encode()),
-            Mutation::Put(
-                pb::internal::MetaTx {
-                    keys: Some(pb::internal::CompressedKeySet::from(
-                        raw_muts.keys().cloned().collect::<BTreeSet<_>>(),
-                    )),
-                }
-                .encode_to_vec(),
-            ),
-        );
-
-        let ts = self.tablet.write(preconds, raw_muts).await?;
-        // TODO: Periodically poll in case we have a success-but-error above.
-        _ = self.ts.set(ts);
-        Ok(ts)
     }
 }
 
@@ -408,6 +408,14 @@ impl<T: Meta + ?Sized> Meta for Box<T> {
     async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
         T::tablet_ids(self, ts).await
     }
+
+    async fn write(
+        &self,
+        snapshot_ts: Timestamp,
+        muts: HashMap<MetaKey, Mutation>,
+    ) -> anyhow::Result<Timestamp> {
+        T::write(self, snapshot_ts, muts).await
+    }
 }
 
 #[async_trait]
@@ -449,5 +457,13 @@ impl<T: Meta + ?Sized> Meta for Arc<T> {
 
     async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
         T::tablet_ids(self, ts).await
+    }
+
+    async fn write(
+        &self,
+        snapshot_ts: Timestamp,
+        muts: HashMap<MetaKey, Mutation>,
+    ) -> anyhow::Result<Timestamp> {
+        T::write(self, snapshot_ts, muts).await
     }
 }

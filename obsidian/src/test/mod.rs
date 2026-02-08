@@ -148,7 +148,7 @@ impl<T: Tablet + ?Sized> Tablet for Arc<T> {
 
 pub(crate) struct ObsidianForTest {
     pub gateway: Gateway,
-    pub supervisor: Supervisor<Arc<dyn Tablet>>,
+    pub supervisor: Supervisor,
     pub meta: Arc<MetaImpl<Arc<dyn Tablet>>>,
 }
 
@@ -176,8 +176,11 @@ impl ObsidianForTest {
         let meta_tablet = shards.tablet(TabletId::META)?;
         let meta = Arc::new(MetaImpl::new(meta_tablet));
 
+        let meta_synced = Arc::new(MetaSynced::new(Arc::clone(&meta)));
+
         let supervisor = Supervisor::new(
-            Arc::clone(&meta),
+            Arc::clone(&meta) as Arc<dyn Meta>,
+            meta_synced,
             Arc::new(Arc::clone(&shards)) as Arc<dyn Shards>,
         );
 

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -5,6 +6,8 @@ use anyhow::anyhow;
 use arc_atomic::AtomicArc;
 use async_trait::async_trait;
 
+use crate::Mutation;
+use crate::meta::MetaKey;
 use crate::runtime::Meta;
 use crate::Bound;
 use crate::ColoGroupId;
@@ -102,6 +105,18 @@ impl<T: Meta> Meta for Arc<MetaProxy<T>> {
         let inner = self.inner.load();
         if let Some(inner) = inner.deref() {
             return T::tablet_ids(inner, ts).await;
+        }
+        Err(anyhow!("MetaProxy not filled yet"))
+    }
+
+    async fn write(
+        &self,
+        snapshot_ts: Timestamp,
+        muts: HashMap<MetaKey, Mutation>,
+    ) -> anyhow::Result<Timestamp> {
+        let inner = self.inner.load();
+        if let Some(inner) = inner.deref() {
+            return T::write(inner, snapshot_ts, muts).await;
         }
         Err(anyhow!("MetaProxy not filled yet"))
     }
