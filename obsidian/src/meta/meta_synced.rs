@@ -1,7 +1,6 @@
 use std::cmp;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::future::Future;
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -14,7 +13,7 @@ use tokio::sync::oneshot;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
 use crate::meta::MetaState;
-use crate::meta::MetaWatcher;
+use crate::meta::MetaSubscriber;
 use crate::meta::TabletState;
 use crate::router::StaticRouter;
 use crate::runtime::Meta;
@@ -95,48 +94,15 @@ impl MetaSynced {
         Range::empty()
     }
 
-    /// Subscribes to changes in `MetaSynced`. `f` will be called once, either immediately or when
-    /// initial sync finishes, with `SyncType::Initial`. Every transaction that updates the
-    /// `MetaSynced` after that point will be given as a `SyncType::Tx` with the changed keys.
+    /// Subscribes to changes in `MetaSynced`.
     ///
     /// The synced timestamp (as observed by `wait()`) does not advance until all subscribers
     /// return, so that `wait()` also describes the log position that those subscribers are at.
     ///
-    /// That also means it would be unwise to do anything terribly expensive inside f.
-    pub(crate) async fn subscribe<F, Fut>(&self, f: F)
+    /// That also means it would be unwise to do anything terribly expensive inside `sync_meta`.
+    pub(crate) fn subscribe<T>(&self, w: &WithBackground<T>)
     where
-        F: Fn(SyncType, MetaSyncedSnapshot) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = ()> + Send,
-    {
-        let (maybe_initial, mut rx) = {
-            let mut inner = self.inner.write().unwrap();
-            let (tx, rx) = mpsc::channel(1);
-            inner.subscribers.push(tx);
-
-            if inner.synced_ts.get() > Timestamp::ZERO {
-                (Some(inner.kv.clone()), rx)
-            } else {
-                (None, rx)
-            }
-        };
-
-        if let Some(initial) = maybe_initial {
-            f(SyncType::Initial, initial).await;
-        }
-
-        self.bg.spawn(async move {
-            while let Some((sync_type, snapshot, done)) = rx.recv().await {
-                f(sync_type, snapshot).await;
-                // This only errors if the other side hung up, which means they're gone and we don't
-                // care about them for the purposes of synced_ts.
-                let _ = done.send(());
-            }
-        });
-    }
-
-    pub(crate) fn subscribe2<T>(&self, w: &WithBackground<T>)
-    where
-        T: MetaWatcher + Send + Sync + 'static,
+        T: MetaSubscriber + Send + Sync + 'static,
     {
         let (maybe_initial, mut rx) = {
             let mut inner = self.inner.write().unwrap();

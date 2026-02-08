@@ -13,10 +13,10 @@ use crate::lsm::Manifest;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
 use crate::meta::MetaState;
+use crate::meta::MetaSubscriber;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::meta::MetaValue;
-use crate::meta::MetaWatcher;
 use crate::meta::SyncType;
 use crate::meta::TabletMetadata;
 use crate::meta::TabletState;
@@ -56,7 +56,7 @@ impl Supervisor {
             shards,
         })));
 
-        meta_synced.subscribe2(&supervisor.0);
+        meta_synced.subscribe(&supervisor.0);
 
         supervisor
     }
@@ -569,7 +569,7 @@ impl SupervisorInner {
 }
 
 #[async_trait]
-impl MetaWatcher for SupervisorInner
+impl MetaSubscriber for SupervisorInner
 {
     async fn sync_meta(&self, sync_type: SyncType, snapshot: MetaSyncedSnapshot) {}
 }

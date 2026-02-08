@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::meta::MetaSubscriber;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
-use crate::meta::MetaWatcher;
 use crate::meta::SyncType;
 use crate::runtime::Meta;
 use crate::util::Retry;
@@ -29,14 +29,14 @@ impl Node {
         let inner = Arc::new(NodeInner { node_id, meta });
         let node = Node(WithBackground::new(Arc::clone(&inner)));
 
-        meta_synced.subscribe2(&node.0);
+        meta_synced.subscribe(&node.0);
 
         Ok(node)
     }
 }
 
 #[async_trait]
-impl MetaWatcher for NodeInner {
+impl MetaSubscriber for NodeInner {
     async fn sync_meta(&self, sync_type: SyncType, snapshot: MetaSyncedSnapshot) {
         Retry::new()
             .indefinitely(&async || -> anyhow::Result<()> {
