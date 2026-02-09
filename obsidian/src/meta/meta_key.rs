@@ -29,10 +29,10 @@ impl MetaKey {
     // (PFX_SYNC) -> pb::internal::MetaTx
     const PFX_SYNC: u64 = 1;
 
-    // (PFX_SHARDS, shard_id) => []
+    // (PFX_SHARDS, shard_id) => ShardMetadata
     const PFX_SHARDS: u64 = 2;
 
-    // (PFX_NODES, node_id) => []
+    // (PFX_NODES, node_id) => NodeMetadata
     const PFX_NODES: u64 = 7;
 
     // (PFX_COLO_GROUPS, colo_group_id) -> []
@@ -41,10 +41,10 @@ impl MetaKey {
     // (PFX_KEYSPACES, keyspace_id) -> []
     const PFX_KEYSPACES: u64 = 4;
 
-    // (PFX_TABLETS, tablet_id) -> pb::internal::TabletMetadata
+    // (PFX_TABLETS, tablet_id) -> TabletMetadata
     const PFX_TABLETS: u64 = 5;
 
-    // (PFX_TRANSFERS, transfer_id) -> pb::internal::TransferMetadata
+    // (PFX_TRANSFERS, transfer_id) -> TransferMetadata
     const PFX_TRANSFERS: u64 = 6;
 
     pub(crate) fn encode(&self) -> Vec<u8> {
@@ -115,6 +115,10 @@ impl MetaKey {
             }
             _ => Err(anyhow!("unrecognized MetaKey prefix {}", prefix)),
         }
+    }
+
+    pub fn nodes() -> Range<Vec<u8>> {
+        Range::prefix(tuple_encode(&(Self::PFX_NODES,)))
     }
 
     pub fn shards() -> Range<Vec<u8>> {

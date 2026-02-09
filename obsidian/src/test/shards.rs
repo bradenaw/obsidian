@@ -65,13 +65,13 @@ where
     S: Storage,
     M: Meta + 'static,
 {
-    fn shard(&self, shard_id: ShardId) -> anyhow::Result<Box<dyn Shard>> {
+    fn shard(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn Shard>> {
         let m = self.m.lock().unwrap();
         let shard_arc = m
             .get(&shard_id)
             .ok_or_else(|| anyhow::anyhow!("{:?} does not exist", shard_id))?;
 
-        Ok(Box::new(shard_arc.clone()))
+        Ok(Arc::clone(shard_arc) as Arc<dyn Shard>)
     }
 
     fn shards(&self) -> Vec<Box<dyn Shard>> {
@@ -87,14 +87,14 @@ where
     S: Storage,
     M: Meta + 'static,
 {
-    fn shard(&self, shard_id: ShardId) -> anyhow::Result<Box<dyn Shard>> {
+    fn shard(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn Shard>> {
         let shards = Weak::upgrade(self).ok_or_else(|| anyhow!(""))?;
         let m = shards.m.lock().unwrap();
         let shard_arc = m
             .get(&shard_id)
             .ok_or_else(|| anyhow::anyhow!("{:?} does not exist", shard_id))?;
 
-        Ok(Box::new(shard_arc.clone()))
+        Ok(Arc::clone(shard_arc) as Arc<dyn Shard>)
     }
 
     fn shards(&self) -> Vec<Box<dyn Shard>> {

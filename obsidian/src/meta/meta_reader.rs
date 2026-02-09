@@ -6,16 +6,17 @@ use futures::TryStreamExt;
 
 use crate::meta::MetaKey;
 use crate::meta::MetaValue;
+use crate::meta::ShardMetadata;
 use crate::meta::TabletMetadata;
 use crate::meta::TransferMetadata;
 use crate::ColoGroupId;
 use crate::Direction;
 use crate::KeyspaceId;
+use crate::NodeId;
 use crate::Range;
 use crate::ShardId;
 use crate::TabletId;
 use crate::TransferId;
-use crate::NodeId;
 
 #[async_trait]
 pub(crate) trait MetaReader {
@@ -46,15 +47,15 @@ pub(crate) trait MetaReader {
         }))
     }
 
-    fn scan_keys(&self,
+    fn scan_keys(
+        &self,
         range: Range<Vec<u8>>,
         direction: Direction,
     ) -> Box<dyn Stream<Item = anyhow::Result<MetaKey>> + Unpin + Send + '_> {
-        Box::new(self.scan_raw(range, direction).map(|result| {
-            result
-                .map(|(k, _)| Ok(MetaKey::decode(&k)?))
-                .flatten()
-        }))
+        Box::new(
+            self.scan_raw(range, direction)
+                .map(|result| result.map(|(k, _)| Ok(MetaKey::decode(&k)?)).flatten()),
+        )
     }
 
     async fn exists(&self, meta_key: &MetaKey) -> anyhow::Result<bool> {
@@ -76,6 +77,12 @@ pub(crate) trait MetaReader {
             }
         }
         Ok(out)
+    }
+
+    async fn shard_metadata(&self, shard_id: ShardId) -> anyhow::Result<ShardMetadata> {
+        self.get::<ShardMetadata>(&MetaKey::Shard(shard_id))
+            .await?
+            .ok_or_else(|| anyhow!("{:?} not found", shard_id))
     }
 
     async fn node_exists(&self, node_id: &NodeId) -> anyhow::Result<bool> {

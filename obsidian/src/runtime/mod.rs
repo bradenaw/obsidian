@@ -12,6 +12,8 @@
 //! the system, like Storage.
 
 mod meta;
+mod node;
+mod nodes;
 mod shard;
 mod shards;
 mod storage;
@@ -20,6 +22,8 @@ mod wal;
 mod wals;
 
 pub(crate) use meta::Meta;
+pub(crate) use node::Node;
+pub(crate) use nodes::Nodes;
 pub(crate) use shard::Shard;
 pub(crate) use shards::Shards;
 pub(crate) use storage::FileReader;

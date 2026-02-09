@@ -13,6 +13,7 @@ mod router;
 mod rtest;
 mod runtime;
 mod shard;
+mod shards;
 mod storage;
 mod supervisor;
 mod tablet;
