@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 
 use crate::runtime::FileReader;
+use crate::runtime::FileWriter;
 use crate::runtime::Storage;
 
 /// CachedStorage wraps another implementation of `Storage`, holding pages in an
@@ -154,7 +155,7 @@ where
 
 impl<W> AsyncWrite for PutCacher<W>
 where
-    W: AsyncWrite + Unpin,
+    W: FileWriter + Unpin,
 {
     fn poll_write(
         self: Pin<&mut Self>,
