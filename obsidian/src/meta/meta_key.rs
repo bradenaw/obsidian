@@ -1,7 +1,7 @@
 use std::convert::TryFrom;
+use std::str::FromStr;
 
 use anyhow::anyhow;
-use uuid::Uuid;
 
 use crate::tuple_encoding::tuple_decode;
 use crate::tuple_encoding::tuple_decode_prefix;
@@ -50,12 +50,10 @@ impl MetaKey {
     pub(crate) fn encode(&self) -> Vec<u8> {
         match self {
             Self::Sync => tuple_encode(&(Self::PFX_SYNC,)),
-            Self::Node(node_id) => tuple_encode(&(
-                Self::PFX_NODES,
-                node_id.hostname.as_bytes().to_vec(),
-                node_id.port as u64,
-                node_id.uuid,
-            )),
+            Self::Node(node_id) => {
+                let node_id_bytes = format!("{}", node_id).into_bytes();
+                tuple_encode(&(Self::PFX_NODES, node_id_bytes))
+            }
             Self::Shard(shard_id) => tuple_encode(&(Self::PFX_SHARDS, shard_id.0 as u64)),
             Self::ColoGroup(colo_group_id) => {
                 tuple_encode(&(Self::PFX_COLO_GROUPS, colo_group_id.0 as u64))
@@ -77,12 +75,9 @@ impl MetaKey {
         match prefix {
             Self::PFX_SYNC => Ok(Self::Sync),
             Self::PFX_NODES => {
-                let (_, hostname_raw, port_raw, uuid): (u64, Vec<u8>, u64, Uuid) = tuple_decode(b)?;
-                Ok(Self::Node(NodeId {
-                    hostname: String::from_utf8(hostname_raw)?,
-                    port: u16::try_from(port_raw)?,
-                    uuid,
-                }))
+                let (_, node_id_bytes): (u64, Vec<u8>) = tuple_decode(b)?;
+                let node_id_str = String::try_from(node_id_bytes)?;
+                Ok(Self::Node(NodeId::from_str(&node_id_str)?))
             }
             Self::PFX_SHARDS => {
                 let (_, shard_id_raw): (u64, u64) = tuple_decode(b)?;

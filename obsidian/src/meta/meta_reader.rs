@@ -85,8 +85,8 @@ pub(crate) trait MetaReader {
             .ok_or_else(|| anyhow!("{:?} not found", shard_id))
     }
 
-    async fn node_exists(&self, node_id: &NodeId) -> anyhow::Result<bool> {
-        self.exists(&MetaKey::Node(node_id.clone())).await
+    async fn node_exists(&self, node_id: NodeId) -> anyhow::Result<bool> {
+        self.exists(&MetaKey::Node(node_id)).await
     }
 
     async fn shard_exists(&self, shard_id: ShardId) -> anyhow::Result<bool> {

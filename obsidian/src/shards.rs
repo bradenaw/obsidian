@@ -45,7 +45,7 @@ impl runtime::Shards for Shards {
             routing.get(&shard_id).ok_or_else(|| anyhow!(""))?.clone()
         };
 
-        self.0.nodes.node(&node_id)?.shard(shard_id)
+        self.0.nodes.node(node_id)?.shard(shard_id)
     }
 
     fn shards(&self) -> Vec<Box<dyn runtime::Shard>> {

@@ -55,9 +55,27 @@ message TabletId {
 }
 
 message NodeId {
-    string hostname = 1;
+    IpAddr addr = 1;
     uint32 port = 2;
     Uuid uuid = 3;
+}
+
+message IpAddr {
+    oneof addr_type {
+        Ipv4Addr v4 = 1;
+        Ipv6Addr v6 = 2;
+    }
+}
+
+message Ipv4Addr {
+    // Big-endian.
+    fixed32 bits = 1;
+}
+
+message Ipv6Addr {
+    // Big-endian.
+    fixed64 a = 1;
+    fixed64 b = 2;
 }
 
 message Uuid {

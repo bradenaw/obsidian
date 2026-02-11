@@ -74,7 +74,7 @@ impl<T: Tablet> Meta for MetaImpl<T> {
     async fn add_node(&self, node_id: NodeId) -> anyhow::Result<()> {
         let snapshot = self.latest_snapshot_().await?;
 
-        if snapshot.node_exists(&node_id).await? {
+        if snapshot.node_exists(node_id).await? {
             return Err(anyhow!("{:?} already exists", node_id));
         }
 
