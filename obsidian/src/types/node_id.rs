@@ -21,6 +21,15 @@ pub(crate) struct NodeId {
     pub uuid: Uuid,
 }
 
+impl NodeId {
+    pub fn new(addr: IpAddr, port: u16) -> Self {
+        Self {
+            addr,
+            port,
+            uuid: Uuid::now_v7(),
+        }
+    }
+}
 static NODE_ID_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(.+?):([0-9]+)/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?")
         .unwrap()

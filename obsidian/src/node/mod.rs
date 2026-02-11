@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::RwLock;
 
+use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::TryStreamExt;
 
@@ -11,6 +13,7 @@ use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::meta::NodeMetadata;
 use crate::meta::SyncType;
+use crate::runtime;
 use crate::runtime::Meta;
 use crate::runtime::Shard;
 use crate::runtime::Shards;
@@ -30,7 +33,7 @@ struct NodeInner {
     shards: Arc<dyn Shards>,
 
     supervisor: Mutex<Option<Supervisor>>,
-    shard: Mutex<Option<Arc<dyn Shard>>>,
+    shard: RwLock<Option<Arc<dyn Shard>>>,
 }
 
 impl Node {
@@ -48,13 +51,28 @@ impl Node {
             meta_synced: Arc::clone(&meta_synced),
             shards,
             supervisor: Mutex::new(None),
-            shard: Mutex::new(None),
+            shard: RwLock::new(None),
         });
         let node = Node(WithBackground::new(Arc::clone(&inner)));
 
         meta_synced.subscribe(&node.0);
 
         Ok(node)
+    }
+}
+
+impl runtime::Node for Node {
+    fn id(&self) -> NodeId {
+        self.0.node_id
+    }
+
+    fn shard(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn Shard>> {
+        let maybe_shard = self.0.shard.read().unwrap();
+        if let Some(shard) = maybe_shard.as_ref() {
+            return Ok(Arc::clone(&shard));
+        } else {
+            return Err(anyhow!("{:?} does not own {:?}", self.0.node_id, shard_id));
+        }
     }
 }
 
