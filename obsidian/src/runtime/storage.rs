@@ -3,7 +3,7 @@ use tokio::io::AsyncWrite;
 
 #[async_trait]
 pub(crate) trait Storage: Clone + Sync + Send + 'static {
-    type Writer: AsyncWrite + Send + 'static;
+    type Writer: FileWriter;
     type Reader: FileReader;
 
     async fn put(&self, name: &str) -> anyhow::Result<Self::Writer>;
@@ -12,6 +12,10 @@ pub(crate) trait Storage: Clone + Sync + Send + 'static {
 
     async fn get(&self, name: &str) -> anyhow::Result<Self::Reader>;
 }
+
+pub(crate) trait FileWriter: AsyncWrite + Send + 'static {}
+
+impl<T> FileWriter for T where T: AsyncWrite + Send + 'static {}
 
 #[async_trait]
 pub(crate) trait FileReader: Clone + Sync + Send + 'static {
