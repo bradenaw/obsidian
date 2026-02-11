@@ -15,8 +15,8 @@ use crate::meta::NodeMetadata;
 use crate::meta::SyncType;
 use crate::runtime;
 use crate::runtime::Meta;
-use crate::runtime::Shard;
 use crate::runtime::Shards;
+use crate::shard::Shard;
 use crate::supervisor::Supervisor;
 use crate::util::Retry;
 use crate::util::WithBackground;
@@ -33,7 +33,7 @@ struct NodeInner {
     shards: Arc<dyn Shards>,
 
     supervisor: Mutex<Option<Supervisor>>,
-    shard: RwLock<Option<Arc<dyn Shard>>>,
+    shard: RwLock<Option<Arc<dyn runtime::Shard>>>,
 }
 
 impl Node {
@@ -66,7 +66,7 @@ impl runtime::Node for Node {
         self.0.node_id
     }
 
-    fn shard(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn Shard>> {
+    fn shard(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn runtime::Shard>> {
         let maybe_shard = self.0.shard.read().unwrap();
         if let Some(shard) = maybe_shard.as_ref() {
             return Ok(Arc::clone(&shard));
@@ -86,14 +86,14 @@ impl NodeInner {
             SyncType::Initial => {
                 let shard_ids = snapshot.shard_ids().await?;
                 for shard_id in shard_ids {
-                    self.sync_meta_shard_metadata(snapshot, shard_id).await?;
+                    self.shard_metadata_changed(snapshot, shard_id).await?;
                 }
                 self.nodes_changed(snapshot).await?;
             }
             SyncType::Tx(keys) => {
                 for key in keys {
                     if let MetaKey::Shard(shard_id) = key {
-                        self.sync_meta_shard_metadata(snapshot, *shard_id).await?;
+                        self.shard_metadata_changed(snapshot, *shard_id).await?;
                     }
                 }
 
@@ -119,6 +119,23 @@ impl NodeInner {
         Ok(())
     }
 
+    async fn shard_metadata_changed(
+        &self,
+        snapshot: &MetaSyncedSnapshot,
+        shard_id: ShardId,
+    ) -> anyhow::Result<()> {
+        let shard_metadata = snapshot.shard_metadata(shard_id).await?;
+
+        if let Some(node_id) = shard_metadata.assigned_node_id {
+            if node_id == self.node_id {
+                self.maybe_spawn_shard(shard_id).await?;
+                // eyyy
+            }
+        }
+
+        Ok(())
+    }
+
     async fn maybe_spawn_supervisor(&self) {
         let mut supervisor = self.supervisor.lock().unwrap();
         if supervisor.is_some() {
@@ -132,20 +149,21 @@ impl NodeInner {
         ));
     }
 
-    async fn sync_meta_shard_metadata(
-        &self,
-        snapshot: &MetaSyncedSnapshot,
-        shard_id: ShardId,
-    ) -> anyhow::Result<()> {
-        let shard_metadata = snapshot.shard_metadata(shard_id).await?;
-
-        if let Some(node_id) = shard_metadata.assigned_node_id {
-            if node_id == self.node_id {
-                // eyyy
+    async fn maybe_spawn_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
+        let mut maybe_shard = self.shard.write().unwrap();
+        if let Some(shard) = maybe_shard.as_ref() {
+            if shard.id() == shard_id {
+                return Ok(());
             }
         }
 
-        Ok(())
+        // let shard = Shard::new(shard_id).await?;
+
+        // *maybe_shard = Some(Arc::new(shard));
+
+        // Ok(())
+
+        todo!();
     }
 }
 
