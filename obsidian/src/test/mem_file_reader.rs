@@ -8,7 +8,7 @@ pub(crate) struct MemFileReader {
 
 impl MemFileReader {
     pub fn new(inner: Vec<u8>) -> Self {
-        Self{inner}
+        Self { inner }
     }
 }
 

@@ -45,15 +45,15 @@ pub(crate) trait MetaReader {
         }))
     }
 
-    fn scan_keys(&self,
+    fn scan_keys(
+        &self,
         range: Range<Vec<u8>>,
         direction: Direction,
     ) -> Box<dyn Stream<Item = anyhow::Result<MetaKey>> + Unpin + Send + '_> {
-        Box::new(self.scan_raw(range, direction).map(|result| {
-            result
-                .map(|(k, _)| Ok(MetaKey::decode(&k)?))
-                .flatten()
-        }))
+        Box::new(
+            self.scan_raw(range, direction)
+                .map(|result| result.map(|(k, _)| Ok(MetaKey::decode(&k)?)).flatten()),
+        )
     }
 
     async fn exists(&self, meta_key: &MetaKey) -> anyhow::Result<bool> {

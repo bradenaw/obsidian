@@ -3,7 +3,6 @@
 #![feature(coroutines)]
 #![feature(thread_id_value)]
 
-mod supervisor;
 mod gateway;
 mod grpc;
 mod lsm;
@@ -14,6 +13,7 @@ mod rtest;
 mod runtime;
 mod shard;
 mod storage;
+mod supervisor;
 mod tablet;
 mod tuple_encoding;
 mod types;

@@ -5,7 +5,6 @@ use crossbeam_skiplist::SkipMap;
 
 use crate::lsm::util::LsmRevision;
 use crate::lsm::RunId;
-use crate::WalSeq;
 use crate::util::hexlify;
 use crate::util::IteratorEither;
 use crate::Bound;
@@ -14,6 +13,7 @@ use crate::HistoryRange;
 use crate::Range;
 use crate::RevisionValue;
 use crate::Timestamp;
+use crate::WalSeq;
 
 impl Default for Memtable {
     fn default() -> Self {
