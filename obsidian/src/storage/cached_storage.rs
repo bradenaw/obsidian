@@ -700,7 +700,7 @@ mod tests {
     use super::TreeList;
     use super::HASH_TRIE_LEAF_MAX;
     use super::TREE_LIST_NODE_SIZE;
-    use crate::storage::MemStorage;
+    use crate::test::MemStorage;
 
     #[tokio::test]
     async fn test_cached_storage() -> anyhow::Result<()> {

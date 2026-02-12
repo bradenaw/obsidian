@@ -698,7 +698,6 @@ mod test {
     use futures::TryStreamExt;
 
     use super::Block;
-    use crate::lsm::test::TestFile;
     use crate::lsm::util::LsmRevision;
     use crate::runtime::FileReader;
     use crate::Bound;
@@ -707,6 +706,7 @@ mod test {
     use crate::Range;
     use crate::RevisionValue;
     use crate::Timestamp;
+    use crate::test::MemFileReader;
 
     #[tokio::test]
     async fn test_get() -> anyhow::Result<()> {
@@ -739,7 +739,7 @@ mod test {
         };
         let encoded = Block::<()>::encode(&kvs)?;
         let end_offset = encoded.len() as u64;
-        let f = TestFile::from(encoded);
+        let f = MemFileReader::new(encoded);
         let block = Block::open(&f, end_offset).await?;
 
         assert_eq!(
@@ -835,7 +835,7 @@ mod test {
 
         let encoded = Block::<()>::encode(&kvs)?;
         let end_offset = encoded.len() as u64;
-        let f = TestFile::from(encoded);
+        let f = MemFileReader::new(encoded);
         let block = Block::open(&f, end_offset).await?;
 
         async fn check<'a, R: FileReader>(
@@ -943,7 +943,7 @@ mod test {
         .collect();
         let encoded = Block::<()>::encode(&kvs)?;
         let end_offset = encoded.len() as u64;
-        let f = TestFile::from(encoded);
+        let f = MemFileReader::new(encoded);
         let block = Block::open(&f, end_offset).await?;
 
         assert_eq!(

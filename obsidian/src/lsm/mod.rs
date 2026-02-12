@@ -928,7 +928,6 @@ mod test {
     use std::collections::HashSet;
     use std::sync::Arc;
 
-    use async_trait::async_trait;
     use byteorder::BigEndian;
     use byteorder::ByteOrder;
     use futures::TryStreamExt;
@@ -946,10 +945,11 @@ mod test {
     use crate::lsm::util::LsmRevision;
     use crate::lsm::RunId;
     use crate::runtime::FileReader;
+    use crate::test::MemFileReader;
     use crate::runtime::Storage;
     use crate::runtime::Wal;
     use crate::WalSeq;
-    use crate::storage::MemStorage;
+    use crate::test::MemStorage;
     use crate::test::MemWal;
     use crate::util::binary_search_by_idx;
     use crate::Bound;
@@ -964,44 +964,6 @@ mod test {
     use crate::RevisionValue;
     use crate::Timestamp;
     use crate::WriteError;
-
-    #[derive(Clone)]
-    pub(super) struct TestFile {
-        inner: Arc<Vec<u8>>,
-    }
-
-    impl From<Vec<u8>> for TestFile {
-        fn from(value: Vec<u8>) -> Self {
-            Self {
-                inner: Arc::new(value),
-            }
-        }
-    }
-
-    impl From<Arc<Vec<u8>>> for TestFile {
-        fn from(value: Arc<Vec<u8>>) -> Self {
-            Self {
-                inner: Arc::clone(&value),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl FileReader for TestFile {
-        async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
-            if offset + (buf.len() as u64) > self.inner.len() as u64 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "unexpected eof",
-                )
-                .into());
-            }
-            Ok(buf.copy_from_slice(&self.inner[(offset as usize)..(offset as usize) + buf.len()]))
-        }
-        fn len(&self) -> u64 {
-            self.inner.len() as u64
-        }
-    }
 
     #[tokio::test]
     async fn test_put_get() -> anyhow::Result<()> {
@@ -1868,7 +1830,7 @@ mod test {
 
     async fn keyspace_from_diagram(
         diagram: Vec<(&str, &[u8])>,
-    ) -> anyhow::Result<Keyspace<TestFile>> {
+    ) -> anyhow::Result<Keyspace<MemFileReader>> {
         fn find_touching(
             diagram: &[(&str, &[u8])],
             visited: &mut HashSet<(usize, usize)>,
@@ -1963,7 +1925,7 @@ mod test {
                         run_builder.push(revision).await?;
                     }
                     run_builder.finish().await?;
-                    let run = Run::open(Arc::new(TestFile::from(v))).await?;
+                    let run = Run::open(Arc::new(MemFileReader::new(v))).await?;
                     level.runs.push(Arc::new(run));
                 }
             }

@@ -458,7 +458,6 @@ mod test {
     use super::dump_run;
     use super::Run;
     use super::RunBuilder;
-    use crate::lsm::test::TestFile;
     use crate::lsm::util::LsmRevision;
     use crate::lsm::RunId;
     use crate::Bound;
@@ -468,6 +467,7 @@ mod test {
     use crate::Range;
     use crate::RevisionValue;
     use crate::Timestamp;
+    use crate::test::MemFileReader;
 
     #[tokio::test]
     async fn test_run_file() -> anyhow::Result<()> {
@@ -511,7 +511,7 @@ mod test {
         }
         run_builder.finish().await?;
 
-        let run = Run::open(Arc::new(TestFile::from(v))).await?;
+        let run = Run::open(Arc::new(MemFileReader::new(v))).await?;
 
         assert_eq!(run.min_ts, Timestamp(10230));
         assert_eq!(run.max_ts, Timestamp(21925));
@@ -581,10 +581,10 @@ mod test {
         }
         b.finish().await?;
 
-        let run = Run::open(Arc::new(TestFile::from(v))).await?;
+        let run = Run::open(Arc::new(MemFileReader::new(v))).await?;
 
         async fn check(
-            run: &Run<TestFile>,
+            run: &Run<MemFileReader>,
             ts: Timestamp,
             range: Range<Vec<u8>>,
             expected: Vec<(&str, usize, bool)>,
@@ -728,7 +728,7 @@ mod test {
                 run_builder.finish().await.unwrap();
 
 
-                let run = Run::open(Arc::new(TestFile::from(v))).await.unwrap();
+                let run = Run::open(Arc::new(MemFileReader::new(v))).await.unwrap();
 
                 dump_run(&run).await.unwrap();
 
