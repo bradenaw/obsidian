@@ -5,10 +5,7 @@ use std::net::IpAddr;
 use std::net::Ipv6Addr;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::RwLock;
-use std::sync::Weak;
 
-use anyhow::anyhow;
 use im::OrdSet;
 
 use crate::meta::MetaSynced;
@@ -24,72 +21,79 @@ use crate::util::Watchable;
 use crate::NodeId;
 
 pub(super) struct TestNodes {
+    inner: Arc<TestNodesInner>,
+    shards: Arc<dyn Shards>,
+}
+
+struct TestNodesInner {
     storage: Arc<dyn Storage>,
     meta: Arc<dyn Meta>,
     wals: Arc<MemWals>,
-    // This is always Some, it's just a RwLock<Option> because of the circular dependency during
-    // construction: TestNodes needs a Shards to construct nodes with, Shards needs a Nodes to do
-    // routing.
-    shards: RwLock<Option<Arc<dyn Shards>>>,
 
-    m: Mutex<HashMap<NodeId, Arc<dyn Node>>>,
+    routing: Mutex<HashMap<NodeId, Arc<dyn Node>>>,
     node_ids: Watchable<OrdSet<NodeId>>,
 }
 
 impl TestNodes {
-    pub fn new(storage: Arc<dyn Storage>, meta: Arc<dyn Meta>) -> Arc<Self> {
-        let nodes = Arc::new(Self {
+    pub fn new(storage: Arc<dyn Storage>, meta: Arc<dyn Meta>) -> Self {
+        let inner = Arc::new(TestNodesInner {
             storage,
             meta: Arc::clone(&meta),
             wals: Arc::new(MemWals::new()),
-            shards: RwLock::new(None),
-            m: Mutex::new(HashMap::new()),
+            routing: Mutex::new(HashMap::new()),
             node_ids: Watchable::new(OrdSet::new()),
         });
 
-        {
-            let mut shards = nodes.shards.write().unwrap();
-            *shards = Some(Arc::new(crate::shards::Shards::new(
+        Self {
+            inner: Arc::clone(&inner),
+            shards: Arc::new(crate::shards::Shards::new(
                 Arc::new(MetaSynced::new(meta)),
-                Arc::new(Arc::clone(&nodes)) as Arc<dyn Nodes>,
-            )));
+                Arc::clone(&inner) as Arc<dyn Nodes>,
+            )),
         }
-
-        nodes
     }
 
     pub async fn create_node(self: &Arc<Self>) -> anyhow::Result<NodeId> {
-        let mut m = self.m.lock().unwrap();
+        let mut routing = self.inner.routing.lock().unwrap();
 
         let node_id = NodeId::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 1);
-        let shards = self.shards.read().unwrap().as_ref().unwrap().clone();
 
-        m.insert(
+        routing.insert(
             node_id,
             Arc::new(
                 crate::node::Node::new(
                     node_id,
-                    Arc::clone(&self.storage),
-                    Arc::clone(&self.meta),
-                    shards,
-                    Arc::clone(&self.wals) as Arc<dyn Wals<Arc<dyn Wal>>>,
-                    Arc::new(MetaSynced::new(Arc::clone(&self.meta))),
+                    Arc::clone(&self.inner.storage),
+                    Arc::clone(&self.inner.meta),
+                    Arc::clone(&self.shards),
+                    Arc::clone(&self.inner.wals) as Arc<dyn Wals<Arc<dyn Wal>>>,
+                    Arc::new(MetaSynced::new(Arc::clone(&self.inner.meta))),
                 )
                 .await?,
             ) as Arc<dyn Node>,
         );
-        let mut node_ids = self.node_ids.get().0.clone();
+        let mut node_ids = self.inner.node_ids.get().0.clone();
         node_ids.insert(node_id);
-        self.node_ids.set(node_ids);
+        self.inner.node_ids.set(node_ids);
 
         Ok(node_id)
     }
 }
 
-impl Nodes for Arc<TestNodes> {
+impl Nodes for TestNodes {
     fn node(&self, node_id: NodeId) -> anyhow::Result<Arc<dyn Node>> {
-        let m = self.m.lock().unwrap();
-        let node_arc = m
+        self.inner.node(node_id)
+    }
+
+    fn node_ids(&self) -> (OrdSet<NodeId>, Box<dyn Future<Output = ()>>) {
+        self.inner.node_ids()
+    }
+}
+
+impl Nodes for TestNodesInner {
+    fn node(&self, node_id: NodeId) -> anyhow::Result<Arc<dyn Node>> {
+        let routing = self.routing.lock().unwrap();
+        let node_arc = routing
             .get(&node_id)
             .ok_or_else(|| anyhow::anyhow!("{:?} does not exist", node_id))?;
 
@@ -99,21 +103,5 @@ impl Nodes for Arc<TestNodes> {
     fn node_ids(&self) -> (OrdSet<NodeId>, Box<dyn Future<Output = ()>>) {
         let (node_ids, changed) = self.node_ids.get();
         (node_ids, Box::new(changed))
-    }
-}
-
-impl Nodes for Weak<TestNodes> {
-    fn node(&self, node_id: NodeId) -> anyhow::Result<Arc<dyn Node>> {
-        Weak::upgrade(self)
-            .ok_or_else(|| anyhow!(""))?
-            .node(node_id)
-    }
-
-    fn node_ids(&self) -> (OrdSet<NodeId>, Box<dyn Future<Output = ()>>) {
-        if let Some(inner) = Weak::upgrade(self) {
-            inner.node_ids()
-        } else {
-            (OrdSet::new(), Box::new(pending()))
-        }
     }
 }
