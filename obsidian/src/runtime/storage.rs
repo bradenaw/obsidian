@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 
 #[async_trait]
-pub(crate) trait Storage: Clone + Sync + Send + 'static {
+pub(crate) trait Storage: Sync + Send + 'static {
     type Writer: FileWriter;
     type Reader: FileReader;
 
