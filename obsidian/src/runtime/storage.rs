@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 
@@ -10,7 +12,7 @@ pub(crate) trait Storage: Clone + Sync + Send + 'static {
 
     async fn delete(&self, name: &str) -> anyhow::Result<()>;
 
-    async fn get(&self, name: &str) -> anyhow::Result<Self::Reader>;
+    async fn get(&self, name: &str) -> anyhow::Result<Arc<Self::Reader>>;
 }
 
 pub(crate) trait FileWriter: AsyncWrite + Send + 'static {}
@@ -18,7 +20,7 @@ pub(crate) trait FileWriter: AsyncWrite + Send + 'static {}
 impl<T> FileWriter for T where T: AsyncWrite + Send + 'static {}
 
 #[async_trait]
-pub(crate) trait FileReader: Clone + Sync + Send + 'static {
+pub(crate) trait FileReader: Sync + Send + 'static {
     /// Fills `buf` with the bytes of the file starting at `offset`. Returns an error if the end of
     /// the file is reached before filling `buf`.
     async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()>;

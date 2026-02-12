@@ -1688,7 +1688,7 @@ mod test {
         Ok(())
     }
 
-    async fn dump_keyspace<R: FileReader + Clone>(keyspace: &Keyspace<R>) -> anyhow::Result<()> {
+    async fn dump_keyspace<R: FileReader>(keyspace: &Keyspace<R>) -> anyhow::Result<()> {
         println!("== manifest =====");
         println!("l0_active");
         {
@@ -1963,7 +1963,7 @@ mod test {
                         run_builder.push(revision).await?;
                     }
                     run_builder.finish().await?;
-                    let run = Run::open(TestFile::from(v)).await?;
+                    let run = Run::open(Arc::new(TestFile::from(v))).await?;
                     level.runs.push(Arc::new(run));
                 }
             }

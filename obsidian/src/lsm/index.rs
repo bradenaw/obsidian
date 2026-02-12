@@ -17,7 +17,6 @@ use crate::lsm::RunId;
 use crate::lsm::RunManifest;
 use crate::runtime::FileReader;
 use crate::runtime::Storage;
-use crate::WalSeq;
 use crate::util::binary_search_by_idx;
 use crate::Bound;
 use crate::KeyOrBound;
@@ -26,6 +25,7 @@ use crate::Range;
 use crate::RangeMap;
 use crate::RevisionValue;
 use crate::Timestamp;
+use crate::WalSeq;
 
 const N_STRIPES: usize = 32;
 
@@ -51,7 +51,7 @@ pub(super) struct Index<R> {
 
 impl<R> Index<R>
 where
-    R: FileReader + Clone,
+    R: FileReader,
 {
     pub(super) fn new() -> Self {
         Self::from_snapshot(IndexSnapshot {
@@ -206,7 +206,6 @@ where
     }
 }
 
-#[derive(Clone)]
 pub(super) struct IndexSnapshot<R> {
     pub(super) keyspaces: HashMap<KeyspaceId, Keyspace<R>>,
     /// The compactor will split runs at these bounds and schedule compactions of all runs that
@@ -216,9 +215,15 @@ pub(super) struct IndexSnapshot<R> {
     pub(super) splits: Vec<Bound<Vec<u8>>>,
 }
 
+impl<R> Clone for IndexSnapshot<R> {
+    fn clone(&self) -> Self {
+        Self { keyspaces: self.keyspaces.clone(), splits: self.splits.clone() }
+    }
+}
+
 impl<R> IndexSnapshot<R>
 where
-    R: FileReader + Clone,
+    R: FileReader,
 {
     async fn from_manifest<S>(storage: &S, manifest: Manifest) -> anyhow::Result<Self>
     where
@@ -247,7 +252,6 @@ where
     }
 }
 
-#[derive(Clone)]
 pub(super) struct Keyspace<R> {
     pub(super) l0_active: Arc<Memtable>,
     pub(super) l0_sealed: Vec<Arc<Memtable>>,
@@ -255,9 +259,15 @@ pub(super) struct Keyspace<R> {
     pub(super) levels: Vec<Level<R>>,
 }
 
+impl<R> Clone for Keyspace<R> {
+    fn clone(&self) -> Self {
+        Self { l0_active: self.l0_active.clone(), l0_sealed: self.l0_sealed.clone(), levels: self.levels.clone() }
+    }
+}
+
 impl<R> Keyspace<R>
 where
-    R: FileReader + Clone,
+    R: FileReader,
 {
     async fn from_manifest<S>(storage: &S, manifest: KeyspaceManifest) -> anyhow::Result<Self>
     where
@@ -419,10 +429,15 @@ where
     }
 }
 
-#[derive(Clone)]
 pub(super) struct Level<R> {
     // In sorted order by range, guaranteed non-overlapping.
     pub(super) runs: Vec<Arc<Run<R>>>,
+}
+
+impl<R> Clone for Level<R> {
+    fn clone(&self) -> Self {
+        Self { runs: self.runs.clone() }
+    }
 }
 
 impl<R: FileReader> Level<R> {

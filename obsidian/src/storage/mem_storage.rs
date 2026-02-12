@@ -44,17 +44,17 @@ impl Storage for MemStorage {
         })
     }
 
-    async fn get(&self, name: &str) -> anyhow::Result<Self::Reader> {
+    async fn get(&self, name: &str) -> anyhow::Result<Arc<Self::Reader>> {
         let inner = self.inner.lock().unwrap();
         let file_content = inner
             .files
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("{} not found", name))?;
 
-        Ok(MemFile {
+        Ok(Arc::new(MemFile {
             content: Arc::downgrade(file_content),
             len: file_content.len() as u64,
-        })
+        }))
     }
 
     async fn delete(&self, name: &str) -> anyhow::Result<()> {

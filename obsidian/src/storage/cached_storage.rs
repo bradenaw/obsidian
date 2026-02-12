@@ -77,16 +77,16 @@ impl<S: Storage> Storage for CachedStorage<S> {
         })
     }
 
-    async fn get(&self, name: &str) -> anyhow::Result<Self::Reader> {
+    async fn get(&self, name: &str) -> anyhow::Result<Arc<Self::Reader>> {
         let f = self.inner.get(name).await?;
         let len = f.len();
-        Ok(GetCacher {
+        Ok(Arc::new(GetCacher {
             inner: f,
             len: len,
             page_size: self.page_size,
             name: Arc::new(name.to_string()),
             cache: self.cache.clone(),
-        })
+        }))
     }
 
     async fn delete(&self, name: &str) -> anyhow::Result<()> {
@@ -191,7 +191,7 @@ where
 // Wraps read_exact_at in a cache.
 #[derive(Clone)]
 pub(crate) struct GetCacher<R: FileReader> {
-    inner: R,
+    inner: Arc<R>,
     page_size: usize,
     len: u64,
     name: Arc<String>,

@@ -1,5 +1,7 @@
 use std::cmp;
 use std::collections::BTreeMap;
+use std::ops::Deref;
+use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_stream::try_stream;
@@ -34,7 +36,7 @@ use crate::Timestamp;
 
 #[derive(Clone)]
 pub(super) struct Run<R> {
-    reader: R,
+    reader: Arc<R>,
 
     id: RunId,
     size: usize,
@@ -51,8 +53,8 @@ pub(super) struct Run<R> {
 }
 
 impl<R: FileReader> Run<R> {
-    pub(super) async fn open(reader: R) -> anyhow::Result<Self> {
-        let trailer = RunTrailer::open(&reader).await?;
+    pub(super) async fn open(reader: Arc<R>) -> anyhow::Result<Self> {
+        let trailer = RunTrailer::open(reader.deref()).await?;
 
         let max_key = {
             let mut max_key = vec![0u8; trailer.max_key_len as usize];
@@ -144,7 +146,7 @@ impl<R: FileReader> Run<R> {
 
             for i in block_idxs {
                 let block_end_offset = self.index.get_value(i);
-                let block = Block::open(&self.reader, block_end_offset as u64).await?;
+                let block = Block::open(self.reader.deref(), block_end_offset as u64).await?;
                 let block_scan = block.scan(ts, range.clone(), direction);
                 pin_mut!(block_scan);
                 while let Some(revision) = block_scan.try_next().await? {
@@ -189,7 +191,7 @@ impl<R: FileReader> Run<R> {
         try_stream! {
             for i in 0..self.index.len() {
                 let block_end_offset = self.index.get_value(i);
-                let block = Block::open(&self.reader, block_end_offset as u64).await?;
+                let block = Block::open(self.reader.deref(), block_end_offset as u64).await?;
                 let block_stream = block.stream();
                 pin_mut!(block_stream);
                 while let Some(revision) = block_stream.try_next().await? {
@@ -211,7 +213,7 @@ impl<R: FileReader> Run<R> {
         };
         let block_end_offset = self.index.get_value(block_header_idx);
         Ok(Some(
-            Block::open(&self.reader, block_end_offset as u64).await?,
+            Block::open(self.reader.deref(), block_end_offset as u64).await?,
         ))
     }
 }
@@ -437,7 +439,7 @@ pub(super) async fn dump_run<R: FileReader>(run: &Run<R>) -> anyhow::Result<()> 
         println!("    first key: [{}]", hexlify(&run.index.get_key(i)),);
         println!("    block_end_offset: {}", run.index.get_value(i));
         let block_end_offset = run.index.get_value(i);
-        let block = Block::open(&run.reader, block_end_offset as u64).await?;
+        let block = Block::open(run.reader.deref(), block_end_offset as u64).await?;
         dump_block(&block).await?;
     }
     Ok(())
@@ -446,6 +448,7 @@ pub(super) async fn dump_run<R: FileReader>(run: &Run<R>) -> anyhow::Result<()> 
 #[cfg(test)]
 mod test {
     use std::cmp::Reverse;
+    use std::sync::Arc;
 
     use futures::StreamExt;
     use futures::TryStreamExt;
@@ -508,7 +511,7 @@ mod test {
         }
         run_builder.finish().await?;
 
-        let run = Run::open(TestFile::from(v)).await?;
+        let run = Run::open(Arc::new(TestFile::from(v))).await?;
 
         assert_eq!(run.min_ts, Timestamp(10230));
         assert_eq!(run.max_ts, Timestamp(21925));
@@ -578,7 +581,7 @@ mod test {
         }
         b.finish().await?;
 
-        let run = Run::open(TestFile::from(v)).await?;
+        let run = Run::open(Arc::new(TestFile::from(v))).await?;
 
         async fn check(
             run: &Run<TestFile>,
@@ -725,7 +728,7 @@ mod test {
                 run_builder.finish().await.unwrap();
 
 
-                let run = Run::open(TestFile::from(v)).await.unwrap();
+                let run = Run::open(Arc::new(TestFile::from(v))).await.unwrap();
 
                 dump_run(&run).await.unwrap();
 
