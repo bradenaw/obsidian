@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::pin::pin;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -23,6 +24,7 @@ pub(crate) struct MemStorage {
 
 struct MemStorageInner {
     files: HashMap<String, Arc<MemFileReader>>,
+    names: HashSet<String>,
 }
 
 impl MemStorage {
@@ -30,6 +32,7 @@ impl MemStorage {
         Self {
             inner: Arc::new(Mutex::new(MemStorageInner {
                 files: HashMap::new(),
+                names: HashSet::new(),
             })),
         }
     }
@@ -38,6 +41,12 @@ impl MemStorage {
 #[async_trait]
 impl Storage for MemStorage {
     async fn put(&self, name: &str) -> anyhow::Result<Box<dyn FileWriter>> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.names.contains(name) {
+            return Err(anyhow!("file {:?} already exists", name));
+        }
+        inner.names.insert(name.to_string());
+
         Ok(Box::new(MemStorageFileWriter {
             parent: Arc::clone(&self.inner),
             name: name.to_string(),
@@ -60,6 +69,7 @@ impl Storage for MemStorage {
 
     async fn delete(&self, name: &str) -> anyhow::Result<()> {
         self.inner.lock().unwrap().files.remove(name);
+        // Are names allowed to be reused?
         Ok(())
     }
 }
