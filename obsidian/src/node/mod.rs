@@ -15,7 +15,11 @@ use crate::meta::NodeMetadata;
 use crate::meta::SyncType;
 use crate::runtime;
 use crate::runtime::Meta;
+use crate::runtime::Shard as _;
 use crate::runtime::Shards;
+use crate::runtime::Storage;
+use crate::runtime::Wal;
+use crate::runtime::Wals;
 use crate::shard::Shard;
 use crate::supervisor::Supervisor;
 use crate::util::Retry;
@@ -28,28 +32,34 @@ pub(crate) struct Node(WithBackground<NodeInner>);
 
 struct NodeInner {
     node_id: NodeId,
+    storage: Arc<dyn Storage>,
     meta: Arc<dyn Meta>,
-    meta_synced: Arc<MetaSynced>,
     shards: Arc<dyn Shards>,
+    wals: Arc<dyn Wals<Arc<dyn Wal>>>,
+    meta_synced: Arc<MetaSynced>,
 
     supervisor: Mutex<Option<Supervisor>>,
-    shard: RwLock<Option<Arc<dyn runtime::Shard>>>,
+    shard: RwLock<Option<Arc<Shard>>>,
 }
 
 impl Node {
     pub async fn new(
         node_id: NodeId,
+        storage: Arc<dyn Storage>,
         meta: Arc<dyn Meta>,
-        meta_synced: Arc<MetaSynced>,
         shards: Arc<dyn Shards>,
+        wals: Arc<dyn Wals<Arc<dyn Wal>>>,
+        meta_synced: Arc<MetaSynced>,
     ) -> anyhow::Result<Self> {
         meta.add_node(node_id.clone()).await?;
 
         let inner = Arc::new(NodeInner {
             node_id,
+            storage,
             meta,
-            meta_synced: Arc::clone(&meta_synced),
             shards,
+            wals,
+            meta_synced: Arc::clone(&meta_synced),
             supervisor: Mutex::new(None),
             shard: RwLock::new(None),
         });
@@ -69,7 +79,7 @@ impl runtime::Node for Node {
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn runtime::Shard>> {
         let maybe_shard = self.0.shard.read().unwrap();
         if let Some(shard) = maybe_shard.as_ref() {
-            return Ok(Arc::clone(&shard));
+            return Ok(Arc::clone(shard) as Arc<dyn runtime::Shard>);
         } else {
             return Err(anyhow!("{:?} does not own {:?}", self.0.node_id, shard_id));
         }
@@ -129,7 +139,6 @@ impl NodeInner {
         if let Some(node_id) = shard_metadata.assigned_node_id {
             if node_id == self.node_id {
                 self.maybe_spawn_shard(shard_id).await?;
-                // eyyy
             }
         }
 
@@ -150,20 +159,33 @@ impl NodeInner {
     }
 
     async fn maybe_spawn_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
-        let mut maybe_shard = self.shard.write().unwrap();
-        if let Some(shard) = maybe_shard.as_ref() {
-            if shard.id() == shard_id {
-                return Ok(());
+        {
+            let maybe_shard = self.shard.write().unwrap();
+            if let Some(shard) = maybe_shard.as_ref() {
+                if shard.id() == shard_id {
+                    return Ok(());
+                }
             }
         }
 
-        // let shard = Shard::new(shard_id).await?;
+        let shard = Shard::new(
+            shard_id,
+            Arc::clone(&self.storage),
+            Arc::clone(&self.meta),
+            Arc::clone(&self.shards),
+            Arc::clone(&self.wals),
+            65536,
+            65536,
+            4096,
+        )
+        .await?;
 
-        // *maybe_shard = Some(Arc::new(shard));
+        {
+            let mut maybe_shard = self.shard.write().unwrap();
+            *maybe_shard = Some(Arc::new(shard));
+        }
 
-        // Ok(())
-
-        todo!();
+        Ok(())
     }
 }
 

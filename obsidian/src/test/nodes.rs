@@ -17,14 +17,16 @@ use crate::runtime::Node;
 use crate::runtime::Nodes;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
+use crate::runtime::Wal;
+use crate::runtime::Wals;
 use crate::test::MemWals;
 use crate::util::Watchable;
 use crate::NodeId;
 
-pub(super) struct TestNodes<S> {
-    storage: Arc<S>,
+pub(super) struct TestNodes {
+    storage: Arc<dyn Storage>,
     meta: Arc<dyn Meta>,
-    wals: MemWals,
+    wals: Arc<MemWals>,
     // This is always Some, it's just a RwLock<Option> because of the circular dependency during
     // construction: TestNodes needs a Shards to construct nodes with, Shards needs a Nodes to do
     // routing.
@@ -34,15 +36,12 @@ pub(super) struct TestNodes<S> {
     node_ids: Watchable<OrdSet<NodeId>>,
 }
 
-impl<S> TestNodes<S>
-where
-    S: Storage,
-{
-    pub fn new(storage: Arc<S>, meta: Arc<dyn Meta>) -> Arc<Self> {
+impl TestNodes {
+    pub fn new(storage: Arc<dyn Storage>, meta: Arc<dyn Meta>) -> Arc<Self> {
         let nodes = Arc::new(Self {
             storage,
             meta: Arc::clone(&meta),
-            wals: MemWals::new(),
+            wals: Arc::new(MemWals::new()),
             shards: RwLock::new(None),
             m: Mutex::new(HashMap::new()),
             node_ids: Watchable::new(OrdSet::new()),
@@ -70,9 +69,11 @@ where
             Arc::new(
                 crate::node::Node::new(
                     node_id,
+                    Arc::clone(&self.storage),
                     Arc::clone(&self.meta),
-                    Arc::new(MetaSynced::new(Arc::clone(&self.meta))),
                     shards,
+                    Arc::clone(&self.wals) as Arc<dyn Wals<Arc<dyn Wal>>>,
+                    Arc::new(MetaSynced::new(Arc::clone(&self.meta))),
                 )
                 .await?,
             ) as Arc<dyn Node>,
@@ -85,10 +86,7 @@ where
     }
 }
 
-impl<S> Nodes for Arc<TestNodes<S>>
-where
-    S: Storage,
-{
+impl Nodes for Arc<TestNodes> {
     fn node(&self, node_id: NodeId) -> anyhow::Result<Arc<dyn Node>> {
         let m = self.m.lock().unwrap();
         let node_arc = m
@@ -104,10 +102,7 @@ where
     }
 }
 
-impl<S> Nodes for Weak<TestNodes<S>>
-where
-    S: Storage,
-{
+impl Nodes for Weak<TestNodes> {
     fn node(&self, node_id: NodeId) -> anyhow::Result<Arc<dyn Node>> {
         Weak::upgrade(self)
             .ok_or_else(|| anyhow!(""))?
