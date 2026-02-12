@@ -28,12 +28,9 @@ pub(crate) use crate::lsm::preload::Preloaded;
 pub(crate) use crate::lsm::preload::Preloader;
 use crate::lsm::run::Run;
 use crate::lsm::util::LsmRevision;
-use crate::runtime::FileReader;
 use crate::runtime::Storage;
 use crate::runtime::Wal;
-use crate::WalSeq;
 use crate::util::hexlify;
-use crate::WalEntry;
 use crate::util::merge_sorted_streams;
 use crate::util::shortest_between;
 use crate::util::Background;
@@ -50,6 +47,8 @@ use crate::Range;
 use crate::Revision;
 use crate::RevisionValue;
 use crate::Timestamp;
+use crate::WalEntry;
+use crate::WalSeq;
 use crate::WriteError;
 
 pub(crate) struct LsmBuilder<S> {
@@ -121,7 +120,7 @@ pub(crate) struct Lsm<S: Storage> {
     block_size_target: u64,
 
     wal: Arc<dyn Wal>,
-    index: Arc<Index<S::Reader>>,
+    index: Arc<Index>,
     compactor: Compactor<S>,
     storage: Arc<S>,
 
@@ -395,9 +394,9 @@ impl<S: Storage> Lsm<S> {
     }
 
     fn keyspace(
-        snapshot: &IndexSnapshot<S::Reader>,
+        snapshot: &IndexSnapshot,
         keyspace_id: KeyspaceId,
-    ) -> anyhow::Result<KeyspaceReader<'_, S::Reader>> {
+    ) -> anyhow::Result<KeyspaceReader<'_>> {
         Ok(KeyspaceReader(
             snapshot
                 .keyspaces
@@ -406,7 +405,7 @@ impl<S: Storage> Lsm<S> {
         ))
     }
 
-    pub async fn load(&self, preloaded: Preloaded<S::Reader>) -> anyhow::Result<()> {
+    pub async fn load(&self, preloaded: Preloaded) -> anyhow::Result<()> {
         self.index.load(preloaded.snapshot)?;
         // We need to flush here otherwise after a crash and restart we'd lose track of the runs,
         // and could erroneously transition to Active with no data.
@@ -433,7 +432,7 @@ impl<S: Storage> Lsm<S> {
         l0_max_size: u64,
         wal: &Arc<dyn Wal>,
         storage: &S,
-    ) -> anyhow::Result<(Index<S::Reader>, Option<WalSeq>)> {
+    ) -> anyhow::Result<(Index, Option<WalSeq>)> {
         let oldest_seqno = wal.oldest_available().await?;
         let mut newest_seqno = None;
         let mut wal_stream = wal.read(oldest_seqno);
@@ -498,7 +497,7 @@ impl<S: Storage> Lsm<S> {
     }
 
     async fn process_wal(
-        index: Arc<Index<S::Reader>>,
+        index: Arc<Index>,
         wal: Arc<dyn Wal>,
         start: WalSeq,
         wal_processed: tokio::sync::watch::Sender<WalSeq>,
@@ -511,7 +510,7 @@ impl<S: Storage> Lsm<S> {
     }
 
     async fn process_wal_once(
-        index: &Index<S::Reader>,
+        index: &Index,
         wal: &Arc<dyn Wal>,
         start: WalSeq,
         wal_processed: tokio::sync::watch::Sender<WalSeq>,
@@ -642,12 +641,9 @@ pub(crate) struct RunManifest {
     pub(crate) range: Range<Vec<u8>>,
 }
 
-struct KeyspaceReader<'a, R>(&'a Keyspace<R>);
+struct KeyspaceReader<'a>(&'a Keyspace);
 
-impl<'a, R> KeyspaceReader<'a, R>
-where
-    R: FileReader,
-{
+impl<'a> KeyspaceReader<'a> {
     async fn get(
         &self,
         ts: Timestamp,
@@ -944,11 +940,9 @@ mod test {
     use crate::lsm::run::RunBuilder;
     use crate::lsm::util::LsmRevision;
     use crate::lsm::RunId;
-    use crate::runtime::FileReader;
-    use crate::test::MemFileReader;
     use crate::runtime::Storage;
     use crate::runtime::Wal;
-    use crate::WalSeq;
+    use crate::test::MemFileReader;
     use crate::test::MemStorage;
     use crate::test::MemWal;
     use crate::util::binary_search_by_idx;
@@ -963,6 +957,7 @@ mod test {
     use crate::Revision;
     use crate::RevisionValue;
     use crate::Timestamp;
+    use crate::WalSeq;
     use crate::WriteError;
 
     #[tokio::test]
@@ -1445,8 +1440,8 @@ mod test {
 
         let keyspace = keyspace_from_diagram(diagram).await?;
 
-        async fn check<R: FileReader>(
-            keyspace: &Keyspace<R>,
+        async fn check(
+            keyspace: &Keyspace,
             key: &[u8],
             range: HistoryRange,
             expected: &[(usize, bool)],
@@ -1650,7 +1645,7 @@ mod test {
         Ok(())
     }
 
-    async fn dump_keyspace<R: FileReader>(keyspace: &Keyspace<R>) -> anyhow::Result<()> {
+    async fn dump_keyspace(keyspace: &Keyspace) -> anyhow::Result<()> {
         println!("== manifest =====");
         println!("l0_active");
         {
@@ -1828,9 +1823,7 @@ mod test {
         }
     }
 
-    async fn keyspace_from_diagram(
-        diagram: Vec<(&str, &[u8])>,
-    ) -> anyhow::Result<Keyspace<MemFileReader>> {
+    async fn keyspace_from_diagram(diagram: Vec<(&str, &[u8])>) -> anyhow::Result<Keyspace> {
         fn find_touching(
             diagram: &[(&str, &[u8])],
             visited: &mut HashSet<(usize, usize)>,

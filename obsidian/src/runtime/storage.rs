@@ -5,19 +5,16 @@ use tokio::io::AsyncWrite;
 
 #[async_trait]
 pub(crate) trait Storage: Sync + Send + 'static {
-    type Writer: FileWriter;
-    type Reader: FileReader;
-
-    async fn put(&self, name: &str) -> anyhow::Result<Self::Writer>;
+    async fn put(&self, name: &str) -> anyhow::Result<Box<dyn FileWriter>>;
 
     async fn delete(&self, name: &str) -> anyhow::Result<()>;
 
-    async fn get(&self, name: &str) -> anyhow::Result<Arc<Self::Reader>>;
+    async fn get(&self, name: &str) -> anyhow::Result<Arc<dyn FileReader>>;
 }
 
-pub(crate) trait FileWriter: AsyncWrite + Send + 'static {}
+pub(crate) trait FileWriter: AsyncWrite + Send + Unpin + 'static {}
 
-impl<T> FileWriter for T where T: AsyncWrite + Send + 'static {}
+impl<T> FileWriter for T where T: AsyncWrite + Send + Unpin + 'static {}
 
 #[async_trait]
 pub(crate) trait FileReader: Sync + Send + 'static {

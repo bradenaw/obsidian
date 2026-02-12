@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 
 use crate::runtime::FileReader;
+use crate::runtime::FileWriter;
 use crate::runtime::Storage;
 use crate::test::MemFileReader;
 use crate::test::MemFileWriter;
@@ -36,18 +37,15 @@ impl MemStorage {
 
 #[async_trait]
 impl Storage for MemStorage {
-    type Writer = MemStorageFileWriter;
-    type Reader = MemStorageFileReader;
-
-    async fn put(&self, name: &str) -> anyhow::Result<Self::Writer> {
-        Ok(MemStorageFileWriter {
+    async fn put(&self, name: &str) -> anyhow::Result<Box<dyn FileWriter>> {
+        Ok(Box::new(MemStorageFileWriter {
             parent: Arc::clone(&self.inner),
             name: name.to_string(),
             inner: Some(MemFileWriter::new()),
-        })
+        }))
     }
 
-    async fn get(&self, name: &str) -> anyhow::Result<Arc<Self::Reader>> {
+    async fn get(&self, name: &str) -> anyhow::Result<Arc<dyn FileReader>> {
         let inner = self.inner.lock().unwrap();
         let file_content = inner
             .files
@@ -89,7 +87,7 @@ impl FileReader for MemStorageFileReader {
     }
 }
 
-pub(crate) struct MemStorageFileWriter {
+struct MemStorageFileWriter {
     name: String,
     parent: Arc<Mutex<MemStorageInner>>,
 

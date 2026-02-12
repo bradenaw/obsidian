@@ -27,16 +27,16 @@ use crate::Timestamp;
 
 /// A Block is conceptually a BTreeMap<Vec<u8>, BTreeMap<Timestamp, RevisionValue>>, but it is
 /// compactly serialized and can be used as-is without fully deserializing.
-pub(super) struct Block<'a, R> {
+pub(super) struct Block<'a> {
     values_offset_in_file: u64,
     key_index: PrefixCompressedKV<Vec<u8>>,
     version_index: BlockVersionIndex<Vec<u8>>,
-    reader: &'a R,
+    reader: &'a dyn FileReader,
 }
 
 const BLOCK_TRAILER_SIZE: usize = 20;
 
-impl<'a, R> Block<'a, R> {
+impl<'a> Block<'a> {
     /// Assumes that kvs values are in reverse order by timestamp.
     ///
     /// Returns the encoded block and the offset of the trailer within the block.
@@ -148,8 +148,11 @@ impl<'a, R> Block<'a, R> {
     }
 }
 
-impl<'a, R: FileReader> Block<'a, R> {
-    pub(super) async fn open(reader: &'a R, block_end_offset: u64) -> anyhow::Result<Block<'a, R>> {
+impl<'a> Block<'a> {
+    pub(super) async fn open(
+        reader: &'a dyn FileReader,
+        block_end_offset: u64,
+    ) -> anyhow::Result<Block<'a>> {
         let trailer = BlockTrailer::open(reader, block_end_offset).await?;
 
         let block_offset_in_file = block_end_offset - (trailer.block_size as u64);
@@ -484,7 +487,7 @@ impl BlockBuilder {
     }
 
     pub(super) fn encode(&self) -> anyhow::Result<Vec<u8>> {
-        Block::<()>::encode(&self.buffer)
+        Block::encode(&self.buffer)
     }
 }
 
@@ -512,7 +515,7 @@ impl BlockTrailer {
         out.extend_from_slice(&trailer[..]);
     }
 
-    async fn open<R: FileReader>(reader: &R, block_end_offset: u64) -> anyhow::Result<Self> {
+    async fn open(reader: &dyn FileReader, block_end_offset: u64) -> anyhow::Result<Self> {
         let mut trailer = [0u8; Self::ENCODED_LEN];
         reader
             .read_exact_at(
@@ -664,7 +667,7 @@ impl Slice for &[u8] {
     }
 }
 
-pub(super) async fn dump_block<'a, R: FileReader>(block: &Block<'a, R>) -> anyhow::Result<()> {
+pub(super) async fn dump_block<'a>(block: &Block<'a>) -> anyhow::Result<()> {
     println!("    n_keys: {}", block.key_index.len());
     println!("    n_versions: {}", block.version_index.len());
     println!("      == keys ======");
@@ -699,14 +702,13 @@ mod test {
 
     use super::Block;
     use crate::lsm::util::LsmRevision;
-    use crate::runtime::FileReader;
+    use crate::test::MemFileReader;
     use crate::Bound;
     use crate::Direction;
     use crate::HistoryRange;
     use crate::Range;
     use crate::RevisionValue;
     use crate::Timestamp;
-    use crate::test::MemFileReader;
 
     #[tokio::test]
     async fn test_get() -> anyhow::Result<()> {
@@ -737,7 +739,7 @@ mod test {
             );
             kvs
         };
-        let encoded = Block::<()>::encode(&kvs)?;
+        let encoded = Block::encode(&kvs)?;
         let end_offset = encoded.len() as u64;
         let f = MemFileReader::new(encoded);
         let block = Block::open(&f, end_offset).await?;
@@ -833,13 +835,13 @@ mod test {
             kvs.insert(key_str.into(), versions);
         }
 
-        let encoded = Block::<()>::encode(&kvs)?;
+        let encoded = Block::encode(&kvs)?;
         let end_offset = encoded.len() as u64;
         let f = MemFileReader::new(encoded);
         let block = Block::open(&f, end_offset).await?;
 
-        async fn check<'a, R: FileReader>(
-            block: &Block<'a, R>,
+        async fn check<'a>(
+            block: &Block<'a>,
             ts: Timestamp,
             range: Range<Vec<u8>>,
             expected: Vec<(&str, usize, bool)>,
@@ -941,7 +943,7 @@ mod test {
         ]
         .into_iter()
         .collect();
-        let encoded = Block::<()>::encode(&kvs)?;
+        let encoded = Block::encode(&kvs)?;
         let end_offset = encoded.len() as u64;
         let f = MemFileReader::new(encoded);
         let block = Block::open(&f, end_offset).await?;

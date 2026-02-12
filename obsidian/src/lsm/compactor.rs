@@ -44,11 +44,10 @@ where
 impl<S> Compactor<S>
 where
     S: Storage,
-    S::Reader: 'static,
 {
     pub(super) fn new(
         storage: Arc<S>,
-        index: Arc<Index<S::Reader>>,
+        index: Arc<Index>,
         concurrency: usize,
         run_size_target: u64,
         block_size_target: u64,
@@ -72,7 +71,7 @@ struct CompactorInner<S>
 where
     S: Storage,
 {
-    index: Arc<Index<S::Reader>>,
+    index: Arc<Index>,
     storage: Arc<S>,
     run_size_target: u64,
     block_size_target: u64,
@@ -81,7 +80,6 @@ where
 impl<S> CompactorInner<S>
 where
     S: Storage,
-    S::Reader: 'static,
 {
     async fn schedule(self: Arc<Self>, concurrency: usize) {
         let mut compact_futures = FuturesUnordered::new();
@@ -134,7 +132,7 @@ where
 
     async fn schedule_next(
         self: &Arc<Self>,
-        snapshot: &Arc<IndexSnapshot<S::Reader>>,
+        snapshot: &Arc<IndexSnapshot>,
         in_flight_from: &HashSet<RunId>,
         in_flight_into: &HashSet<RunId>,
     ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
@@ -158,7 +156,7 @@ where
     async fn schedule_next_keyspace(
         self: &Arc<Self>,
         keyspace_id: KeyspaceId,
-        keyspace: &Keyspace<S::Reader>,
+        keyspace: &Keyspace,
         splits: &[Bound<Vec<u8>>],
         in_flight_from: &HashSet<RunId>,
         in_flight_into: &HashSet<RunId>,
@@ -201,7 +199,7 @@ where
     fn schedule_for_splits(
         self: &Arc<Self>,
         keyspace_id: KeyspaceId,
-        keyspace: &Keyspace<S::Reader>,
+        keyspace: &Keyspace,
         splits: &[Bound<Vec<u8>>],
         in_flight_from: &HashSet<RunId>,
         in_flight_into: &HashSet<RunId>,
@@ -234,7 +232,7 @@ where
     fn schedule_for_size(
         self: &Arc<Self>,
         keyspace_id: KeyspaceId,
-        keyspace: &Keyspace<S::Reader>,
+        keyspace: &Keyspace,
         splits: &[Bound<Vec<u8>>],
         in_flight_from: &HashSet<RunId>,
         in_flight_into: &HashSet<RunId>,
@@ -292,12 +290,12 @@ where
     fn try_schedule(
         self: &Arc<Self>,
         keyspace_id: KeyspaceId,
-        keyspace: &Keyspace<S::Reader>,
+        keyspace: &Keyspace,
         splits: &[Bound<Vec<u8>>],
         in_flight_from: &HashSet<RunId>,
         in_flight_into: &HashSet<RunId>,
         level_idx: usize,
-        run: &Arc<Run<S::Reader>>,
+        run: &Arc<Run>,
     ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
         if in_flight_from.contains(&run.id()) {
             return None;
@@ -370,7 +368,7 @@ where
     fn schedule_for_ingest(
         self: &Arc<Self>,
         keyspace_id: KeyspaceId,
-        keyspace: &Keyspace<S::Reader>,
+        keyspace: &Keyspace,
         splits: &[Bound<Vec<u8>>],
         in_flight_from: &HashSet<RunId>,
         in_flight_into: &HashSet<RunId>,
@@ -437,7 +435,7 @@ where
         keyspace_id: KeyspaceId,
         splits: &[Bound<Vec<u8>>],
         from: &[Arc<Memtable>],
-        into: &[Arc<Run<S::Reader>>],
+        into: &[Arc<Run>],
     ) -> impl Future<Output = anyhow::Result<()>> {
         let remove: HashSet<_> = Iterator::chain(
             from.iter().map(|memtable| memtable.id()),
@@ -482,8 +480,8 @@ where
         keyspace_id: KeyspaceId,
         splits: &[Bound<Vec<u8>>],
         memtables: &[Arc<Memtable>],
-        runs: &[Arc<Run<S::Reader>>],
-    ) -> anyhow::Result<Vec<Run<S::Reader>>> {
+        runs: &[Arc<Run>],
+    ) -> anyhow::Result<Vec<Run>> {
         let streams = {
             let mut streams = Vec::with_capacity(memtables.len() + 1);
             for memtable in memtables {
@@ -509,8 +507,8 @@ where
         keyspace_id: KeyspaceId,
         splits: &[Bound<Vec<u8>>],
         from_level: usize,
-        from: &Arc<Run<S::Reader>>,
-        into: &[Arc<Run<S::Reader>>],
+        from: &Arc<Run>,
+        into: &[Arc<Run>],
     ) -> impl Future<Output = anyhow::Result<()>> {
         log::trace!(
             "compacting l{} {:?} into {:?}",
@@ -548,9 +546,9 @@ where
         &self,
         keyspace_id: KeyspaceId,
         splits: &[Bound<Vec<u8>>],
-        a: &Run<S::Reader>,
-        b: &[Arc<Run<S::Reader>>],
-    ) -> anyhow::Result<Vec<Run<S::Reader>>> {
+        a: &Run,
+        b: &[Arc<Run>],
+    ) -> anyhow::Result<Vec<Run>> {
         self.runs_from_revisions(
             keyspace_id,
             splits,
@@ -569,7 +567,7 @@ where
         keyspace_id: KeyspaceId,
         splits: &[Bound<Vec<u8>>],
         level: usize,
-        runs: &[Arc<Run<S::Reader>>],
+        runs: &[Arc<Run>],
     ) -> impl Future<Output = anyhow::Result<()>> {
         log::trace!(
             "compacting lmax {:?}",
@@ -608,7 +606,7 @@ where
         keyspace_id: KeyspaceId,
         splits: &[Bound<Vec<u8>>],
         entries: impl Stream<Item = anyhow::Result<LsmRevision>> + Send,
-    ) -> anyhow::Result<Vec<Run<S::Reader>>> {
+    ) -> anyhow::Result<Vec<Run>> {
         let mut revs_by_key = group_by_key(entries.boxed()).boxed().peekable();
         let mut runs = Vec::new();
 

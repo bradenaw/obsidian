@@ -35,8 +35,8 @@ use crate::RevisionValue;
 use crate::Timestamp;
 
 #[derive(Clone)]
-pub(super) struct Run<R> {
-    reader: Arc<R>,
+pub(super) struct Run {
+    reader: Arc<dyn FileReader>,
 
     id: RunId,
     size: usize,
@@ -52,8 +52,8 @@ pub(super) struct Run<R> {
     pub(super) max_key: Vec<u8>,
 }
 
-impl<R: FileReader> Run<R> {
-    pub(super) async fn open(reader: Arc<R>) -> anyhow::Result<Self> {
+impl Run {
+    pub(super) async fn open(reader: Arc<dyn FileReader>) -> anyhow::Result<Self> {
         let trailer = RunTrailer::open(reader.deref()).await?;
 
         let max_key = {
@@ -201,7 +201,7 @@ impl<R: FileReader> Run<R> {
         }
     }
 
-    async fn block_for_key(&self, k: &[u8]) -> anyhow::Result<Option<Block<'_, R>>> {
+    async fn block_for_key(&self, k: &[u8]) -> anyhow::Result<Option<Block<'_>>> {
         let block_header_idx = match self.index.search(k) {
             Ok(idx) => idx,
             Err(idx) => {
@@ -354,7 +354,7 @@ struct RunTrailer {
 impl RunTrailer {
     const ENCODED_LEN: usize = 68;
 
-    async fn open<R: FileReader>(reader: &R) -> anyhow::Result<Self> {
+    async fn open(reader: &dyn FileReader) -> anyhow::Result<Self> {
         let file_len = reader.len();
         let mut trailer_offset_buf = [0u8; 4];
         reader
@@ -421,7 +421,7 @@ impl RunTrailer {
     }
 }
 
-pub(super) async fn dump_run<R: FileReader>(run: &Run<R>) -> anyhow::Result<()> {
+pub(super) async fn dump_run(run: &Run) -> anyhow::Result<()> {
     println!("    min_ts: {}", run.min_ts);
     println!("    max_ts: {}", run.max_ts);
     println!("    range: {:?}", run.range());
@@ -460,6 +460,7 @@ mod test {
     use super::RunBuilder;
     use crate::lsm::util::LsmRevision;
     use crate::lsm::RunId;
+    use crate::test::MemFileReader;
     use crate::Bound;
     use crate::ColoGroupId;
     use crate::Direction;
@@ -467,7 +468,6 @@ mod test {
     use crate::Range;
     use crate::RevisionValue;
     use crate::Timestamp;
-    use crate::test::MemFileReader;
 
     #[tokio::test]
     async fn test_run_file() -> anyhow::Result<()> {
@@ -584,7 +584,7 @@ mod test {
         let run = Run::open(Arc::new(MemFileReader::new(v))).await?;
 
         async fn check(
-            run: &Run<MemFileReader>,
+            run: &Run,
             ts: Timestamp,
             range: Range<Vec<u8>>,
             expected: Vec<(&str, usize, bool)>,
