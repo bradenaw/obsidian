@@ -193,7 +193,7 @@ impl ObsidianForTest {
             meta.add_shard(shard_id).await?;
         }
 
-        meta_proxy.put(Arc::clone(&meta));
+        meta_proxy.put(Arc::clone(&meta) as Arc<dyn Meta>);
 
         let gateway = Gateway::new(
             Box::new(meta_proxy.clone()),
