@@ -1,5 +1,7 @@
 use std::cmp;
 use std::collections::BTreeMap;
+use std::ops::Deref;
+use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_stream::try_stream;
@@ -33,8 +35,8 @@ use crate::RevisionValue;
 use crate::Timestamp;
 
 #[derive(Clone)]
-pub(super) struct Run<R> {
-    reader: R,
+pub(super) struct Run {
+    reader: Arc<dyn FileReader>,
 
     id: RunId,
     size: usize,
@@ -50,9 +52,9 @@ pub(super) struct Run<R> {
     pub(super) max_key: Vec<u8>,
 }
 
-impl<R: FileReader> Run<R> {
-    pub(super) async fn open(reader: R) -> anyhow::Result<Self> {
-        let trailer = RunTrailer::open(&reader).await?;
+impl Run {
+    pub(super) async fn open(reader: Arc<dyn FileReader>) -> anyhow::Result<Self> {
+        let trailer = RunTrailer::open(reader.deref()).await?;
 
         let max_key = {
             let mut max_key = vec![0u8; trailer.max_key_len as usize];
@@ -144,7 +146,7 @@ impl<R: FileReader> Run<R> {
 
             for i in block_idxs {
                 let block_end_offset = self.index.get_value(i);
-                let block = Block::open(&self.reader, block_end_offset as u64).await?;
+                let block = Block::open(self.reader.deref(), block_end_offset as u64).await?;
                 let block_scan = block.scan(ts, range.clone(), direction);
                 pin_mut!(block_scan);
                 while let Some(revision) = block_scan.try_next().await? {
@@ -189,7 +191,7 @@ impl<R: FileReader> Run<R> {
         try_stream! {
             for i in 0..self.index.len() {
                 let block_end_offset = self.index.get_value(i);
-                let block = Block::open(&self.reader, block_end_offset as u64).await?;
+                let block = Block::open(self.reader.deref(), block_end_offset as u64).await?;
                 let block_stream = block.stream();
                 pin_mut!(block_stream);
                 while let Some(revision) = block_stream.try_next().await? {
@@ -199,7 +201,7 @@ impl<R: FileReader> Run<R> {
         }
     }
 
-    async fn block_for_key(&self, k: &[u8]) -> anyhow::Result<Option<Block<'_, R>>> {
+    async fn block_for_key(&self, k: &[u8]) -> anyhow::Result<Option<Block<'_>>> {
         let block_header_idx = match self.index.search(k) {
             Ok(idx) => idx,
             Err(idx) => {
@@ -211,7 +213,7 @@ impl<R: FileReader> Run<R> {
         };
         let block_end_offset = self.index.get_value(block_header_idx);
         Ok(Some(
-            Block::open(&self.reader, block_end_offset as u64).await?,
+            Block::open(self.reader.deref(), block_end_offset as u64).await?,
         ))
     }
 }
@@ -352,7 +354,7 @@ struct RunTrailer {
 impl RunTrailer {
     const ENCODED_LEN: usize = 68;
 
-    async fn open<R: FileReader>(reader: &R) -> anyhow::Result<Self> {
+    async fn open(reader: &dyn FileReader) -> anyhow::Result<Self> {
         let file_len = reader.len();
         let mut trailer_offset_buf = [0u8; 4];
         reader
@@ -419,7 +421,7 @@ impl RunTrailer {
     }
 }
 
-pub(super) async fn dump_run<R: FileReader>(run: &Run<R>) -> anyhow::Result<()> {
+pub(super) async fn dump_run(run: &Run) -> anyhow::Result<()> {
     println!("    min_ts: {}", run.min_ts);
     println!("    max_ts: {}", run.max_ts);
     println!("    range: {:?}", run.range());
@@ -437,15 +439,16 @@ pub(super) async fn dump_run<R: FileReader>(run: &Run<R>) -> anyhow::Result<()> 
         println!("    first key: [{}]", hexlify(&run.index.get_key(i)),);
         println!("    block_end_offset: {}", run.index.get_value(i));
         let block_end_offset = run.index.get_value(i);
-        let block = Block::open(&run.reader, block_end_offset as u64).await?;
+        let block = Block::open(run.reader.deref(), block_end_offset as u64).await?;
         dump_block(&block).await?;
     }
     Ok(())
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use std::cmp::Reverse;
+    use std::sync::Arc;
 
     use futures::StreamExt;
     use futures::TryStreamExt;
@@ -455,9 +458,9 @@ mod test {
     use super::dump_run;
     use super::Run;
     use super::RunBuilder;
-    use crate::lsm::test::TestFile;
     use crate::lsm::util::LsmRevision;
     use crate::lsm::RunId;
+    use crate::test::MemFileReader;
     use crate::Bound;
     use crate::ColoGroupId;
     use crate::Direction;
@@ -508,7 +511,7 @@ mod test {
         }
         run_builder.finish().await?;
 
-        let run = Run::open(TestFile::from(v)).await?;
+        let run = Run::open(Arc::new(MemFileReader::new(v))).await?;
 
         assert_eq!(run.min_ts, Timestamp(10230));
         assert_eq!(run.max_ts, Timestamp(21925));
@@ -578,10 +581,10 @@ mod test {
         }
         b.finish().await?;
 
-        let run = Run::open(TestFile::from(v)).await?;
+        let run = Run::open(Arc::new(MemFileReader::new(v))).await?;
 
         async fn check(
-            run: &Run<TestFile>,
+            run: &Run,
             ts: Timestamp,
             range: Range<Vec<u8>>,
             expected: Vec<(&str, usize, bool)>,
@@ -725,7 +728,7 @@ mod test {
                 run_builder.finish().await.unwrap();
 
 
-                let run = Run::open(TestFile::from(v)).await.unwrap();
+                let run = Run::open(Arc::new(MemFileReader::new(v))).await.unwrap();
 
                 dump_run(&run).await.unwrap();
 

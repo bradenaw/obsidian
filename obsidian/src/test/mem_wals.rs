@@ -16,7 +16,7 @@ pub(crate) struct MemWals {
 
 impl MemWals {
     pub fn new() -> Self {
-        Self{
+        Self {
             m: Arc::new(Mutex::new(HashMap::new())),
         }
     }

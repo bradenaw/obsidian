@@ -10,9 +10,5 @@ pub(crate) trait MetaSubscriber {
     /// immediately or when initial sync finishes, with `SyncType::Initial`. Every transaction that
     /// updates the `MetaSynced` after that point will be given as a `SyncType::Tx` with the
     /// changed keys.
-    async fn sync_meta(
-        &self,
-        sync_type: SyncType,
-        snapshot: MetaSyncedSnapshot,
-    );
+    async fn sync_meta(&self, sync_type: SyncType, snapshot: MetaSyncedSnapshot);
 }

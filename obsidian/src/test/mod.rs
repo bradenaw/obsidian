@@ -1,8 +1,11 @@
-mod meta_proxy;
-mod shards;
+mod mem_file_reader;
+mod mem_file_writer;
+mod mem_storage;
 mod mem_wal;
 mod nodes;
 mod mem_wals;
+mod meta_proxy;
+mod shards;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -13,18 +16,20 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use async_trait::async_trait;
 
-use crate::supervisor::Supervisor;
 use crate::gateway::Gateway;
 use crate::lsm::Manifest;
 use crate::meta::MetaImpl;
 use crate::meta::MetaSynced;
-pub(crate) use mem_wal::MemWal;
-pub(crate) use mem_wals::MemWals;
 use crate::runtime::Meta;
 use crate::runtime::Shards;
 use crate::runtime::Tablet;
 use crate::storage::CachedStorage;
-use crate::storage::MemStorage;
+use crate::supervisor::Supervisor;
+pub(crate) use crate::test::mem_file_reader::MemFileReader;
+pub(crate) use crate::test::mem_file_writer::MemFileWriter;
+pub(crate) use crate::test::mem_storage::MemStorage;
+pub(crate) use crate::test::mem_wal::MemWal;
+pub(crate) use crate::test::mem_wals::MemWals;
 use crate::test::meta_proxy::MetaProxy;
 use crate::test::shards::TestShards;
 use crate::util::encode;
@@ -189,7 +194,7 @@ impl ObsidianForTest {
             meta.add_shard(shard_id).await?;
         }
 
-        meta_proxy.put(Arc::clone(&meta));
+        meta_proxy.put(Arc::clone(&meta) as Arc<dyn Meta>);
 
         let gateway = Gateway::new(
             Box::new(meta_proxy.clone()),

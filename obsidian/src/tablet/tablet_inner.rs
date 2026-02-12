@@ -9,7 +9,6 @@ use futures::future;
 use futures::Stream;
 
 use crate::lsm::Manifest;
-use crate::runtime::Storage;
 use crate::tablet::lock_mgr::Guard;
 use crate::tablet::lock_mgr::LockMgr;
 use crate::tablet::protected::LsmRead;
@@ -34,25 +33,22 @@ use crate::TabletId;
 use crate::Timestamp;
 use crate::Txid;
 
-pub(super) struct TabletInner<S: Storage> {
+pub(super) struct TabletInner {
     pub tablet_id: TabletId,
     pub colo_group_id: ColoGroupId,
     pub range: Range<Vec<u8>>,
 
-    pub lsm: ProtectedLsm<S>,
+    pub lsm: ProtectedLsm,
     pub sequencer: Sequencer,
     pub lock_mgr: LockMgr,
 }
 
-impl<S> TabletInner<S>
-where
-    S: Storage,
-{
+impl TabletInner {
     pub(super) fn new(
         tablet_id: TabletId,
         colo_group_id: ColoGroupId,
         range: Range<Vec<u8>>,
-        lsm: ProtectedLsm<S>,
+        lsm: ProtectedLsm,
     ) -> Self {
         Self {
             tablet_id,

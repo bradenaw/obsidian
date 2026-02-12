@@ -29,17 +29,13 @@ use crate::ShardId;
 use crate::TabletId;
 use crate::Timestamp;
 
-pub(crate) struct Shard<S, M>(WithBackground<ShardInner<S, M>>);
+pub(crate) struct Shard(WithBackground<ShardInner>);
 
-impl<S, M> Shard<S, M>
-where
-    S: Storage,
-    M: Meta + 'static,
-{
+impl Shard {
     pub(crate) async fn new(
         shard_id: ShardId,
-        storage: Arc<S>,
-        meta: Arc<M>,
+        storage: Arc<dyn Storage>,
+        meta: Arc<dyn Meta>,
         shards: Arc<dyn Shards>,
         wals: Box<dyn Wals<Arc<dyn Wal>>>,
         l0_max_size: u64,
@@ -100,11 +96,7 @@ where
 }
 
 #[async_trait]
-impl<S, M> crate::runtime::Shard for Shard<S, M>
-where
-    S: Storage,
-    M: Meta + 'static,
-{
+impl crate::runtime::Shard for Shard {
     fn id(&self) -> ShardId {
         self.0.id
     }
@@ -125,11 +117,7 @@ where
 }
 
 #[async_trait]
-impl<S, M> crate::runtime::Shard for Arc<Shard<S, M>>
-where
-    S: Storage,
-    M: Meta + 'static,
-{
+impl crate::runtime::Shard for Arc<Shard> {
     fn id(&self) -> ShardId {
         Shard::id(self)
     }
@@ -143,10 +131,10 @@ where
     }
 }
 
-struct ShardInner<S, M> {
+struct ShardInner {
     id: ShardId,
-    storage: Arc<S>,
-    meta: Arc<M>,
+    storage: Arc<dyn Storage>,
+    meta: Arc<dyn Meta>,
     meta_synced: Arc<MetaSynced>,
     shards: Arc<dyn Shards>,
     wals: Box<dyn Wals<Arc<dyn Wal>>>,
@@ -157,11 +145,7 @@ struct ShardInner<S, M> {
     tablets: ShardedLock<HashMap<TabletId, Arc<dyn Tablet + 'static>>>,
 }
 
-impl<S, M> ShardInner<S, M>
-where
-    M: Meta + 'static,
-    S: Storage,
-{
+impl ShardInner {
     async fn ensure_tablet(
         &self,
         tablet_id: TabletId,
@@ -258,11 +242,7 @@ where
 }
 
 #[async_trait]
-impl<S, M> MetaSubscriber for ShardInner<S, M>
-where
-    M: Meta + 'static,
-    S: Storage,
-{
+impl MetaSubscriber for ShardInner {
     async fn sync_meta(&self, sync_type: SyncType, snapshot: MetaSyncedSnapshot) {
         Retry::new()
             .indefinitely(&async || -> anyhow::Result<()> {

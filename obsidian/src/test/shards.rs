@@ -5,7 +5,6 @@ use std::sync::Weak;
 
 use anyhow::anyhow;
 
-use crate::runtime::Meta;
 use crate::runtime::Shard;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
@@ -15,20 +14,16 @@ use crate::test::meta_proxy::MetaProxy;
 use crate::test::MemWals;
 use crate::ShardId;
 
-pub(super) struct TestShards<S, M> {
-    storage: Arc<S>,
-    meta_proxy: Arc<MetaProxy<M>>,
+pub(super) struct TestShards {
+    storage: Arc<dyn Storage>,
+    meta_proxy: Arc<MetaProxy>,
     wals: MemWals,
 
-    m: Mutex<HashMap<ShardId, Arc<crate::shard::Shard<S, Arc<MetaProxy<M>>>>>>,
+    m: Mutex<HashMap<ShardId, Arc<crate::shard::Shard>>>,
 }
 
-impl<S, M> TestShards<S, M>
-where
-    S: Storage,
-    M: Meta + 'static,
-{
-    pub fn new(storage: Arc<S>, meta_proxy: Arc<MetaProxy<M>>) -> Self {
+impl TestShards {
+    pub fn new(storage: Arc<dyn Storage>, meta_proxy: Arc<MetaProxy>) -> Self {
         Self {
             storage,
             meta_proxy,
@@ -60,11 +55,7 @@ where
     }
 }
 
-impl<S, M> Shards for Arc<TestShards<S, M>>
-where
-    S: Storage,
-    M: Meta + 'static,
-{
+impl Shards for Arc<TestShards> {
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn Shard>> {
         let m = self.m.lock().unwrap();
         let shard_arc = m
@@ -82,11 +73,7 @@ where
     }
 }
 
-impl<S, M> Shards for Weak<TestShards<S, M>>
-where
-    S: Storage,
-    M: Meta + 'static,
-{
+impl Shards for Weak<TestShards> {
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn Shard>> {
         let shards = Weak::upgrade(self).ok_or_else(|| anyhow!(""))?;
         let m = shards.m.lock().unwrap();
