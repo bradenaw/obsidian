@@ -695,7 +695,7 @@ pub(super) async fn dump_block<'a>(block: &Block<'a>) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use std::collections::BTreeMap;
 
     use futures::TryStreamExt;

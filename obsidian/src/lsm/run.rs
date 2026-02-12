@@ -446,7 +446,7 @@ pub(super) async fn dump_run(run: &Run) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use std::cmp::Reverse;
     use std::sync::Arc;
 

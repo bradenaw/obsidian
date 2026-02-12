@@ -920,7 +920,7 @@ impl<'a> KeyspaceReader<'a> {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use std::collections::BTreeMap;
     use std::collections::HashSet;
     use std::sync::Arc;

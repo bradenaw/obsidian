@@ -446,7 +446,7 @@ impl Gateway {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use crate::test::obsidian_test_suite;
 
     obsidian_test_suite!(
