@@ -20,7 +20,7 @@ pub(super) struct TestShards<M> {
     meta_proxy: Arc<MetaProxy<M>>,
     wals: MemWals,
 
-    m: Mutex<HashMap<ShardId, Arc<crate::shard::Shard<Arc<MetaProxy<M>>>>>>,
+    m: Mutex<HashMap<ShardId, Arc<crate::shard::Shard>>>,
 }
 
 impl<M> TestShards<M>
