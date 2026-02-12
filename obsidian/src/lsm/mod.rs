@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::fmt::Display;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -51,16 +52,16 @@ use crate::WalEntry;
 use crate::WalSeq;
 use crate::WriteError;
 
-pub(crate) struct LsmBuilder<S> {
+pub(crate) struct LsmBuilder {
     l0_max_size: u64,
     run_size_target: u64,
     block_size_target: u64,
     wal: Arc<dyn Wal>,
-    storage: Arc<S>,
+    storage: Arc<dyn Storage>,
 }
 
-impl<S: Storage> LsmBuilder<S> {
-    pub fn new(wal: Arc<dyn Wal>, storage: Arc<S>) -> Self {
+impl LsmBuilder {
+    pub fn new(wal: Arc<dyn Wal>, storage: Arc<dyn Storage>) -> Self {
         LsmBuilder {
             l0_max_size: 8_000_000,
             run_size_target: 64_000_000,
@@ -90,7 +91,7 @@ impl<S: Storage> LsmBuilder<S> {
         self
     }
 
-    pub async fn build(self) -> anyhow::Result<Lsm<S>> {
+    pub async fn build(self) -> anyhow::Result<Lsm> {
         Lsm::new(
             self.l0_max_size,
             self.run_size_target,
@@ -102,7 +103,7 @@ impl<S: Storage> LsmBuilder<S> {
     }
 }
 
-impl<S> Clone for LsmBuilder<S> {
+impl Clone for LsmBuilder {
     fn clone(&self) -> Self {
         Self {
             l0_max_size: self.l0_max_size.clone(),
@@ -114,29 +115,29 @@ impl<S> Clone for LsmBuilder<S> {
     }
 }
 
-pub(crate) struct Lsm<S: Storage> {
+pub(crate) struct Lsm {
     l0_max_size: u64,
     run_size_target: u64,
     block_size_target: u64,
 
     wal: Arc<dyn Wal>,
     index: Arc<Index>,
-    compactor: Compactor<S>,
-    storage: Arc<S>,
+    compactor: Compactor,
+    storage: Arc<dyn Storage>,
 
     bg: Background,
     wal_processed: tokio::sync::watch::Receiver<WalSeq>,
 }
 
-impl<S: Storage> Lsm<S> {
+impl Lsm {
     pub async fn new(
         l0_max_size: u64,
         run_size_target: u64,
         block_size_target: u64,
         wal: Arc<dyn Wal>,
-        storage: Arc<S>,
+        storage: Arc<dyn Storage>,
     ) -> anyhow::Result<Self> {
-        let (index, newest_seqno) = Self::recovery(l0_max_size, &wal, &storage).await?;
+        let (index, newest_seqno) = Self::recovery(l0_max_size, &wal, storage.deref()).await?;
 
         let index_arc = Arc::new(index);
 
@@ -431,7 +432,7 @@ impl<S: Storage> Lsm<S> {
     async fn recovery(
         l0_max_size: u64,
         wal: &Arc<dyn Wal>,
-        storage: &S,
+        storage: &dyn Storage,
     ) -> anyhow::Result<(Index, Option<WalSeq>)> {
         let oldest_seqno = wal.oldest_available().await?;
         let mut newest_seqno = None;
@@ -940,7 +941,6 @@ mod test {
     use crate::lsm::run::RunBuilder;
     use crate::lsm::util::LsmRevision;
     use crate::lsm::RunId;
-    use crate::runtime::Storage;
     use crate::runtime::Wal;
     use crate::test::MemFileReader;
     use crate::test::MemStorage;
@@ -1334,8 +1334,8 @@ mod test {
             //expecteds.push(expected);
         }
 
-        async fn check<S: Storage>(
-            lsm: &Lsm<S>,
+        async fn check(
+            lsm: &Lsm,
             ts: Timestamp,
             keyspace_id: KeyspaceId,
             range: Range<Vec<u8>>,
@@ -1635,7 +1635,7 @@ mod test {
         }
     }
 
-    async fn dump_lsm<S: Storage>(lsm: &Lsm<S>) -> anyhow::Result<()> {
+    async fn dump_lsm(lsm: &Lsm) -> anyhow::Result<()> {
         let index_snapshot = lsm.index.snapshot();
         for (keyspace_id, keyspace) in &index_snapshot.keyspaces {
             println!("keyspace_id {:?}", keyspace_id);

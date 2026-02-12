@@ -37,16 +37,11 @@ use crate::Timestamp;
 /// but with the same logical content, as well as persisting from memory (where new writes go in
 /// addition to the WAL) into storage so that tablets don't have to replay as much of the WAL on
 /// startup.
-pub(super) struct Compactor<S>(WithBackground<CompactorInner<S>>)
-where
-    S: Storage;
+pub(super) struct Compactor(WithBackground<CompactorInner>);
 
-impl<S> Compactor<S>
-where
-    S: Storage,
-{
+impl Compactor {
     pub(super) fn new(
-        storage: Arc<S>,
+        storage: Arc<dyn Storage>,
         index: Arc<Index>,
         concurrency: usize,
         run_size_target: u64,
@@ -67,20 +62,14 @@ where
     }
 }
 
-struct CompactorInner<S>
-where
-    S: Storage,
-{
+struct CompactorInner {
     index: Arc<Index>,
-    storage: Arc<S>,
+    storage: Arc<dyn Storage>,
     run_size_target: u64,
     block_size_target: u64,
 }
 
-impl<S> CompactorInner<S>
-where
-    S: Storage,
-{
+impl CompactorInner {
     async fn schedule(self: Arc<Self>, concurrency: usize) {
         let mut compact_futures = FuturesUnordered::new();
         let mut in_flight_from: HashSet<RunId> = HashSet::new();

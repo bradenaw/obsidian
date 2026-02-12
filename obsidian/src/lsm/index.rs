@@ -63,10 +63,10 @@ impl Index {
         }
     }
 
-    pub(super) async fn from_manifest<S>(storage: &S, manifest: Manifest) -> anyhow::Result<Self>
-    where
-        S: Storage,
-    {
+    pub(super) async fn from_manifest(
+        storage: &dyn Storage,
+        manifest: Manifest,
+    ) -> anyhow::Result<Self> {
         let index_snapshot = IndexSnapshot::from_manifest(storage, manifest).await?;
 
         Ok(Self::from_snapshot(index_snapshot))
@@ -211,10 +211,7 @@ pub(super) struct IndexSnapshot {
 }
 
 impl IndexSnapshot {
-    async fn from_manifest<S>(storage: &S, manifest: Manifest) -> anyhow::Result<Self>
-    where
-        S: Storage,
-    {
+    async fn from_manifest(storage: &dyn Storage, manifest: Manifest) -> anyhow::Result<Self> {
         let mut keyspaces = HashMap::new();
         for (keyspace_id, keyspace_manifest) in manifest.keyspaces {
             let keyspace = Keyspace::from_manifest(storage, keyspace_manifest).await?;
@@ -247,10 +244,10 @@ pub(super) struct Keyspace {
 }
 
 impl Keyspace {
-    async fn from_manifest<S>(storage: &S, manifest: KeyspaceManifest) -> anyhow::Result<Self>
-    where
-        S: Storage,
-    {
+    async fn from_manifest(
+        storage: &dyn Storage,
+        manifest: KeyspaceManifest,
+    ) -> anyhow::Result<Self> {
         if !manifest.levels[0].runs.is_empty() {
             return Err(anyhow!("manifest with non-empty l0"));
         }

@@ -15,20 +15,19 @@ use crate::test::meta_proxy::MetaProxy;
 use crate::test::MemWals;
 use crate::ShardId;
 
-pub(super) struct TestShards<S, M> {
-    storage: Arc<S>,
+pub(super) struct TestShards<M> {
+    storage: Arc<dyn Storage>,
     meta_proxy: Arc<MetaProxy<M>>,
     wals: MemWals,
 
-    m: Mutex<HashMap<ShardId, Arc<crate::shard::Shard<S, Arc<MetaProxy<M>>>>>>,
+    m: Mutex<HashMap<ShardId, Arc<crate::shard::Shard<Arc<MetaProxy<M>>>>>>,
 }
 
-impl<S, M> TestShards<S, M>
+impl<M> TestShards<M>
 where
-    S: Storage,
     M: Meta + 'static,
 {
-    pub fn new(storage: Arc<S>, meta_proxy: Arc<MetaProxy<M>>) -> Self {
+    pub fn new(storage: Arc<dyn Storage>, meta_proxy: Arc<MetaProxy<M>>) -> Self {
         Self {
             storage,
             meta_proxy,
@@ -60,9 +59,8 @@ where
     }
 }
 
-impl<S, M> Shards for Arc<TestShards<S, M>>
+impl<M> Shards for Arc<TestShards<M>>
 where
-    S: Storage,
     M: Meta + 'static,
 {
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Box<dyn Shard>> {
@@ -82,9 +80,8 @@ where
     }
 }
 
-impl<S, M> Shards for Weak<TestShards<S, M>>
+impl<M> Shards for Weak<TestShards<M>>
 where
-    S: Storage,
     M: Meta + 'static,
 {
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Box<dyn Shard>> {

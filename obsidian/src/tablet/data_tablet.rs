@@ -58,12 +58,12 @@ use crate::Txid;
 
 const MAX_PRECOND_VALUE_LEN: usize = 256;
 
-pub(crate) struct DataTablet<S: Storage>(WithBackground<Arc<DataTabletInner<S>>>);
+pub(crate) struct DataTablet(WithBackground<Arc<DataTabletInner>>);
 
-struct DataTabletInner<S: Storage> {
-    inner: TabletInner<S>,
+struct DataTabletInner {
+    inner: TabletInner,
     meta_synced: Arc<MetaSynced>,
-    storage: Arc<S>,
+    storage: Arc<dyn Storage>,
     shards: Arc<dyn Shards>,
     prepare_sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
 
@@ -91,7 +91,7 @@ enum HydrationState {
 }
 
 #[async_trait]
-impl<S: Storage> Tablet for DataTablet<S> {
+impl Tablet for DataTablet {
     async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
         self.0.inner.get(ts, key).await
     }
@@ -149,7 +149,7 @@ impl<S: Storage> Tablet for DataTablet<S> {
         let _guard = self.0.inner.acquire_write_locks(&preconds, &muts).await?;
 
         if let Some(conflict_txid) =
-            TabletInner::<S>::check_write_conflicts(&lsm_rw, &preconds, &muts).await?
+            TabletInner::check_write_conflicts(&lsm_rw, &preconds, &muts).await?
         {
             return Err(InternalError::Conflict(conflict_txid));
         }
@@ -165,15 +165,14 @@ impl<S: Storage> Tablet for DataTablet<S> {
                     precond.keyspace_id()
                 )
             })?;
-            let value =
-                TabletInner::<S>::unsafe_get_latest_record(&lsm_rw, keyspace_id, precond.key())
-                    .await
-                    .map_err(|e| InternalError::Other(e.into()))?
-                    .map(|(_, v)| match v {
-                        RevisionValue::Regular(v) => v,
-                        RevisionValue::Tombstone => vec![],
-                    })
-                    .unwrap_or(vec![]);
+            let value = TabletInner::unsafe_get_latest_record(&lsm_rw, keyspace_id, precond.key())
+                .await
+                .map_err(|e| InternalError::Other(e.into()))?
+                .map(|(_, v)| match v {
+                    RevisionValue::Regular(v) => v,
+                    RevisionValue::Tombstone => vec![],
+                })
+                .unwrap_or(vec![]);
 
             let mut precond_locks = PrecondLocks::decode(&value)?;
             precond_locks.txids.insert(txid);
@@ -324,14 +323,14 @@ impl<S: Storage> Tablet for DataTablet<S> {
     }
 }
 
-impl<S: Storage> DataTablet<S> {
+impl DataTablet {
     pub async fn new(
         tablet_id: TabletId,
         colo_group_id: ColoGroupId,
         range: Range<Vec<u8>>,
-        lsm: Lsm<S>,
+        lsm: Lsm,
         meta_synced: Arc<MetaSynced>,
-        storage: Arc<S>,
+        storage: Arc<dyn Storage>,
         shards: Arc<dyn Shards>,
     ) -> anyhow::Result<Self> {
         let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
@@ -375,10 +374,7 @@ impl<S: Storage> DataTablet<S> {
     }
 }
 
-impl<S> DataTabletInner<S>
-where
-    S: Storage,
-{
+impl DataTabletInner {
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
         self.inner.lsm.find_split().await
     }
@@ -446,7 +442,6 @@ where
             })
             .await;
     }
-
 
     // Scans for pending mutations that exist on disk already and delivers them to `sender`.
     async fn scan_for_pending_mutations(
@@ -598,9 +593,7 @@ where
         let _guard = self.inner.lock_mgr.write_lock(&key[..]).await;
 
         let (pending_ts, value) =
-            match TabletInner::<S>::unsafe_get_latest_record(lsm_rw, pending_keyspace_id, &key)
-                .await?
-            {
+            match TabletInner::unsafe_get_latest_record(lsm_rw, pending_keyspace_id, &key).await? {
                 Some((pending_ts, value)) => (pending_ts, value),
                 None => return Ok(()),
             };
@@ -650,7 +643,7 @@ where
         let _guard = self.inner.lock_mgr.write_lock(&key[..]).await;
 
         let (overwrite_ts, m) = if let Some((prepare_ts, RevisionValue::Regular(bytes))) =
-            TabletInner::<S>::unsafe_get_latest_record(lsm_rw, precond_keyspace_id, &key).await?
+            TabletInner::unsafe_get_latest_record(lsm_rw, precond_keyspace_id, &key).await?
         {
             let mut precond_locks = PrecondLocks::decode(&bytes)?;
             if precond_locks.txids.remove(&txid) {
@@ -924,10 +917,7 @@ where
 }
 
 #[async_trait]
-impl<S> MetaSubscriber for Arc<DataTabletInner<S>>
-where
-    S: Storage,
-{
+impl MetaSubscriber for Arc<DataTabletInner> {
     async fn sync_meta(&self, sync_type: SyncType, snapshot: MetaSyncedSnapshot) {
         Retry::new()
             .indefinitely(&async || -> anyhow::Result<()> {

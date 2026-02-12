@@ -7,7 +7,6 @@ use async_trait::async_trait;
 use crate::lsm::Lsm;
 use crate::lsm::Manifest;
 use crate::meta::TabletState;
-use crate::runtime::Storage;
 use crate::runtime::Tablet;
 use crate::tablet::protected::ProtectedLsm;
 use crate::tablet::tablet_inner::TabletInner;
@@ -37,18 +36,12 @@ use crate::Txid;
 ///    TabletMetadata at all.
 /// 2. They cannot participate in 2PC. For the sake of the simplicity of the interface, it
 ///    implements those methods, but always errors.
-pub(crate) struct MetaTablet<S>
-where
-    S: Storage,
-{
-    inner: TabletInner<S>,
+pub(crate) struct MetaTablet {
+    inner: TabletInner,
 }
 
-impl<S> MetaTablet<S>
-where
-    S: Storage,
-{
-    pub(crate) async fn new(lsm: Lsm<S>) -> anyhow::Result<Self> {
+impl MetaTablet {
+    pub(crate) async fn new(lsm: Lsm) -> anyhow::Result<Self> {
         lsm.create_keyspace(KeyspaceId::META).await?;
 
         Ok(Self {
@@ -63,10 +56,7 @@ where
 }
 
 #[async_trait]
-impl<S> Tablet for MetaTablet<S>
-where
-    S: Storage,
-{
+impl Tablet for MetaTablet {
     async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
         self.inner.get(ts, key).await
     }

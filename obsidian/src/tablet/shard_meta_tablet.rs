@@ -21,7 +21,6 @@ use crate::meta::MetaSynced;
 use crate::meta::TabletState;
 use crate::pb;
 use crate::runtime::Shards;
-use crate::runtime::Storage;
 use crate::runtime::Tablet;
 use crate::tablet::protected::LsmReadWrite;
 use crate::tablet::protected::ProtectedLsm;
@@ -58,15 +57,10 @@ const WAIT_ABORT_TIMEOUT: Duration = Duration::from_millis(1_000);
 /// 1. They always have TabletState::Active. Their range cannot be moved to another tablet.
 /// 2. They only host the TX_OUTCOMES keyspace so they refuse regular writes but do accept
 ///    try_commit/try_abort.
-pub(crate) struct ShardMetaTablet<S>(WithBackground<ShardMetaTabletInner<S>>)
-where
-    S: Storage;
+pub(crate) struct ShardMetaTablet(WithBackground<ShardMetaTabletInner>);
 
-struct ShardMetaTabletInner<S>
-where
-    S: Storage,
-{
-    inner: TabletInner<S>,
+struct ShardMetaTabletInner {
+    inner: TabletInner,
     meta_synced: Arc<MetaSynced>,
     shards: Arc<dyn Shards>,
     waiters: Waiters,
@@ -74,13 +68,10 @@ where
     commit_sender: mpsc::Sender<(Txid, Timestamp, BTreeSet<Key>, BTreeSet<Key>)>,
 }
 
-impl<S> ShardMetaTablet<S>
-where
-    S: Storage,
-{
+impl ShardMetaTablet {
     pub(crate) async fn new(
         shard_id: ShardId,
-        lsm: Lsm<S>,
+        lsm: Lsm,
         meta_synced: Arc<MetaSynced>,
         shards: Arc<dyn Shards>,
     ) -> anyhow::Result<Self> {
@@ -118,10 +109,7 @@ where
 }
 
 #[async_trait]
-impl<S> Tablet for ShardMetaTablet<S>
-where
-    S: Storage,
-{
+impl Tablet for ShardMetaTablet {
     async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
         self.0.inner.get(ts, key).await
     }
@@ -211,7 +199,7 @@ where
                 let lsm_read = self.0.inner.lsm.read()?;
                 let _guard = self.0.inner.lock_mgr.read_lock(&tx_outcome_key[..]).await;
 
-                match TabletInner::<S>::unsafe_get_latest_record(
+                match TabletInner::unsafe_get_latest_record(
                     &lsm_read,
                     KeyspaceId::TX_OUTCOMES,
                     &tx_outcome_key[..],
@@ -271,10 +259,7 @@ where
     }
 }
 
-impl<S> ShardMetaTabletInner<S>
-where
-    S: Storage,
-{
+impl ShardMetaTabletInner {
     async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
         self.try_write_tx_outcome(txid, TxOutcomeRecord::Aborted)
             .await
@@ -294,7 +279,7 @@ where
             let _guard = self.inner.lock_mgr.write_lock(&tx_outcome_key[..]).await;
 
             if let Some((_, RevisionValue::Regular(tx_outcome_bytes))) =
-                TabletInner::<S>::unsafe_get_latest_record(
+                TabletInner::unsafe_get_latest_record(
                     &lsm_rw,
                     KeyspaceId::TX_OUTCOMES,
                     &tx_outcome_key[..],

@@ -14,11 +14,8 @@ use crate::util::spawn_owned;
 use crate::util::OwnedJoinHandle;
 use crate::KeyspaceId;
 
-pub(crate) struct Preloader<S>
-where
-    S: Storage,
-{
-    storage: Arc<S>,
+pub(crate) struct Preloader {
+    storage: Arc<dyn Storage>,
 
     semaphore: Arc<tokio::sync::Semaphore>,
     runs: HashMap<RunId, (usize, PreloadRun)>,
@@ -30,11 +27,8 @@ enum PreloadRun {
     Loaded(Run),
 }
 
-impl<S> Preloader<S>
-where
-    S: Storage,
-{
-    pub fn new(storage: Arc<S>) -> Self {
+impl Preloader {
+    pub fn new(storage: Arc<dyn Storage>) -> Self {
         Self {
             storage,
             semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
@@ -132,7 +126,7 @@ where
         Ok(Preloaded { snapshot })
     }
 
-    async fn fetch(storage: Arc<S>, run_id: RunId) -> anyhow::Result<Run> {
+    async fn fetch(storage: Arc<dyn Storage>, run_id: RunId) -> anyhow::Result<Run> {
         let file = storage.get(&run_id.to_string()).await?;
         Ok(Run::open(file).await?)
     }
