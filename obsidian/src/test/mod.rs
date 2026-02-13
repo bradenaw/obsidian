@@ -10,7 +10,6 @@ mod shards;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt::Debug;
-use std::ops::Deref;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -210,118 +209,6 @@ impl ObsidianForTest {
     }
 }
 
-#[async_trait]
-impl Tablet for Box<dyn Tablet> {
-    async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
-        Ok(self.deref().get(ts, key).await?)
-    }
-
-    async fn get_latest(&self, key: Key) -> Result<(Timestamp, Option<Record>), InternalError> {
-        Ok(self.deref().get_latest(key).await?)
-    }
-
-    async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError> {
-        Ok(self.deref().latest_snapshot(keys).await?)
-    }
-
-    async fn scan_page(
-        &self,
-        ts: Timestamp,
-        keyspace_id: KeyspaceId,
-        range: Range<&[u8]>,
-        direction: Direction,
-        limit: usize,
-    ) -> Result<(Vec<Record>, Option<Range<Vec<u8>>>), InternalError> {
-        Ok(self
-            .deref()
-            .scan_page(ts, keyspace_id, range, direction, limit)
-            .await?)
-    }
-
-    async fn history_page(
-        &self,
-        key: Key,
-        range: HistoryRange,
-        direction: Direction,
-        limit: usize,
-    ) -> Result<(Vec<Revision>, Option<HistoryRange>), InternalError> {
-        Ok(self
-            .deref()
-            .history_page(key, range, direction, limit)
-            .await?)
-    }
-
-    async fn write(
-        &self,
-        preconds: Vec<Precondition>,
-        muts: BTreeMap<Key, Mutation>,
-    ) -> Result<Timestamp, InternalError> {
-        Ok(self.deref().write(preconds, muts).await?)
-    }
-
-    async fn prepare(
-        &self,
-        txid: Txid,
-        preconds: Vec<Precondition>,
-        muts: BTreeMap<Key, Mutation>,
-    ) -> Result<Timestamp, InternalError> {
-        Ok(self.deref().prepare(txid, preconds, muts).await?)
-    }
-
-    async fn try_commit(
-        &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<Key>,
-        mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<TxOutcome> {
-        Ok(self
-            .deref()
-            .try_commit(txid, ts, precond_keys, mut_keys)
-            .await?)
-    }
-
-    async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
-        Ok(self.deref().try_abort(txid).await?)
-    }
-
-    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
-        Ok(self.deref().wait(txid).await?)
-    }
-
-    async fn cleanup_committed(
-        &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<Key>,
-        mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<()> {
-        Ok(self
-            .deref()
-            .cleanup_committed(txid, ts, precond_keys, mut_keys)
-            .await?)
-    }
-
-    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
-        Ok(self.deref().wait_meta_sync(ts).await?)
-    }
-
-    async fn manifest(&self) -> anyhow::Result<Manifest> {
-        self.deref().manifest().await
-    }
-
-    async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
-        self.deref().wait_mostly_hydrated().await
-    }
-
-    async fn catchup(&self) -> anyhow::Result<()> {
-        self.deref().catchup().await
-    }
-
-    async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
-        self.deref().find_split().await
-    }
-}
 
 pub(crate) fn single_byte_splits(n: usize) -> Vec<Bound<Vec<u8>>> {
     if n > 255 {

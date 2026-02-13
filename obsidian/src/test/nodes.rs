@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::future::pending;
 use std::future::Future;
 use std::net::IpAddr;
 use std::net::Ipv6Addr;
