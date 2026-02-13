@@ -8,7 +8,6 @@ use anyhow::anyhow;
 use crate::runtime::Shard;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
-use crate::runtime::Wal;
 use crate::runtime::Wals;
 use crate::test::meta_proxy::MetaProxy;
 use crate::test::MemWals;
@@ -43,7 +42,7 @@ impl TestShards {
                     self.storage.clone(),
                     Arc::new(self.meta_proxy.clone()),
                     Arc::new(Arc::downgrade(&self)),
-                    Box::new(self.wals.clone()) as Box<dyn Wals<Arc<dyn Wal>>>,
+                    Box::new(self.wals.clone()) as Box<dyn Wals>,
                     256,   // l0_max_size
                     65536, // run_size_target
                     4096,  // block_size_target
