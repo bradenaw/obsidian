@@ -18,7 +18,6 @@ use crate::runtime::Meta;
 use crate::runtime::Shard as _;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
-use crate::runtime::Wal;
 use crate::runtime::Wals;
 use crate::shard::Shard;
 use crate::supervisor::Supervisor;
@@ -35,7 +34,7 @@ struct NodeInner {
     storage: Arc<dyn Storage>,
     meta: Arc<dyn Meta>,
     shards: Arc<dyn Shards>,
-    wals: Arc<dyn Wals<Arc<dyn Wal>>>,
+    wals: Arc<dyn Wals>,
     meta_synced: Arc<MetaSynced>,
 
     supervisor: Mutex<Option<Supervisor>>,
@@ -48,7 +47,7 @@ impl Node {
         storage: Arc<dyn Storage>,
         meta: Arc<dyn Meta>,
         shards: Arc<dyn Shards>,
-        wals: Arc<dyn Wals<Arc<dyn Wal>>>,
+        wals: Arc<dyn Wals>,
         meta_synced: Arc<MetaSynced>,
     ) -> anyhow::Result<Self> {
         meta.add_node(node_id.clone()).await?;

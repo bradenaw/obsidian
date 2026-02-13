@@ -13,7 +13,6 @@ use crate::runtime::Node;
 use crate::runtime::Nodes;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
-use crate::runtime::Wal;
 use crate::runtime::Wals;
 use crate::test::MemWals;
 use crate::util::Watchable;
@@ -65,7 +64,7 @@ impl TestNodes {
                     Arc::clone(&self.inner.storage),
                     Arc::clone(&self.inner.meta),
                     Arc::clone(&self.shards),
-                    Arc::clone(&self.inner.wals) as Arc<dyn Wals<Arc<dyn Wal>>>,
+                    Arc::clone(&self.inner.wals) as Arc<dyn Wals>,
                     Arc::new(MetaSynced::new(Arc::clone(&self.inner.meta))),
                 )
                 .await?,

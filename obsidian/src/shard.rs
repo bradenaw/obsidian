@@ -16,7 +16,6 @@ use crate::runtime::Meta;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
 use crate::runtime::Tablet;
-use crate::runtime::Wal;
 use crate::runtime::Wals;
 use crate::tablet::DataTablet;
 use crate::tablet::MetaTablet;
@@ -37,7 +36,7 @@ impl Shard {
         storage: Arc<dyn Storage>,
         meta: Arc<dyn Meta>,
         shards: Arc<dyn Shards>,
-        wals: Arc<dyn Wals<Arc<dyn Wal>>>,
+        wals: Arc<dyn Wals>,
         l0_max_size: u64,
         run_size_target: u64,
         block_size_target: u64,
@@ -137,7 +136,7 @@ struct ShardInner {
     meta: Arc<dyn Meta>,
     meta_synced: Arc<MetaSynced>,
     shards: Arc<dyn Shards>,
-    wals: Arc<dyn Wals<Arc<dyn Wal>>>,
+    wals: Arc<dyn Wals>,
     l0_max_size: u64,
     run_size_target: u64,
     block_size_target: u64,
