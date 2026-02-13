@@ -14,7 +14,6 @@ use crate::runtime::Nodes;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
 use crate::runtime::Wals;
-use crate::test::MemWals;
 use crate::util::Watchable;
 use crate::NodeId;
 
@@ -26,18 +25,18 @@ pub(super) struct TestNodes {
 struct TestNodesInner {
     storage: Arc<dyn Storage>,
     meta: Arc<dyn Meta>,
-    wals: Arc<MemWals>,
+    wals: Arc<dyn Wals>,
 
     routing: Mutex<HashMap<NodeId, Arc<dyn Node>>>,
     node_ids: Watchable<OrdSet<NodeId>>,
 }
 
 impl TestNodes {
-    pub fn new(storage: Arc<dyn Storage>, meta: Arc<dyn Meta>) -> Self {
+    pub fn new(storage: Arc<dyn Storage>, meta: Arc<dyn Meta>, wals: Arc<dyn Wals>) -> Self {
         let inner = Arc::new(TestNodesInner {
             storage,
+            wals,
             meta: Arc::clone(&meta),
-            wals: Arc::new(MemWals::new()),
             routing: Mutex::new(HashMap::new()),
             node_ids: Watchable::new(OrdSet::new()),
         });
@@ -51,7 +50,7 @@ impl TestNodes {
         }
     }
 
-    pub async fn create_node(self: &Arc<Self>) -> anyhow::Result<NodeId> {
+    pub async fn create_node(&self) -> anyhow::Result<NodeId> {
         let mut routing = self.inner.routing.lock().unwrap();
 
         let node_id = NodeId::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 1);

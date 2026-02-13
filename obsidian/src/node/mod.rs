@@ -121,7 +121,8 @@ impl NodeInner {
 
         if let Some((MetaKey::Node(node_id), _)) = first_node {
             if node_id == self.node_id {
-                self.maybe_spawn_supervisor().await;
+                // TODO: Actually do this. ObsidianForTest spawns its own.
+                // self.maybe_spawn_supervisor().await;
             }
         }
 

@@ -665,7 +665,7 @@ mod tests {
                 .await?;
         }
 
-        let meta_snapshot = obs.meta.latest_snapshot_().await?;
+        let meta_snapshot = obs.latest_meta_snapshot().await?;
         let tablet_ids = meta_snapshot.tablet_ids().await?;
         let shard_ids = meta_snapshot.shard_ids().await?;
 
@@ -735,7 +735,7 @@ mod tests {
                 .await?;
         }
 
-        let meta_snapshot = obs.meta.latest_snapshot_().await?;
+        let meta_snapshot = obs.latest_meta_snapshot().await?;
         let tablet_ids = meta_snapshot.tablet_ids().await?;
         let shard_ids = meta_snapshot.shard_ids().await?;
 
@@ -814,7 +814,7 @@ mod tests {
             }
         }
 
-        let meta_snapshot = obs.meta.latest_snapshot_().await?;
+        let meta_snapshot = obs.latest_meta_snapshot().await?;
         let tablet_ids = meta_snapshot.tablet_ids().await?;
         let shard_ids = meta_snapshot.shard_ids().await?;
 
