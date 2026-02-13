@@ -31,7 +31,7 @@ impl NodeId {
     }
 }
 static NODE_ID_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(.+?):([0-9]+)/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?")
+    Regex::new(r"^(.+?):([0-9]+)/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
         .unwrap()
 });
 

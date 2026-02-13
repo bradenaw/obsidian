@@ -6,6 +6,7 @@ use futures::TryStreamExt;
 
 use crate::meta::MetaKey;
 use crate::meta::MetaValue;
+use crate::meta::NodeMetadata;
 use crate::meta::ShardMetadata;
 use crate::meta::TabletMetadata;
 use crate::meta::TransferMetadata;
@@ -87,6 +88,22 @@ pub(crate) trait MetaReader {
 
     async fn node_exists(&self, node_id: NodeId) -> anyhow::Result<bool> {
         self.exists(&MetaKey::Node(node_id)).await
+    }
+
+    fn node_metadatas(
+        &self,
+    ) -> Box<dyn Stream<Item = anyhow::Result<(NodeId, NodeMetadata)>> + Unpin + Send + '_> {
+        Box::new(
+            self.scan::<NodeMetadata>(MetaKey::nodes(), Direction::Asc)
+                .map(|result| match result {
+                    Ok((MetaKey::Node(node_id), node_metadata)) => Ok((node_id, node_metadata)),
+                    Ok((meta_key, _)) => Err(anyhow!(
+                        "unexpected meta key {:?}: expected MetaKey::Node",
+                        meta_key
+                    )),
+                    Err(e) => Err(e),
+                }),
+        )
     }
 
     async fn shard_exists(&self, shard_id: ShardId) -> anyhow::Result<bool> {

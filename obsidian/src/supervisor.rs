@@ -7,6 +7,7 @@ use std::time::SystemTime;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 use futures::TryStreamExt;
 
 use crate::lsm::Manifest;
@@ -561,12 +562,73 @@ impl SupervisorInner {
         self.meta_synced.wait(ts).await?;
         Ok(self.meta_synced.snapshot())
     }
+
+    async fn try_sync_meta(
+        &self,
+        sync_type: &SyncType,
+        snapshot: &MetaSyncedSnapshot,
+    ) -> anyhow::Result<()> {
+        match sync_type {
+            SyncType::Initial => {
+                self.assign_shards(snapshot).await?;
+            }
+            SyncType::Tx(keys) => {
+                if keys
+                    .iter()
+                    .any(|key| matches!(key, MetaKey::Node(_) | MetaKey::Shard(_)))
+                {
+                    self.assign_shards(snapshot).await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn assign_shards(&self, snapshot: &MetaSyncedSnapshot) -> anyhow::Result<()> {
+        let shard_ids = snapshot.shard_ids().await?;
+        let mut unassigned_node_ids = snapshot
+            .node_metadatas()
+            .map(|result| result.map(|(node_id, _)| node_id))
+            .try_collect::<HashSet<_>>()
+            .await?;
+
+        let mut unassigned_shard_ids = HashSet::new();
+        for shard_id in shard_ids {
+            let shard_metadata = snapshot.shard_metadata(shard_id).await?;
+
+            if let Some(node_id) = shard_metadata.assigned_node_id {
+                unassigned_node_ids.remove(&node_id);
+            } else {
+                unassigned_shard_ids.insert(shard_id);
+            }
+        }
+
+        let mut unassigned_node_ids = unassigned_node_ids.into_iter();
+        let mut unassigned_shard_ids = unassigned_shard_ids.into_iter();
+
+        let mut muts = HashMap::new();
+        while let (Some(node_id), Some(shard_id)) = (unassigned_node_ids.next(), unassigned_shard_ids.next()) {
+            let mut shard_metadata = snapshot.shard_metadata(shard_id).await?;
+            shard_metadata.assigned_node_id = Some(node_id);
+            muts.insert(MetaKey::Shard(shard_id), Mutation::Put(shard_metadata.encode_to_vec()));
+        }
+
+        let _ = self.meta.write(snapshot.ts(), muts).await?;
+
+        Ok(())
+    }
 }
 
 #[async_trait]
-impl MetaSubscriber for SupervisorInner
-{
-    async fn sync_meta(&self, sync_type: SyncType, snapshot: MetaSyncedSnapshot) {}
+impl MetaSubscriber for SupervisorInner {
+    async fn sync_meta(&self, sync_type: SyncType, snapshot: MetaSyncedSnapshot) {
+        Retry::new()
+            .indefinitely(&async || -> anyhow::Result<()> {
+                self.try_sync_meta(&sync_type, &snapshot).await
+            })
+            .await;
+    }
 }
 
 fn check_manifests_equal(a: &[&Manifest], b: &[&Manifest]) -> anyhow::Result<()> {

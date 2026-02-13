@@ -24,7 +24,6 @@ use crate::meta::MetaImpl;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::runtime::Meta;
-use crate::runtime::Shards;
 use crate::runtime::Storage;
 use crate::runtime::Tablet;
 use crate::runtime::Wals;
@@ -37,7 +36,6 @@ pub(crate) use crate::test::mem_wal::MemWal;
 pub(crate) use crate::test::mem_wals::MemWals;
 use crate::test::meta_proxy::MetaProxy;
 use crate::test::nodes::TestNodes;
-use crate::test::shards::TestShards;
 use crate::util::encode;
 use crate::util::Decode;
 use crate::util::Encode;
@@ -195,8 +193,6 @@ impl ObsidianForTest {
         let meta: Arc<dyn Meta> = Arc::new(MetaImpl::new(meta_tablet));
         meta_proxy.put(Arc::clone(&meta) as Arc<dyn Meta>);
 
-        let shards = Arc::new(TestShards::new(storage.clone(), meta_proxy.clone()));
-
         let nodes = TestNodes::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&meta) as Arc<dyn Meta>,
@@ -214,13 +210,13 @@ impl ObsidianForTest {
         let supervisor = Supervisor::new(
             Arc::clone(&meta) as Arc<dyn Meta>,
             Arc::clone(&meta_synced),
-            Arc::new(Arc::clone(&shards)) as Arc<dyn Shards>,
+            nodes.shards(),
         );
 
         let gateway = Gateway::new(
             Box::new(meta_proxy.clone()),
             MetaSynced::new(meta_proxy),
-            Box::new(shards),
+            nodes.shards(),
         );
 
         // JANK: Need to wait for everything to come to life.

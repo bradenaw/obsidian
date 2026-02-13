@@ -50,6 +50,10 @@ impl TestNodes {
         }
     }
 
+    pub fn shards(&self) -> Arc<dyn Shards> {
+        Arc::clone(&self.shards)
+    }
+
     pub async fn create_node(&self) -> anyhow::Result<NodeId> {
         let mut routing = self.inner.routing.lock().unwrap();
 
