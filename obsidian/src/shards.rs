@@ -26,8 +26,8 @@ struct ShardsInner {
 }
 
 impl Shards {
-    pub fn new(meta_synced: Arc<MetaSynced>, nodes: Arc<dyn Nodes>) -> Self{
-        let shards = Shards(WithBackground::new(Arc::new(ShardsInner{
+    pub fn new(meta_synced: Arc<MetaSynced>, nodes: Arc<dyn Nodes>) -> Self {
+        let shards = Shards(WithBackground::new(Arc::new(ShardsInner {
             nodes,
             routing: RwLock::new(HashMap::new()),
         })));
@@ -42,7 +42,10 @@ impl runtime::Shards for Shards {
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn runtime::Shard>> {
         let node_id = {
             let routing = self.0.routing.read().unwrap();
-            routing.get(&shard_id).ok_or_else(|| anyhow!("{:?} not in the routing table", shard_id))?.clone()
+            routing
+                .get(&shard_id)
+                .ok_or_else(|| anyhow!("{:?} not in the routing table", shard_id))?
+                .clone()
         };
 
         self.0.nodes.node(node_id)?.shard(shard_id)

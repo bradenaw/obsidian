@@ -251,6 +251,8 @@ impl<T: Tablet> Meta for MetaImpl<T> {
             return Err(anyhow!("write contains a mutation to sync_key already"));
         }
 
+        log::trace!("attempting meta write {:?}", muts);
+
         let preconds = vec![Precondition::NotChangedSince(
             KeyspaceId::META,
             self.sync_key.clone(),
@@ -273,6 +275,7 @@ impl<T: Tablet> Meta for MetaImpl<T> {
                 .encode_to_vec(),
             ),
         );
+
 
         let ts = self.tablet.write(preconds, raw_muts).await?;
         // TODO: Periodically poll in case we have a success-but-error above.

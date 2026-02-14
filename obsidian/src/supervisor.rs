@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use futures::TryStreamExt;
+use tokio::sync::Notify;
 
 use crate::lsm::Manifest;
 use crate::meta::MetaKey;
@@ -43,6 +44,8 @@ struct SupervisorInner {
     meta: Arc<dyn Meta>,
     meta_synced: Arc<MetaSynced>,
     shards: Arc<dyn Shards>,
+
+    assign_shards_trigger: Notify,
 }
 
 impl Supervisor {
@@ -56,9 +59,14 @@ impl Supervisor {
             meta,
             meta_synced: Arc::clone(&meta_synced),
             shards,
+            assign_shards_trigger: Notify::new(),
         })));
 
         meta_synced.subscribe(&supervisor.0);
+
+        supervisor.0.spawn(async |inner| {
+            inner.background_assign_shards().await;
+        });
 
         supervisor
     }
@@ -566,18 +574,18 @@ impl SupervisorInner {
     async fn try_sync_meta(
         &self,
         sync_type: &SyncType,
-        snapshot: &MetaSyncedSnapshot,
+        _snapshot: &MetaSyncedSnapshot,
     ) -> anyhow::Result<()> {
         match sync_type {
             SyncType::Initial => {
-                self.assign_shards(snapshot).await?;
+                self.assign_shards_trigger.notify_one();
             }
             SyncType::Tx(keys) => {
                 if keys
                     .iter()
                     .any(|key| matches!(key, MetaKey::Node(_) | MetaKey::Shard(_)))
                 {
-                    self.assign_shards(snapshot).await?;
+                    self.assign_shards_trigger.notify_one();
                 }
             }
         }
@@ -585,7 +593,24 @@ impl SupervisorInner {
         Ok(())
     }
 
-    async fn assign_shards(&self, snapshot: &MetaSyncedSnapshot) -> anyhow::Result<()> {
+    // This must be done out-of-band from try_sync_meta because we need to get up-to-date snapshots
+    // of meta in order to make progress if we ever run into a precondition failure, and
+    // meta_synced.wait from inside a meta_synced.subscribe deadlocks.
+    async fn background_assign_shards(&self) {
+        Retry::new()
+            .indefinitely::<_, _, (), anyhow::Error>(&async || loop {
+                self.assign_shards_trigger.notified().await;
+                self.assign_shards().await?;
+            })
+            .await
+    }
+
+    async fn assign_shards(&self) -> anyhow::Result<()> {
+        self.meta_synced
+            .wait(self.meta.latest_snapshot().await?)
+            .await?;
+        let snapshot = self.meta_synced.snapshot();
+
         let shard_ids = snapshot.shard_ids().await?;
         let mut unassigned_node_ids = snapshot
             .node_metadatas()
@@ -608,10 +633,15 @@ impl SupervisorInner {
         let mut unassigned_shard_ids = unassigned_shard_ids.into_iter();
 
         let mut muts = HashMap::new();
-        while let (Some(node_id), Some(shard_id)) = (unassigned_node_ids.next(), unassigned_shard_ids.next()) {
+        while let (Some(node_id), Some(shard_id)) =
+            (unassigned_node_ids.next(), unassigned_shard_ids.next())
+        {
             let mut shard_metadata = snapshot.shard_metadata(shard_id).await?;
             shard_metadata.assigned_node_id = Some(node_id);
-            muts.insert(MetaKey::Shard(shard_id), Mutation::Put(shard_metadata.encode_to_vec()));
+            muts.insert(
+                MetaKey::Shard(shard_id),
+                Mutation::Put(shard_metadata.encode_to_vec()),
+            );
         }
 
         let _ = self.meta.write(snapshot.ts(), muts).await?;
