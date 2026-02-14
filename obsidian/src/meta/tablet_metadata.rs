@@ -10,7 +10,7 @@ use crate::ColoGroupId;
 use crate::Range;
 use crate::TransferId;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct TabletMetadata {
     pub(crate) colo_group_id: ColoGroupId,
     pub(crate) range: Range<Vec<u8>>,

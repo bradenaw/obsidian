@@ -1,7 +1,9 @@
+use std::fmt::Debug;
+
 use prost::Message;
 
 pub(crate) trait MetaValue:
-    Into<Self::PB> + TryFrom<Self::PB, Error = anyhow::Error>
+    Into<Self::PB> + TryFrom<Self::PB, Error = anyhow::Error> + Debug
 {
     type PB: prost::Message + Default;
 

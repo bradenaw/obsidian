@@ -10,7 +10,7 @@ use crate::meta::TransferState;
 use crate::pb;
 use crate::TabletId;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct TransferMetadata {
     pub(crate) state: MetaState<TransferState>,
     pub(crate) srcs: Vec<TabletId>,
