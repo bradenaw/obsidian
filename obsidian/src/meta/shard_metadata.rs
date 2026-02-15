@@ -1,13 +1,9 @@
-use crate::meta::MetaValue;
 use crate::pb;
 use crate::NodeId;
 
+#[derive(Clone, Debug)]
 pub(crate) struct ShardMetadata {
     pub assigned_node_id: Option<NodeId>,
-}
-
-impl MetaValue for ShardMetadata {
-    type PB = pb::internal::ShardMetadata;
 }
 
 impl TryFrom<pb::internal::ShardMetadata> for ShardMetadata {

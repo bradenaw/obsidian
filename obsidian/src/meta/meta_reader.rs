@@ -6,7 +6,6 @@ use futures::TryStreamExt;
 
 use crate::meta::MetaKey;
 use crate::meta::MetaValue;
-use crate::meta::NodeMetadata;
 use crate::meta::ShardMetadata;
 use crate::meta::TabletMetadata;
 use crate::meta::TransferMetadata;
@@ -29,21 +28,21 @@ pub(crate) trait MetaReader {
         direction: Direction,
     ) -> Box<dyn Stream<Item = anyhow::Result<(Vec<u8>, Vec<u8>)>> + Unpin + Send + '_>;
 
-    async fn get<V: MetaValue>(&self, meta_key: &MetaKey) -> anyhow::Result<Option<V>> {
+    async fn get(&self, meta_key: &MetaKey) -> anyhow::Result<Option<MetaValue>> {
         if let Some(value) = self.get_raw(&meta_key.encode()).await? {
-            return Ok(Some(V::decode(&value[..])?));
+            return Ok(Some(MetaValue::decode(&value[..])?));
         }
         Ok(None)
     }
 
-    fn scan<V: MetaValue>(
+    fn scan(
         &self,
         range: Range<Vec<u8>>,
         direction: Direction,
-    ) -> Box<dyn Stream<Item = anyhow::Result<(MetaKey, V)>> + Unpin + Send + '_> {
+    ) -> Box<dyn Stream<Item = anyhow::Result<(MetaKey, MetaValue)>> + Unpin + Send + '_> {
         Box::new(self.scan_raw(range, direction).map(|result| {
             result
-                .map(|(k, v)| Ok((MetaKey::decode(&k)?, V::decode(&v)?)))
+                .map(|(k, v)| Ok((MetaKey::decode(&k)?, MetaValue::decode(&v)?)))
                 .flatten()
         }))
     }
@@ -81,22 +80,31 @@ pub(crate) trait MetaReader {
     }
 
     async fn shard_metadata(&self, shard_id: ShardId) -> anyhow::Result<ShardMetadata> {
-        self.get::<ShardMetadata>(&MetaKey::Shard(shard_id))
+        match self
+            .get(&MetaKey::Shard(shard_id))
             .await?
-            .ok_or_else(|| anyhow!("{:?} not found", shard_id))
+            .ok_or_else(|| anyhow!("{:?} not found", shard_id))?
+        {
+            MetaValue::ShardMetadata(shard_metadata) => Ok(shard_metadata),
+            other => Err(anyhow!(
+                "unexpected type for {:?} metadata: {:?}",
+                shard_id,
+                other
+            )),
+        }
     }
 
     async fn node_exists(&self, node_id: NodeId) -> anyhow::Result<bool> {
         self.exists(&MetaKey::Node(node_id)).await
     }
 
-    fn node_metadatas(
+    fn node_ids(
         &self,
-    ) -> Box<dyn Stream<Item = anyhow::Result<(NodeId, NodeMetadata)>> + Unpin + Send + '_> {
+    ) -> Box<dyn Stream<Item = anyhow::Result<NodeId>> + Unpin + Send + '_> {
         Box::new(
-            self.scan::<NodeMetadata>(MetaKey::nodes(), Direction::Asc)
+            self.scan(MetaKey::nodes(), Direction::Asc)
                 .map(|result| match result {
-                    Ok((MetaKey::Node(node_id), node_metadata)) => Ok((node_id, node_metadata)),
+                    Ok((MetaKey::Node(node_id), _)) => Ok(node_id),
                     Ok((meta_key, _)) => Err(anyhow!(
                         "unexpected meta key {:?}: expected MetaKey::Node",
                         meta_key
@@ -166,17 +174,35 @@ pub(crate) trait MetaReader {
     where
         Self: Sized,
     {
-        self.get::<TabletMetadata>(&MetaKey::Tablet(tablet_id))
+        match self
+            .get(&MetaKey::Tablet(tablet_id))
             .await?
-            .ok_or_else(|| anyhow!("{:?} not found", tablet_id))
+            .ok_or_else(|| anyhow!("{:?} not found", tablet_id))?
+        {
+            MetaValue::TabletMetadata(tablet_metadata) => Ok(tablet_metadata),
+            other => Err(anyhow!(
+                "unexpected type for {:?} metadata: {:?}",
+                tablet_id,
+                other
+            )),
+        }
     }
 
     async fn transfer_metadata(&self, transfer_id: TransferId) -> anyhow::Result<TransferMetadata>
     where
         Self: Sized,
     {
-        self.get::<TransferMetadata>(&MetaKey::Transfer(transfer_id))
+        match self
+            .get(&MetaKey::Transfer(transfer_id))
             .await?
-            .ok_or_else(|| anyhow!("{:?} not found", transfer_id))
+            .ok_or_else(|| anyhow!("{:?} not found", transfer_id))?
+        {
+            MetaValue::TransferMetadata(transfer_metadata) => Ok(transfer_metadata),
+            other => Err(anyhow!(
+                "unexpected type for {:?} metadata: {:?}",
+                transfer_id,
+                other
+            )),
+        }
     }
 }

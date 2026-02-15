@@ -3,23 +3,18 @@ use std::convert::TryFrom;
 use anyhow::anyhow;
 
 use crate::meta::MetaState;
-use crate::meta::MetaValue;
 use crate::meta::TabletState;
 use crate::pb;
 use crate::ColoGroupId;
 use crate::Range;
 use crate::TransferId;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct TabletMetadata {
     pub(crate) colo_group_id: ColoGroupId,
     pub(crate) range: Range<Vec<u8>>,
     pub(crate) state: MetaState<TabletState>,
     pub(crate) transfer_id: Option<TransferId>,
-}
-
-impl MetaValue for TabletMetadata {
-    type PB = pb::internal::TabletMetadata;
 }
 
 impl TryFrom<pb::internal::TabletMetadata> for TabletMetadata {

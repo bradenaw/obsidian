@@ -4,10 +4,10 @@ use async_trait::async_trait;
 
 use crate::NodeId;
 use crate::meta::MetaKey;
+use crate::meta::MetaMutation;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::KeyspaceId;
-use crate::Mutation;
 use crate::Range;
 use crate::Record;
 use crate::Revision;
@@ -42,6 +42,6 @@ pub(crate) trait Meta: Send + Sync {
     async fn write(
         &self,
         snapshot_ts: Timestamp,
-        muts: HashMap<MetaKey, Mutation>,
+        muts: HashMap<MetaKey, MetaMutation>,
     ) -> anyhow::Result<Timestamp>;
 }

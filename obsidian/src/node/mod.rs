@@ -11,7 +11,6 @@ use crate::meta::MetaReader;
 use crate::meta::MetaSubscriber;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
-use crate::meta::NodeMetadata;
 use crate::meta::SyncType;
 use crate::runtime;
 use crate::runtime::Meta;
@@ -116,7 +115,7 @@ impl NodeInner {
     }
 
     async fn nodes_changed(&self, snapshot: &MetaSyncedSnapshot) -> anyhow::Result<()> {
-        let mut node_metadatas = snapshot.scan::<NodeMetadata>(MetaKey::nodes(), Direction::Asc);
+        let mut node_metadatas = snapshot.scan(MetaKey::nodes(), Direction::Asc);
         let first_node = TryStreamExt::try_next(&mut node_metadatas).await?;
 
         if let Some((MetaKey::Node(node_id), _)) = first_node {

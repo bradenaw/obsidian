@@ -7,12 +7,12 @@ use std::time::SystemTime;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::stream::FuturesUnordered;
-use futures::StreamExt;
 use futures::TryStreamExt;
 use tokio::sync::Notify;
 
 use crate::lsm::Manifest;
 use crate::meta::MetaKey;
+use crate::meta::MetaMutation;
 use crate::meta::MetaReader;
 use crate::meta::MetaState;
 use crate::meta::MetaSubscriber;
@@ -29,7 +29,6 @@ use crate::runtime::Meta;
 use crate::runtime::Shards;
 use crate::util::Retry;
 use crate::util::WithBackground;
-use crate::Mutation;
 use crate::Range;
 use crate::RangeSet;
 use crate::ShardId;
@@ -111,7 +110,7 @@ impl Supervisor {
             src_metadata.transfer_id = Some(transfer_id);
             muts.insert(
                 MetaKey::Tablet(*src),
-                Mutation::Put(src_metadata.clone().encode_to_vec()),
+                MetaMutation::Put(MetaValue::TabletMetadata(src_metadata.clone())),
             );
 
             if let Some(colo_group_id) = colo_group_id {
@@ -155,29 +154,23 @@ impl Supervisor {
             dst_tablet_ids.push(dst_tablet_id);
             muts.insert(
                 MetaKey::Tablet(dst_tablet_id),
-                Mutation::Put(
-                    TabletMetadata {
-                        colo_group_id: colo_group_id.unwrap(),
-                        range: dst_range.clone(),
-                        state: MetaState::Stable(TabletState::Hydrating),
-                        transfer_id: Some(transfer_id),
-                    }
-                    .encode_to_vec(),
-                ),
+                MetaMutation::Put(MetaValue::TabletMetadata(TabletMetadata {
+                    colo_group_id: colo_group_id.unwrap(),
+                    range: dst_range.clone(),
+                    state: MetaState::Stable(TabletState::Hydrating),
+                    transfer_id: Some(transfer_id),
+                })),
             );
         }
 
         muts.insert(
             MetaKey::Transfer(transfer_id),
-            Mutation::Put(
-                TransferMetadata {
-                    state: MetaState::Stable(TransferState::Copy),
-                    srcs: srcs.clone(),
-                    dsts: dst_tablet_ids.clone(),
-                    timestamp: SystemTime::now(),
-                }
-                .encode_to_vec(),
-            ),
+            MetaMutation::Put(MetaValue::TransferMetadata(TransferMetadata {
+                state: MetaState::Stable(TransferState::Copy),
+                srcs: srcs.clone(),
+                dsts: dst_tablet_ids.clone(),
+                timestamp: SystemTime::now(),
+            })),
         );
 
         self.0.meta.write(snapshot.ts(), muts).await?;
@@ -436,7 +429,7 @@ impl SupervisorInner {
         };
         muts.insert(
             MetaKey::Transfer(transfer_id),
-            Mutation::Put(next_transfer_metadata.encode_to_vec()),
+            MetaMutation::Put(MetaValue::TransferMetadata(next_transfer_metadata)),
         );
 
         for (tablet_ids, next_tablet_state) in [
@@ -467,7 +460,7 @@ impl SupervisorInner {
 
                 muts.insert(
                     MetaKey::Tablet(*tablet_id),
-                    Mutation::Put(tablet_metadata.encode_to_vec()),
+                    MetaMutation::Put(MetaValue::TabletMetadata(tablet_metadata)),
                 );
             }
         }
@@ -507,7 +500,7 @@ impl SupervisorInner {
         };
         muts.insert(
             MetaKey::Transfer(transfer_id),
-            Mutation::Put(next_transfer_metadata.encode_to_vec()),
+            MetaMutation::Put(MetaValue::TransferMetadata(next_transfer_metadata)),
         );
 
         let (curr_srcs_state, curr_dsts_state) = curr_state.tablet_states();
@@ -552,7 +545,7 @@ impl SupervisorInner {
                     tablet_metadata.state = MetaState::Stable(next_tablet_state);
                     muts.insert(
                         MetaKey::Tablet(*tablet_id),
-                        Mutation::Put(tablet_metadata.encode_to_vec()),
+                        MetaMutation::Put(MetaValue::TabletMetadata(tablet_metadata)),
                     );
                 }
             }
@@ -613,8 +606,7 @@ impl SupervisorInner {
 
         let shard_ids = snapshot.shard_ids().await?;
         let mut unassigned_node_ids = snapshot
-            .node_metadatas()
-            .map(|result| result.map(|(node_id, _)| node_id))
+            .node_ids()
             .try_collect::<HashSet<_>>()
             .await?;
 
@@ -640,7 +632,7 @@ impl SupervisorInner {
             shard_metadata.assigned_node_id = Some(node_id);
             muts.insert(
                 MetaKey::Shard(shard_id),
-                Mutation::Put(shard_metadata.encode_to_vec()),
+                MetaMutation::Put(MetaValue::ShardMetadata(shard_metadata)),
             );
         }
 
@@ -905,6 +897,9 @@ mod tests {
                 obs.gateway.write(vec![], muts).await?;
             }
         }
+        // TODO: jank, have to wait for the compactor to pick these up since we don't use memtables
+        // for size estimates
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let meta_snapshot = obs.latest_meta_snapshot().await?;
         let tablet_ids = meta_snapshot.tablet_ids().await?;
