@@ -1,9 +1,11 @@
 mod meta;
 mod meta_key;
+mod meta_mutation;
 mod meta_reader;
 mod meta_state;
 mod meta_subscriber;
 mod meta_synced;
+mod meta_tx;
 mod meta_value;
 mod tablet_metadata;
 mod transfer;
@@ -14,12 +16,14 @@ pub(crate) use meta::MetaImpl;
 #[allow(unused_imports)]
 pub(crate) use meta::MetaSnapshot;
 pub(crate) use meta_key::MetaKey;
+pub(crate) use meta_mutation::MetaMutation;
 pub(crate) use meta_reader::MetaReader;
 pub(crate) use meta_state::MetaState;
 pub(crate) use meta_subscriber::MetaSubscriber;
 pub(crate) use meta_synced::MetaSynced;
 pub(crate) use meta_synced::MetaSyncedSnapshot;
 pub(crate) use meta_synced::SyncType;
+pub(crate) use meta_tx::MetaTx;
 pub(crate) use meta_value::MetaValue;
 pub(crate) use tablet_metadata::TabletMetadata;
 pub(crate) use transfer::TabletState;

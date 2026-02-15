@@ -1,17 +1,66 @@
 use std::fmt::Debug;
 
+use anyhow::anyhow;
 use prost::Message;
 
-pub(crate) trait MetaValue:
-    Into<Self::PB> + TryFrom<Self::PB, Error = anyhow::Error> + Debug
-{
-    type PB: prost::Message + Default;
+use crate::meta::MetaTx;
+use crate::meta::TabletMetadata;
+use crate::meta::TransferMetadata;
+use crate::pb;
 
-    fn encode_to_vec(self) -> Vec<u8> {
-        Into::<Self::PB>::into(self).encode_to_vec()
+#[derive(Clone, Debug)]
+pub(crate) enum MetaValue {
+    Empty,
+    MetaTx(MetaTx),
+    TabletMetadata(TabletMetadata),
+    TransferMetadata(TransferMetadata),
+}
+
+impl MetaValue {
+    pub fn decode(buf: &[u8]) -> anyhow::Result<Self> {
+        MetaValue::try_from(pb::internal::MetaValue::decode(buf)?)
     }
+}
 
-    fn decode(b: &[u8]) -> anyhow::Result<Self> {
-        Ok(Self::try_from(Self::PB::decode(b)?)?)
+impl From<MetaValue> for pb::internal::MetaValue {
+    fn from(value: MetaValue) -> pb::internal::MetaValue {
+        pb::internal::MetaValue {
+            value_type: Some(match value {
+                MetaValue::Empty => pb::internal::meta_value::ValueType::Empty(()),
+                MetaValue::MetaTx(meta_tx) => {
+                    pb::internal::meta_value::ValueType::MetaTx(meta_tx.into())
+                }
+                MetaValue::TabletMetadata(tablet_metadata) => {
+                    pb::internal::meta_value::ValueType::TabletMetadata(tablet_metadata.into())
+                }
+                MetaValue::TransferMetadata(transfer_metadata) => {
+                    pb::internal::meta_value::ValueType::TransferMetadata(transfer_metadata.into())
+                }
+            }),
+        }
+    }
+}
+
+impl TryFrom<pb::internal::MetaValue> for MetaValue {
+    type Error = anyhow::Error;
+
+    fn try_from(value_pb: pb::internal::MetaValue) -> anyhow::Result<Self> {
+        Ok(
+            match value_pb
+                .value_type
+                .ok_or_else(|| anyhow!("missing value_type"))?
+            {
+                pb::internal::meta_value::ValueType::Empty(()) => MetaValue::Empty,
+                pb::internal::meta_value::ValueType::MetaTx(meta_tx_pb) => {
+                    MetaValue::MetaTx(MetaTx::try_from(meta_tx_pb)?)
+                }
+                pb::internal::meta_value::ValueType::TabletMetadata(tablet_metadata_pb) => {
+                    MetaValue::TabletMetadata(TabletMetadata::try_from(tablet_metadata_pb)?)
+                }
+                pb::internal::meta_value::ValueType::TransferMetadata(tablet_metadata_pb) => {
+                    MetaValue::TransferMetadata(TransferMetadata::try_from(tablet_metadata_pb)?)
+                }
+            },
+        )
     }
 }

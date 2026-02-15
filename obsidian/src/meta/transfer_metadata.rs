@@ -5,7 +5,6 @@ use std::time::SystemTime;
 use anyhow::anyhow;
 
 use crate::meta::MetaState;
-use crate::meta::MetaValue;
 use crate::meta::TransferState;
 use crate::pb;
 use crate::TabletId;
@@ -16,10 +15,6 @@ pub(crate) struct TransferMetadata {
     pub(crate) srcs: Vec<TabletId>,
     pub(crate) dsts: Vec<TabletId>,
     pub(crate) timestamp: SystemTime,
-}
-
-impl MetaValue for TransferMetadata {
-    type PB = pb::internal::TransferMetadata;
 }
 
 impl TryFrom<pb::internal::TransferMetadata> for TransferMetadata {

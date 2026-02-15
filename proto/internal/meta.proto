@@ -7,6 +7,15 @@ import "google/protobuf/empty.proto";
 import "internal/internal.proto";
 import "obsidian.proto";
 
+message MetaValue {
+    oneof value_type {
+        google.protobuf.Empty empty = 1;
+        MetaTx meta_tx = 2;
+        TabletMetadata tablet_metadata = 3;
+        TransferMetadata transfer_metadata = 4;
+    }
+}
+
 message MetaTx {
     CompressedKeySet keys = 1;
 }

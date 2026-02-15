@@ -1,23 +1,23 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::convert::TryFrom;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_stream::try_stream;
 use async_trait::async_trait;
 use futures::Stream;
-use prost::Message;
 use rand::seq::SliceRandom;
 
 use crate::meta::MetaKey;
+use crate::meta::MetaMutation;
 use crate::meta::MetaReader;
 use crate::meta::MetaState;
+use crate::meta::MetaTx;
 use crate::meta::MetaValue;
 use crate::meta::TabletMetadata;
 use crate::meta::TabletState;
-use crate::pb;
 use crate::runtime::Meta;
 use crate::runtime::Tablet;
 use crate::util::WaitableTimestamp;
@@ -54,7 +54,10 @@ impl<T: Tablet> Meta for MetaImpl<T> {
 
         self.write(
             snapshot.ts,
-            HashMap::from([(MetaKey::Shard(shard_id), Mutation::Put(vec![]))]),
+            HashMap::from([(
+                MetaKey::Shard(shard_id),
+                MetaMutation::Put(MetaValue::Empty),
+            )]),
         )
         .await?;
 
@@ -77,7 +80,10 @@ impl<T: Tablet> Meta for MetaImpl<T> {
         let mut shard_ids: Vec<_> = snapshot.shard_ids().await?;
         shard_ids.shuffle(&mut rand::thread_rng());
 
-        let mut muts = HashMap::from([(MetaKey::ColoGroup(colo_group_id), Mutation::Put(vec![]))]);
+        let mut muts = HashMap::from([(
+            MetaKey::ColoGroup(colo_group_id),
+            MetaMutation::Put(MetaValue::Empty),
+        )]);
 
         let mut next_tablet_id_by_shard = BTreeMap::new();
         for shard_id in &shard_ids {
@@ -95,15 +101,12 @@ impl<T: Tablet> Meta for MetaImpl<T> {
 
             muts.insert(
                 MetaKey::Tablet(tablet_id),
-                Mutation::Put(
-                    TabletMetadata {
-                        colo_group_id,
-                        range,
-                        state: MetaState::Stable(TabletState::Active),
-                        transfer_id: None,
-                    }
-                    .encode_to_vec(),
-                ),
+                MetaMutation::Put(MetaValue::TabletMetadata(TabletMetadata {
+                    colo_group_id,
+                    range,
+                    state: MetaState::Stable(TabletState::Active),
+                    transfer_id: None,
+                })),
             );
         }
 
@@ -129,7 +132,7 @@ impl<T: Tablet> Meta for MetaImpl<T> {
 
         self.write(
             snapshot.ts,
-            HashMap::from([(keyspace_key, Mutation::Put(vec![]))]),
+            HashMap::from([(keyspace_key, MetaMutation::Put(MetaValue::Empty))]),
         )
         .await?;
 
@@ -178,14 +181,14 @@ impl<T: Tablet> Meta for MetaImpl<T> {
         let mut new_ts = ts;
         for revision in page {
             if let RevisionValue::Regular(value) = revision.value {
-                let proto_tx = pb::internal::MetaTx::decode(&value[..])?;
-                let keys = BTreeSet::try_from(
-                    proto_tx
-                        .keys
-                        .ok_or_else(|| anyhow!("ProtoTx with no keys"))?,
-                )?;
+                let meta_tx = match MetaValue::decode(&value)? {
+                    MetaValue::MetaTx(meta_tx) => meta_tx,
+                    other => return Err(anyhow!("unexpected MetaValue {:?}", other)),
+                };
 
-                for key in keys {
+                for meta_key in meta_tx.keys {
+                    let key = (KeyspaceId::META, meta_key.encode());
+
                     let rev_value = match self.tablet.get(revision.ts, &key).await? {
                         Some(record) => RevisionValue::Regular(record.value),
                         None => RevisionValue::Tombstone,
@@ -219,7 +222,7 @@ impl<T: Tablet> Meta for MetaImpl<T> {
     async fn write(
         &self,
         snapshot_ts: Timestamp,
-        muts: HashMap<MetaKey, Mutation>,
+        mut muts: HashMap<MetaKey, MetaMutation>,
     ) -> anyhow::Result<Timestamp> {
         if muts.contains_key(&MetaKey::Sync) {
             return Err(anyhow!("write contains a mutation to sync_key already"));
@@ -231,22 +234,22 @@ impl<T: Tablet> Meta for MetaImpl<T> {
             snapshot_ts,
         )];
 
-        let mut raw_muts = muts
-            .into_iter()
-            .map(|(meta_key, mutation)| ((KeyspaceId::META, meta_key.encode()), mutation))
-            .collect::<BTreeMap<Key, Mutation>>();
+        let changed_keys = muts.keys().cloned().collect::<HashSet<_>>();
 
-        raw_muts.insert(
-            (KeyspaceId::META, MetaKey::Sync.encode()),
-            Mutation::Put(
-                pb::internal::MetaTx {
-                    keys: Some(pb::internal::CompressedKeySet::from(
-                        raw_muts.keys().cloned().collect::<BTreeSet<_>>(),
-                    )),
-                }
-                .encode_to_vec(),
-            ),
+        muts.insert(
+            MetaKey::Sync,
+            MetaMutation::Put(MetaValue::MetaTx(MetaTx { keys: changed_keys })),
         );
+
+        let raw_muts = muts
+            .into_iter()
+            .map(|(meta_key, meta_mutation)| {
+                (
+                    (KeyspaceId::META, meta_key.encode()),
+                    meta_mutation.into_mutation(),
+                )
+            })
+            .collect::<BTreeMap<Key, Mutation>>();
 
         let ts = self.tablet.write(preconds, raw_muts).await?;
         // TODO: Periodically poll in case we have a success-but-error above.
@@ -412,7 +415,7 @@ impl<T: Meta + ?Sized> Meta for Box<T> {
     async fn write(
         &self,
         snapshot_ts: Timestamp,
-        muts: HashMap<MetaKey, Mutation>,
+        muts: HashMap<MetaKey, MetaMutation>,
     ) -> anyhow::Result<Timestamp> {
         T::write(self, snapshot_ts, muts).await
     }
@@ -462,7 +465,7 @@ impl<T: Meta + ?Sized> Meta for Arc<T> {
     async fn write(
         &self,
         snapshot_ts: Timestamp,
-        muts: HashMap<MetaKey, Mutation>,
+        muts: HashMap<MetaKey, MetaMutation>,
     ) -> anyhow::Result<Timestamp> {
         T::write(self, snapshot_ts, muts).await
     }
