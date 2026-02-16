@@ -173,9 +173,9 @@ impl NodeInner {
             Arc::clone(&self.meta),
             Arc::clone(&self.shards),
             Arc::clone(&self.wals),
-            65536,
-            65536,
-            4096,
+            256,   // l0_max_size
+            65536, // run_size_target
+            4096,  // block_size_target
         )
         .await?;
 
