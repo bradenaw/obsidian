@@ -5,7 +5,6 @@ mod mem_wal;
 mod mem_wals;
 mod meta_proxy;
 mod nodes;
-mod shards;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
