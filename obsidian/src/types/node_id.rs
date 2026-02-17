@@ -31,8 +31,10 @@ impl NodeId {
     }
 }
 static NODE_ID_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(.+?):([0-9]+)/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
-        .unwrap()
+    Regex::new(
+        r"^\[(.+?)\]:([0-9]+)/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+    )
+    .unwrap()
 });
 
 impl FromStr for NodeId {
@@ -54,7 +56,7 @@ impl FromStr for NodeId {
 
 impl Display for NodeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}/{}", self.addr, self.port, self.uuid)
+        write!(f, "[{}]:{}/{}", self.addr, self.port, self.uuid)
     }
 }
 
