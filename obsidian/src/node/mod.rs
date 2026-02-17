@@ -135,10 +135,8 @@ impl NodeInner {
     ) -> anyhow::Result<()> {
         let shard_metadata = snapshot.shard_metadata(shard_id).await?;
 
-        if let Some(node_id) = shard_metadata.assigned_node_id {
-            if node_id == self.node_id {
-                self.maybe_spawn_shard(shard_id).await?;
-            }
+        if shard_metadata.assigned_node_ids.contains(&self.node_id) {
+            self.maybe_spawn_shard(shard_id).await?;
         }
 
         Ok(())

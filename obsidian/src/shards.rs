@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -22,7 +23,7 @@ pub(crate) struct Shards(WithBackground<ShardsInner>);
 
 struct ShardsInner {
     nodes: Arc<dyn Nodes>,
-    routing: RwLock<HashMap<ShardId, NodeId>>,
+    routing: RwLock<HashMap<ShardId, HashSet<NodeId>>>,
 }
 
 impl Shards {
@@ -40,7 +41,7 @@ impl Shards {
 
 impl runtime::Shards for Shards {
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn runtime::Shard>> {
-        let node_id = {
+        let node_ids = {
             let routing = self.0.routing.read().unwrap();
             routing
                 .get(&shard_id)
@@ -48,7 +49,15 @@ impl runtime::Shards for Shards {
                 .clone()
         };
 
-        self.0.nodes.node(node_id)?.shard(shard_id)
+        self.0
+            .nodes
+            .node(
+                *node_ids
+                    .iter()
+                    .next()
+                    .ok_or_else(|| anyhow!("no nodes assigned to {:?}", shard_id))?,
+            )?
+            .shard(shard_id)
     }
 
     fn shards(&self) -> Vec<Box<dyn runtime::Shard>> {
@@ -89,11 +98,7 @@ impl ShardsInner {
         let shard_metadata = snapshot.shard_metadata(shard_id).await?;
 
         let mut routing = self.routing.write().unwrap();
-        if let Some(node_id) = shard_metadata.assigned_node_id {
-            routing.insert(shard_id, node_id);
-        } else {
-            routing.remove(&shard_id);
-        }
+        routing.insert(shard_id, shard_metadata.assigned_node_ids.clone());
 
         Ok(())
     }

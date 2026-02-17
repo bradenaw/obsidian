@@ -59,7 +59,7 @@ impl<T: Tablet> Meta for MetaImpl<T> {
             HashMap::from([(
                 MetaKey::Shard(shard_id),
                 MetaMutation::Put(MetaValue::ShardMetadata(ShardMetadata {
-                    assigned_node_id: None,
+                    assigned_node_ids: HashSet::new(),
                 })),
             )]),
         )
