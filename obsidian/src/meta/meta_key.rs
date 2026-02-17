@@ -1,4 +1,5 @@
 use std::convert::TryFrom;
+use std::str::FromStr;
 
 use anyhow::anyhow;
 
@@ -7,6 +8,7 @@ use crate::tuple_encoding::tuple_decode_prefix;
 use crate::tuple_encoding::tuple_encode;
 use crate::ColoGroupId;
 use crate::KeyspaceId;
+use crate::NodeId;
 use crate::Range;
 use crate::ShardId;
 use crate::TabletId;
@@ -15,6 +17,7 @@ use crate::TransferId;
 #[derive(Clone, Hash, Eq, PartialEq, Debug)]
 pub(crate) enum MetaKey {
     Sync,
+    Node(NodeId),
     Shard(ShardId),
     ColoGroup(ColoGroupId),
     Keyspace(KeyspaceId),
@@ -26,8 +29,11 @@ impl MetaKey {
     // (PFX_SYNC) -> pb::internal::MetaTx
     const PFX_SYNC: u64 = 1;
 
-    // (PFX_SHARDS, shard_id) => []
+    // (PFX_SHARDS, shard_id) => ShardMetadata
     const PFX_SHARDS: u64 = 2;
+
+    // (PFX_NODES, node_id) => NodeMetadata
+    const PFX_NODES: u64 = 7;
 
     // (PFX_COLO_GROUPS, colo_group_id) -> []
     const PFX_COLO_GROUPS: u64 = 3;
@@ -35,15 +41,19 @@ impl MetaKey {
     // (PFX_KEYSPACES, keyspace_id) -> []
     const PFX_KEYSPACES: u64 = 4;
 
-    // (PFX_TABLETS, tablet_id) -> pb::internal::TabletMetadata
+    // (PFX_TABLETS, tablet_id) -> TabletMetadata
     const PFX_TABLETS: u64 = 5;
 
-    // (PFX_TRANSFERS, transfer_id) -> pb::internal::TransferMetadata
+    // (PFX_TRANSFERS, transfer_id) -> TransferMetadata
     const PFX_TRANSFERS: u64 = 6;
 
     pub(crate) fn encode(&self) -> Vec<u8> {
         match self {
             Self::Sync => tuple_encode(&(Self::PFX_SYNC,)),
+            Self::Node(node_id) => {
+                let node_id_bytes = format!("{}", node_id).into_bytes();
+                tuple_encode(&(Self::PFX_NODES, node_id_bytes))
+            }
             Self::Shard(shard_id) => tuple_encode(&(Self::PFX_SHARDS, shard_id.0 as u64)),
             Self::ColoGroup(colo_group_id) => {
                 tuple_encode(&(Self::PFX_COLO_GROUPS, colo_group_id.0 as u64))
@@ -64,6 +74,11 @@ impl MetaKey {
         let prefix = tuple_decode_prefix::<(u64,)>(b)?.0;
         match prefix {
             Self::PFX_SYNC => Ok(Self::Sync),
+            Self::PFX_NODES => {
+                let (_, node_id_bytes): (u64, Vec<u8>) = tuple_decode(b)?;
+                let node_id_str = String::try_from(node_id_bytes)?;
+                Ok(Self::Node(NodeId::from_str(&node_id_str)?))
+            }
             Self::PFX_SHARDS => {
                 let (_, shard_id_raw): (u64, u64) = tuple_decode(b)?;
                 Ok(Self::Shard(ShardId(u32::try_from(shard_id_raw)?)))
@@ -95,6 +110,10 @@ impl MetaKey {
             }
             _ => Err(anyhow!("unrecognized MetaKey prefix {}", prefix)),
         }
+    }
+
+    pub fn nodes() -> Range<Vec<u8>> {
+        Range::prefix(tuple_encode(&(Self::PFX_NODES,)))
     }
 
     pub fn shards() -> Range<Vec<u8>> {

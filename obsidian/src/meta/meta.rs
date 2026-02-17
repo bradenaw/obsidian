@@ -16,6 +16,7 @@ use crate::meta::MetaReader;
 use crate::meta::MetaState;
 use crate::meta::MetaTx;
 use crate::meta::MetaValue;
+use crate::meta::ShardMetadata;
 use crate::meta::TabletMetadata;
 use crate::meta::TabletState;
 use crate::runtime::Meta;
@@ -28,6 +29,7 @@ use crate::HistoryRange;
 use crate::Key;
 use crate::KeyspaceId;
 use crate::Mutation;
+use crate::NodeId;
 use crate::Precondition;
 use crate::Range;
 use crate::Record;
@@ -56,8 +58,28 @@ impl<T: Tablet> Meta for MetaImpl<T> {
             snapshot.ts,
             HashMap::from([(
                 MetaKey::Shard(shard_id),
-                MetaMutation::Put(MetaValue::Empty),
+                MetaMutation::Put(
+                    MetaValue::ShardMetadata(ShardMetadata {
+                        assigned_node_id: None,
+                    })
+                ),
             )]),
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn add_node(&self, node_id: NodeId) -> anyhow::Result<()> {
+        let snapshot = self.latest_snapshot_().await?;
+
+        if snapshot.node_exists(node_id).await? {
+            return Err(anyhow!("{:?} already exists", node_id));
+        }
+
+        self.write(
+            snapshot.ts,
+            HashMap::from([(MetaKey::Node(node_id), MetaMutation::Put(MetaValue::Empty))]),
         )
         .await?;
 
@@ -228,6 +250,8 @@ impl<T: Tablet> Meta for MetaImpl<T> {
             return Err(anyhow!("write contains a mutation to sync_key already"));
         }
 
+        log::trace!("attempting meta write {:?}", muts);
+
         let preconds = vec![Precondition::NotChangedSince(
             KeyspaceId::META,
             self.sync_key.clone(),
@@ -376,6 +400,11 @@ impl<T: Meta + ?Sized> Meta for Box<T> {
     async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
         T::add_shard(self, shard_id).await
     }
+
+    async fn add_node(&self, node_id: NodeId) -> anyhow::Result<()> {
+        T::add_node(self, node_id).await
+    }
+
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,
@@ -426,6 +455,11 @@ impl<T: Meta + ?Sized> Meta for Arc<T> {
     async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
         T::add_shard(self, shard_id).await
     }
+
+    async fn add_node(&self, node_id: NodeId) -> anyhow::Result<()> {
+        T::add_node(self, node_id).await
+    }
+
     async fn create_colo_group(
         &self,
         colo_group_id: ColoGroupId,

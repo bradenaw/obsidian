@@ -1,17 +1,20 @@
 #![allow(dead_code)]
 #![feature(assert_matches)]
 #![feature(coroutines)]
+#![feature(ip_from)]
 #![feature(thread_id_value)]
 
 mod gateway;
 mod grpc;
 mod lsm;
 mod meta;
+mod node;
 mod obsidian;
 mod router;
 mod rtest;
 mod runtime;
 mod shard;
+mod shards;
 mod storage;
 mod supervisor;
 mod tablet;
@@ -68,6 +71,7 @@ pub(crate) use crate::types::Key;
 pub(crate) use crate::types::KeyOrBound;
 pub(crate) use crate::types::KeyspaceId;
 pub(crate) use crate::types::Mutation;
+pub(crate) use crate::types::NodeId;
 pub(crate) use crate::types::Precondition;
 pub(crate) use crate::types::Range;
 pub(crate) use crate::types::RangeMap;

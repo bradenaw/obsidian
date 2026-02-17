@@ -5,17 +5,21 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use anyhow::anyhow;
+use async_trait::async_trait;
 use futures::stream::FuturesUnordered;
 use futures::TryStreamExt;
+use tokio::sync::Notify;
 
 use crate::lsm::Manifest;
 use crate::meta::MetaKey;
 use crate::meta::MetaMutation;
 use crate::meta::MetaReader;
 use crate::meta::MetaState;
+use crate::meta::MetaSubscriber;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::meta::MetaValue;
+use crate::meta::SyncType;
 use crate::meta::TabletMetadata;
 use crate::meta::TabletState;
 use crate::meta::TransferMetadata;
@@ -39,6 +43,8 @@ struct SupervisorInner {
     meta: Arc<dyn Meta>,
     meta_synced: Arc<MetaSynced>,
     shards: Arc<dyn Shards>,
+
+    assign_shards_trigger: Notify,
 }
 
 impl Supervisor {
@@ -48,11 +54,20 @@ impl Supervisor {
         shards: Arc<dyn Shards>,
     ) -> Self {
         // TODO: scan for transfers
-        Self(WithBackground::new(Arc::new(SupervisorInner {
+        let supervisor = Self(WithBackground::new(Arc::new(SupervisorInner {
             meta,
-            meta_synced,
+            meta_synced: Arc::clone(&meta_synced),
             shards,
-        })))
+            assign_shards_trigger: Notify::new(),
+        })));
+
+        meta_synced.subscribe(&supervisor.0);
+
+        supervisor.0.spawn(async |inner| {
+            inner.background_assign_shards().await;
+        });
+
+        supervisor
     }
 
     async fn start_transfer(
@@ -548,6 +563,94 @@ impl SupervisorInner {
         self.meta_synced.wait(ts).await?;
         Ok(self.meta_synced.snapshot())
     }
+
+    async fn try_sync_meta(
+        &self,
+        sync_type: &SyncType,
+        _snapshot: &MetaSyncedSnapshot,
+    ) -> anyhow::Result<()> {
+        match sync_type {
+            SyncType::Initial => {
+                self.assign_shards_trigger.notify_one();
+            }
+            SyncType::Tx(keys) => {
+                if keys
+                    .iter()
+                    .any(|key| matches!(key, MetaKey::Node(_) | MetaKey::Shard(_)))
+                {
+                    self.assign_shards_trigger.notify_one();
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // This must be done out-of-band from try_sync_meta because we need to get up-to-date snapshots
+    // of meta in order to make progress if we ever run into a precondition failure, and
+    // meta_synced.wait from inside a meta_synced.subscribe deadlocks.
+    async fn background_assign_shards(&self) {
+        Retry::new()
+            .indefinitely::<_, _, (), anyhow::Error>(&async || loop {
+                self.assign_shards_trigger.notified().await;
+                self.assign_shards().await?;
+            })
+            .await
+    }
+
+    async fn assign_shards(&self) -> anyhow::Result<()> {
+        self.meta_synced
+            .wait(self.meta.latest_snapshot().await?)
+            .await?;
+        let snapshot = self.meta_synced.snapshot();
+
+        let shard_ids = snapshot.shard_ids().await?;
+        let mut unassigned_node_ids = snapshot
+            .node_ids()
+            .try_collect::<HashSet<_>>()
+            .await?;
+
+        let mut unassigned_shard_ids = HashSet::new();
+        for shard_id in shard_ids {
+            let shard_metadata = snapshot.shard_metadata(shard_id).await?;
+
+            if let Some(node_id) = shard_metadata.assigned_node_id {
+                unassigned_node_ids.remove(&node_id);
+            } else {
+                unassigned_shard_ids.insert(shard_id);
+            }
+        }
+
+        let mut unassigned_node_ids = unassigned_node_ids.into_iter();
+        let mut unassigned_shard_ids = unassigned_shard_ids.into_iter();
+
+        let mut muts = HashMap::new();
+        while let (Some(node_id), Some(shard_id)) =
+            (unassigned_node_ids.next(), unassigned_shard_ids.next())
+        {
+            let mut shard_metadata = snapshot.shard_metadata(shard_id).await?;
+            shard_metadata.assigned_node_id = Some(node_id);
+            muts.insert(
+                MetaKey::Shard(shard_id),
+                MetaMutation::Put(MetaValue::ShardMetadata(shard_metadata)),
+            );
+        }
+
+        let _ = self.meta.write(snapshot.ts(), muts).await?;
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl MetaSubscriber for SupervisorInner {
+    async fn sync_meta(&self, sync_type: SyncType, snapshot: MetaSyncedSnapshot) {
+        Retry::new()
+            .indefinitely(&async || -> anyhow::Result<()> {
+                self.try_sync_meta(&sync_type, &snapshot).await
+            })
+            .await;
+    }
 }
 
 fn check_manifests_equal(a: &[&Manifest], b: &[&Manifest]) -> anyhow::Result<()> {
@@ -646,7 +749,7 @@ mod tests {
                 .await?;
         }
 
-        let meta_snapshot = obs.meta.latest_snapshot_().await?;
+        let meta_snapshot = obs.latest_meta_snapshot().await?;
         let tablet_ids = meta_snapshot.tablet_ids().await?;
         let shard_ids = meta_snapshot.shard_ids().await?;
 
@@ -716,7 +819,7 @@ mod tests {
                 .await?;
         }
 
-        let meta_snapshot = obs.meta.latest_snapshot_().await?;
+        let meta_snapshot = obs.latest_meta_snapshot().await?;
         let tablet_ids = meta_snapshot.tablet_ids().await?;
         let shard_ids = meta_snapshot.shard_ids().await?;
 
@@ -794,8 +897,11 @@ mod tests {
                 obs.gateway.write(vec![], muts).await?;
             }
         }
+        // TODO: jank, have to wait for the compactor to pick these up since we don't use memtables
+        // for size estimates
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let meta_snapshot = obs.meta.latest_snapshot_().await?;
+        let meta_snapshot = obs.latest_meta_snapshot().await?;
         let tablet_ids = meta_snapshot.tablet_ids().await?;
         let shard_ids = meta_snapshot.shard_ids().await?;
 

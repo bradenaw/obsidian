@@ -4,24 +4,28 @@ mod mem_storage;
 mod mem_wal;
 mod mem_wals;
 mod meta_proxy;
-mod shards;
+mod test_nodes;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt::Debug;
-use std::ops::Deref;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
 
+use crate::ShardId;
 use crate::gateway::Gateway;
+use crate::lsm::LsmBuilder;
 use crate::lsm::Manifest;
 use crate::meta::MetaImpl;
 use crate::meta::MetaSynced;
+use crate::meta::MetaSyncedSnapshot;
 use crate::runtime::Meta;
-use crate::runtime::Shards;
+use crate::runtime::Storage;
 use crate::runtime::Tablet;
+use crate::runtime::Wals;
 use crate::storage::CachedStorage;
 use crate::supervisor::Supervisor;
 pub(crate) use crate::test::mem_file_reader::MemFileReader;
@@ -30,7 +34,7 @@ pub(crate) use crate::test::mem_storage::MemStorage;
 pub(crate) use crate::test::mem_wal::MemWal;
 pub(crate) use crate::test::mem_wals::MemWals;
 use crate::test::meta_proxy::MetaProxy;
-use crate::test::shards::TestShards;
+use crate::test::test_nodes::TestNodes;
 use crate::util::encode;
 use crate::util::Decode;
 use crate::util::Encode;
@@ -153,8 +157,11 @@ impl<T: Tablet + ?Sized> Tablet for Arc<T> {
 
 pub(crate) struct ObsidianForTest {
     pub gateway: Gateway,
+    pub meta: Arc<dyn Meta>,
+    pub meta_synced: Arc<MetaSynced>,
     pub supervisor: Supervisor,
-    pub meta: Arc<MetaImpl<Arc<dyn Tablet>>>,
+
+    nodes: TestNodes,
 }
 
 impl ObsidianForTest {
@@ -171,154 +178,61 @@ impl ObsidianForTest {
             4,  // n_stripes
         ));
 
-        let shards = Arc::new(TestShards::new(storage.clone(), meta_proxy.clone()));
+        let wals = Arc::new(MemWals::new()) as Arc<dyn Wals>;
 
-        let mut shard_ids = vec![];
-        for _ in 0..n_shards {
-            shard_ids.push(shards.create_shard().await?);
+        let meta_tablet = crate::tablet::MetaTablet::new(
+            LsmBuilder::new(
+                wals.wal(TabletId::META).await?,
+                Arc::clone(&storage) as Arc<dyn Storage>,
+            )
+            .build()
+            .await?,
+        )
+        .await?;
+        let meta: Arc<dyn Meta> = Arc::new(MetaImpl::new(meta_tablet));
+        meta_proxy.put(Arc::clone(&meta) as Arc<dyn Meta>);
+
+        let nodes = TestNodes::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&meta) as Arc<dyn Meta>,
+            Arc::clone(&wals),
+        );
+
+        for i in 0..n_shards {
+            let shard_id = ShardId((2+i) as u32);
+            meta.add_shard(shard_id).await?;
+            nodes.create_node().await?;
         }
-
-        let meta_tablet = shards.tablet(TabletId::META)?;
-        let meta = Arc::new(MetaImpl::new(meta_tablet));
 
         let meta_synced = Arc::new(MetaSynced::new(Arc::clone(&meta)));
 
         let supervisor = Supervisor::new(
             Arc::clone(&meta) as Arc<dyn Meta>,
-            meta_synced,
-            Arc::new(Arc::clone(&shards)) as Arc<dyn Shards>,
+            Arc::clone(&meta_synced),
+            nodes.shards(),
         );
-
-        for shard_id in shard_ids {
-            meta.add_shard(shard_id).await?;
-        }
-
-        meta_proxy.put(Arc::clone(&meta) as Arc<dyn Meta>);
 
         let gateway = Gateway::new(
             Box::new(meta_proxy.clone()),
             MetaSynced::new(meta_proxy),
-            Box::new(shards),
+            nodes.shards(),
         );
+
+        // JANK: Need to wait for everything to come to life.
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         Ok(Self {
             gateway,
             meta,
+            meta_synced,
             supervisor,
+            nodes,
         })
     }
-}
 
-#[async_trait]
-impl Tablet for Box<dyn Tablet> {
-    async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
-        Ok(self.deref().get(ts, key).await?)
-    }
-
-    async fn get_latest(&self, key: Key) -> Result<(Timestamp, Option<Record>), InternalError> {
-        Ok(self.deref().get_latest(key).await?)
-    }
-
-    async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError> {
-        Ok(self.deref().latest_snapshot(keys).await?)
-    }
-
-    async fn scan_page(
-        &self,
-        ts: Timestamp,
-        keyspace_id: KeyspaceId,
-        range: Range<&[u8]>,
-        direction: Direction,
-        limit: usize,
-    ) -> Result<(Vec<Record>, Option<Range<Vec<u8>>>), InternalError> {
-        Ok(self
-            .deref()
-            .scan_page(ts, keyspace_id, range, direction, limit)
-            .await?)
-    }
-
-    async fn history_page(
-        &self,
-        key: Key,
-        range: HistoryRange,
-        direction: Direction,
-        limit: usize,
-    ) -> Result<(Vec<Revision>, Option<HistoryRange>), InternalError> {
-        Ok(self
-            .deref()
-            .history_page(key, range, direction, limit)
-            .await?)
-    }
-
-    async fn write(
-        &self,
-        preconds: Vec<Precondition>,
-        muts: BTreeMap<Key, Mutation>,
-    ) -> Result<Timestamp, InternalError> {
-        Ok(self.deref().write(preconds, muts).await?)
-    }
-
-    async fn prepare(
-        &self,
-        txid: Txid,
-        preconds: Vec<Precondition>,
-        muts: BTreeMap<Key, Mutation>,
-    ) -> Result<Timestamp, InternalError> {
-        Ok(self.deref().prepare(txid, preconds, muts).await?)
-    }
-
-    async fn try_commit(
-        &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<Key>,
-        mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<TxOutcome> {
-        Ok(self
-            .deref()
-            .try_commit(txid, ts, precond_keys, mut_keys)
-            .await?)
-    }
-
-    async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
-        Ok(self.deref().try_abort(txid).await?)
-    }
-
-    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
-        Ok(self.deref().wait(txid).await?)
-    }
-
-    async fn cleanup_committed(
-        &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<Key>,
-        mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<()> {
-        Ok(self
-            .deref()
-            .cleanup_committed(txid, ts, precond_keys, mut_keys)
-            .await?)
-    }
-
-    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
-        Ok(self.deref().wait_meta_sync(ts).await?)
-    }
-
-    async fn manifest(&self) -> anyhow::Result<Manifest> {
-        self.deref().manifest().await
-    }
-
-    async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
-        self.deref().wait_mostly_hydrated().await
-    }
-
-    async fn catchup(&self) -> anyhow::Result<()> {
-        self.deref().catchup().await
-    }
-
-    async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
-        self.deref().find_split().await
+    pub async fn latest_meta_snapshot(&self) -> anyhow::Result<MetaSyncedSnapshot> {
+        self.meta_synced.wait(self.meta.latest_snapshot().await?).await?;
+        Ok(self.meta_synced.snapshot())
     }
 }
 

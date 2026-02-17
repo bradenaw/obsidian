@@ -12,6 +12,7 @@ use crate::runtime::Meta;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::KeyspaceId;
+use crate::NodeId;
 use crate::Range;
 use crate::Record;
 use crate::Revision;
@@ -41,6 +42,14 @@ impl Meta for Arc<MetaProxy> {
         let inner = self.inner.load();
         if let Some(inner) = inner.deref() {
             return Meta::add_shard(inner, shard_id).await;
+        }
+        Err(anyhow!("MetaProxy not filled yet"))
+    }
+
+    async fn add_node(&self, node_id: NodeId) -> anyhow::Result<()> {
+        let inner = self.inner.load();
+        if let Some(inner) = inner.deref() {
+            return Meta::add_node(inner, node_id).await;
         }
         Err(anyhow!("MetaProxy not filled yet"))
     }

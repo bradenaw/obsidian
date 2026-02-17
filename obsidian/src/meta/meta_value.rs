@@ -4,6 +4,7 @@ use anyhow::anyhow;
 use prost::Message;
 
 use crate::meta::MetaTx;
+use crate::meta::ShardMetadata;
 use crate::meta::TabletMetadata;
 use crate::meta::TransferMetadata;
 use crate::pb;
@@ -12,6 +13,7 @@ use crate::pb;
 pub(crate) enum MetaValue {
     Empty,
     MetaTx(MetaTx),
+    ShardMetadata(ShardMetadata),
     TabletMetadata(TabletMetadata),
     TransferMetadata(TransferMetadata),
 }
@@ -29,6 +31,9 @@ impl From<MetaValue> for pb::internal::MetaValue {
                 MetaValue::Empty => pb::internal::meta_value::ValueType::Empty(()),
                 MetaValue::MetaTx(meta_tx) => {
                     pb::internal::meta_value::ValueType::MetaTx(meta_tx.into())
+                }
+                MetaValue::ShardMetadata(shard_metadata) => {
+                    pb::internal::meta_value::ValueType::ShardMetadata(shard_metadata.into())
                 }
                 MetaValue::TabletMetadata(tablet_metadata) => {
                     pb::internal::meta_value::ValueType::TabletMetadata(tablet_metadata.into())
@@ -53,6 +58,9 @@ impl TryFrom<pb::internal::MetaValue> for MetaValue {
                 pb::internal::meta_value::ValueType::Empty(()) => MetaValue::Empty,
                 pb::internal::meta_value::ValueType::MetaTx(meta_tx_pb) => {
                     MetaValue::MetaTx(MetaTx::try_from(meta_tx_pb)?)
+                }
+                pb::internal::meta_value::ValueType::ShardMetadata(shard_metadata_pb) => {
+                    MetaValue::ShardMetadata(ShardMetadata::try_from(shard_metadata_pb)?)
                 }
                 pb::internal::meta_value::ValueType::TabletMetadata(tablet_metadata_pb) => {
                     MetaValue::TabletMetadata(TabletMetadata::try_from(tablet_metadata_pb)?)
