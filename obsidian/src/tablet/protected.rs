@@ -13,7 +13,6 @@ use crate::lsm::Manifest;
 use crate::lsm::Preloaded;
 use crate::meta::TabletState;
 use crate::meta::TabletStateProperties;
-use crate::runtime::Storage;
 use crate::Bound;
 use crate::Direction;
 use crate::HistoryRange;
@@ -29,19 +28,16 @@ use crate::TabletId;
 use crate::Timestamp;
 use crate::WriteError;
 
-pub(super) struct ProtectedLsm<S: Storage> {
+pub(super) struct ProtectedLsm {
     tablet_id: TabletId,
     state: InfrequentlyChanged<TabletStateProperties>,
     changed: watch::Receiver<()>,
     on_change: watch::Sender<()>,
-    lsm: Lsm<S>,
+    lsm: Lsm,
 }
 
-impl<S> ProtectedLsm<S>
-where
-    S: Storage,
-{
-    pub(super) fn new(tablet_id: TabletId, lsm: Lsm<S>, initial: TabletState) -> Self {
+impl ProtectedLsm {
+    pub(super) fn new(tablet_id: TabletId, lsm: Lsm, initial: TabletState) -> Self {
         let (on_change, changed) = watch::channel(());
         Self {
             tablet_id,
@@ -63,7 +59,7 @@ where
         );
     }
 
-    pub(super) fn read<'a>(&'a self) -> Result<LsmReadGuard<'a, S>, InternalError> {
+    pub(super) fn read<'a>(&'a self) -> Result<LsmReadGuard<'a>, InternalError> {
         let guard = self.state.load();
 
         if !guard.contains(TabletStateProperties::Readable) {
@@ -76,7 +72,7 @@ where
         })
     }
 
-    pub(super) async fn wait_read<'a>(&'a self) -> LsmReadGuard<'a, S> {
+    pub(super) async fn wait_read<'a>(&'a self) -> LsmReadGuard<'a> {
         let guard = self.wait(TabletStateProperties::Readable).await;
         LsmReadGuard {
             guard,
@@ -84,7 +80,7 @@ where
         }
     }
 
-    pub(super) fn read_write<'a>(&'a self) -> Result<LsmReadWriteGuard<'a, S>, InternalError> {
+    pub(super) fn read_write<'a>(&'a self) -> Result<LsmReadWriteGuard<'a>, InternalError> {
         let guard = self.state.load();
 
         if guard.contains(TabletStateProperties::Readable | TabletStateProperties::Writable) {
@@ -97,7 +93,7 @@ where
         Err(InternalError::TabletNotWriteable(self.tablet_id))
     }
 
-    pub(super) async fn wait_read_write<'a>(&'a self) -> LsmReadWriteGuard<'a, S> {
+    pub(super) async fn wait_read_write<'a>(&'a self) -> LsmReadWriteGuard<'a> {
         let guard = self
             .wait(TabletStateProperties::Readable | TabletStateProperties::Writable)
             .await;
@@ -107,7 +103,7 @@ where
         }
     }
 
-    pub(super) fn load<'a>(&'a self) -> Result<LsmLoadGuard<'a, S>, InternalError> {
+    pub(super) fn load<'a>(&'a self) -> Result<LsmLoadGuard<'a>, InternalError> {
         let guard = self.state.load();
 
         if guard.contains(TabletStateProperties::Hydrating) {
@@ -201,15 +197,12 @@ pub(super) trait LsmReadWrite: LsmRead {
     async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()>;
 }
 
-pub(super) struct LsmReadGuard<'a, S: Storage> {
+pub(super) struct LsmReadGuard<'a> {
     guard: InfrequentlyChangedGuard<'a, TabletStateProperties>,
-    lsm: &'a Lsm<S>,
+    lsm: &'a Lsm,
 }
 
-impl<'a, S> LsmRead for LsmReadGuard<'a, S>
-where
-    S: Storage,
-{
+impl<'a> LsmRead for LsmReadGuard<'a> {
     async fn get(
         &self,
         ts: Timestamp,
@@ -252,15 +245,12 @@ where
     }
 }
 
-pub(super) struct LsmReadWriteGuard<'a, S: Storage> {
+pub(super) struct LsmReadWriteGuard<'a> {
     guard: InfrequentlyChangedGuard<'a, TabletStateProperties>,
-    lsm: &'a Lsm<S>,
+    lsm: &'a Lsm,
 }
 
-impl<'a, S> LsmRead for LsmReadWriteGuard<'a, S>
-where
-    S: Storage,
-{
+impl<'a> LsmRead for LsmReadWriteGuard<'a> {
     async fn get(
         &self,
         ts: Timestamp,
@@ -303,10 +293,7 @@ where
     }
 }
 
-impl<'a, S> LsmReadWrite for LsmReadWriteGuard<'a, S>
-where
-    S: Storage,
-{
+impl<'a> LsmReadWrite for LsmReadWriteGuard<'a> {
     async fn write(
         &self,
         ts: Timestamp,
@@ -321,16 +308,13 @@ where
     }
 }
 
-pub(super) struct LsmLoadGuard<'a, S: Storage> {
+pub(super) struct LsmLoadGuard<'a> {
     guard: InfrequentlyChangedGuard<'a, TabletStateProperties>,
-    lsm: &'a Lsm<S>,
+    lsm: &'a Lsm,
 }
 
-impl<'a, S> LsmLoadGuard<'a, S>
-where
-    S: Storage,
-{
-    pub async fn load(&self, preloaded: Preloaded<S::Reader>) -> anyhow::Result<()> {
+impl<'a> LsmLoadGuard<'a> {
+    pub async fn load(&self, preloaded: Preloaded) -> anyhow::Result<()> {
         self.lsm.load(preloaded).await
     }
 }

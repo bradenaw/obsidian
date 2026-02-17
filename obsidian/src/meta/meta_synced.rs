@@ -1,7 +1,6 @@
 use std::cmp;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::future::Future;
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -14,6 +13,7 @@ use tokio::sync::oneshot;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
 use crate::meta::MetaState;
+use crate::meta::MetaSubscriber;
 use crate::meta::TabletState;
 use crate::router::StaticRouter;
 use crate::runtime::Meta;
@@ -22,6 +22,7 @@ use crate::util::wait_all;
 use crate::util::Background;
 use crate::util::Retry;
 use crate::util::WaitableTimestamp;
+use crate::util::WithBackground;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -93,18 +94,15 @@ impl MetaSynced {
         Range::empty()
     }
 
-    /// Subscribes to changes in `MetaSynced`. `f` will be called once, either immediately or when
-    /// initial sync finishes, with `SyncType::Initial`. Every transaction that updates the
-    /// `MetaSynced` after that point will be given as a `SyncType::Tx` with the changed keys.
+    /// Subscribes to changes in `MetaSynced`.
     ///
     /// The synced timestamp (as observed by `wait()`) does not advance until all subscribers
     /// return, so that `wait()` also describes the log position that those subscribers are at.
     ///
-    /// That also means it would be unwise to do anything terribly expensive inside f.
-    pub(crate) async fn subscribe<F, Fut>(&self, f: F)
+    /// That also means it would be unwise to do anything terribly expensive inside `sync_meta`.
+    pub(crate) fn subscribe<T>(&self, w: &WithBackground<T>)
     where
-        F: Fn(SyncType, MetaSyncedSnapshot) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = ()> + Send,
+        T: MetaSubscriber + Send + Sync + 'static,
     {
         let (maybe_initial, mut rx) = {
             let mut inner = self.inner.write().unwrap();
@@ -118,13 +116,12 @@ impl MetaSynced {
             }
         };
 
-        if let Some(initial) = maybe_initial {
-            f(SyncType::Initial, initial).await;
-        }
-
-        self.bg.spawn(async move {
+        w.spawn(async move |inner| {
+            if let Some(initial) = maybe_initial {
+                inner.sync_meta(SyncType::Initial, initial).await;
+            }
             while let Some((sync_type, snapshot, done)) = rx.recv().await {
-                f(sync_type, snapshot).await;
+                inner.sync_meta(sync_type, snapshot).await;
                 // This only errors if the other side hung up, which means they're gone and we don't
                 // care about them for the purposes of synced_ts.
                 let _ = done.send(());
@@ -313,6 +310,7 @@ impl MetaSyncedInner {
                     }
                 }
             }
+            inner.kv.ts = ts;
             inner.kv.clone()
         };
 
@@ -392,6 +390,7 @@ impl MetaSyncedInner {
 pub(crate) struct MetaSyncedSnapshot {
     // We have to clone these a lot, im::OrdMap makes this cheap.
     m: im::OrdMap<Vec<u8>, Vec<u8>>,
+    ts: Timestamp,
     // Keeping track of the maximum key length that exists in m is necessary to transform
     // Bound::AfterPrefix to a std::ops::Bound, since we need to be able to make an actual key
     // that's at the end of the prefix, which is done by padding the prefix to the maximum length
@@ -403,8 +402,13 @@ impl MetaSyncedSnapshot {
     fn new() -> Self {
         Self {
             m: im::OrdMap::new(),
+            ts: Timestamp::ZERO,
             max_key_len: 0,
         }
+    }
+
+    pub fn ts(&self) -> Timestamp {
+        self.ts
     }
 
     fn insert(&mut self, k: Vec<u8>, v: Vec<u8>) {
@@ -419,11 +423,11 @@ impl MetaSyncedSnapshot {
 
 #[async_trait]
 impl MetaReader for MetaSyncedSnapshot {
-    async fn get(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+    async fn get_raw(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(self.m.get(key).cloned())
     }
 
-    fn scan(
+    fn scan_raw(
         &self,
         range: Range<Vec<u8>>,
         direction: Direction,

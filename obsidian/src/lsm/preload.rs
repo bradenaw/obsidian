@@ -14,27 +14,21 @@ use crate::util::spawn_owned;
 use crate::util::OwnedJoinHandle;
 use crate::KeyspaceId;
 
-pub(crate) struct Preloader<S>
-where
-    S: Storage,
-{
-    storage: Arc<S>,
+pub(crate) struct Preloader {
+    storage: Arc<dyn Storage>,
 
     semaphore: Arc<tokio::sync::Semaphore>,
-    runs: HashMap<RunId, (usize, PreloadRun<S::Reader>)>,
+    runs: HashMap<RunId, (usize, PreloadRun)>,
     keyspaces: HashMap<KeyspaceId, usize>,
 }
 
-enum PreloadRun<R> {
-    Loading(OwnedJoinHandle<anyhow::Result<Run<R>>>),
-    Loaded(Run<R>),
+enum PreloadRun {
+    Loading(OwnedJoinHandle<anyhow::Result<Run>>),
+    Loaded(Run),
 }
 
-impl<S> Preloader<S>
-where
-    S: Storage,
-{
-    pub fn new(storage: Arc<S>) -> Self {
+impl Preloader {
+    pub fn new(storage: Arc<dyn Storage>) -> Self {
         Self {
             storage,
             semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
@@ -79,7 +73,7 @@ where
         self.runs.remove(&run_id);
     }
 
-    pub async fn wait(self) -> anyhow::Result<Preloaded<S::Reader>> {
+    pub async fn wait(self) -> anyhow::Result<Preloaded> {
         let mut snapshot = IndexSnapshot {
             keyspaces: HashMap::new(),
             splits: vec![],
@@ -132,12 +126,12 @@ where
         Ok(Preloaded { snapshot })
     }
 
-    async fn fetch(storage: Arc<S>, run_id: RunId) -> anyhow::Result<Run<S::Reader>> {
+    async fn fetch(storage: Arc<dyn Storage>, run_id: RunId) -> anyhow::Result<Run> {
         let file = storage.get(&run_id.to_string()).await?;
         Ok(Run::open(file).await?)
     }
 }
 
-pub(crate) struct Preloaded<R> {
-    pub(super) snapshot: IndexSnapshot<R>,
+pub(crate) struct Preloaded {
+    pub(super) snapshot: IndexSnapshot,
 }

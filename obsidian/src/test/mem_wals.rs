@@ -16,14 +16,14 @@ pub(crate) struct MemWals {
 
 impl MemWals {
     pub fn new() -> Self {
-        Self{
+        Self {
             m: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
 
 #[async_trait]
-impl Wals<Arc<dyn Wal>> for MemWals {
+impl Wals for MemWals {
     async fn wal(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Wal>> {
         let mut m = self.m.lock().unwrap();
 

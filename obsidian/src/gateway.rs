@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::future::Future;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -42,7 +43,7 @@ use crate::WriteError;
 pub(crate) struct Gateway {
     meta: Box<dyn Meta>,
     meta_synced: MetaSynced,
-    shards: Box<dyn Shards>,
+    shards: Arc<dyn Shards>,
 }
 
 const MAX_CONFLICT_RETRIES: usize = 10;
@@ -310,7 +311,7 @@ impl Gateway {
     pub(crate) fn new(
         meta: Box<dyn Meta>,
         meta_synced: MetaSynced,
-        shards: Box<dyn Shards>,
+        shards: Arc<dyn Shards>,
     ) -> Self {
         Self {
             meta,
@@ -446,7 +447,7 @@ impl Gateway {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use crate::test::obsidian_test_suite;
 
     obsidian_test_suite!(

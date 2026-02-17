@@ -321,7 +321,7 @@ impl<E0: Element, E1: Element, E2: Element> Tuple for (E0, E1, E2) {
         self.0.encode(&mut out[i..i + size_0]);
         i += size_0;
         self.1.encode(&mut out[i..i + size_1]);
-        i += size_0;
+        i += size_1;
         self.2.encode(&mut out[i..i + size_2]);
         out
     }
@@ -348,6 +348,59 @@ impl<E0: Element, E1: Element, E2: Element> Tuple for (E0, E1, E2) {
         i += e1_size;
         let (e2, _) = E2::decode(&b[i..])?;
         Ok((e0, e1, e2))
+    }
+}
+
+impl<E0, E1, E2, E3> Tuple for (E0, E1, E2, E3)
+where
+    E0: Element,
+    E1: Element,
+    E2: Element,
+    E3: Element,
+{
+    fn encode(&self) -> Vec<u8> {
+        let size_0 = self.0.encoded_size();
+        let size_1 = self.1.encoded_size();
+        let size_2 = self.2.encoded_size();
+        let size_3 = self.2.encoded_size();
+        let mut out = vec![0u8; size_0 + size_1 + size_2 + size_3];
+        let mut i = 0;
+        self.0.encode(&mut out[i..i + size_0]);
+        i += size_0;
+        self.1.encode(&mut out[i..i + size_1]);
+        i += size_1;
+        self.2.encode(&mut out[i..i + size_2]);
+        i += size_2;
+        self.2.encode(&mut out[i..i + size_3]);
+        out
+    }
+
+    fn decode(b: &[u8]) -> anyhow::Result<Self> {
+        let mut i = 0;
+        let (e0, e0_size) = E0::decode(&b[i..])?;
+        i += e0_size;
+        let (e1, e1_size) = E1::decode(&b[i..])?;
+        i += e1_size;
+        let (e2, e2_size) = E2::decode(&b[i..])?;
+        i += e2_size;
+        let (e3, e3_size) = E3::decode(&b[i..])?;
+        i += e3_size;
+        if i != b.len() {
+            return Err(anyhow!("didn't consume full input"));
+        }
+        Ok((e0, e1, e2, e3))
+    }
+
+    fn decode_prefix(b: &[u8]) -> anyhow::Result<Self> {
+        let mut i = 0;
+        let (e0, e0_size) = E0::decode(&b[i..])?;
+        i += e0_size;
+        let (e1, e1_size) = E1::decode(&b[i..])?;
+        i += e1_size;
+        let (e2, e2_size) = E2::decode(&b[i..])?;
+        i += e2_size;
+        let (e3, _) = E3::decode(&b[i..])?;
+        Ok((e0, e1, e2, e3))
     }
 }
 

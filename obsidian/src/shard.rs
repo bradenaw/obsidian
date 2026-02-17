@@ -8,6 +8,7 @@ use crossbeam::sync::ShardedLock;
 use crate::lsm::LsmBuilder;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
+use crate::meta::MetaSubscriber;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::meta::SyncType;
@@ -15,35 +16,27 @@ use crate::runtime::Meta;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
 use crate::runtime::Tablet;
-use crate::runtime::Wal;
 use crate::runtime::Wals;
 use crate::tablet::DataTablet;
 use crate::tablet::MetaTablet;
 use crate::tablet::ShardMetaTablet;
-use crate::util::Background;
 use crate::util::Retry;
+use crate::util::WithBackground;
 use crate::ColoGroupId;
 use crate::Range;
 use crate::ShardId;
 use crate::TabletId;
 use crate::Timestamp;
 
-pub(crate) struct Shard<S, M> {
-    bg: Background,
-    inner: Arc<ShardInner<S, M>>,
-}
+pub(crate) struct Shard(WithBackground<ShardInner>);
 
-impl<S, M> Shard<S, M>
-where
-    S: Storage,
-    M: Meta + 'static,
-{
+impl Shard {
     pub(crate) async fn new(
         shard_id: ShardId,
-        storage: Arc<S>,
-        meta: Arc<M>,
+        storage: Arc<dyn Storage>,
+        meta: Arc<dyn Meta>,
         shards: Arc<dyn Shards>,
-        wals: Box<dyn Wals<Arc<dyn Wal>>>,
+        wals: Arc<dyn Wals>,
         l0_max_size: u64,
         run_size_target: u64,
         block_size_target: u64,
@@ -82,7 +75,7 @@ where
             init_tablets
         };
 
-        let inner = Arc::new(ShardInner {
+        let shard = Shard(WithBackground::new(Arc::new(ShardInner {
             id: shard_id,
             storage,
             meta,
@@ -93,91 +86,22 @@ where
             l0_max_size,
             run_size_target,
             block_size_target,
-        });
+        })));
 
-        let bg = Background::new();
+        meta_synced.subscribe(&shard.0);
 
-        {
-            let inner = inner.clone();
-            meta_synced
-                .subscribe(move |sync_type, snapshot| {
-                    let inner = inner.clone();
-                    async move {
-                        Self::sync_meta(inner.clone(), sync_type, snapshot).await;
-                    }
-                })
-                .await;
-        }
-
-        Ok(Self { bg, inner })
-    }
-
-    async fn sync_meta(
-        inner: Arc<ShardInner<S, M>>,
-        sync_type: SyncType,
-        snapshot: MetaSyncedSnapshot,
-    ) {
-        Retry::new()
-            .indefinitely(&async || -> anyhow::Result<()> {
-                Self::try_sync_meta(inner.clone(), sync_type.clone(), snapshot.clone()).await
-            })
-            .await;
-    }
-
-    async fn try_sync_meta(
-        inner: Arc<ShardInner<S, M>>,
-        sync_type: SyncType,
-        snapshot: MetaSyncedSnapshot,
-    ) -> anyhow::Result<()> {
-        match sync_type {
-            SyncType::Initial => {
-                let owned_tablet_ids = snapshot.shard_tablet_ids(inner.id).await?;
-                for tablet_id in owned_tablet_ids {
-                    let tablet_metadata = snapshot.tablet_metadata(tablet_id).await?;
-                    inner
-                        .ensure_tablet(
-                            tablet_id,
-                            tablet_metadata.colo_group_id,
-                            tablet_metadata.range,
-                        )
-                        .await?;
-                }
-            }
-            SyncType::Tx(meta_keys) => {
-                for meta_key in meta_keys {
-                    if let MetaKey::Tablet(tablet_id) = meta_key {
-                        if tablet_id.0 != inner.id {
-                            continue;
-                        }
-
-                        let tablet_metadata = snapshot.tablet_metadata(tablet_id).await?;
-                        inner
-                            .ensure_tablet(
-                                tablet_id,
-                                tablet_metadata.colo_group_id,
-                                tablet_metadata.range,
-                            )
-                            .await?;
-                    }
-                }
-            }
-        }
-        Ok(())
+        Ok(shard)
     }
 }
 
 #[async_trait]
-impl<S, M> crate::runtime::Shard for Shard<S, M>
-where
-    S: Storage,
-    M: Meta + 'static,
-{
+impl crate::runtime::Shard for Shard {
     fn id(&self) -> ShardId {
-        self.inner.id
+        self.0.id
     }
 
     fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet>> {
-        let tablets = self.inner.tablets.read().unwrap();
+        let tablets = self.0.tablets.read().unwrap();
         Ok(tablets
             .get(&tablet_id)
             .ok_or_else(|| anyhow!("{:?} not found", tablet_id))?
@@ -185,18 +109,14 @@ where
     }
 
     async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
-        self.inner.meta_synced.wait(ts).await?;
+        self.0.meta_synced.wait(ts).await?;
 
         Ok(())
     }
 }
 
 #[async_trait]
-impl<S, M> crate::runtime::Shard for Arc<Shard<S, M>>
-where
-    S: Storage,
-    M: Meta + 'static,
-{
+impl crate::runtime::Shard for Arc<Shard> {
     fn id(&self) -> ShardId {
         Shard::id(self)
     }
@@ -210,13 +130,13 @@ where
     }
 }
 
-struct ShardInner<S, M> {
+struct ShardInner {
     id: ShardId,
-    storage: Arc<S>,
-    meta: Arc<M>,
+    storage: Arc<dyn Storage>,
+    meta: Arc<dyn Meta>,
     meta_synced: Arc<MetaSynced>,
     shards: Arc<dyn Shards>,
-    wals: Box<dyn Wals<Arc<dyn Wal>>>,
+    wals: Arc<dyn Wals>,
     l0_max_size: u64,
     run_size_target: u64,
     block_size_target: u64,
@@ -224,11 +144,7 @@ struct ShardInner<S, M> {
     tablets: ShardedLock<HashMap<TabletId, Arc<dyn Tablet + 'static>>>,
 }
 
-impl<S, M> ShardInner<S, M>
-where
-    M: Meta + 'static,
-    S: Storage,
-{
+impl ShardInner {
     async fn ensure_tablet(
         &self,
         tablet_id: TabletId,
@@ -282,5 +198,55 @@ where
         tablets.insert(tablet_id, Arc::new(tablet));
 
         Ok(())
+    }
+
+    async fn try_sync_meta(
+        &self,
+        sync_type: &SyncType,
+        snapshot: &MetaSyncedSnapshot,
+    ) -> anyhow::Result<()> {
+        match sync_type {
+            SyncType::Initial => {
+                let owned_tablet_ids = snapshot.shard_tablet_ids(self.id).await?;
+                for tablet_id in owned_tablet_ids {
+                    let tablet_metadata = snapshot.tablet_metadata(tablet_id).await?;
+                    self.ensure_tablet(
+                        tablet_id,
+                        tablet_metadata.colo_group_id,
+                        tablet_metadata.range,
+                    )
+                    .await?;
+                }
+            }
+            SyncType::Tx(meta_keys) => {
+                for meta_key in meta_keys {
+                    if let MetaKey::Tablet(tablet_id) = meta_key {
+                        if tablet_id.0 != self.id {
+                            continue;
+                        }
+
+                        let tablet_metadata = snapshot.tablet_metadata(*tablet_id).await?;
+                        self.ensure_tablet(
+                            *tablet_id,
+                            tablet_metadata.colo_group_id,
+                            tablet_metadata.range,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl MetaSubscriber for ShardInner {
+    async fn sync_meta(&self, sync_type: SyncType, snapshot: MetaSyncedSnapshot) {
+        Retry::new()
+            .indefinitely(&async || -> anyhow::Result<()> {
+                self.try_sync_meta(&sync_type, &snapshot).await
+            })
+            .await;
     }
 }

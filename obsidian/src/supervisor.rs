@@ -5,25 +5,30 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use anyhow::anyhow;
+use async_trait::async_trait;
 use futures::stream::FuturesUnordered;
 use futures::TryStreamExt;
+use tokio::sync::Notify;
 
 use crate::lsm::Manifest;
-use crate::meta::MetaImpl;
 use crate::meta::MetaKey;
+use crate::meta::MetaMutation;
 use crate::meta::MetaReader;
-use crate::meta::MetaSnapshot;
 use crate::meta::MetaState;
+use crate::meta::MetaSubscriber;
+use crate::meta::MetaSynced;
+use crate::meta::MetaSyncedSnapshot;
+use crate::meta::MetaValue;
+use crate::meta::SyncType;
 use crate::meta::TabletMetadata;
 use crate::meta::TabletState;
 use crate::meta::TransferMetadata;
 use crate::meta::TransferState;
-use crate::meta::Value;
+use crate::runtime;
+use crate::runtime::Meta;
 use crate::runtime::Shards;
-use crate::runtime::Tablet;
 use crate::util::Retry;
 use crate::util::WithBackground;
-use crate::Mutation;
 use crate::Range;
 use crate::RangeSet;
 use crate::ShardId;
@@ -32,98 +37,37 @@ use crate::TransferId;
 
 const CATCHUP_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(crate) struct Coordinator<T>(WithBackground<CoordinatorInner<T>>);
+pub(crate) struct Supervisor(WithBackground<SupervisorInner>);
 
-struct CoordinatorInner<T> {
-    meta: Arc<MetaImpl<T>>,
+struct SupervisorInner {
+    meta: Arc<dyn Meta>,
+    meta_synced: Arc<MetaSynced>,
     shards: Arc<dyn Shards>,
+
+    assign_shards_trigger: Notify,
 }
 
-impl<T> Coordinator<T>
-where
-    T: Tablet + 'static,
-{
-    pub(crate) fn new(meta: Arc<MetaImpl<T>>, shards: Arc<dyn Shards>) -> Self {
+impl Supervisor {
+    pub(crate) fn new(
+        meta: Arc<dyn Meta>,
+        meta_synced: Arc<MetaSynced>,
+        shards: Arc<dyn Shards>,
+    ) -> Self {
         // TODO: scan for transfers
-        Self(WithBackground::new(Arc::new(CoordinatorInner {
+        let supervisor = Self(WithBackground::new(Arc::new(SupervisorInner {
             meta,
+            meta_synced: Arc::clone(&meta_synced),
             shards,
-        })))
-    }
+            assign_shards_trigger: Notify::new(),
+        })));
 
-    pub(crate) async fn start_move(
-        &self,
-        src: TabletId,
-        dst: ShardId,
-    ) -> anyhow::Result<TransferId> {
-        let snapshot = self.0.meta.latest_snapshot_().await?;
-        let src_metadata = snapshot.tablet_metadata(src).await?;
+        meta_synced.subscribe(&supervisor.0);
 
-        Ok(self
-            .start_transfer(vec![src], vec![(dst, src_metadata.range)])
-            .await?)
-    }
+        supervisor.0.spawn(async |inner| {
+            inner.background_assign_shards().await;
+        });
 
-    pub(crate) async fn start_split(
-        &self,
-        src: TabletId,
-        dst_a: ShardId,
-        dst_b: ShardId,
-    ) -> anyhow::Result<TransferId> {
-        let snapshot = self.0.meta.latest_snapshot_().await?;
-        let src_metadata = snapshot.tablet_metadata(src).await?;
-
-        let src_tablet = self.0.shards.tablet(src)?;
-        let split_point = src_tablet.find_split().await?;
-
-        log::debug!("selected {:?} for split of {:?}", split_point, src);
-
-        let (range_a, range_b) = src_metadata.range.split(&split_point);
-
-        self.start_transfer(vec![src], vec![(dst_a, range_a), (dst_b, range_b)])
-            .await
-    }
-
-    pub(crate) async fn start_merge(
-        &self,
-        srcs: Vec<TabletId>,
-        dst: ShardId,
-    ) -> anyhow::Result<TransferId> {
-        let snapshot = self.0.meta.latest_snapshot_().await?;
-        let mut src_range_set = RangeSet::new();
-        for src in &srcs {
-            let src_metadata = snapshot.tablet_metadata(*src).await?;
-            src_range_set.add_range(src_metadata.range);
-        }
-
-        let dst_range = src_range_set.contiguous().ok_or_else(|| {
-            anyhow!(
-                "can't start merge: source tablets not contiguous: {:?} own {:?}",
-                srcs,
-                src_range_set
-            )
-        })?;
-
-        Ok(self.start_transfer(srcs, vec![(dst, dst_range)]).await?)
-    }
-
-    pub(crate) async fn wait_transfer(&self, transfer_id: TransferId) -> anyhow::Result<()> {
-        loop {
-            let snapshot = self.0.meta.latest_snapshot_().await?;
-            let transfer_metadata = snapshot.transfer_metadata(transfer_id).await?;
-
-            match transfer_metadata.state {
-                MetaState::Stable(TransferState::Complete) => {
-                    return Ok(());
-                }
-                MetaState::Stable(TransferState::Aborted) => {
-                    return Err(anyhow!("{:?} aborted", transfer_id));
-                }
-                _ => {}
-            }
-
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
+        supervisor
     }
 
     async fn start_transfer(
@@ -131,7 +75,7 @@ where
         srcs: Vec<TabletId>,
         dsts: Vec<(ShardId, Range<Vec<u8>>)>,
     ) -> anyhow::Result<TransferId> {
-        let snapshot = self.0.meta.latest_snapshot_().await?;
+        let snapshot = self.0.latest_snapshot().await?;
 
         if !((srcs.len() == 1 && dsts.len() >= 1) || (srcs.len() >= 1 && dsts.len() == 1)) {
             return Err(anyhow!(
@@ -166,7 +110,7 @@ where
             src_metadata.transfer_id = Some(transfer_id);
             muts.insert(
                 MetaKey::Tablet(*src),
-                Mutation::Put(src_metadata.clone().encode_to_vec()),
+                MetaMutation::Put(MetaValue::TabletMetadata(src_metadata.clone())),
             );
 
             if let Some(colo_group_id) = colo_group_id {
@@ -210,32 +154,26 @@ where
             dst_tablet_ids.push(dst_tablet_id);
             muts.insert(
                 MetaKey::Tablet(dst_tablet_id),
-                Mutation::Put(
-                    TabletMetadata {
-                        colo_group_id: colo_group_id.unwrap(),
-                        range: dst_range.clone(),
-                        state: MetaState::Stable(TabletState::Hydrating),
-                        transfer_id: Some(transfer_id),
-                    }
-                    .encode_to_vec(),
-                ),
+                MetaMutation::Put(MetaValue::TabletMetadata(TabletMetadata {
+                    colo_group_id: colo_group_id.unwrap(),
+                    range: dst_range.clone(),
+                    state: MetaState::Stable(TabletState::Hydrating),
+                    transfer_id: Some(transfer_id),
+                })),
             );
         }
 
         muts.insert(
             MetaKey::Transfer(transfer_id),
-            Mutation::Put(
-                TransferMetadata {
-                    state: MetaState::Stable(TransferState::Copy),
-                    srcs: srcs.clone(),
-                    dsts: dst_tablet_ids.clone(),
-                    timestamp: SystemTime::now(),
-                }
-                .encode_to_vec(),
-            ),
+            MetaMutation::Put(MetaValue::TransferMetadata(TransferMetadata {
+                state: MetaState::Stable(TransferState::Copy),
+                srcs: srcs.clone(),
+                dsts: dst_tablet_ids.clone(),
+                timestamp: SystemTime::now(),
+            })),
         );
 
-        self.0.meta.write_syncable(snapshot, muts).await?;
+        self.0.meta.write(snapshot.ts(), muts).await?;
 
         log::info!(
             "{:?} started {:?} -> {:?}",
@@ -252,10 +190,76 @@ where
     }
 }
 
-impl<T> CoordinatorInner<T>
-where
-    T: Tablet + 'static,
-{
+impl runtime::Supervisor for Supervisor {
+    async fn start_move(&self, src: TabletId, dst: ShardId) -> anyhow::Result<TransferId> {
+        let snapshot = self.0.latest_snapshot().await?;
+        let src_metadata = snapshot.tablet_metadata(src).await?;
+
+        Ok(self
+            .start_transfer(vec![src], vec![(dst, src_metadata.range)])
+            .await?)
+    }
+
+    async fn start_split(
+        &self,
+        src: TabletId,
+        dst_a: ShardId,
+        dst_b: ShardId,
+    ) -> anyhow::Result<TransferId> {
+        let snapshot = self.0.latest_snapshot().await?;
+        let src_metadata = snapshot.tablet_metadata(src).await?;
+
+        let src_tablet = self.0.shards.tablet(src)?;
+        let split_point = src_tablet.find_split().await?;
+
+        log::debug!("selected {:?} for split of {:?}", split_point, src);
+
+        let (range_a, range_b) = src_metadata.range.split(&split_point);
+
+        self.start_transfer(vec![src], vec![(dst_a, range_a), (dst_b, range_b)])
+            .await
+    }
+
+    async fn start_merge(&self, srcs: Vec<TabletId>, dst: ShardId) -> anyhow::Result<TransferId> {
+        let snapshot = self.0.latest_snapshot().await?;
+        let mut src_range_set = RangeSet::new();
+        for src in &srcs {
+            let src_metadata = snapshot.tablet_metadata(*src).await?;
+            src_range_set.add_range(src_metadata.range);
+        }
+
+        let dst_range = src_range_set.contiguous().ok_or_else(|| {
+            anyhow!(
+                "can't start merge: source tablets not contiguous: {:?} own {:?}",
+                srcs,
+                src_range_set
+            )
+        })?;
+
+        Ok(self.start_transfer(srcs, vec![(dst, dst_range)]).await?)
+    }
+
+    async fn wait_transfer(&self, transfer_id: TransferId) -> anyhow::Result<()> {
+        loop {
+            let snapshot = self.0.latest_snapshot().await?;
+            let transfer_metadata = snapshot.transfer_metadata(transfer_id).await?;
+
+            match transfer_metadata.state {
+                MetaState::Stable(TransferState::Complete) => {
+                    return Ok(());
+                }
+                MetaState::Stable(TransferState::Aborted) => {
+                    return Err(anyhow!("{:?} aborted", transfer_id));
+                }
+                _ => {}
+            }
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+}
+
+impl SupervisorInner {
     async fn transfer(&self, transfer_id: TransferId) {
         Retry::new()
             .indefinitely(&async || -> anyhow::Result<()> {
@@ -270,7 +274,7 @@ where
     }
 
     async fn transfer_step(&self, transfer_id: TransferId) -> anyhow::Result<bool> {
-        let snapshot = self.meta.latest_snapshot_().await?;
+        let snapshot = self.latest_snapshot().await?;
         let transfer_metadata = snapshot.transfer_metadata(transfer_id).await?;
 
         let transfer_state = match transfer_metadata.state {
@@ -385,9 +389,9 @@ where
         Ok(true)
     }
 
-    async fn transition_transfer<'a>(
-        &'a self,
-        snapshot: MetaSnapshot<'a, T>,
+    async fn transition_transfer(
+        &self,
+        snapshot: MetaSyncedSnapshot,
         transfer_id: TransferId,
         next_state: TransferState,
     ) -> anyhow::Result<()> {
@@ -425,7 +429,7 @@ where
         };
         muts.insert(
             MetaKey::Transfer(transfer_id),
-            Mutation::Put(next_transfer_metadata.encode_to_vec()),
+            MetaMutation::Put(MetaValue::TransferMetadata(next_transfer_metadata)),
         );
 
         for (tablet_ids, next_tablet_state) in [
@@ -456,14 +460,14 @@ where
 
                 muts.insert(
                     MetaKey::Tablet(*tablet_id),
-                    Mutation::Put(tablet_metadata.encode_to_vec()),
+                    MetaMutation::Put(MetaValue::TabletMetadata(tablet_metadata)),
                 );
             }
         }
 
         log::info!("{:?} transitioning to {:?}", transfer_id, next_state);
 
-        let _ = self.meta.write_syncable(snapshot, muts).await?;
+        let _ = self.meta.write(snapshot.ts(), muts).await?;
 
         log::info!("{:?} transition to {:?} persisted", transfer_id, next_state);
 
@@ -479,7 +483,7 @@ where
     }
 
     async fn roll_transition_forward(&self, transfer_id: TransferId) -> anyhow::Result<()> {
-        let snapshot = self.meta.latest_snapshot_().await?;
+        let snapshot = self.latest_snapshot().await?;
         let transfer_metadata = snapshot.transfer_metadata(transfer_id).await?;
 
         let (curr_state, next_state) = match transfer_metadata.state {
@@ -496,7 +500,7 @@ where
         };
         muts.insert(
             MetaKey::Transfer(transfer_id),
-            Mutation::Put(next_transfer_metadata.encode_to_vec()),
+            MetaMutation::Put(MetaValue::TransferMetadata(next_transfer_metadata)),
         );
 
         let (curr_srcs_state, curr_dsts_state) = curr_state.tablet_states();
@@ -541,17 +545,111 @@ where
                     tablet_metadata.state = MetaState::Stable(next_tablet_state);
                     muts.insert(
                         MetaKey::Tablet(*tablet_id),
-                        Mutation::Put(tablet_metadata.encode_to_vec()),
+                        MetaMutation::Put(MetaValue::TabletMetadata(tablet_metadata)),
                     );
                 }
             }
         }
 
-        let _ = self.meta.write_syncable(snapshot, muts).await?;
+        let _ = self.meta.write(snapshot.ts(), muts).await?;
 
         log::info!("{:?} transitioned to {:?}", transfer_id, next_state);
 
         Ok(())
+    }
+
+    async fn latest_snapshot(&self) -> anyhow::Result<MetaSyncedSnapshot> {
+        let ts = self.meta.latest_snapshot().await?;
+        self.meta_synced.wait(ts).await?;
+        Ok(self.meta_synced.snapshot())
+    }
+
+    async fn try_sync_meta(
+        &self,
+        sync_type: &SyncType,
+        _snapshot: &MetaSyncedSnapshot,
+    ) -> anyhow::Result<()> {
+        match sync_type {
+            SyncType::Initial => {
+                self.assign_shards_trigger.notify_one();
+            }
+            SyncType::Tx(keys) => {
+                if keys
+                    .iter()
+                    .any(|key| matches!(key, MetaKey::Node(_) | MetaKey::Shard(_)))
+                {
+                    self.assign_shards_trigger.notify_one();
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // This must be done out-of-band from try_sync_meta because we need to get up-to-date snapshots
+    // of meta in order to make progress if we ever run into a precondition failure, and
+    // meta_synced.wait from inside a meta_synced.subscribe deadlocks.
+    async fn background_assign_shards(&self) {
+        Retry::new()
+            .indefinitely::<_, _, (), anyhow::Error>(&async || loop {
+                self.assign_shards_trigger.notified().await;
+                self.assign_shards().await?;
+            })
+            .await
+    }
+
+    async fn assign_shards(&self) -> anyhow::Result<()> {
+        self.meta_synced
+            .wait(self.meta.latest_snapshot().await?)
+            .await?;
+        let snapshot = self.meta_synced.snapshot();
+
+        let shard_ids = snapshot.shard_ids().await?;
+        let mut unassigned_node_ids = snapshot
+            .node_ids()
+            .try_collect::<HashSet<_>>()
+            .await?;
+
+        let mut unassigned_shard_ids = HashSet::new();
+        for shard_id in shard_ids {
+            let shard_metadata = snapshot.shard_metadata(shard_id).await?;
+
+            if let Some(node_id) = shard_metadata.assigned_node_id {
+                unassigned_node_ids.remove(&node_id);
+            } else {
+                unassigned_shard_ids.insert(shard_id);
+            }
+        }
+
+        let mut unassigned_node_ids = unassigned_node_ids.into_iter();
+        let mut unassigned_shard_ids = unassigned_shard_ids.into_iter();
+
+        let mut muts = HashMap::new();
+        while let (Some(node_id), Some(shard_id)) =
+            (unassigned_node_ids.next(), unassigned_shard_ids.next())
+        {
+            let mut shard_metadata = snapshot.shard_metadata(shard_id).await?;
+            shard_metadata.assigned_node_id = Some(node_id);
+            muts.insert(
+                MetaKey::Shard(shard_id),
+                MetaMutation::Put(MetaValue::ShardMetadata(shard_metadata)),
+            );
+        }
+
+        let _ = self.meta.write(snapshot.ts(), muts).await?;
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl MetaSubscriber for SupervisorInner {
+    async fn sync_meta(&self, sync_type: SyncType, snapshot: MetaSyncedSnapshot) {
+        Retry::new()
+            .indefinitely(&async || -> anyhow::Result<()> {
+                self.try_sync_meta(&sync_type, &snapshot).await
+            })
+            .await;
     }
 }
 
@@ -612,6 +710,7 @@ mod tests {
     use rand::RngCore;
 
     use crate::meta::MetaReader;
+    use crate::runtime::Supervisor;
     use crate::test::ObsidianForTest;
     use crate::Bound;
     use crate::ColoGroupId;
@@ -650,12 +749,12 @@ mod tests {
                 .await?;
         }
 
-        let meta_snapshot = obs.meta.latest_snapshot_().await?;
+        let meta_snapshot = obs.latest_meta_snapshot().await?;
         let tablet_ids = meta_snapshot.tablet_ids().await?;
         let shard_ids = meta_snapshot.shard_ids().await?;
 
         let transfer_id = obs
-            .coordinator
+            .supervisor
             .start_move(
                 tablet_ids[0],
                 shard_ids
@@ -667,7 +766,7 @@ mod tests {
             )
             .await?;
 
-        obs.coordinator.wait_transfer(transfer_id).await?;
+        obs.supervisor.wait_transfer(transfer_id).await?;
 
         // TODO: jank, because we need to wait for the gateway to find out about the routing
         // change
@@ -720,7 +819,7 @@ mod tests {
                 .await?;
         }
 
-        let meta_snapshot = obs.meta.latest_snapshot_().await?;
+        let meta_snapshot = obs.latest_meta_snapshot().await?;
         let tablet_ids = meta_snapshot.tablet_ids().await?;
         let shard_ids = meta_snapshot.shard_ids().await?;
 
@@ -732,11 +831,11 @@ mod tests {
             .unwrap();
 
         let transfer_id = obs
-            .coordinator
+            .supervisor
             .start_merge(tablet_ids, target_shard_id)
             .await?;
 
-        obs.coordinator.wait_transfer(transfer_id).await?;
+        obs.supervisor.wait_transfer(transfer_id).await?;
 
         // TODO: jank, because we need to wait for the gateway to find out about the routing
         // change
@@ -798,8 +897,11 @@ mod tests {
                 obs.gateway.write(vec![], muts).await?;
             }
         }
+        // TODO: jank, have to wait for the compactor to pick these up since we don't use memtables
+        // for size estimates
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let meta_snapshot = obs.meta.latest_snapshot_().await?;
+        let meta_snapshot = obs.latest_meta_snapshot().await?;
         let tablet_ids = meta_snapshot.tablet_ids().await?;
         let shard_ids = meta_snapshot.shard_ids().await?;
 
@@ -810,11 +912,11 @@ mod tests {
             .collect();
 
         let transfer_id = obs
-            .coordinator
+            .supervisor
             .start_split(tablet_ids[0], target_shard_ids[0], target_shard_ids[1])
             .await?;
 
-        obs.coordinator.wait_transfer(transfer_id).await?;
+        obs.supervisor.wait_transfer(transfer_id).await?;
 
         // TODO: jank, because we need to wait for the gateway to find out about the routing
         // change

@@ -15,9 +15,7 @@ use crate::lsm::Memtable;
 use crate::lsm::Run;
 use crate::lsm::RunId;
 use crate::lsm::RunManifest;
-use crate::runtime::FileReader;
 use crate::runtime::Storage;
-use crate::WalSeq;
 use crate::util::binary_search_by_idx;
 use crate::Bound;
 use crate::KeyOrBound;
@@ -26,6 +24,7 @@ use crate::Range;
 use crate::RangeMap;
 use crate::RevisionValue;
 use crate::Timestamp;
+use crate::WalSeq;
 
 const N_STRIPES: usize = 32;
 
@@ -40,19 +39,16 @@ const N_STRIPES: usize = 32;
 /// Because memtables are interior-mutable, nothing actually prevents writes to l0_sealed. It's the
 /// caller's responsibility to guarantee (1) and (2), most easily by having the same thread
 /// responsible for both tasks.
-pub(super) struct Index<R> {
+pub(super) struct Index {
     // All of the elements of this array are separate arcs with clones of the same data inside.
     // Readers can choose any of them, writers must update all of them.
     //
     // This is done so that readers don't have to contend on the atomic inside the arc.
-    current: [RwLock<Arc<IndexSnapshot<R>>>; N_STRIPES],
+    current: [RwLock<Arc<IndexSnapshot>>; N_STRIPES],
     updated: Notify,
 }
 
-impl<R> Index<R>
-where
-    R: FileReader + Clone,
-{
+impl Index {
     pub(super) fn new() -> Self {
         Self::from_snapshot(IndexSnapshot {
             keyspaces: HashMap::new(),
@@ -60,33 +56,31 @@ where
         })
     }
 
-    pub(super) fn from_snapshot(index_snapshot: IndexSnapshot<R>) -> Self {
+    pub(super) fn from_snapshot(index_snapshot: IndexSnapshot) -> Self {
         Self {
             current: array::from_fn(|_| RwLock::new(Arc::new(index_snapshot.clone()))),
             updated: Notify::new(),
         }
     }
 
-    pub(super) async fn from_manifest<S>(storage: &S, manifest: Manifest) -> anyhow::Result<Self>
-    where
-        S: Storage<Reader = R>,
-    {
+    pub(super) async fn from_manifest(
+        storage: &dyn Storage,
+        manifest: Manifest,
+    ) -> anyhow::Result<Self> {
         let index_snapshot = IndexSnapshot::from_manifest(storage, manifest).await?;
 
         Ok(Self::from_snapshot(index_snapshot))
     }
 
     /// Returns the current snapshot of the index state.
-    pub(super) fn snapshot(&self) -> Arc<IndexSnapshot<R>> {
+    pub(super) fn snapshot(&self) -> Arc<IndexSnapshot> {
         let thread_id = std::thread::current().id().as_u64().get() as usize;
         Arc::clone(&self.current[thread_id % N_STRIPES].read().unwrap())
     }
 
     /// Returns the current snapshot of the index state, and a future that will complete if the
     /// snapshot changes.
-    pub(super) fn snapshot_subscribe(
-        &self,
-    ) -> (Arc<IndexSnapshot<R>>, impl Future<Output = ()> + '_) {
+    pub(super) fn snapshot_subscribe(&self) -> (Arc<IndexSnapshot>, impl Future<Output = ()> + '_) {
         let notified = self.updated.notified();
         (self.snapshot(), notified)
     }
@@ -140,7 +134,7 @@ where
             if snapshot.keyspaces.contains_key(&keyspace_id) {
                 return Ok(());
             }
-            let mut levels: Vec<Level<R>> = Vec::with_capacity(n_levels);
+            let mut levels: Vec<Level> = Vec::with_capacity(n_levels);
             for _ in 0..n_levels {
                 levels.push(Level::new());
             }
@@ -158,7 +152,7 @@ where
     pub(super) fn replace(
         &self,
         keyspace_id: KeyspaceId,
-        add: Vec<Run<R>>,
+        add: Vec<Run>,
         min_level: usize,
         remove: HashSet<RunId>,
     ) -> anyhow::Result<()> {
@@ -172,7 +166,7 @@ where
         })
     }
 
-    pub(super) fn load(&self, new_snapshot: IndexSnapshot<R>) -> anyhow::Result<()> {
+    pub(super) fn load(&self, new_snapshot: IndexSnapshot) -> anyhow::Result<()> {
         self.update(|snapshot| {
             // TODO: Error out if the existing index isn't empty.
             *snapshot = new_snapshot;
@@ -189,7 +183,7 @@ where
 
     fn update<F>(&self, f: F) -> anyhow::Result<()>
     where
-        F: FnOnce(&mut IndexSnapshot<R>) -> anyhow::Result<()>,
+        F: FnOnce(&mut IndexSnapshot) -> anyhow::Result<()>,
     {
         let mut current: [_; N_STRIPES] = array::from_fn(|i| self.current[i].write().unwrap());
         let snapshot = &current[0];
@@ -207,8 +201,8 @@ where
 }
 
 #[derive(Clone)]
-pub(super) struct IndexSnapshot<R> {
-    pub(super) keyspaces: HashMap<KeyspaceId, Keyspace<R>>,
+pub(super) struct IndexSnapshot {
+    pub(super) keyspaces: HashMap<KeyspaceId, Keyspace>,
     /// The compactor will split runs at these bounds and schedule compactions of all runs that
     /// contain any.
     ///
@@ -216,14 +210,8 @@ pub(super) struct IndexSnapshot<R> {
     pub(super) splits: Vec<Bound<Vec<u8>>>,
 }
 
-impl<R> IndexSnapshot<R>
-where
-    R: FileReader + Clone,
-{
-    async fn from_manifest<S>(storage: &S, manifest: Manifest) -> anyhow::Result<Self>
-    where
-        S: Storage<Reader = R>,
-    {
+impl IndexSnapshot {
+    async fn from_manifest(storage: &dyn Storage, manifest: Manifest) -> anyhow::Result<Self> {
         let mut keyspaces = HashMap::new();
         for (keyspace_id, keyspace_manifest) in manifest.keyspaces {
             let keyspace = Keyspace::from_manifest(storage, keyspace_manifest).await?;
@@ -248,21 +236,18 @@ where
 }
 
 #[derive(Clone)]
-pub(super) struct Keyspace<R> {
+pub(super) struct Keyspace {
     pub(super) l0_active: Arc<Memtable>,
     pub(super) l0_sealed: Vec<Arc<Memtable>>,
     // For ease of expression, levels[0] is always present but empty because it's represented above.
-    pub(super) levels: Vec<Level<R>>,
+    pub(super) levels: Vec<Level>,
 }
 
-impl<R> Keyspace<R>
-where
-    R: FileReader + Clone,
-{
-    async fn from_manifest<S>(storage: &S, manifest: KeyspaceManifest) -> anyhow::Result<Self>
-    where
-        S: Storage<Reader = R>,
-    {
+impl Keyspace {
+    async fn from_manifest(
+        storage: &dyn Storage,
+        manifest: KeyspaceManifest,
+    ) -> anyhow::Result<Self> {
         if !manifest.levels[0].runs.is_empty() {
             return Err(anyhow!("manifest with non-empty l0"));
         }
@@ -325,7 +310,7 @@ where
         }
     }
 
-    pub fn runs(&self) -> impl Iterator<Item = (usize, &Arc<Run<R>>)> {
+    pub fn runs(&self) -> impl Iterator<Item = (usize, &Arc<Run>)> {
         self.levels
             .iter()
             .enumerate()
@@ -335,7 +320,7 @@ where
 
     fn replace(
         &mut self,
-        add: Vec<Run<R>>,
+        add: Vec<Run>,
         min_level: usize,
         remove: HashSet<RunId>,
     ) -> anyhow::Result<()> {
@@ -420,12 +405,12 @@ where
 }
 
 #[derive(Clone)]
-pub(super) struct Level<R> {
+pub(super) struct Level {
     // In sorted order by range, guaranteed non-overlapping.
-    pub(super) runs: Vec<Arc<Run<R>>>,
+    pub(super) runs: Vec<Arc<Run>>,
 }
 
-impl<R: FileReader> Level<R> {
+impl Level {
     fn new() -> Self {
         Self { runs: Vec::new() }
     }
@@ -446,7 +431,7 @@ impl<R: FileReader> Level<R> {
         self.runs.iter().map(|run| run.size()).sum()
     }
 
-    pub(super) fn run_for_key<'a>(&'a self, k: &[u8]) -> Option<&'a Run<R>> {
+    pub(super) fn run_for_key<'a>(&'a self, k: &[u8]) -> Option<&'a Run> {
         let idx = self
             .runs
             .binary_search_by_key(&KeyOrBound::Key(k.to_vec()), |run| {
@@ -463,7 +448,7 @@ impl<R: FileReader> Level<R> {
         Some(run)
     }
 
-    pub(super) fn range(&self, range: Range<Vec<u8>>) -> &[Arc<Run<R>>] {
+    pub(super) fn range(&self, range: Range<Vec<u8>>) -> &[Arc<Run>] {
         let start_idx = match binary_search_by_idx(self.runs.len(), range.lower, |idx| {
             self.runs[idx].range().upper
         }) {

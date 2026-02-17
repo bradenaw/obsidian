@@ -7,6 +7,16 @@ import "google/protobuf/empty.proto";
 import "internal/internal.proto";
 import "obsidian.proto";
 
+message MetaValue {
+    oneof value_type {
+        google.protobuf.Empty empty = 1;
+        MetaTx meta_tx = 2;
+        ShardMetadata shard_metadata = 3;
+        TabletMetadata tablet_metadata = 4;
+        TransferMetadata transfer_metadata = 5;
+    }
+}
+
 message MetaTx {
     CompressedKeySet keys = 1;
 }
@@ -45,9 +55,37 @@ enum TransferState {
     TRANSFER_STATE_ABORTED = 6;
 }
 
+message ShardMetadata {
+    NodeId assigned_node_id = 1;
+}
+
 message TabletId {
     uint32 shard_id = 1;
     uint64 id = 2;
+}
+
+message NodeId {
+    IpAddr addr = 1;
+    uint32 port = 2;
+    Uuid uuid = 3;
+}
+
+message IpAddr {
+    oneof addr_type {
+        Ipv4Addr v4 = 1;
+        Ipv6Addr v6 = 2;
+    }
+}
+
+message Ipv4Addr {
+    // Big-endian.
+    fixed32 bits = 1;
+}
+
+message Ipv6Addr {
+    // Big-endian.
+    fixed64 a = 1;
+    fixed64 b = 2;
 }
 
 message Uuid {

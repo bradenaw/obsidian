@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::fmt::Display;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -28,12 +29,9 @@ pub(crate) use crate::lsm::preload::Preloaded;
 pub(crate) use crate::lsm::preload::Preloader;
 use crate::lsm::run::Run;
 use crate::lsm::util::LsmRevision;
-use crate::runtime::FileReader;
 use crate::runtime::Storage;
 use crate::runtime::Wal;
-use crate::WalSeq;
 use crate::util::hexlify;
-use crate::WalEntry;
 use crate::util::merge_sorted_streams;
 use crate::util::shortest_between;
 use crate::util::Background;
@@ -50,18 +48,20 @@ use crate::Range;
 use crate::Revision;
 use crate::RevisionValue;
 use crate::Timestamp;
+use crate::WalEntry;
+use crate::WalSeq;
 use crate::WriteError;
 
-pub(crate) struct LsmBuilder<S> {
+pub(crate) struct LsmBuilder {
     l0_max_size: u64,
     run_size_target: u64,
     block_size_target: u64,
     wal: Arc<dyn Wal>,
-    storage: Arc<S>,
+    storage: Arc<dyn Storage>,
 }
 
-impl<S: Storage> LsmBuilder<S> {
-    pub fn new(wal: Arc<dyn Wal>, storage: Arc<S>) -> Self {
+impl LsmBuilder {
+    pub fn new(wal: Arc<dyn Wal>, storage: Arc<dyn Storage>) -> Self {
         LsmBuilder {
             l0_max_size: 8_000_000,
             run_size_target: 64_000_000,
@@ -91,7 +91,7 @@ impl<S: Storage> LsmBuilder<S> {
         self
     }
 
-    pub async fn build(self) -> anyhow::Result<Lsm<S>> {
+    pub async fn build(self) -> anyhow::Result<Lsm> {
         Lsm::new(
             self.l0_max_size,
             self.run_size_target,
@@ -103,7 +103,7 @@ impl<S: Storage> LsmBuilder<S> {
     }
 }
 
-impl<S> Clone for LsmBuilder<S> {
+impl Clone for LsmBuilder {
     fn clone(&self) -> Self {
         Self {
             l0_max_size: self.l0_max_size.clone(),
@@ -115,29 +115,29 @@ impl<S> Clone for LsmBuilder<S> {
     }
 }
 
-pub(crate) struct Lsm<S: Storage> {
+pub(crate) struct Lsm {
     l0_max_size: u64,
     run_size_target: u64,
     block_size_target: u64,
 
     wal: Arc<dyn Wal>,
-    index: Arc<Index<S::Reader>>,
-    compactor: Compactor<S>,
-    storage: Arc<S>,
+    index: Arc<Index>,
+    compactor: Compactor,
+    storage: Arc<dyn Storage>,
 
     bg: Background,
     wal_processed: tokio::sync::watch::Receiver<WalSeq>,
 }
 
-impl<S: Storage> Lsm<S> {
+impl Lsm {
     pub async fn new(
         l0_max_size: u64,
         run_size_target: u64,
         block_size_target: u64,
         wal: Arc<dyn Wal>,
-        storage: Arc<S>,
+        storage: Arc<dyn Storage>,
     ) -> anyhow::Result<Self> {
-        let (index, newest_seqno) = Self::recovery(l0_max_size, &wal, &storage).await?;
+        let (index, newest_seqno) = Self::recovery(l0_max_size, &wal, storage.deref()).await?;
 
         let index_arc = Arc::new(index);
 
@@ -395,9 +395,9 @@ impl<S: Storage> Lsm<S> {
     }
 
     fn keyspace(
-        snapshot: &IndexSnapshot<S::Reader>,
+        snapshot: &IndexSnapshot,
         keyspace_id: KeyspaceId,
-    ) -> anyhow::Result<KeyspaceReader<'_, S::Reader>> {
+    ) -> anyhow::Result<KeyspaceReader<'_>> {
         Ok(KeyspaceReader(
             snapshot
                 .keyspaces
@@ -406,7 +406,7 @@ impl<S: Storage> Lsm<S> {
         ))
     }
 
-    pub async fn load(&self, preloaded: Preloaded<S::Reader>) -> anyhow::Result<()> {
+    pub async fn load(&self, preloaded: Preloaded) -> anyhow::Result<()> {
         self.index.load(preloaded.snapshot)?;
         // We need to flush here otherwise after a crash and restart we'd lose track of the runs,
         // and could erroneously transition to Active with no data.
@@ -432,8 +432,8 @@ impl<S: Storage> Lsm<S> {
     async fn recovery(
         l0_max_size: u64,
         wal: &Arc<dyn Wal>,
-        storage: &S,
-    ) -> anyhow::Result<(Index<S::Reader>, Option<WalSeq>)> {
+        storage: &dyn Storage,
+    ) -> anyhow::Result<(Index, Option<WalSeq>)> {
         let oldest_seqno = wal.oldest_available().await?;
         let mut newest_seqno = None;
         let mut wal_stream = wal.read(oldest_seqno);
@@ -498,7 +498,7 @@ impl<S: Storage> Lsm<S> {
     }
 
     async fn process_wal(
-        index: Arc<Index<S::Reader>>,
+        index: Arc<Index>,
         wal: Arc<dyn Wal>,
         start: WalSeq,
         wal_processed: tokio::sync::watch::Sender<WalSeq>,
@@ -511,7 +511,7 @@ impl<S: Storage> Lsm<S> {
     }
 
     async fn process_wal_once(
-        index: &Index<S::Reader>,
+        index: &Index,
         wal: &Arc<dyn Wal>,
         start: WalSeq,
         wal_processed: tokio::sync::watch::Sender<WalSeq>,
@@ -642,12 +642,9 @@ pub(crate) struct RunManifest {
     pub(crate) range: Range<Vec<u8>>,
 }
 
-struct KeyspaceReader<'a, R>(&'a Keyspace<R>);
+struct KeyspaceReader<'a>(&'a Keyspace);
 
-impl<'a, R> KeyspaceReader<'a, R>
-where
-    R: FileReader,
-{
+impl<'a> KeyspaceReader<'a> {
     async fn get(
         &self,
         ts: Timestamp,
@@ -923,12 +920,11 @@ where
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use std::collections::BTreeMap;
     use std::collections::HashSet;
     use std::sync::Arc;
 
-    use async_trait::async_trait;
     use byteorder::BigEndian;
     use byteorder::ByteOrder;
     use futures::TryStreamExt;
@@ -945,11 +941,9 @@ mod test {
     use crate::lsm::run::RunBuilder;
     use crate::lsm::util::LsmRevision;
     use crate::lsm::RunId;
-    use crate::runtime::FileReader;
-    use crate::runtime::Storage;
     use crate::runtime::Wal;
-    use crate::WalSeq;
-    use crate::storage::MemStorage;
+    use crate::test::MemFileReader;
+    use crate::test::MemStorage;
     use crate::test::MemWal;
     use crate::util::binary_search_by_idx;
     use crate::Bound;
@@ -963,45 +957,8 @@ mod test {
     use crate::Revision;
     use crate::RevisionValue;
     use crate::Timestamp;
+    use crate::WalSeq;
     use crate::WriteError;
-
-    #[derive(Clone)]
-    pub(super) struct TestFile {
-        inner: Arc<Vec<u8>>,
-    }
-
-    impl From<Vec<u8>> for TestFile {
-        fn from(value: Vec<u8>) -> Self {
-            Self {
-                inner: Arc::new(value),
-            }
-        }
-    }
-
-    impl From<Arc<Vec<u8>>> for TestFile {
-        fn from(value: Arc<Vec<u8>>) -> Self {
-            Self {
-                inner: Arc::clone(&value),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl FileReader for TestFile {
-        async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
-            if offset + (buf.len() as u64) > self.inner.len() as u64 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "unexpected eof",
-                )
-                .into());
-            }
-            Ok(buf.copy_from_slice(&self.inner[(offset as usize)..(offset as usize) + buf.len()]))
-        }
-        fn len(&self) -> u64 {
-            self.inner.len() as u64
-        }
-    }
 
     #[tokio::test]
     async fn test_put_get() -> anyhow::Result<()> {
@@ -1377,8 +1334,8 @@ mod test {
             //expecteds.push(expected);
         }
 
-        async fn check<S: Storage>(
-            lsm: &Lsm<S>,
+        async fn check(
+            lsm: &Lsm,
             ts: Timestamp,
             keyspace_id: KeyspaceId,
             range: Range<Vec<u8>>,
@@ -1483,8 +1440,8 @@ mod test {
 
         let keyspace = keyspace_from_diagram(diagram).await?;
 
-        async fn check<R: FileReader>(
-            keyspace: &Keyspace<R>,
+        async fn check(
+            keyspace: &Keyspace,
             key: &[u8],
             range: HistoryRange,
             expected: &[(usize, bool)],
@@ -1678,7 +1635,7 @@ mod test {
         }
     }
 
-    async fn dump_lsm<S: Storage>(lsm: &Lsm<S>) -> anyhow::Result<()> {
+    async fn dump_lsm(lsm: &Lsm) -> anyhow::Result<()> {
         let index_snapshot = lsm.index.snapshot();
         for (keyspace_id, keyspace) in &index_snapshot.keyspaces {
             println!("keyspace_id {:?}", keyspace_id);
@@ -1688,7 +1645,7 @@ mod test {
         Ok(())
     }
 
-    async fn dump_keyspace<R: FileReader + Clone>(keyspace: &Keyspace<R>) -> anyhow::Result<()> {
+    async fn dump_keyspace(keyspace: &Keyspace) -> anyhow::Result<()> {
         println!("== manifest =====");
         println!("l0_active");
         {
@@ -1866,9 +1823,7 @@ mod test {
         }
     }
 
-    async fn keyspace_from_diagram(
-        diagram: Vec<(&str, &[u8])>,
-    ) -> anyhow::Result<Keyspace<TestFile>> {
+    async fn keyspace_from_diagram(diagram: Vec<(&str, &[u8])>) -> anyhow::Result<Keyspace> {
         fn find_touching(
             diagram: &[(&str, &[u8])],
             visited: &mut HashSet<(usize, usize)>,
@@ -1963,7 +1918,7 @@ mod test {
                         run_builder.push(revision).await?;
                     }
                     run_builder.finish().await?;
-                    let run = Run::open(TestFile::from(v)).await?;
+                    let run = Run::open(Arc::new(MemFileReader::new(v))).await?;
                     level.runs.push(Arc::new(run));
                 }
             }

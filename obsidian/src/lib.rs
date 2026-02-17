@@ -1,20 +1,23 @@
 #![allow(dead_code)]
 #![feature(assert_matches)]
 #![feature(coroutines)]
+#![feature(ip_from)]
 #![feature(thread_id_value)]
 
-mod coordinator;
 mod election;
 mod gateway;
 mod grpc;
 mod lsm;
 mod meta;
+mod node;
 mod obsidian;
 mod router;
 mod rtest;
 mod runtime;
 mod shard;
+mod shards;
 mod storage;
+mod supervisor;
 mod tablet;
 mod tuple_encoding;
 mod types;

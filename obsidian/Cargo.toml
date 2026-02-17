@@ -22,6 +22,7 @@ pretty_env_logger = "^0.5"
 priority-queue = "^1.3"
 prost = "0.11.9"
 rand = "0.8.5"
+regex = "1.12.3"
 thiserror = "^1.0"
 tokio = { version = "1.47.1", features = [ "fs", "io-util", "macros", "rt", "rt-multi-thread", "sync", "time", "tracing" ] }
 tokio-stream = "0.1.18"

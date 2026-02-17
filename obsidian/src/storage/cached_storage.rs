@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 
 use crate::runtime::FileReader;
+use crate::runtime::FileWriter;
 use crate::runtime::Storage;
 
 /// CachedStorage wraps another implementation of `Storage`, holding pages in an
@@ -55,9 +56,6 @@ impl<S: Storage> CachedStorage<S> {
 
 #[async_trait]
 impl<S: Storage> Storage for CachedStorage<S> {
-    type Writer = PutCacher<Pin<Box<S::Writer>>>;
-    type Reader = GetCacher<S::Reader>;
-
     // Assuming that:
     // 1. Objects are immutable, i.e. put() with an object that exists will fail.
     // 2. Names are globally unique and never reused.
@@ -65,27 +63,27 @@ impl<S: Storage> Storage for CachedStorage<S> {
     //
     // Then it's perfectly safe to not actually make any changes to the cache from put/delete.
 
-    async fn put(&self, name: &str) -> anyhow::Result<Self::Writer> {
-        Ok(PutCacher {
+    async fn put(&self, name: &str) -> anyhow::Result<Box<dyn FileWriter>> {
+        Ok(Box::new(PutCacher {
             inner: Box::pin(self.inner.put(name).await?),
             cache: self.cache.clone(),
             name: Arc::new(name.to_string()),
             buf: Vec::with_capacity(self.page_size),
             buf_offset: 0,
             page_size: self.page_size as usize,
-        })
+        }))
     }
 
-    async fn get(&self, name: &str) -> anyhow::Result<Self::Reader> {
+    async fn get(&self, name: &str) -> anyhow::Result<Arc<dyn FileReader>> {
         let f = self.inner.get(name).await?;
         let len = f.len();
-        Ok(GetCacher {
+        Ok(Arc::new(GetCacher {
             inner: f,
             len: len,
             page_size: self.page_size,
             name: Arc::new(name.to_string()),
             cache: self.cache.clone(),
-        })
+        }) as Arc<dyn FileReader>)
     }
 
     async fn delete(&self, name: &str) -> anyhow::Result<()> {
@@ -154,7 +152,7 @@ where
 
 impl<W> AsyncWrite for PutCacher<W>
 where
-    W: AsyncWrite + Unpin,
+    W: FileWriter + Unpin,
 {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -189,8 +187,8 @@ where
 
 // Wraps read_exact_at in a cache.
 #[derive(Clone)]
-pub(crate) struct GetCacher<R: FileReader> {
-    inner: R,
+pub(crate) struct GetCacher {
+    inner: Arc<dyn FileReader>,
     page_size: usize,
     len: u64,
     name: Arc<String>,
@@ -199,10 +197,7 @@ pub(crate) struct GetCacher<R: FileReader> {
 }
 
 #[async_trait]
-impl<R> FileReader for GetCacher<R>
-where
-    R: FileReader,
-{
+impl FileReader for GetCacher {
     async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
         let end_offset = offset + (buf.len() as u64);
 
@@ -692,14 +687,13 @@ mod tests {
 
     use super::Cache;
     use super::CachedStorage;
-    use super::FileReader;
     use super::HashTrie;
     use super::HashTrieNode;
     use super::Storage;
     use super::TreeList;
     use super::HASH_TRIE_LEAF_MAX;
     use super::TREE_LIST_NODE_SIZE;
-    use crate::storage::MemStorage;
+    use crate::test::MemStorage;
 
     #[tokio::test]
     async fn test_cached_storage() -> anyhow::Result<()> {
