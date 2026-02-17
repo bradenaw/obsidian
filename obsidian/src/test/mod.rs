@@ -4,7 +4,7 @@ mod mem_storage;
 mod mem_wal;
 mod mem_wals;
 mod meta_proxy;
-mod nodes;
+mod test_nodes;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -34,7 +34,7 @@ pub(crate) use crate::test::mem_storage::MemStorage;
 pub(crate) use crate::test::mem_wal::MemWal;
 pub(crate) use crate::test::mem_wals::MemWals;
 use crate::test::meta_proxy::MetaProxy;
-use crate::test::nodes::TestNodes;
+use crate::test::test_nodes::TestNodes;
 use crate::util::encode;
 use crate::util::Decode;
 use crate::util::Encode;
