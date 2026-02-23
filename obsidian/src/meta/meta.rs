@@ -58,11 +58,9 @@ impl<T: Tablet> Meta for MetaImpl<T> {
             snapshot.ts,
             HashMap::from([(
                 MetaKey::Shard(shard_id),
-                MetaMutation::Put(
-                    MetaValue::ShardMetadata(ShardMetadata {
-                        assigned_node_id: None,
-                    })
-                ),
+                MetaMutation::Put(MetaValue::ShardMetadata(ShardMetadata {
+                    assigned_node_id: None,
+                })),
             )]),
         )
         .await?;

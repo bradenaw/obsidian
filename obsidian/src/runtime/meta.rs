@@ -2,12 +2,12 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 
-use crate::NodeId;
 use crate::meta::MetaKey;
 use crate::meta::MetaMutation;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::KeyspaceId;
+use crate::NodeId;
 use crate::Range;
 use crate::Record;
 use crate::Revision;

@@ -296,7 +296,6 @@ impl ShardMetaTabletInner {
             lsm_rw
                 .write(
                     Timestamp::ZERO,
-                    vec![],
                     BTreeMap::from([(
                         (KeyspaceId::TX_OUTCOMES, tx_outcome_key.to_vec()),
                         Mutation::Put(tx_outcome_record_bytes),
@@ -422,7 +421,6 @@ impl ShardMetaTabletInner {
         lsm_rw
             .write(
                 Timestamp::ZERO.plus_one(),
-                vec![],
                 BTreeMap::from([(
                     (KeyspaceId::TX_OUTCOMES, tx_outcome_key.to_vec()),
                     Mutation::Delete,

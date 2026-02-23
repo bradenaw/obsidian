@@ -43,7 +43,6 @@ use crate::HistoryRange;
 use crate::Key;
 use crate::KeyspaceId;
 use crate::Mutation;
-use crate::Precondition;
 use crate::Range;
 use crate::Revision;
 use crate::RevisionValue;
@@ -227,25 +226,9 @@ impl Lsm {
     pub async fn write(
         &self,
         ts: Timestamp,
-        preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<(), WriteError> {
         let index_snapshot = self.index.snapshot();
-
-        for precond in preconds {
-            let res = Self::keyspace(&index_snapshot, precond.keyspace_id())?
-                .get(ts, precond.key())
-                .await?;
-            match precond {
-                Precondition::NotChangedSince(_, _, ts) => {
-                    if let Some((last_write_ts, _)) = res {
-                        if last_write_ts > ts {
-                            return Err(WriteError::PreconditionFailed);
-                        }
-                    }
-                }
-            }
-        }
 
         for key in muts.keys() {
             Self::keyspace(&index_snapshot, key.0)?;
@@ -952,13 +935,11 @@ mod tests {
     use crate::HistoryRange;
     use crate::KeyspaceId;
     use crate::Mutation;
-    use crate::Precondition;
     use crate::Range;
     use crate::Revision;
     use crate::RevisionValue;
     use crate::Timestamp;
     use crate::WalSeq;
-    use crate::WriteError;
 
     #[tokio::test]
     async fn test_put_get() -> anyhow::Result<()> {
@@ -974,7 +955,6 @@ mod tests {
             .await?;
         lsm.write(
             Timestamp(5),
-            vec![],
             BTreeMap::from([((keyspace_id, k.to_vec()), Mutation::Put(v.to_vec()))]),
         )
         .await?;
@@ -990,78 +970,6 @@ mod tests {
         assert_eq!(lsm.get(Timestamp(4), keyspace_id, not_k).await?, None);
         assert_eq!(lsm.get(Timestamp(5), keyspace_id, not_k).await?, None);
         assert_eq!(lsm.get(Timestamp(6), keyspace_id, not_k).await?, None);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_write_tx() -> anyhow::Result<()> {
-        let lsm = LsmBuilder::new(Arc::new(MemWal::new()), Arc::new(MemStorage::new()))
-            .build()
-            .await?;
-
-        let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-        let ka = b"a";
-        let kb = b"b";
-
-        lsm.create_keyspace_with_depth(keyspace_id, 2 /*depth*/)
-            .await?;
-        lsm.write(
-            Timestamp(5),
-            vec![],
-            BTreeMap::from([
-                ((keyspace_id, ka.to_vec()), Mutation::Put(b"a0".to_vec())),
-                ((keyspace_id, kb.to_vec()), Mutation::Put(b"b0".to_vec())),
-            ]),
-        )
-        .await?;
-
-        assert!(matches!(
-            lsm.write(
-                Timestamp(10),
-                vec![Precondition::NotChangedSince(
-                    keyspace_id,
-                    ka.to_vec(),
-                    Timestamp(4),
-                )],
-                BTreeMap::from([((keyspace_id, ka.to_vec()), Mutation::Put(b"a1".to_vec()))]),
-            )
-            .await,
-            Err(WriteError::PreconditionFailed),
-        ));
-
-        lsm.write(
-            Timestamp(10),
-            vec![Precondition::NotChangedSince(
-                keyspace_id,
-                ka.to_vec(),
-                Timestamp(5),
-            )],
-            BTreeMap::from([
-                ((keyspace_id, ka.to_vec()), Mutation::Put(b"a1".to_vec())),
-                ((keyspace_id, kb.to_vec()), Mutation::Delete),
-            ]),
-        )
-        .await?;
-
-        assert_eq!(lsm.get(Timestamp(4), keyspace_id, ka).await?, None);
-        assert_eq!(lsm.get(Timestamp(4), keyspace_id, kb).await?, None);
-        assert_eq!(
-            lsm.get(Timestamp(9), keyspace_id, ka).await?,
-            Some((Timestamp(5), RevisionValue::Regular(b"a0".to_vec())))
-        );
-        assert_eq!(
-            lsm.get(Timestamp(9), keyspace_id, kb).await?,
-            Some((Timestamp(5), RevisionValue::Regular(b"b0".to_vec())))
-        );
-        assert_eq!(
-            lsm.get(Timestamp(10), keyspace_id, ka).await?,
-            Some((Timestamp(10), RevisionValue::Regular(b"a1".to_vec())))
-        );
-        assert_eq!(
-            lsm.get(Timestamp(10), keyspace_id, kb).await?,
-            Some((Timestamp(10), RevisionValue::Tombstone))
-        );
 
         Ok(())
     }
@@ -1089,7 +997,6 @@ mod tests {
                 last_ts = Timestamp(last_ts.0 + 1);
                 lsm.write(
                     last_ts,
-                    vec![],
                     BTreeMap::from([((keyspace_id, vec![i as u8]), Mutation::Put(vec![v]))]),
                 )
                 .await?;
@@ -1148,7 +1055,6 @@ mod tests {
                     ctr += 1;
                     lsm.write(
                         Timestamp(ctr as u64),
-                        vec![],
                         BTreeMap::from([((keyspace_id, vec![k]), Mutation::Put(v.to_vec()))]),
                     )
                     .await?;
@@ -1208,7 +1114,6 @@ mod tests {
                 let v = (i % 179) as u8;
                 lsm.write(
                     Timestamp(write_ts),
-                    vec![],
                     BTreeMap::from([((keyspace_id, vec![i as u8]), Mutation::Put(vec![v]))]),
                 )
                 .await?;
@@ -1321,7 +1226,6 @@ mod tests {
                 //};
                 lsm.write(
                     Timestamp(ts as u64),
-                    vec![],
                     BTreeMap::from([((keyspace_id, key.into()), mutation)]),
                 )
                 .await?;
@@ -1585,7 +1489,6 @@ mod tests {
                     lsm
                         .write(
                             Timestamp(write_ts),
-                            vec![],
                             BTreeMap::from([((keyspace_id, key.clone()), Mutation::Put(value.clone()))]),
                         )
                         .await

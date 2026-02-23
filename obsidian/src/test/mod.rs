@@ -15,7 +15,6 @@ use std::time::Duration;
 use anyhow::anyhow;
 use async_trait::async_trait;
 
-use crate::ShardId;
 use crate::gateway::Gateway;
 use crate::lsm::LsmBuilder;
 use crate::lsm::Manifest;
@@ -49,6 +48,7 @@ use crate::Precondition;
 use crate::Range;
 use crate::Record;
 use crate::Revision;
+use crate::ShardId;
 use crate::TabletId;
 use crate::Timestamp;
 use crate::TxOutcome;
@@ -199,7 +199,7 @@ impl ObsidianForTest {
         );
 
         for i in 0..n_shards {
-            let shard_id = ShardId((2+i) as u32);
+            let shard_id = ShardId((2 + i) as u32);
             meta.add_shard(shard_id).await?;
             nodes.create_node().await?;
         }
@@ -231,7 +231,9 @@ impl ObsidianForTest {
     }
 
     pub async fn latest_meta_snapshot(&self) -> anyhow::Result<MetaSyncedSnapshot> {
-        self.meta_synced.wait(self.meta.latest_snapshot().await?).await?;
+        self.meta_synced
+            .wait(self.meta.latest_snapshot().await?)
+            .await?;
         Ok(self.meta_synced.snapshot())
     }
 }

@@ -605,10 +605,7 @@ impl SupervisorInner {
         let snapshot = self.meta_synced.snapshot();
 
         let shard_ids = snapshot.shard_ids().await?;
-        let mut unassigned_node_ids = snapshot
-            .node_ids()
-            .try_collect::<HashSet<_>>()
-            .await?;
+        let mut unassigned_node_ids = snapshot.node_ids().try_collect::<HashSet<_>>().await?;
 
         let mut unassigned_shard_ids = HashSet::new();
         for shard_id in shard_ids {

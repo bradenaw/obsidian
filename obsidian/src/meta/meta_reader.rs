@@ -98,9 +98,7 @@ pub(crate) trait MetaReader {
         self.exists(&MetaKey::Node(node_id)).await
     }
 
-    fn node_ids(
-        &self,
-    ) -> Box<dyn Stream<Item = anyhow::Result<NodeId>> + Unpin + Send + '_> {
+    fn node_ids(&self) -> Box<dyn Stream<Item = anyhow::Result<NodeId>> + Unpin + Send + '_> {
         Box::new(
             self.scan(MetaKey::nodes(), Direction::Asc)
                 .map(|result| match result {

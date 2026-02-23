@@ -20,7 +20,6 @@ use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
 use crate::Mutation;
-use crate::Precondition;
 use crate::Range;
 use crate::Revision;
 use crate::RevisionValue;
@@ -187,12 +186,7 @@ pub(super) trait LsmRead {
 }
 
 pub(super) trait LsmReadWrite: LsmRead {
-    async fn write(
-        &self,
-        ts: Timestamp,
-        preconds: Vec<Precondition>,
-        muts: BTreeMap<Key, Mutation>,
-    ) -> Result<(), WriteError>;
+    async fn write(&self, ts: Timestamp, muts: BTreeMap<Key, Mutation>) -> Result<(), WriteError>;
 
     async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()>;
 }
@@ -294,13 +288,8 @@ impl<'a> LsmRead for LsmReadWriteGuard<'a> {
 }
 
 impl<'a> LsmReadWrite for LsmReadWriteGuard<'a> {
-    async fn write(
-        &self,
-        ts: Timestamp,
-        preconds: Vec<Precondition>,
-        muts: BTreeMap<Key, Mutation>,
-    ) -> Result<(), WriteError> {
-        Ok(self.lsm.write(ts, preconds, muts).await?)
+    async fn write(&self, ts: Timestamp, muts: BTreeMap<Key, Mutation>) -> Result<(), WriteError> {
+        Ok(self.lsm.write(ts, muts).await?)
     }
 
     async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
