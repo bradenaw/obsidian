@@ -234,14 +234,6 @@ where
         Ok(seq)
     }
 
-    fn read(
-        &self,
-        _first: WalSeq,
-    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(WalSeq, Proposal<TestEntry>)>> + Send + '_>>
-    {
-        todo!();
-    }
-
     fn tail(
         &self,
         first: WalSeq,
@@ -278,6 +270,10 @@ where
         })
     }
 
+    async fn latest(&self) -> anyhow::Result<WalSeq> {
+        self.inner.latest().await
+    }
+
     async fn oldest_available(&self) -> anyhow::Result<WalSeq> {
         self.inner.oldest_available().await
     }
@@ -296,18 +292,15 @@ where
         Journal::append(self.deref(), entry).await
     }
 
-    fn read(
-        &self,
-        first: WalSeq,
-    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(WalSeq, E)>> + Send + '_>> {
-        Journal::read(self.deref(), first)
-    }
-
     fn tail(
         &self,
         first: WalSeq,
     ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(WalSeq, E)>> + Send + '_>> {
         Journal::tail(self.deref(), first)
+    }
+
+    async fn latest(&self) -> anyhow::Result<WalSeq> {
+        Journal::latest(self.deref()).await
     }
 
     async fn oldest_available(&self) -> anyhow::Result<WalSeq> {

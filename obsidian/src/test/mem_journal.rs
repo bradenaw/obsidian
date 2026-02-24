@@ -22,7 +22,10 @@ struct MemJournalInner<E> {
     offset: WalSeq,
 }
 
-impl<E> MemJournal<E> {
+impl<E> MemJournal<E>
+where
+    E: Clone + Send + 'static,
+{
     pub fn new() -> Self {
         let (highest_seqno_send, highest_seqno) = watch::channel(WalSeq(0));
         Self {
@@ -34,20 +37,6 @@ impl<E> MemJournal<E> {
             highest_seqno_send,
             highest_seqno,
         }
-    }
-}
-
-#[async_trait]
-impl<E> Journal<E> for MemJournal<E>
-where
-    E: Clone + Send + 'static,
-{
-    async fn append(&self, entry: E) -> anyhow::Result<WalSeq> {
-        let mut inner = self.inner.lock().unwrap();
-        let seqno = WalSeq(inner.offset.0 + (inner.entries.len() as u64));
-        inner.entries.push_back(entry);
-        let _ = self.highest_seqno_send.send(seqno);
-        Ok(seqno)
     }
 
     fn read(
@@ -74,6 +63,20 @@ where
             }
         })
     }
+}
+
+#[async_trait]
+impl<E> Journal<E> for MemJournal<E>
+where
+    E: Clone + Send + 'static,
+{
+    async fn append(&self, entry: E) -> anyhow::Result<WalSeq> {
+        let mut inner = self.inner.lock().unwrap();
+        let seqno = WalSeq(inner.offset.0 + (inner.entries.len() as u64));
+        inner.entries.push_back(entry);
+        let _ = self.highest_seqno_send.send(seqno);
+        Ok(seqno)
+    }
 
     fn tail(
         &self,
@@ -93,6 +96,10 @@ where
                     .await;
             }
         })
+    }
+
+    async fn latest(&self) -> anyhow::Result<WalSeq> {
+        Ok(self.highest_seqno.borrow().clone())
     }
 
     async fn oldest_available(&self) -> anyhow::Result<WalSeq> {
