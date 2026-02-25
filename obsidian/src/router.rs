@@ -125,7 +125,7 @@ impl StaticRouter {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use core::assert_matches;
 
     use super::StaticRouter;
     use crate::util::encode;
