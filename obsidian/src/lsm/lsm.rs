@@ -1,16 +1,12 @@
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::fmt::Debug;
-use std::fmt::Display;
 use std::ops::Deref;
 use std::sync::Arc;
 
 use anyhow::anyhow;
 use futures::stream::StreamExt;
 use futures::TryStreamExt;
-use uuid::Uuid;
 
 use crate::lsm::compactor::Compactor;
 use crate::lsm::index::Index;
@@ -18,6 +14,7 @@ use crate::lsm::index::IndexSnapshot;
 use crate::lsm::index::Keyspace;
 use crate::lsm::preload::Preloaded;
 use crate::lsm::util::LsmRevision;
+use crate::lsm::Manifest;
 use crate::runtime::Storage;
 use crate::runtime::Wal;
 use crate::util::hexlify;
@@ -467,114 +464,6 @@ impl Lsm {
     pub(super) fn index_snapshot(&self) -> Arc<IndexSnapshot> {
         self.index.snapshot()
     }
-}
-
-#[derive(Eq, PartialEq, Hash, Clone, Copy)]
-pub(crate) struct RunId(Uuid);
-
-impl RunId {
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-
-    pub fn encode_fixed(&self) -> [u8; 16] {
-        let mut out = [0u8; 16];
-        out.copy_from_slice(self.0.as_bytes());
-        out
-    }
-
-    pub fn to_string(&self) -> String {
-        self.0.to_string()
-    }
-}
-
-impl Display for RunId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self.0, f)
-    }
-}
-
-impl Debug for RunId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("run:")?;
-        Display::fmt(self, f)
-    }
-}
-
-impl From<Uuid> for RunId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct Manifest {
-    pub(crate) keyspaces: HashMap<KeyspaceId, KeyspaceManifest>,
-}
-
-impl Manifest {
-    pub fn new() -> Self {
-        Self {
-            keyspaces: HashMap::new(),
-        }
-    }
-}
-
-impl Manifest {
-    pub fn runs(&self) -> impl Iterator<Item = (KeyspaceId, usize, &RunManifest)> {
-        self.keyspaces
-            .iter()
-            .map(|(keyspace_id, keyspace)| {
-                keyspace
-                    .levels
-                    .iter()
-                    .enumerate()
-                    .map(move |(i, level)| level.runs.iter().map(move |run| (*keyspace_id, i, run)))
-                    .flatten()
-            })
-            .flatten()
-    }
-}
-
-impl Debug for Manifest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut keyspace_ids: Vec<_> = self.keyspaces.keys().collect();
-        keyspace_ids.sort_unstable();
-
-        write!(f, "manifest\n")?;
-        for keyspace_id in keyspace_ids {
-            let keyspace = &self.keyspaces[keyspace_id];
-            write!(f, "  {:?}\n", keyspace_id)?;
-            for (i, level) in keyspace.levels.iter().enumerate() {
-                write!(f, "    l{}\n", i)?;
-                for run_manifest in &level.runs {
-                    write!(
-                        f,
-                        "      {:?} {:?}\n",
-                        run_manifest.run_id, run_manifest.range
-                    )?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct KeyspaceManifest {
-    pub(crate) levels: Vec<LevelManifest>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct LevelManifest {
-    pub(crate) runs: Vec<RunManifest>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct RunManifest {
-    pub(crate) run_id: RunId,
-    pub(crate) range: Range<Vec<u8>>,
 }
 
 pub(super) struct KeyspaceReader<'a>(pub &'a Keyspace);
