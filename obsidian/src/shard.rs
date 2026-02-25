@@ -5,7 +5,8 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use crossbeam::sync::ShardedLock;
 
-use crate::lsm::LsmBuilder;
+use crate::lsm::Lsm;
+use crate::lsm::LsmOptions;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
 use crate::meta::MetaSubscriber;
@@ -37,9 +38,7 @@ impl Shard {
         meta: Arc<dyn Meta>,
         shards: Arc<dyn Shards>,
         wals: Arc<dyn Wals>,
-        l0_max_size: u64,
-        run_size_target: u64,
-        block_size_target: u64,
+        lsm_options: LsmOptions,
     ) -> anyhow::Result<Self> {
         let meta_synced = Arc::new(MetaSynced::new(Arc::clone(&meta)));
 
@@ -47,9 +46,12 @@ impl Shard {
             let mut init_tablets = HashMap::new();
             if shard_id == TabletId::META.0 {
                 let meta_tablet = MetaTablet::new(
-                    LsmBuilder::new(wals.wal(TabletId::META).await?, Arc::clone(&storage))
-                        .build()
-                        .await?,
+                    Lsm::new(
+                        LsmOptions::default(),
+                        wals.wal(TabletId::META).await?,
+                        Arc::clone(&storage),
+                    )
+                    .await?,
                 )
                 .await?;
                 init_tablets.insert(TabletId::META, Arc::new(meta_tablet) as Arc<dyn Tablet>);
@@ -57,11 +59,11 @@ impl Shard {
 
             let shard_meta_tablet = ShardMetaTablet::new(
                 shard_id,
-                LsmBuilder::new(
+                Lsm::new(
+                    LsmOptions::default(),
                     wals.wal(TabletId::shard_meta(shard_id)).await?,
                     Arc::clone(&storage),
                 )
-                .build()
                 .await?,
                 meta_synced.clone(),
                 shards.clone(),
@@ -83,9 +85,7 @@ impl Shard {
             shards,
             wals,
             tablets: ShardedLock::new(init_tablets),
-            l0_max_size,
-            run_size_target,
-            block_size_target,
+            lsm_options,
         })));
 
         meta_synced.subscribe(&shard.0);
@@ -137,9 +137,7 @@ struct ShardInner {
     meta_synced: Arc<MetaSynced>,
     shards: Arc<dyn Shards>,
     wals: Arc<dyn Wals>,
-    l0_max_size: u64,
-    run_size_target: u64,
-    block_size_target: u64,
+    lsm_options: LsmOptions,
 
     tablets: ShardedLock<HashMap<TabletId, Arc<dyn Tablet + 'static>>>,
 }
@@ -173,12 +171,12 @@ impl ShardInner {
             range
         );
 
-        let lsm = LsmBuilder::new(self.wals.wal(tablet_id).await?, Arc::clone(&self.storage))
-            .l0_max_size(self.l0_max_size)
-            .run_size_target(self.run_size_target)
-            .block_size_target(self.block_size_target)
-            .build()
-            .await?;
+        let lsm = Lsm::new(
+            self.lsm_options.clone(),
+            self.wals.wal(tablet_id).await?,
+            Arc::clone(&self.storage),
+        )
+        .await?;
 
         let tablet = DataTablet::new(
             tablet_id,

@@ -621,7 +621,8 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    use crate::lsm::LsmBuilder;
+    use crate::lsm::Lsm;
+    use crate::lsm::LsmOptions;
     use crate::meta::TabletState;
     use crate::tablet::protected::ProtectedLsm;
     use crate::tablet::tablet_inner::TabletInner;
@@ -640,9 +641,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_preconds() -> anyhow::Result<()> {
-        let lsm = LsmBuilder::new(Arc::new(MemWal::new()), Arc::new(MemStorage::new()))
-            .build()
-            .await?;
+        let lsm = Lsm::new(
+            LsmOptions::default(),
+            Arc::new(MemWal::new()),
+            Arc::new(MemStorage::new()),
+        )
+        .await?;
 
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
         let ka = b"a";

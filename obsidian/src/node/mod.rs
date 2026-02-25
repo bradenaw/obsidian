@@ -6,6 +6,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::TryStreamExt;
 
+use crate::lsm::LsmOptions;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
 use crate::meta::MetaSubscriber;
@@ -173,9 +174,11 @@ impl NodeInner {
             Arc::clone(&self.meta),
             Arc::clone(&self.shards),
             Arc::clone(&self.wals),
-            256,   // l0_max_size
-            65536, // run_size_target
-            4096,  // block_size_target
+            LsmOptions {
+            l0_max_size: 256,   
+            run_size_target: 65536,
+            block_size_target: 4096, 
+            },
         )
         .await?;
 

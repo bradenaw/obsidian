@@ -51,73 +51,25 @@ use crate::WalEntry;
 use crate::WalSeq;
 use crate::WriteError;
 
-pub(crate) struct LsmBuilder {
-    l0_max_size: u64,
-    run_size_target: u64,
-    block_size_target: u64,
-    wal: Arc<dyn Wal>,
-    storage: Arc<dyn Storage>,
+#[derive(Clone)]
+pub(crate) struct LsmOptions {
+    pub l0_max_size: u64,
+    pub run_size_target: u64,
+    pub block_size_target: u64,
 }
 
-impl LsmBuilder {
-    pub fn new(wal: Arc<dyn Wal>, storage: Arc<dyn Storage>) -> Self {
-        LsmBuilder {
+impl Default for LsmOptions {
+    fn default() -> Self {
+        LsmOptions {
             l0_max_size: 8_000_000,
             run_size_target: 64_000_000,
             block_size_target: 32768,
-            wal: wal,
-            storage: storage,
-        }
-    }
-
-    pub fn l0_max_size(mut self, x: u64) -> Self {
-        self.l0_max_size = x;
-        self
-    }
-
-    pub fn run_size_target(mut self, x: u64) -> Self {
-        self.run_size_target = x;
-        self
-    }
-
-    pub fn block_size_target(mut self, x: u64) -> Self {
-        self.block_size_target = x;
-        self
-    }
-
-    pub fn wal(mut self, wal: Arc<dyn Wal>) -> Self {
-        self.wal = wal;
-        self
-    }
-
-    pub async fn build(self) -> anyhow::Result<Lsm> {
-        Lsm::new(
-            self.l0_max_size,
-            self.run_size_target,
-            self.block_size_target,
-            self.wal,
-            self.storage,
-        )
-        .await
-    }
-}
-
-impl Clone for LsmBuilder {
-    fn clone(&self) -> Self {
-        Self {
-            l0_max_size: self.l0_max_size.clone(),
-            run_size_target: self.run_size_target.clone(),
-            block_size_target: self.block_size_target.clone(),
-            wal: self.wal.clone(),
-            storage: self.storage.clone(),
         }
     }
 }
 
 pub(crate) struct Lsm {
-    l0_max_size: u64,
-    run_size_target: u64,
-    block_size_target: u64,
+    options: LsmOptions,
 
     wal: Arc<dyn Wal>,
     index: Arc<Index>,
@@ -130,13 +82,12 @@ pub(crate) struct Lsm {
 
 impl Lsm {
     pub async fn new(
-        l0_max_size: u64,
-        run_size_target: u64,
-        block_size_target: u64,
+        options: LsmOptions,
         wal: Arc<dyn Wal>,
         storage: Arc<dyn Storage>,
     ) -> anyhow::Result<Self> {
-        let (index, newest_seqno) = Self::recovery(l0_max_size, &wal, storage.deref()).await?;
+        let (index, newest_seqno) =
+            Self::recovery(options.l0_max_size, &wal, storage.deref()).await?;
 
         let index_arc = Arc::new(index);
 
@@ -147,21 +98,19 @@ impl Lsm {
             Arc::clone(&wal),
             newest_seqno.unwrap_or(WalSeq(1)),
             wal_processed_send,
-            l0_max_size,
+            options.l0_max_size,
         ));
 
         let compactor = Compactor::new(
             Arc::clone(&storage),
             Arc::clone(&index_arc),
             1, // parallelism
-            run_size_target,
-            block_size_target,
+            options.run_size_target,
+            options.block_size_target,
         );
 
         Ok(Self {
-            l0_max_size,
-            run_size_target,
-            block_size_target,
+            options,
 
             compactor,
             index: index_arc,
@@ -915,7 +864,7 @@ mod tests {
 
     use super::KeyspaceReader;
     use super::Lsm;
-    use super::LsmBuilder;
+    use super::LsmOptions;
     use crate::lsm::index::Keyspace;
     use crate::lsm::index::Level;
     use crate::lsm::memtable::Memtable;
@@ -943,9 +892,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_put_get() -> anyhow::Result<()> {
-        let lsm = LsmBuilder::new(Arc::new(MemWal::new()), Arc::new(MemStorage::new()))
-            .build()
-            .await?;
+        let lsm = Lsm::new(
+            LsmOptions::default(),
+            Arc::new(MemWal::new()),
+            Arc::new(MemStorage::new()),
+        )
+        .await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
         let k = b"abc";
         let not_k = b"def";
@@ -977,12 +929,16 @@ mod tests {
     #[tokio::test]
     async fn test_compact_l0() -> anyhow::Result<()> {
         _ = pretty_env_logger::try_init();
-        let lsm = LsmBuilder::new(Arc::new(MemWal::new()), Arc::new(MemStorage::new()))
-            .l0_max_size(128)
-            .block_size_target(128)
-            .run_size_target(512)
-            .build()
-            .await?;
+        let lsm = Lsm::new(
+            LsmOptions {
+                l0_max_size: 128,
+                block_size_target: 128,
+                run_size_target: 512,
+            },
+            Arc::new(MemWal::new()),
+            Arc::new(MemStorage::new()),
+        )
+        .await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
         lsm.create_keyspace_with_depth(keyspace_id, 2 /*depth*/)
             .await?;
@@ -1032,12 +988,16 @@ mod tests {
     async fn test_compact_l1() -> anyhow::Result<()> {
         _ = pretty_env_logger::try_init();
 
-        let lsm = LsmBuilder::new(Arc::new(MemWal::new()), Arc::new(MemStorage::new()))
-            .l0_max_size(128)
-            .block_size_target(128)
-            .run_size_target(512)
-            .build()
-            .await?;
+        let lsm = Lsm::new(
+            LsmOptions {
+                l0_max_size: 128,
+                block_size_target: 128,
+                run_size_target: 512,
+            },
+            Arc::new(MemWal::new()),
+            Arc::new(MemStorage::new()),
+        )
+        .await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
         lsm.create_keyspace_with_depth(keyspace_id, 3 /*depth*/)
             .await?;
@@ -1094,12 +1054,16 @@ mod tests {
         let wal = Arc::new(MemWal::new()) as Arc<dyn Wal>;
         let storage = Arc::new(MemStorage::new());
 
-        let lsm = LsmBuilder::new(Arc::clone(&wal), storage.clone())
-            .l0_max_size(128)
-            .block_size_target(128)
-            .run_size_target(512)
-            .build()
-            .await?;
+        let lsm = Lsm::new(
+            LsmOptions {
+                l0_max_size: 128,
+                block_size_target: 128,
+                run_size_target: 512,
+            },
+            Arc::clone(&wal),
+            storage.clone(),
+        )
+        .await?;
 
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
         lsm.create_keyspace_with_depth(keyspace_id, 2 /*depth*/)
@@ -1150,7 +1114,7 @@ mod tests {
         drop(lsm);
 
         // Rebuild the LSM from the same WAL and storage, this should recover everything.
-        let lsm = LsmBuilder::new(wal, storage).build().await?;
+        let lsm = Lsm::new(LsmOptions::default(), wal, storage).await?;
 
         for (k, v) in &map {
             assert_eq!(
@@ -1180,12 +1144,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_page() -> anyhow::Result<()> {
-        let lsm = LsmBuilder::new(Arc::new(MemWal::new()), Arc::new(MemStorage::new()))
-            .l0_max_size(32)
-            .block_size_target(48)
-            .run_size_target(96)
-            .build()
-            .await?;
+        let lsm = Lsm::new(
+            LsmOptions {
+                l0_max_size: 32,
+                block_size_target: 48,
+                run_size_target: 96,
+            },
+            Arc::new(MemWal::new()),
+            Arc::new(MemStorage::new()),
+        )
+        .await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
         lsm.create_keyspace_with_depth(keyspace_id, 3 /*depth*/)
             .await?;
@@ -1471,13 +1439,17 @@ mod tests {
 
                 let mut writes = vec![];
 
-                let lsm = LsmBuilder::new(Arc::new(MemWal::new()), Arc::new(MemStorage::new()))
-                    .l0_max_size(128)
-                    .block_size_target(128)
-                    .run_size_target(512)
-                    .build()
-                    .await
-                    .unwrap();
+                let lsm = Lsm::new(
+                    LsmOptions {
+                        l0_max_size: 128,
+                        block_size_target: 128,
+                        run_size_target: 512,
+                    },
+                    Arc::new(MemWal::new()),
+                    Arc::new(MemStorage::new()),
+                )
+                .await
+                .unwrap();
                 let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
                 lsm.create_keyspace_with_depth(keyspace_id, 3 /*depth*/).await.unwrap();
 
