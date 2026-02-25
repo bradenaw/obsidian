@@ -17,8 +17,8 @@ use uuid::Uuid;
 use crate::lsm::block::dump_block;
 use crate::lsm::block::Block;
 use crate::lsm::block::BlockBuilder;
-use crate::lsm::util::LsmRevision;
 use crate::lsm::util::PrefixCompressedKV;
+use crate::lsm::LsmRevision;
 use crate::lsm::RunId;
 use crate::runtime::FileReader;
 use crate::util::binary_search_by_idx;
@@ -458,7 +458,7 @@ mod tests {
     use super::dump_run;
     use super::Run;
     use super::RunBuilder;
-    use crate::lsm::util::LsmRevision;
+    use crate::lsm::LsmRevision;
     use crate::lsm::RunId;
     use crate::test::MemFileReader;
     use crate::Bound;

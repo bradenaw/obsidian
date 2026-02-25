@@ -9,9 +9,9 @@ use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use futures::Stream;
 
-use crate::lsm::util::LsmRevision;
 use crate::lsm::util::PackedVec2;
 use crate::lsm::util::PrefixCompressedKV;
+use crate::lsm::LsmRevision;
 use crate::runtime::FileReader;
 use crate::util::binary_search_by_idx;
 use crate::util::byte_width;
@@ -701,7 +701,7 @@ mod tests {
     use futures::TryStreamExt;
 
     use super::Block;
-    use crate::lsm::util::LsmRevision;
+    use crate::lsm::LsmRevision;
     use crate::test::MemFileReader;
     use crate::Bound;
     use crate::Direction;

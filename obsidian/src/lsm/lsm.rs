@@ -13,7 +13,7 @@ use crate::lsm::index::Index;
 use crate::lsm::index::IndexSnapshot;
 use crate::lsm::index::Keyspace;
 use crate::lsm::preload::Preloaded;
-use crate::lsm::util::LsmRevision;
+use crate::lsm::LsmRevision;
 use crate::lsm::Manifest;
 use crate::runtime::Storage;
 use crate::runtime::Wal;
