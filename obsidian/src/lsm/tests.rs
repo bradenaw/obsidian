@@ -7,9 +7,6 @@ use byteorder::ByteOrder;
 use futures::TryStreamExt;
 use proptest::prelude::*;
 
-use super::KeyspaceReader;
-use super::Lsm;
-use super::LsmOptions;
 use crate::lsm::index::Keyspace;
 use crate::lsm::index::Level;
 use crate::lsm::memtable::Memtable;
@@ -17,6 +14,9 @@ use crate::lsm::run::dump_run;
 use crate::lsm::run::Run;
 use crate::lsm::run::RunBuilder;
 use crate::lsm::util::LsmRevision;
+use crate::lsm::KeyspaceReader;
+use crate::lsm::Lsm;
+use crate::lsm::LsmOptions;
 use crate::lsm::RunId;
 use crate::runtime::Wal;
 use crate::test::MemFileReader;
@@ -115,8 +115,7 @@ async fn test_compact_l0() -> anyhow::Result<()> {
 
     // Make sure we actually did ever do a compaction.
     assert!(
-        lsm.index
-            .snapshot()
+        lsm.index_snapshot()
             .keyspaces
             .get(&keyspace_id)
             .unwrap()
@@ -169,8 +168,7 @@ async fn test_compact_l1() -> anyhow::Result<()> {
 
             lsm.pending_compactions().await;
             if lsm
-                .index
-                .snapshot()
+                .index_snapshot()
                 .keyspaces
                 .get(&keyspace_id)
                 .unwrap()
@@ -243,8 +241,7 @@ async fn test_recovery() -> anyhow::Result<()> {
 
     // Make sure we actually did ever do a compaction.
     assert!(
-        lsm.index
-            .snapshot()
+        lsm.index_snapshot()
             .keyspaces
             .get(&keyspace_id)
             .unwrap()
@@ -656,7 +653,7 @@ proptest! {
 }
 
 async fn dump_lsm(lsm: &Lsm) -> anyhow::Result<()> {
-    let index_snapshot = lsm.index.snapshot();
+    let index_snapshot = lsm.index_snapshot();
     for (keyspace_id, keyspace) in &index_snapshot.keyspaces {
         println!("keyspace_id {:?}", keyspace_id);
         dump_keyspace(&keyspace).await?;

@@ -8,10 +8,10 @@ use std::sync::RwLock;
 use anyhow::anyhow;
 use tokio::sync::Notify;
 
+use crate::lsm::memtable::Memtable;
 use crate::lsm::KeyspaceManifest;
 use crate::lsm::LevelManifest;
 use crate::lsm::Manifest;
-use crate::lsm::Memtable;
 use crate::lsm::Run;
 use crate::lsm::RunId;
 use crate::lsm::RunManifest;
@@ -258,7 +258,7 @@ impl Keyspace {
             let mut runs = Vec::with_capacity(level_manifest.runs.len());
 
             for run_manifest in &level_manifest.runs {
-                let run = Run::open(storage.get(&run_manifest.run_id.0.to_string()).await?).await?;
+                let run = Run::open(storage.get(&run_manifest.run_id.to_string()).await?).await?;
                 runs.push(Arc::new(run));
             }
 

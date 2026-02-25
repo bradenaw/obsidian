@@ -370,7 +370,7 @@ impl RunTrailer {
         let id = {
             let mut uuid_bytes = [0u8; 16];
             uuid_bytes.copy_from_slice(&trailer[0..16]);
-            RunId(Uuid::from_bytes(uuid_bytes))
+            RunId::from(Uuid::from_bytes(uuid_bytes))
         };
         let keyspace_id = KeyspaceId(
             ColoGroupId(LittleEndian::read_u32(&trailer[16..20])),

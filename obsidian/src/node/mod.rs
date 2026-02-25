@@ -175,9 +175,9 @@ impl NodeInner {
             Arc::clone(&self.shards),
             Arc::clone(&self.wals),
             LsmOptions {
-            l0_max_size: 256,   
-            run_size_target: 65536,
-            block_size_target: 4096, 
+                l0_max_size: 256,
+                run_size_target: 65536,
+                block_size_target: 4096,
             },
         )
         .await?;
