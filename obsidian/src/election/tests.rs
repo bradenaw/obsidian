@@ -131,7 +131,7 @@ struct TestLeader {
 
 #[async_trait]
 impl Leader<TestEntry, TestFollower> for TestLeader {
-    async fn process(&self, entry: TestEntry) {
+    async fn process(&self, _seq: WalSeq, entry: TestEntry) {
         let mut inner = self.inner.lock().unwrap();
         inner.processed_entries.push(entry);
     }
@@ -162,7 +162,7 @@ impl TestFollower {
 
 #[async_trait]
 impl Follower<TestEntry, TestLeader> for TestFollower {
-    async fn process(&self, entry: TestEntry) {
+    async fn process(&self, _seq: WalSeq, entry: TestEntry) {
         let mut inner = self.inner.lock().unwrap();
         inner.processed_entries.push(entry);
     }

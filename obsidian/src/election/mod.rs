@@ -1,4 +1,4 @@
-#![cfg(test)]
+#[cfg(test)]
 mod tests;
 
 use std::future::Future;
@@ -205,13 +205,13 @@ enum ProposalType<TEntry> {
 
 #[async_trait]
 pub trait Leader<TEntry, TFollower> {
-    async fn process(&self, entry: TEntry);
+    async fn process(&self, seq: WalSeq, entry: TEntry);
     async fn demote(self) -> TFollower;
 }
 
 #[async_trait]
 pub trait Follower<TEntry, TLeader> {
-    async fn process(&self, entry: TEntry);
+    async fn process(&self, seq: WalSeq, entry: TEntry);
     async fn promote(self) -> TLeader;
 }
 
@@ -249,11 +249,11 @@ where
         Err(anyhow!("cannot append: not currently leader"))
     }
 
-    pub async fn with_state<F, Fut, T>(&self, f: F) -> anyhow::Result<T>
+    pub async fn with_state<F, T, E>(&self, f: &F) -> Result<T, E>
     where
-        F: FnOnce(ParticipantState<TLeader, TFollower>) -> Fut + Send + 'static,
-        Fut: Future<Output = anyhow::Result<T>> + Send,
+        F: AsyncFn(ParticipantState<TLeader, TFollower>) -> Result<T, E>,
         T: Send + 'static,
+        E: From<anyhow::Error> + Send + 'static,
     {
         let state_change_request = self.0.state_change_request.notified();
         let state = self.0.state.read().await;
@@ -266,7 +266,7 @@ where
                 out?
             },
             _ = state_change_request => {
-                return Err(anyhow!("aborted: participant state change requested"));
+                return Err(anyhow!("aborted: participant state change requested").into());
             },
         };
 
@@ -276,7 +276,7 @@ where
             if Instant::now().duration_since(last_confirmation)
                 > self.0.lease_duration - self.0.lease_grace_period
             {
-                return Err(anyhow!("lease expired before operation completed"));
+                return Err(anyhow!("lease expired before operation completed").into());
             }
         }
 
@@ -368,12 +368,12 @@ where
         *maybe_state = Some(InnerParticipantState::Follower(follower));
     }
 
-    async fn process(&self, entry: TEntry) {
+    async fn process(&self, seq: WalSeq, entry: TEntry) {
         let maybe_state = self.state.read().await;
         let state = maybe_state.as_ref().unwrap();
         match state {
-            InnerParticipantState::Leader { leader, .. } => leader.process(entry).await,
-            InnerParticipantState::Follower(follower) => follower.process(entry).await,
+            InnerParticipantState::Leader { leader, .. } => leader.process(seq, entry).await,
+            InnerParticipantState::Follower(follower) => follower.process(seq, entry).await,
         }
     }
 
@@ -415,7 +415,7 @@ where
 
             select! {
                 next = StreamExt::next(&mut accepted) => {
-                    let (_seq, ratification) = next
+                    let (seq, ratification) = next
                         .transpose()?
                         .ok_or_else(|| anyhow!("journal tail ended"))?;
 
@@ -443,7 +443,7 @@ where
                                 }
                             },
                             ProposalType::Append(entry) => {
-                                self.process(entry).await;
+                                self.process(seq, entry).await;
                             },
                             ProposalType::Heartbeat => {
                                 if proposal.participant_id == self.participant_id {

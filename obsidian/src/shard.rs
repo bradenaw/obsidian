@@ -40,6 +40,12 @@ impl Shard {
         wals: Arc<dyn Wals>,
         lsm_options: LsmOptions,
     ) -> anyhow::Result<Self> {
+        // TODO: We need to make sure we don't rewind MetaSynced's snapshot on promotion. We can
+        // choose to either:
+        // 1. Persist the synced snapshot into ShardMetaTablet before responding to wait_meta_sync
+        // 2. Sync to latest during promotion
+        //
+        // (2) requires meta to be available to promote anything, which isn't great.
         let meta_synced = Arc::new(MetaSynced::new(Arc::clone(&meta)));
 
         let init_tablets: HashMap<TabletId, Arc<dyn Tablet + 'static>> = {

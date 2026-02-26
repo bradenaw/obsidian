@@ -9,6 +9,7 @@ mod lsm;
 mod meta;
 mod node;
 mod obsidian;
+mod replica;
 mod router;
 mod rtest;
 mod runtime;
