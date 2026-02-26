@@ -25,6 +25,8 @@ pub(crate) enum InternalError {
     TabletNotWriteable(TabletId),
     #[error("tablet not currently hydrating")]
     TabletNotHydrating(TabletId),
+    #[error("node not currently leader for tablet {0:?}")]
+    NotLeader(TabletId),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
