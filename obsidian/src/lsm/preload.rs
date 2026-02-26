@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 
+use crate::lsm::index::IndexSnapshot;
+use crate::lsm::index::Keyspace;
 use crate::lsm::index::Level;
 use crate::lsm::memtable::Memtable;
-use crate::lsm::IndexSnapshot;
-use crate::lsm::Keyspace;
 use crate::lsm::Run;
 use crate::lsm::RunId;
 use crate::runtime::Storage;

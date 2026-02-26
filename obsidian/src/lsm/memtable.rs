@@ -3,7 +3,7 @@ use std::sync::RwLock;
 
 use crossbeam_skiplist::SkipMap;
 
-use crate::lsm::util::LsmRevision;
+use crate::lsm::LsmRevision;
 use crate::lsm::RunId;
 use crate::util::hexlify;
 use crate::util::IteratorEither;

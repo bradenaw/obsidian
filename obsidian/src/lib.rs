@@ -1,7 +1,5 @@
 #![allow(dead_code)]
-#![feature(assert_matches)]
 #![feature(coroutines)]
-#![feature(ip_from)]
 #![feature(thread_id_value)]
 
 mod election;

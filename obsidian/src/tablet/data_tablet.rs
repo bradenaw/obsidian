@@ -154,6 +154,8 @@ impl Tablet for DataTablet {
             return Err(InternalError::Conflict(conflict_txid));
         }
 
+        self.0.inner.check_preconds(&lsm_rw, &preconds).await?;
+
         let ts = self.0.inner.sequencer.start_write();
 
         let mut actual_muts = BTreeMap::new();
@@ -202,7 +204,7 @@ impl Tablet for DataTablet {
         }
 
         lsm_rw
-            .write(*ts, preconds.clone(), actual_muts)
+            .write(*ts, actual_muts)
             .await
             .map_err(|e| InternalError::Other(e.into()))?;
 
@@ -624,7 +626,7 @@ impl DataTabletInner {
         if let TxOutcome::Committed(_) = tx_outcome {
             muts.insert((keyspace_id, key.clone()), m);
         }
-        lsm_rw.write(resolve_ts, vec![], muts).await?;
+        lsm_rw.write(resolve_ts, muts).await?;
         Ok(())
     }
 
@@ -661,7 +663,7 @@ impl DataTabletInner {
             return Ok(());
         };
         muts.insert((precond_keyspace_id, key.clone()), m);
-        lsm_rw.write(overwrite_ts, vec![], muts).await?;
+        lsm_rw.write(overwrite_ts, muts).await?;
         Ok(())
     }
 

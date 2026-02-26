@@ -17,8 +17,8 @@ use uuid::Uuid;
 use crate::lsm::block::dump_block;
 use crate::lsm::block::Block;
 use crate::lsm::block::BlockBuilder;
-use crate::lsm::util::LsmRevision;
 use crate::lsm::util::PrefixCompressedKV;
+use crate::lsm::LsmRevision;
 use crate::lsm::RunId;
 use crate::runtime::FileReader;
 use crate::util::binary_search_by_idx;
@@ -370,7 +370,7 @@ impl RunTrailer {
         let id = {
             let mut uuid_bytes = [0u8; 16];
             uuid_bytes.copy_from_slice(&trailer[0..16]);
-            RunId(Uuid::from_bytes(uuid_bytes))
+            RunId::from(Uuid::from_bytes(uuid_bytes))
         };
         let keyspace_id = KeyspaceId(
             ColoGroupId(LittleEndian::read_u32(&trailer[16..20])),
@@ -458,7 +458,7 @@ mod tests {
     use super::dump_run;
     use super::Run;
     use super::RunBuilder;
-    use crate::lsm::util::LsmRevision;
+    use crate::lsm::LsmRevision;
     use crate::lsm::RunId;
     use crate::test::MemFileReader;
     use crate::Bound;
