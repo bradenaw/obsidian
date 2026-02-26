@@ -249,9 +249,9 @@ where
         Err(anyhow!("cannot append: not currently leader"))
     }
 
-    pub async fn with_state<F, T, E>(&self, f: &F) -> Result<T, E>
+    pub async fn with_state<F, T, E>(&self, f: F) -> Result<T, E>
     where
-        F: AsyncFn(ParticipantState<TLeader, TFollower>) -> Result<T, E>,
+        F: AsyncFnOnce(ParticipantState<TLeader, TFollower>) -> Result<T, E>,
         T: Send + 'static,
         E: From<anyhow::Error> + Send + 'static,
     {
@@ -259,7 +259,8 @@ where
         let state = self.0.state.read().await;
 
         let out = select! {
-            out = f(state
+            out =
+                f(state
                 .as_ref()
                 .ok_or_else(|| anyhow!("no participant state present"))?
                 .as_participant_state()) => {
