@@ -697,7 +697,7 @@ impl DataTabletInner {
                 let manifest = src.manifest().await?;
 
                 for (keyspace_id, keyspace_manifest) in &manifest.keyspaces {
-                    preloader.add_keyspace(*keyspace_id, keyspace_manifest.levels.len());
+                    preloader.add_keyspace(*keyspace_id, keyspace_manifest.levels().len());
                 }
 
                 for (_, level, run_manifest) in manifest.runs() {

@@ -232,12 +232,7 @@ impl Lsm {
 
         self.pending_compactions().await;
 
-        let mut manifest = self.index.snapshot().manifest();
-        // Anything in l0 must already be present in the WAL. We can't write the run IDs here
-        // because there's nothing for recovery to open.
-        for keyspace in manifest.keyspaces.values_mut() {
-            keyspace.levels[0].runs = Vec::new();
-        }
+        let manifest = self.index.snapshot().manifest();
 
         self.wal.append(WalEntry::Manifest(seqno, manifest)).await?;
 

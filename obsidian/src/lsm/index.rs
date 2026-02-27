@@ -248,16 +248,12 @@ impl Keyspace {
         storage: &dyn Storage,
         manifest: KeyspaceManifest,
     ) -> anyhow::Result<Self> {
-        if !manifest.levels[0].runs.is_empty() {
-            return Err(anyhow!("manifest with non-empty l0"));
-        }
+        let mut levels = Vec::with_capacity(manifest.levels().len());
 
-        let mut levels = Vec::with_capacity(manifest.levels.len());
+        for level_manifest in manifest.levels() {
+            let mut runs = Vec::with_capacity(level_manifest.runs().len());
 
-        for level_manifest in &manifest.levels {
-            let mut runs = Vec::with_capacity(level_manifest.runs.len());
-
-            for run_manifest in &level_manifest.runs {
+            for run_manifest in level_manifest.runs() {
                 let run = Run::open(storage.get(&run_manifest.run_id.to_string()).await?).await?;
                 runs.push(Arc::new(run));
             }
@@ -274,22 +270,7 @@ impl Keyspace {
 
     pub(super) fn manifest(&self) -> KeyspaceManifest {
         let mut level_manifests = Vec::with_capacity(self.levels.len());
-        {
-            let mut l0_runs = Vec::new();
-            for memtable in &self.l0_sealed {
-                l0_runs.push(RunManifest {
-                    run_id: memtable.id(),
-                    range: memtable.range(),
-                });
-            }
-            if !self.l0_active.is_empty() {
-                l0_runs.push(RunManifest {
-                    run_id: self.l0_active.id(),
-                    range: self.l0_active.range(),
-                });
-            }
-            level_manifests.push(LevelManifest { runs: l0_runs });
-        }
+        level_manifests.push(LevelManifest::empty());
         for level in &self.levels[1..] {
             let mut run_manifests = Vec::with_capacity(level.runs.len());
 
@@ -300,14 +281,12 @@ impl Keyspace {
                 });
             }
 
-            level_manifests.push(LevelManifest {
-                runs: run_manifests,
-            });
+            level_manifests.push(
+                LevelManifest::new(run_manifests).expect("LSM didn't maintain Manifest invariants"),
+            );
         }
 
-        KeyspaceManifest {
-            levels: level_manifests,
-        }
+        KeyspaceManifest::new(level_manifests).expect("LSM didn't maintain Manifest invariants")
     }
 
     pub fn runs(&self) -> impl Iterator<Item = (usize, &Arc<Run>)> {

@@ -84,14 +84,32 @@ impl Debug for Manifest {
     }
 }
 
+/// The manifest for a single keyspace. L0 is always empty because L0 is kept in-memory rather than
+/// in Runs, so there are no RunIds for it.
 #[derive(Clone, Eq, Debug, PartialEq)]
 pub(crate) struct KeyspaceManifest {
-    pub(crate) levels: Vec<LevelManifest>,
+    levels: Vec<LevelManifest>,
 }
 
 impl KeyspaceManifest {
+    pub fn new(levels: Vec<LevelManifest>) -> anyhow::Result<KeyspaceManifest> {
+        if levels.is_empty() {
+            return Ok(KeyspaceManifest::empty());
+        }
+
+        if !levels[0].runs().is_empty() {
+            return Err(anyhow!("manifest with non-empty L0"));
+        }
+
+        Ok(KeyspaceManifest { levels })
+    }
+
     pub fn empty() -> KeyspaceManifest {
         KeyspaceManifest { levels: vec![] }
+    }
+
+    pub fn levels(&self) -> &[LevelManifest] {
+        &self.levels
     }
 
     pub fn merge(self, other: KeyspaceManifest) -> anyhow::Result<KeyspaceManifest> {
@@ -123,12 +141,35 @@ impl KeyspaceManifest {
 
 #[derive(Clone, Eq, Debug, PartialEq)]
 pub(crate) struct LevelManifest {
-    pub(crate) runs: Vec<RunManifest>,
+    runs: Vec<RunManifest>,
 }
 
 impl LevelManifest {
+    pub fn new(mut runs: Vec<RunManifest>) -> anyhow::Result<LevelManifest> {
+        runs.sort_unstable_by(|a, b| a.range.lower.cmp(&b.range.lower));
+        for i in 1..runs.len() {
+            if runs[i].range.intersects(&runs[i - 1].range) {
+                return Err(anyhow!(
+                    "invalid manifest: {:?} {:?} overlaps {:?} {:?}",
+                    runs[i].run_id,
+                    runs[i].range,
+                    runs[i - 1].run_id,
+                    runs[i - 1].range
+                ));
+            }
+        }
+
+        Ok(LevelManifest { runs })
+    }
+
     pub fn empty() -> LevelManifest {
         LevelManifest { runs: vec![] }
+    }
+
+    /// The runs that comprise this level. Always in sorted order by range, and ranges are
+    /// guaranteed non-overlapping.
+    pub fn runs(&self) -> &[RunManifest] {
+        &self.runs
     }
 
     pub fn merge(self, other: LevelManifest) -> anyhow::Result<LevelManifest> {
