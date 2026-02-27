@@ -1,7 +1,6 @@
 #[cfg(test)]
 mod tests;
 
-use std::future::Future;
 use std::ops::Deref;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
