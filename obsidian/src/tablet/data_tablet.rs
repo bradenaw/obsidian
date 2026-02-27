@@ -669,9 +669,13 @@ impl DataTabletInner {
 
     async fn hydrate(&self, srcs: &[TabletId]) -> anyhow::Result<()> {
         let mut preloader = Preloader::new(Arc::clone(&self.storage));
-        let mut loaded = HashSet::new();
 
         let mut rounds_with_completed = 0;
+
+        let mut src_manifests = Vec::with_capacity(srcs.len());
+        for _ in 0..srcs.len() {
+            src_manifests.push(Manifest::empty());
+        }
 
         loop {
             let mut run_ids_seen = HashSet::new();
@@ -691,20 +695,12 @@ impl DataTabletInner {
                 HydrationState::Catchup,
             );
 
-            for src_id in srcs {
+            let mut any_changed = false;
+            for (i, src_id) in srcs.iter().enumerate() {
                 let src = self.shards.tablet(*src_id)?;
-
                 let manifest = src.manifest().await?;
 
-                for (keyspace_id, keyspace_manifest) in &manifest.keyspaces {
-                    preloader.add_keyspace(*keyspace_id, keyspace_manifest.levels().len());
-                }
-
-                for (_, level, run_manifest) in manifest.runs() {
-                    if level == 0 {
-                        continue;
-                    }
-
+                for (_, _, run_manifest) in manifest.runs() {
                     if !self.inner.range.contains_range(&run_manifest.range) {
                         // If the run partially overlaps, compaction at the source will
                         // eventually make it not.
@@ -720,32 +716,32 @@ impl DataTabletInner {
                     }
 
                     run_ids_seen.insert(run_manifest.run_id);
+                }
 
-                    if loaded.contains(&run_manifest.run_id) {
-                        continue;
-                    }
-
-                    preloader.queue(run_manifest.run_id, level);
-                    loaded.insert(run_manifest.run_id);
-                    log::debug!(
-                        "{:?} queued {:?} {:?} for hydration",
-                        self.inner.tablet_id,
-                        run_manifest.run_id,
-                        run_manifest.range
-                    );
+                if src_manifests[i] != manifest {
+                    src_manifests[i] = manifest;
+                    any_changed = true;
                 }
             }
 
-            // Unload the runs that went away because of compaction.
-            for run_id in loaded.extract_if(|run_id| !run_ids_seen.contains(run_id)) {
-                preloader.unload(run_id);
+            if any_changed {
+                let merged_manifest = {
+                    let mut merged_manifest = Manifest::empty();
+                    for src_manifest in &src_manifests {
+                        let mut manifest = src_manifest.clone();
+                        manifest.clip(self.inner.range.borrow());
+                        merged_manifest = merged_manifest.merge(manifest)?;
+                    }
+                    merged_manifest
+                };
+                preloader.set_manifest(merged_manifest);
             }
 
             if done_after_round && complete {
                 break;
             }
 
-            preloader.load().await?;
+            preloader.wait().await?;
 
             if complete {
                 rounds_with_completed += 1;
@@ -773,7 +769,7 @@ impl DataTabletInner {
         }
 
         // TODO: Need to block compactions and only enable after we transition.
-        self.inner.lsm.load()?.load(preloader.wait().await?).await?;
+        self.inner.lsm.load()?.load(preloader.load().await?).await?;
         let _ = self
             .hydration
             .lock()

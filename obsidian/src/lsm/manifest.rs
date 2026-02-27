@@ -16,7 +16,7 @@ pub(crate) struct Manifest {
 }
 
 impl Manifest {
-    pub fn new() -> Self {
+    pub fn empty() -> Self {
         Self {
             keyspaces: HashMap::new(),
         }
