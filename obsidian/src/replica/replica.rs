@@ -113,12 +113,12 @@ struct ReplicaTablet {
 }
 
 impl ReplicaTablet {
-    async fn get_inner(&self, ts: Timestamp, key: Key) -> Result<Option<Record>, InternalError> {
+    async fn get_inner(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
         let tablet_id = self.tablet_id;
         self.participant
             .with_state(async move |participant_state| {
                 if let ParticipantState::Leader(leader) = participant_state {
-                    return leader.shard.tablet(tablet_id)?.get(ts, &key).await;
+                    return leader.shard.tablet(tablet_id)?.get(ts, key).await;
                 }
                 Err(InternalError::NotLeader(tablet_id))
             })
@@ -154,7 +154,7 @@ impl ReplicaTablet {
 #[async_trait]
 impl runtime::Tablet for ReplicaTablet {
     async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
-        self.get_inner(ts, key.clone()).await
+        self.get_inner(ts, key).await
     }
 
     async fn get_latest(&self, key: Key) -> Result<(Timestamp, Option<Record>), InternalError> {
