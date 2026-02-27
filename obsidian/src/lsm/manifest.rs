@@ -22,8 +22,8 @@ impl Manifest {
         }
     }
 
-    // Merges two manifests together. Returns an error if any resulting level >0 would have
-    // intersecting runs in it.
+    /// Merges two manifests together. Returns an error if any resulting level >0 would have
+    /// intersecting runs in it.
     pub fn merge(self, other: Manifest) -> anyhow::Result<Manifest> {
         Ok(Manifest {
             keyspaces: merge_maps(self.keyspaces, other.keyspaces)
@@ -36,14 +36,14 @@ impl Manifest {
         })
     }
 
-    // Removes all runs from the manifest that are not fully contained within the given range.
+    /// Removes all runs from the manifest that are not fully contained within the given range.
     pub fn clip(&mut self, range: Range<&[u8]>) {
         for (_, keyspace) in &mut self.keyspaces {
             keyspace.clip(range);
         }
     }
 
-    // Returns an iterator of (keyspace_id, level_idx, run_manifest) for all runs in the manifest.
+    /// Returns an iterator of (keyspace_id, level_idx, run_manifest) for all runs in the manifest.
     pub fn runs(&self) -> impl Iterator<Item = (KeyspaceId, usize, &RunManifest)> {
         self.keyspaces
             .iter()
