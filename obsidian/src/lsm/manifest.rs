@@ -518,8 +518,8 @@ mod tests {
         let mut clipped = manifest.clone();
         clipped.clip(
             Range {
-                lower: Bound::Before("b".to_string().into_bytes()),
-                upper: Bound::After("h".to_string().into_bytes()),
+                lower: Bound::Before(b"b".to_vec()),
+                upper: Bound::After(b"h".to_vec()),
             }
             .borrow(),
         );
