@@ -1,4 +1,3 @@
-use std::cmp;
 use std::sync::RwLock;
 
 use crossbeam_skiplist::SkipMap;
@@ -13,7 +12,6 @@ use crate::HistoryRange;
 use crate::Range;
 use crate::RevisionValue;
 use crate::Timestamp;
-use crate::WalSeq;
 
 impl Default for Memtable {
     fn default() -> Self {
@@ -29,7 +27,6 @@ pub(crate) struct Memtable {
 
 struct MemtableStats {
     size: u64,
-    max_seqno: WalSeq,
     max_key_len: usize,
 }
 
@@ -41,17 +38,12 @@ impl Memtable {
             stats: RwLock::new(MemtableStats {
                 size: 0,
                 max_key_len: 0,
-                max_seqno: WalSeq(0),
             }),
         }
     }
 
     pub fn id(&self) -> RunId {
         self.id
-    }
-
-    pub fn max_seqno(&self) -> WalSeq {
-        self.stats.read().unwrap().max_seqno
     }
 
     pub fn size(&self) -> u64 {
@@ -70,7 +62,7 @@ impl Memtable {
         Some((*revision_ts, revision_v.clone()))
     }
 
-    pub fn insert(&self, seqno: WalSeq, k: Vec<u8>, ts: Timestamp, v: RevisionValue) -> u64 {
+    pub fn insert(&self, k: Vec<u8>, ts: Timestamp, v: RevisionValue) -> u64 {
         log::trace!("memtable {}: insert {}@{}", self.id, hexlify(&k[..]), ts);
 
         let mut stats = self.stats.write().unwrap();
@@ -87,7 +79,6 @@ impl Memtable {
 
         stats.size += (key_cost + value_len + 8) as u64;
         stats.max_key_len = std::cmp::max(key_len, stats.max_key_len);
-        stats.max_seqno = cmp::max(stats.max_seqno, seqno);
 
         stats.size
     }

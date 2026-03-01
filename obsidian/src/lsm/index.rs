@@ -24,7 +24,6 @@ use crate::Range;
 use crate::RangeMap;
 use crate::RevisionValue;
 use crate::Timestamp;
-use crate::WalSeq;
 
 const N_STRIPES: usize = 32;
 
@@ -88,7 +87,6 @@ impl Index {
     pub(super) fn insert(
         &self,
         keyspace_id: KeyspaceId,
-        seqno: WalSeq,
         k: Vec<u8>,
         ts: Timestamp,
         v: RevisionValue,
@@ -99,7 +97,7 @@ impl Index {
             .get(&keyspace_id)
             .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?
             .l0_active
-            .insert(seqno, k, ts, v))
+            .insert(k, ts, v))
     }
 
     /// Moves l0_active into l0_sealed and creates a new, empty l0_active.

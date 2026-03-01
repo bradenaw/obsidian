@@ -33,7 +33,6 @@ use crate::Range;
 use crate::Revision;
 use crate::RevisionValue;
 use crate::Timestamp;
-use crate::WalSeq;
 
 #[tokio::test]
 async fn test_put_get() -> anyhow::Result<()> {
@@ -897,7 +896,7 @@ async fn keyspace_from_diagram(diagram: Vec<(&str, &[u8])>) -> anyhow::Result<Ke
     let l0_active_revisions = find_touching(&diagram[..], &mut visited, x_max, 0);
     let l0_active = Memtable::new();
     for revision in l0_active_revisions {
-        l0_active.insert(WalSeq(1), revision.key, revision.ts, revision.value);
+        l0_active.insert(revision.key, revision.ts, revision.value);
     }
     let mut keyspace = Keyspace {
         l0_active: Arc::new(l0_active),
@@ -914,12 +913,7 @@ async fn keyspace_from_diagram(diagram: Vec<(&str, &[u8])>) -> anyhow::Result<Ke
 
             if keyspace.l0_sealed[0].is_empty() {
                 for revision in revisions {
-                    keyspace.l0_sealed[0].insert(
-                        WalSeq(1),
-                        revision.key,
-                        revision.ts,
-                        revision.value,
-                    );
+                    keyspace.l0_sealed[0].insert(revision.key, revision.ts, revision.value);
                 }
             } else {
                 let mut v = vec![];

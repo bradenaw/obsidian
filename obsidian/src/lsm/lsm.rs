@@ -373,7 +373,7 @@ impl Lsm {
         }
 
         let index_snapshot = index.snapshot();
-        for (seqno, ts, kvs) in entries {
+        for (_, ts, kvs) in entries {
             for (keyspace_id, key, value) in kvs {
                 // It's possible that this revision is already present since the seqno in
                 // WalEntry::Manifest is a lower bound, the manifest may already contain newer
@@ -396,7 +396,7 @@ impl Lsm {
                     }
                 }
 
-                index.insert(keyspace_id, seqno, key, ts, value)?;
+                index.insert(keyspace_id, key, ts, value)?;
             }
         }
         for (keyspace_id, keyspace) in &index.snapshot().keyspaces {
@@ -443,7 +443,7 @@ impl Lsm {
                             hexlify(&key[..])
                         );
 
-                        let new_size = index.insert(keyspace_id, seqno, key, ts, value)?;
+                        let new_size = index.insert(keyspace_id, key, ts, value)?;
                         if new_size > l0_max_size {
                             index.rotate_l0(keyspace_id)?;
                         }
