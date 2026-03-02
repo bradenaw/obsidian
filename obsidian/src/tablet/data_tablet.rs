@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::collections::HashSet;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -381,70 +380,6 @@ impl DataTabletInner {
         self.inner.lsm.find_split().await
     }
 
-    pub(super) async fn sync_meta(
-        self: &Arc<Self>,
-        sync_type: SyncType,
-        snapshot: MetaSyncedSnapshot,
-    ) {
-        Retry::new()
-            .indefinitely(&async || -> anyhow::Result<()> {
-                let sync_type = sync_type.clone();
-                match sync_type {
-                    SyncType::Initial => {
-                        self.refresh_metadata(&snapshot).await?;
-
-                        let tablet_metadata =
-                            snapshot.tablet_metadata(self.inner.tablet_id).await?;
-                        if matches!(
-                            tablet_metadata.state,
-                            MetaState::Stable(TabletState::Active),
-                        ) {
-                            for keyspace_id in snapshot.keyspace_ids().await? {
-                                if keyspace_id.0 != self.inner.colo_group_id {
-                                    continue;
-                                }
-                                self.inner.create_keyspace(keyspace_id).await?;
-                            }
-                        }
-                    }
-                    SyncType::Tx(meta_keys) => {
-                        for meta_key in meta_keys {
-                            match meta_key {
-                                MetaKey::Keyspace(keyspace_id) => {
-                                    if keyspace_id.0 != self.inner.colo_group_id {
-                                        continue;
-                                    }
-
-                                    let tablet_metadata =
-                                        snapshot.tablet_metadata(self.inner.tablet_id).await?;
-
-                                    // TODO: There's a race here where we might drop a keyspace
-                                    // creation on the floor if it's done during a transition. We
-                                    // could make this graceful, but it'd be a lot easier to just
-                                    // make keyspace creation wait until there's an active tablet
-                                    // for every range.
-                                    if matches!(
-                                        tablet_metadata.state,
-                                        MetaState::Stable(TabletState::Active),
-                                    ) {
-                                        self.inner.create_keyspace(keyspace_id).await?;
-                                    }
-                                }
-                                MetaKey::Tablet(tablet_id) => {
-                                    if tablet_id == self.inner.tablet_id {
-                                        self.refresh_metadata(&snapshot).await?;
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-                Ok(())
-            })
-            .await;
-    }
-
     // Scans for pending mutations that exist on disk already and delivers them to `sender`.
     async fn scan_for_pending_mutations(
         &self,
@@ -678,7 +613,6 @@ impl DataTabletInner {
         }
 
         loop {
-            let mut run_ids_seen = HashSet::new();
             // True if there aren't partially-overlapping runs, so that once we do preloader.load()
             // we have all of the data we were aware of.
             let mut complete = true;
@@ -714,8 +648,6 @@ impl DataTabletInner {
                         }
                         continue;
                     }
-
-                    run_ids_seen.insert(run_manifest.run_id);
                 }
 
                 if src_manifests[i] != manifest {
