@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::lsm::Lsm;
 use crate::lsm::Manifest;
@@ -465,31 +466,32 @@ impl DataTabletInner {
         &self,
         receiver: mpsc::Receiver<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
     ) {
-        crate::util::bounded_unordered_for_each(
-            receiver,
-            64,
-            |(txid, keyspace_id, key, prepare_type)| async move {
-                let owner_tablet = self.shards.tablet(txid.owner()).unwrap();
-                let tx_outcome = owner_tablet.wait(txid).await.unwrap();
-                // Commits get cleaned up by the owner tablet calling cleanup_committed. Ignore them
-                // here to avoid duplicating work.
-                // TODO: retry instead of unwrap
-                if let TxOutcome::Aborted = tx_outcome {
-                    let lsm_rw = self.inner.lsm.wait_read_write().await;
-                    match prepare_type {
-                        PrepareType::Precondition => self
-                            .cleanup_precond_key(&lsm_rw, txid, keyspace_id, key)
-                            .await
-                            .unwrap(),
-                        PrepareType::Mutation => self
-                            .cleanup_pending_key(&lsm_rw, txid, tx_outcome, keyspace_id, key)
-                            .await
-                            .unwrap(),
+        let stream = ReceiverStream::new(receiver);
+        stream
+            .for_each_concurrent(
+                Some(64),
+                |(txid, keyspace_id, key, prepare_type)| async move {
+                    let owner_tablet = self.shards.tablet(txid.owner()).unwrap();
+                    let tx_outcome = owner_tablet.wait(txid).await.unwrap();
+                    // Commits get cleaned up by the owner tablet calling cleanup_committed. Ignore them
+                    // here to avoid duplicating work.
+                    // TODO: retry instead of unwrap
+                    if let TxOutcome::Aborted = tx_outcome {
+                        let lsm_rw = self.inner.lsm.wait_read_write().await;
+                        match prepare_type {
+                            PrepareType::Precondition => self
+                                .cleanup_precond_key(&lsm_rw, txid, keyspace_id, key)
+                                .await
+                                .unwrap(),
+                            PrepareType::Mutation => self
+                                .cleanup_pending_key(&lsm_rw, txid, tx_outcome, keyspace_id, key)
+                                .await
+                                .unwrap(),
+                        }
                     }
-                }
-            },
-        )
-        .await;
+                },
+            )
+            .await;
     }
 
     async fn cleanup_committed(

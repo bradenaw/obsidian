@@ -23,7 +23,6 @@ pub(crate) use bytes::longest_shared_prefix_len;
 pub(crate) use bytes::shortest_between;
 pub(crate) use bytes::Decode;
 pub(crate) use bytes::Encode;
-pub(crate) use futures::bounded_unordered_for_each;
 pub(crate) use futures::wait_all;
 pub(crate) use iterator_either::IteratorEither;
 pub(crate) use merge_sorted::merge_sorted;

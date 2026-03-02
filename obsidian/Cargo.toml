@@ -25,6 +25,7 @@ rand = "0.8.5"
 regex = "1.12.3"
 thiserror = "^1.0"
 tokio = { version = "1.47.1", features = [ "fs", "io-util", "macros", "rt", "rt-multi-thread", "sync", "time", "tracing" ] }
+tokio-stream = { version = "0.1.18" }
 tonic = "0.9"
 uuid = { version = "1.18.1", features = ["v4", "v7"] }
 
