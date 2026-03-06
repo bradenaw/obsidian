@@ -43,7 +43,8 @@ async fn test_put_get() -> anyhow::Result<()> {
     lsm.create_keyspace_with_depth(keyspace_id, 2 /*depth*/)?;
     lsm.write(
         Timestamp(5),
-        BTreeMap::from([((keyspace_id, k.to_vec()), Mutation::Put(v.to_vec()))]),
+        (keyspace_id, k.to_vec()),
+        Mutation::Put(v.to_vec()),
     )?;
     assert_eq!(lsm.get(Timestamp(4), keyspace_id, k).await?, None);
     assert_eq!(
@@ -86,7 +87,8 @@ async fn test_compact_l0() -> anyhow::Result<()> {
             last_ts = Timestamp(last_ts.0 + 1);
             lsm.write(
                 last_ts,
-                BTreeMap::from([((keyspace_id, vec![i as u8]), Mutation::Put(vec![v]))]),
+                (keyspace_id, vec![i as u8]),
+                Mutation::Put(vec![v]),
             )?;
             map.insert(i as u8, v);
         }
@@ -144,7 +146,8 @@ async fn test_compact_l1() -> anyhow::Result<()> {
                 ctr += 1;
                 lsm.write(
                     Timestamp(ctr as u64),
-                    BTreeMap::from([((keyspace_id, vec![k]), Mutation::Put(v.to_vec()))]),
+                    (keyspace_id, vec![k]),
+                    Mutation::Put(v.to_vec()),
                 )?;
                 last_ts = Timestamp(ctr as u64);
                 map.insert(k, v.to_vec());
@@ -238,10 +241,7 @@ async fn test_scan_page() -> anyhow::Result<()> {
             //    Mutation::Put(v) => RevisionValue::Regular(v),
             //    Mutation::Delete => RevisionValue::Tombstone,
             //};
-            lsm.write(
-                Timestamp(ts as u64),
-                BTreeMap::from([((keyspace_id, key.into()), mutation)]),
-            )?;
+            lsm.write(Timestamp(ts as u64), (keyspace_id, key.into()), mutation)?;
 
             //expected.insert(key, value);
         }
@@ -505,7 +505,8 @@ proptest! {
                 lsm
                     .write(
                         Timestamp(write_ts),
-                        BTreeMap::from([((keyspace_id, key.clone()), Mutation::Put(value.clone()))]),
+                        (keyspace_id, key.clone()),
+                        Mutation::Put(value.clone()),
                     )
                     .unwrap();
                 writes.push((key.clone(), Timestamp(write_ts), value.clone()));

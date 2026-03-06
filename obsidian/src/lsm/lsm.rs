@@ -1,5 +1,4 @@
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -144,24 +143,22 @@ impl Lsm {
             .await
     }
 
-    pub fn write(&self, ts: Timestamp, muts: BTreeMap<Key, Mutation>) -> Result<(), WriteError> {
-        for ((keyspace_id, key), mutation) in muts {
-            let value = match mutation {
-                Mutation::Put(raw_value) => RevisionValue::Regular(raw_value),
-                Mutation::Delete => RevisionValue::Tombstone,
-            };
+    pub fn write(&self, ts: Timestamp, key: Key, mutation: Mutation) -> Result<(), WriteError> {
+        let value = match mutation {
+            Mutation::Put(raw_value) => RevisionValue::Regular(raw_value),
+            Mutation::Delete => RevisionValue::Tombstone,
+        };
 
-            log::trace!(
-                "lsm processing write tx {:?} for {}/{}",
-                ts,
-                keyspace_id,
-                hexlify(&key[..])
-            );
+        log::trace!(
+            "lsm processing write tx {:?} for {}/{}",
+            ts,
+            key.0,
+            hexlify(&key.1[..])
+        );
 
-            let new_size = self.index.insert(keyspace_id, key, ts, value)?;
-            if new_size > self.options.l0_max_size {
-                self.index.rotate_l0(keyspace_id)?;
-            }
+        let new_size = self.index.insert(key.0, key.1, ts, value)?;
+        if new_size > self.options.l0_max_size {
+            self.index.rotate_l0(key.0)?;
         }
 
         Ok(())

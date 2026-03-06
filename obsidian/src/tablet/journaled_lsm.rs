@@ -63,7 +63,10 @@ impl JournaledLsm {
         // fail when processing.
 
         self.wal.append(WalEntry::Write(ts, writes)).await?;
-        self.lsm.write(ts, muts)?;
+
+        for (key, mutation) in muts {
+            self.lsm.write(ts, key, mutation)?;
+        }
 
         Ok(())
     }
@@ -193,7 +196,7 @@ impl JournaledLsm {
                     RevisionValue::Tombstone => Mutation::Delete,
                 };
 
-                lsm.write(ts, BTreeMap::from([((keyspace_id, key), mutation)]))?;
+                lsm.write(ts, (keyspace_id, key), mutation)?;
             }
         }
 
