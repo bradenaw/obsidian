@@ -209,6 +209,13 @@ pub(super) struct IndexSnapshot {
 }
 
 impl IndexSnapshot {
+    pub(super) fn empty() -> Self {
+        Self {
+            keyspaces: HashMap::new(),
+            splits: vec![],
+        }
+    }
+
     async fn from_manifest(storage: &dyn Storage, manifest: Manifest) -> anyhow::Result<Self> {
         let mut keyspaces = HashMap::new();
         for (keyspace_id, keyspace_manifest) in manifest.keyspaces {

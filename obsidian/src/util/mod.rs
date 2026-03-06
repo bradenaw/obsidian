@@ -6,6 +6,7 @@ mod iterator_either;
 mod merge_sorted;
 mod ord_eq_by_first;
 mod retry;
+mod waitable_ord;
 mod waitable_timestamp;
 mod watchable;
 
@@ -33,6 +34,8 @@ pub(crate) use ord_eq_by_first::OrdEqByFirst;
 pub(crate) use retry::sleep_for_retry;
 pub(crate) use retry::Retry;
 pub(crate) use retry::RetryResult;
+#[allow(unused_imports)]
+pub(crate) use waitable_ord::WaitableOrd;
 pub(crate) use waitable_timestamp::WaitableTimestamp;
 #[allow(unused_imports)]
 pub(crate) use watchable::Watchable;

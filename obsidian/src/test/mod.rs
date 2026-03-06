@@ -16,8 +16,6 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 
 use crate::gateway::Gateway;
-use crate::lsm::Lsm;
-use crate::lsm::LsmOptions;
 use crate::lsm::Manifest;
 use crate::meta::MetaImpl;
 use crate::meta::MetaSynced;
@@ -182,12 +180,8 @@ impl ObsidianForTest {
         let wals = Arc::new(MemWals::new()) as Arc<dyn Wals>;
 
         let meta_tablet = crate::tablet::MetaTablet::new(
-            Lsm::new(
-                LsmOptions::default(),
-                wals.wal(TabletId::META).await?,
-                Arc::clone(&storage) as Arc<dyn Storage>,
-            )
-            .await?,
+            wals.wal(TabletId::META).await?,
+            Arc::clone(&storage) as Arc<dyn Storage>,
         )
         .await?;
         let meta: Arc<dyn Meta> = Arc::new(MetaImpl::new(meta_tablet));

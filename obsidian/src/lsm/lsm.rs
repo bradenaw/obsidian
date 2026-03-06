@@ -1,7 +1,5 @@
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
-use std::collections::VecDeque;
-use std::ops::Deref;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -16,11 +14,9 @@ use crate::lsm::preload::Preloaded;
 use crate::lsm::LsmRevision;
 use crate::lsm::Manifest;
 use crate::runtime::Storage;
-use crate::runtime::Wal;
 use crate::util::hexlify;
 use crate::util::merge_sorted_streams;
 use crate::util::shortest_between;
-use crate::util::Background;
 use crate::util::IteratorEither;
 use crate::util::OrdEqByFirst;
 use crate::Bound;
@@ -33,8 +29,6 @@ use crate::Range;
 use crate::Revision;
 use crate::RevisionValue;
 use crate::Timestamp;
-use crate::WalEntry;
-use crate::WalSeq;
 use crate::WriteError;
 
 #[derive(Clone)]
@@ -57,35 +51,30 @@ impl Default for LsmOptions {
 pub(crate) struct Lsm {
     options: LsmOptions,
 
-    wal: Arc<dyn Wal>,
     index: Arc<Index>,
     compactor: Compactor,
     storage: Arc<dyn Storage>,
-
-    bg: Background,
-    wal_processed: tokio::sync::watch::Receiver<WalSeq>,
 }
 
 impl Lsm {
-    pub async fn new(
+    pub async fn empty(options: LsmOptions, storage: Arc<dyn Storage>) -> anyhow::Result<Self> {
+        Self::new_from_index(options, storage, IndexSnapshot::empty()).await
+    }
+
+    pub async fn open(
         options: LsmOptions,
-        wal: Arc<dyn Wal>,
         storage: Arc<dyn Storage>,
+        preloaded: Preloaded,
     ) -> anyhow::Result<Self> {
-        let (index, newest_seqno) =
-            Self::recovery(options.l0_max_size, &wal, storage.deref()).await?;
+        Self::new_from_index(options, storage, preloaded.snapshot).await
+    }
 
-        let index_arc = Arc::new(index);
-
-        let bg = Background::new();
-        let (wal_processed_send, wal_processed_recv) = tokio::sync::watch::channel(WalSeq(0));
-        bg.spawn(Self::process_wal(
-            Arc::clone(&index_arc),
-            Arc::clone(&wal),
-            newest_seqno.unwrap_or(WalSeq(1)),
-            wal_processed_send,
-            options.l0_max_size,
-        ));
+    async fn new_from_index(
+        options: LsmOptions,
+        storage: Arc<dyn Storage>,
+        index_snapshot: IndexSnapshot,
+    ) -> anyhow::Result<Self> {
+        let index_arc = Arc::new(Index::from_snapshot(index_snapshot));
 
         let compactor = Compactor::new(
             Arc::clone(&storage),
@@ -100,10 +89,7 @@ impl Lsm {
 
             compactor,
             index: index_arc,
-            wal,
             storage,
-            bg,
-            wal_processed: wal_processed_recv,
         })
     }
 
@@ -158,44 +144,34 @@ impl Lsm {
             .await
     }
 
-    pub async fn write(
-        &self,
-        ts: Timestamp,
-        muts: BTreeMap<Key, Mutation>,
-    ) -> Result<(), WriteError> {
-        let index_snapshot = self.index.snapshot();
+    pub fn write(&self, ts: Timestamp, muts: BTreeMap<Key, Mutation>) -> Result<(), WriteError> {
+        for ((keyspace_id, key), mutation) in muts {
+            let value = match mutation {
+                Mutation::Put(raw_value) => RevisionValue::Regular(raw_value),
+                Mutation::Delete => RevisionValue::Tombstone,
+            };
 
-        for key in muts.keys() {
-            Self::keyspace(&index_snapshot, key.0)?;
-        }
-
-        let seqno = self
-            .wal
-            .append(WalEntry::Write(
+            log::trace!(
+                "lsm processing write tx {:?} for {}/{}",
                 ts,
-                muts.into_iter()
-                    .map(|((keyspace_id, key), m)| {
-                        let value = match m {
-                            Mutation::Put(raw_value) => RevisionValue::Regular(raw_value),
-                            Mutation::Delete => RevisionValue::Tombstone,
-                        };
-                        (keyspace_id, key, value)
-                    })
-                    .collect(),
-            ))
-            .await?;
+                keyspace_id,
+                hexlify(&key[..])
+            );
 
-        self.wait_processed(seqno).await?;
+            let new_size = self.index.insert(keyspace_id, key, ts, value)?;
+            if new_size > self.options.l0_max_size {
+                self.index.rotate_l0(keyspace_id)?;
+            }
+        }
 
         Ok(())
     }
 
-    pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+    pub fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
         self.create_keyspace_with_depth(keyspace_id, 7 /*depth*/)
-            .await
     }
 
-    pub(super) async fn create_keyspace_with_depth(
+    pub(super) fn create_keyspace_with_depth(
         &self,
         keyspace_id: KeyspaceId,
         depth: usize,
@@ -211,7 +187,7 @@ impl Lsm {
             if index_snapshot
                 .keyspaces
                 .iter()
-                .all(|(_, keyspace)| keyspace.l0_active.is_empty() || keyspace.l0_sealed.is_empty())
+                .all(|(_, keyspace)| keyspace.l0_active.is_empty() && keyspace.l0_sealed.is_empty())
             {
                 break;
             }
@@ -220,21 +196,14 @@ impl Lsm {
     }
 
     /// Flush ensures that all writes that have already completed are in runs committed to storage
-    /// (i.e. not in L0). Snapshots manifests into the WAL to speed recovery.
+    /// (i.e. not in L0).
     pub async fn flush(&self) -> anyhow::Result<()> {
-        let seqno = self.wal.append(WalEntry::NoOp).await?;
-        self.wait_processed(seqno).await?;
-
         let index_snapshot = self.index.snapshot();
         for keyspace_id in index_snapshot.keyspaces.keys() {
             self.index.rotate_l0(*keyspace_id)?;
         }
 
         self.pending_compactions().await;
-
-        let manifest = self.index.snapshot().manifest();
-
-        self.wal.append(WalEntry::Manifest(seqno, manifest)).await?;
 
         Ok(())
     }
@@ -328,132 +297,6 @@ impl Lsm {
 
     pub fn set_splits(&self, splits: Vec<Bound<Vec<u8>>>) {
         self.index.set_splits(splits);
-    }
-
-    /// Waits until at least the given sequence number has been processed.
-    async fn wait_processed(&self, seqno: WalSeq) -> anyhow::Result<()> {
-        let mut wal_processed = self.wal_processed.clone();
-        while *wal_processed.borrow_and_update() < seqno {
-            wal_processed
-                .changed()
-                .await
-                .map_err(|_| WriteError::Other(anyhow!("wal processor missing")))?;
-        }
-        Ok(())
-    }
-
-    async fn recovery(
-        l0_max_size: u64,
-        wal: &Arc<dyn Wal>,
-        storage: &dyn Storage,
-    ) -> anyhow::Result<(Index, Option<WalSeq>)> {
-        let oldest_seqno = wal.oldest_available().await?;
-        let mut newest_seqno = None;
-        let mut wal_stream = wal.read(oldest_seqno);
-
-        let mut entries = VecDeque::new();
-        let mut index = Index::new();
-
-        while let Some((seqno, entry)) = wal_stream.try_next().await? {
-            match entry {
-                WalEntry::NoOp => {}
-                WalEntry::Write(ts, kvs) => {
-                    entries.push_back((seqno, ts, kvs));
-                }
-                WalEntry::Manifest(included_seqno, manifest) => {
-                    let trim_to_idx = entries
-                        .binary_search_by_key(&included_seqno, |(seqno, _, _)| *seqno)
-                        .unwrap_or_else(core::convert::identity);
-                    entries.drain(0..trim_to_idx);
-
-                    index = Index::from_manifest(storage, manifest).await?;
-                }
-            }
-            newest_seqno = Some(seqno);
-        }
-
-        let index_snapshot = index.snapshot();
-        for (_, ts, kvs) in entries {
-            for (keyspace_id, key, value) in kvs {
-                // It's possible that this revision is already present since the seqno in
-                // WalEntry::Manifest is a lower bound, the manifest may already contain newer
-                // writes.
-                if let Some((existing_ts, existing_value)) = index_snapshot
-                    .keyspaces
-                    .get(&keyspace_id)
-                    .map(|keyspace| keyspace.l0_active.get(ts, &key[..]))
-                    .flatten()
-                {
-                    if existing_ts == ts {
-                        if value != existing_value {
-                            return Err(anyhow!(
-                                "duplicate revision for {}@{} with differing values",
-                                hexlify(&key[..]),
-                                ts,
-                            ));
-                        }
-                        continue;
-                    }
-                }
-
-                index.insert(keyspace_id, key, ts, value)?;
-            }
-        }
-        for (keyspace_id, keyspace) in &index.snapshot().keyspaces {
-            // We're not _really_ respecting l0_max_size but it's not any better to have multiple
-            // l0_sealed over one.
-            if keyspace.l0_active.size() >= l0_max_size {
-                index.rotate_l0(*keyspace_id)?;
-            }
-        }
-
-        Ok((index, newest_seqno))
-    }
-
-    async fn process_wal(
-        index: Arc<Index>,
-        wal: Arc<dyn Wal>,
-        start: WalSeq,
-        wal_processed: tokio::sync::watch::Sender<WalSeq>,
-        l0_max_size: u64,
-    ) {
-        // TODO: retry
-        Self::process_wal_once(&index, &wal, start, wal_processed, l0_max_size)
-            .await
-            .unwrap();
-    }
-
-    async fn process_wal_once(
-        index: &Index,
-        wal: &Arc<dyn Wal>,
-        start: WalSeq,
-        wal_processed: tokio::sync::watch::Sender<WalSeq>,
-        l0_max_size: u64,
-    ) -> anyhow::Result<()> {
-        let mut log = wal.tail(start);
-        while let Some((seqno, entry)) = log.try_next().await? {
-            match entry {
-                WalEntry::NoOp => {}
-                WalEntry::Write(ts, kvs) => {
-                    for (keyspace_id, key, value) in kvs {
-                        log::trace!(
-                            "lsm processing write tx {:?} for {}/{}",
-                            ts,
-                            keyspace_id,
-                            hexlify(&key[..])
-                        );
-
-                        let new_size = index.insert(keyspace_id, key, ts, value)?;
-                        if new_size > l0_max_size {
-                            index.rotate_l0(keyspace_id)?;
-                        }
-                    }
-                }
-                WalEntry::Manifest(_, _) => {}
-            }
-            _ = wal_processed.send(seqno);
-        }
-        Ok(())
     }
 
     pub(super) fn index_snapshot(&self) -> Arc<IndexSnapshot> {

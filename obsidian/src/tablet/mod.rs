@@ -1,4 +1,5 @@
 mod data_tablet;
+mod journaled_lsm;
 mod lock_mgr;
 mod meta_tablet;
 mod protected;

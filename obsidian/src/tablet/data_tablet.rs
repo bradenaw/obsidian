@@ -12,7 +12,7 @@ use futures::TryStreamExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::lsm::Lsm;
+use crate::lsm::LsmOptions;
 use crate::lsm::Manifest;
 use crate::lsm::Preloader;
 use crate::meta::MetaKey;
@@ -26,6 +26,8 @@ use crate::meta::TabletState;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
 use crate::runtime::Tablet;
+use crate::runtime::Wal;
+use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::protected::LsmRead;
 use crate::tablet::protected::LsmReadWrite;
 use crate::tablet::protected::ProtectedLsm;
@@ -330,11 +332,14 @@ impl DataTablet {
         tablet_id: TabletId,
         colo_group_id: ColoGroupId,
         range: Range<Vec<u8>>,
-        lsm: Lsm,
+        lsm_options: LsmOptions,
+        wal: Arc<dyn Wal>,
         meta_synced: Arc<MetaSynced>,
         storage: Arc<dyn Storage>,
         shards: Arc<dyn Shards>,
     ) -> anyhow::Result<Self> {
+        let lsm = JournaledLsm::open(lsm_options, wal, Arc::clone(&storage)).await?;
+
         let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
 
         lsm.create_keyspace(KeyspaceId::TX_OUTCOMES).await?;
