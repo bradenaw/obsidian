@@ -79,10 +79,7 @@ impl CompactorInner {
             let (snapshot, snapshot_changed) = self.index.snapshot_subscribe();
 
             while compact_futures.len() < concurrency {
-                match self
-                    .schedule_next(&snapshot, &in_flight_from, &in_flight_into)
-                    .await
-                {
+                match self.schedule_next(&snapshot, &in_flight_from, &in_flight_into) {
                     Some((compaction, join_handle)) => {
                         in_flight_from.extend(compaction.from.iter());
                         in_flight_into.extend(compaction.into.iter());
@@ -119,30 +116,27 @@ impl CompactorInner {
         }
     }
 
-    async fn schedule_next(
+    fn schedule_next(
         self: &Arc<Self>,
         snapshot: &Arc<IndexSnapshot>,
         in_flight_from: &HashSet<RunId>,
         in_flight_into: &HashSet<RunId>,
     ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
         for (keyspace_id, keyspace) in &snapshot.keyspaces {
-            if let Some(out) = self
-                .schedule_next_keyspace(
-                    *keyspace_id,
-                    keyspace,
-                    &snapshot.splits,
-                    in_flight_from,
-                    in_flight_into,
-                )
-                .await
-            {
+            if let Some(out) = self.schedule_next_keyspace(
+                *keyspace_id,
+                keyspace,
+                &snapshot.splits,
+                in_flight_from,
+                in_flight_into,
+            ) {
                 return Some(out);
             }
         }
         None
     }
 
-    async fn schedule_next_keyspace(
+    fn schedule_next_keyspace(
         self: &Arc<Self>,
         keyspace_id: KeyspaceId,
         keyspace: &Keyspace,
