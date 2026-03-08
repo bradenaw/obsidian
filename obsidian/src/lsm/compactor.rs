@@ -72,15 +72,17 @@ struct CompactorInner {
 impl CompactorInner {
     async fn schedule(self: Arc<Self>, concurrency: usize) {
         let mut compact_futures = FuturesUnordered::new();
-        let mut in_flight: HashSet<RunId> = HashSet::new();
+        let mut in_flight_from: HashSet<RunId> = HashSet::new();
+        let mut in_flight_into: HashSet<RunId> = HashSet::new();
 
         loop {
             let (snapshot, snapshot_changed) = self.index.snapshot_subscribe();
 
             while compact_futures.len() < concurrency {
-                match self.schedule_next(&snapshot, &in_flight) {
+                match self.schedule_next(&snapshot, &in_flight_from, &in_flight_into) {
                     Some((compaction, join_handle)) => {
-                        in_flight.extend(compaction.run_ids.iter());
+                        in_flight_from.extend(compaction.from.iter());
+                        in_flight_into.extend(compaction.into.iter());
 
                         compact_futures.push(join_handle.map(|result| {
                             if let Err(e) = result {
@@ -97,8 +99,11 @@ impl CompactorInner {
 
             tokio::select! {
                 Some(compaction) = compact_futures.next() => {
-                    for run_id in compaction.run_ids {
-                        in_flight.remove(&run_id);
+                    for run_id in compaction.from {
+                        in_flight_from.remove(&run_id);
+                    }
+                    for run_id in compaction.into {
+                        in_flight_into.remove(&run_id);
                     }
                 },
                 // This happens when compactions 'finish', though the tasks might not be done yet,
@@ -114,12 +119,17 @@ impl CompactorInner {
     fn schedule_next(
         self: &Arc<Self>,
         snapshot: &Arc<IndexSnapshot>,
-        in_flight: &HashSet<RunId>,
+        in_flight_from: &HashSet<RunId>,
+        in_flight_into: &HashSet<RunId>,
     ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
         for (keyspace_id, keyspace) in &snapshot.keyspaces {
-            if let Some(out) =
-                self.schedule_next_keyspace(*keyspace_id, keyspace, &snapshot.splits, in_flight)
-            {
+            if let Some(out) = self.schedule_next_keyspace(
+                *keyspace_id,
+                keyspace,
+                &snapshot.splits,
+                in_flight_from,
+                in_flight_into,
+            ) {
                 return Some(out);
             }
         }
@@ -131,23 +141,36 @@ impl CompactorInner {
         keyspace_id: KeyspaceId,
         keyspace: &Keyspace,
         splits: &[Bound<Vec<u8>>],
-        in_flight: &HashSet<RunId>,
+        in_flight_from: &HashSet<RunId>,
+        in_flight_into: &HashSet<RunId>,
     ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
-        if let Some((compaction, future)) =
-            self.schedule_for_splits(keyspace_id, keyspace, splits, in_flight)
-        {
+        if let Some((compaction, future)) = self.schedule_for_splits(
+            keyspace_id,
+            keyspace,
+            splits,
+            in_flight_from,
+            in_flight_into,
+        ) {
             return Some((compaction, Either::Left(future)));
         }
 
-        if let Some((compaction, future)) =
-            self.schedule_for_size(keyspace_id, keyspace, splits, in_flight)
-        {
+        if let Some((compaction, future)) = self.schedule_for_size(
+            keyspace_id,
+            keyspace,
+            splits,
+            in_flight_from,
+            in_flight_into,
+        ) {
             return Some((compaction, Either::Right(Either::Left(future))));
         }
 
-        if let Some((compaction, future)) =
-            self.schedule_for_ingest(keyspace_id, keyspace, splits, in_flight)
-        {
+        if let Some((compaction, future)) = self.schedule_for_ingest(
+            keyspace_id,
+            keyspace,
+            splits,
+            in_flight_from,
+            in_flight_into,
+        ) {
             return Some((compaction, Either::Right(Either::Right(future))));
         }
 
@@ -161,7 +184,8 @@ impl CompactorInner {
         keyspace_id: KeyspaceId,
         keyspace: &Keyspace,
         splits: &[Bound<Vec<u8>>],
-        in_flight: &HashSet<RunId>,
+        in_flight_from: &HashSet<RunId>,
+        in_flight_into: &HashSet<RunId>,
     ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
         if splits.is_empty() {
             return None;
@@ -172,9 +196,15 @@ impl CompactorInner {
                 continue;
             }
 
-            if let Some((compaction, future)) =
-                self.try_schedule(keyspace_id, keyspace, splits, in_flight, level_idx, run)
-            {
+            if let Some((compaction, future)) = self.try_schedule(
+                keyspace_id,
+                keyspace,
+                splits,
+                in_flight_from,
+                in_flight_into,
+                level_idx,
+                run,
+            ) {
                 return Some((compaction, future));
             }
         }
@@ -187,7 +217,8 @@ impl CompactorInner {
         keyspace_id: KeyspaceId,
         keyspace: &Keyspace,
         splits: &[Bound<Vec<u8>>],
-        in_flight: &HashSet<RunId>,
+        in_flight_from: &HashSet<RunId>,
+        in_flight_into: &HashSet<RunId>,
     ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
         let level_size_estimates = {
             let mut level_size_estimates: Vec<_> =
@@ -195,7 +226,7 @@ impl CompactorInner {
 
             for i in 1..keyspace.levels.len() - 1 {
                 for run in &keyspace.levels[i].runs {
-                    if in_flight.contains(&run.id()) {
+                    if in_flight_from.contains(&run.id()) {
                         level_size_estimates[i] -= run.size();
                         level_size_estimates[i + 1] += run.size();
                     }
@@ -222,9 +253,15 @@ impl CompactorInner {
             for j in 0..level.runs.len() {
                 let run = &level.runs[(j + offset) % level.runs.len()];
 
-                if let Some((compaction, future)) =
-                    self.try_schedule(keyspace_id, keyspace, splits, in_flight, i, run)
-                {
+                if let Some((compaction, future)) = self.try_schedule(
+                    keyspace_id,
+                    keyspace,
+                    splits,
+                    in_flight_from,
+                    in_flight_into,
+                    i,
+                    run,
+                ) {
                     return Some((compaction, future));
                 }
             }
@@ -238,11 +275,15 @@ impl CompactorInner {
         keyspace_id: KeyspaceId,
         keyspace: &Keyspace,
         splits: &[Bound<Vec<u8>>],
-        in_flight: &HashSet<RunId>,
+        in_flight_from: &HashSet<RunId>,
+        in_flight_into: &HashSet<RunId>,
         level_idx: usize,
         run: &Arc<Run>,
     ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
-        if in_flight.contains(&run.id()) {
+        if in_flight_from.contains(&run.id()) {
+            return None;
+        }
+        if in_flight_into.contains(&run.id()) {
             return None;
         }
 
@@ -251,14 +292,11 @@ impl CompactorInner {
             // next level down.
             let intersecting_runs = keyspace.levels[level_idx + 1].range(run.range());
 
-            let run_ids = {
-                let mut run_ids: HashSet<_> =
-                    intersecting_runs.iter().map(|run| run.id()).collect();
-                run_ids.insert(run.id());
-                run_ids
-            };
+            let into: HashSet<_> = intersecting_runs.iter().map(|run| run.id()).collect();
+            let conflict = into
+                .iter()
+                .any(|run_id| in_flight_from.contains(&run_id) || in_flight_into.contains(&run_id));
 
-            let conflict = run_ids.iter().any(|run_id| in_flight.contains(&run_id));
             if conflict {
                 return None;
             }
@@ -267,7 +305,8 @@ impl CompactorInner {
                 Compaction {
                     keyspace_id,
                     from_level: level_idx,
-                    run_ids,
+                    from: HashSet::from([run.id()]),
+                    into,
                 },
                 Either::Left(self.compact_from(
                     keyspace_id,
@@ -289,7 +328,9 @@ impl CompactorInner {
             let siblings = &keyspace.levels[level_idx].runs[run_idx.saturating_sub(1)
                 ..cmp::min(run_idx + 1, keyspace.levels[level_idx].runs.len())];
 
-            let conflict = siblings.iter().any(|run| in_flight.contains(&run.id()));
+            let conflict = siblings.iter().any(|run| {
+                in_flight_from.contains(&run.id()) || in_flight_into.contains(&run.id())
+            });
 
             if conflict {
                 return None;
@@ -299,7 +340,8 @@ impl CompactorInner {
                 Compaction {
                     keyspace_id,
                     from_level: level_idx,
-                    run_ids: siblings.iter().map(|run| run.id()).collect(),
+                    from: siblings.iter().map(|run| run.id()).collect(),
+                    into: HashSet::new(),
                 },
                 Either::Right(self.compact_max(keyspace_id, splits, siblings)),
             ));
@@ -311,12 +353,15 @@ impl CompactorInner {
         keyspace_id: KeyspaceId,
         keyspace: &Keyspace,
         splits: &[Bound<Vec<u8>>],
-        in_flight: &HashSet<RunId>,
+        in_flight_from: &HashSet<RunId>,
+        in_flight_into: &HashSet<RunId>,
     ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
         let l0_available: Vec<_> = keyspace
             .l0_sealed
             .iter()
-            .filter(|memtable| !in_flight.contains(&memtable.id()))
+            .filter(|memtable| {
+                !in_flight_from.contains(&memtable.id()) && !in_flight_into.contains(&memtable.id())
+            })
             .cloned()
             .collect();
         if l0_available.is_empty() {
@@ -334,7 +379,7 @@ impl CompactorInner {
             keyspace
                 .l0_sealed
                 .iter()
-                .filter(|memtable| in_flight.contains(&memtable.id()))
+                .filter(|memtable| in_flight_from.contains(&memtable.id()))
                 .map(|memtable| memtable.range()),
         );
 
@@ -347,19 +392,18 @@ impl CompactorInner {
         {
             let intersecting_runs = keyspace.levels[1].range(l0_available_range);
 
-            let run_ids: HashSet<_> = Iterator::chain(
-                l0_available.iter().map(|memtable| memtable.id()),
-                intersecting_runs.iter().map(|run| run.id()),
-            )
-            .collect();
+            let from: HashSet<_> = l0_available.iter().map(|memtable| memtable.id()).collect();
+            let into: HashSet<_> = intersecting_runs.iter().map(|run| run.id()).collect();
 
-            let conflict = run_ids.iter().any(|run_id| in_flight.contains(run_id));
+            let conflict = Iterator::chain(from.iter(), into.iter())
+                .any(|run_id| in_flight_from.contains(run_id) || in_flight_into.contains(run_id));
             if !conflict {
                 return Some((
                     Compaction {
                         keyspace_id,
                         from_level: 0,
-                        run_ids,
+                        from,
+                        into,
                     },
                     self.compact_l0(keyspace_id, &splits, &l0_available[..], intersecting_runs),
                 ));
@@ -624,7 +668,8 @@ fn group_by_key(
 struct Compaction {
     keyspace_id: KeyspaceId,
     from_level: usize,
-    run_ids: HashSet<RunId>,
+    from: HashSet<RunId>,
+    into: HashSet<RunId>,
 }
 
 /// Like a "bounding box", returns the minimal range that contains all of the given ranges.
