@@ -184,7 +184,7 @@ impl Lsm {
             if index_snapshot
                 .keyspaces
                 .iter()
-                .all(|(_, keyspace)| keyspace.l0_active.is_empty() && keyspace.l0_sealed.is_empty())
+                .all(|(_, keyspace)| keyspace.l0_sealed.is_empty())
             {
                 break;
             }
