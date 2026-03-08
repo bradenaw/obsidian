@@ -301,7 +301,7 @@ impl CompactorInner {
                     from_level: level_idx,
                     run_ids: siblings.iter().map(|run| run.id()).collect(),
                 },
-                Either::Right(self.compact_max(keyspace_id, splits, level_idx, siblings)),
+                Either::Right(self.compact_max(keyspace_id, splits, siblings)),
             ));
         }
     }
@@ -407,7 +407,7 @@ impl CompactorInner {
                     add.iter().map(|run| run.id()).collect::<Vec<_>>(),
                 );
 
-                self_.index.replace(keyspace_id, add, 1, remove)?;
+                self_.index.replace(keyspace_id, add, remove)?;
 
                 Ok(())
             }
@@ -473,9 +473,7 @@ impl CompactorInner {
                     into.iter().map(|run| run.id()).collect::<Vec<_>>(),
                     add.iter().map(|run| run.id()).collect::<Vec<_>>(),
                 );
-                self_
-                    .index
-                    .replace(keyspace_id, add, from_level + 1, remove)?;
+                self_.index.replace(keyspace_id, add, remove)?;
                 Ok(())
             }
         })
@@ -505,7 +503,6 @@ impl CompactorInner {
         self: &Arc<Self>,
         keyspace_id: KeyspaceId,
         splits: &[Bound<Vec<u8>>],
-        level: usize,
         runs: &[Arc<Run>],
     ) -> impl Future<Output = anyhow::Result<()>> {
         log::trace!(
@@ -534,7 +531,7 @@ impl CompactorInner {
                     runs.iter().map(|run| run.id()).collect::<Vec<_>>(),
                     add.iter().map(|run| run.id()).collect::<Vec<_>>(),
                 );
-                self_.index.replace(keyspace_id, add, level, remove)?;
+                self_.index.replace(keyspace_id, add, remove)?;
                 Ok(())
             }
         })

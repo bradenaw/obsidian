@@ -1,4 +1,5 @@
 use std::array;
+use std::cmp::min;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future::Future;
@@ -151,7 +152,6 @@ impl Index {
         &self,
         keyspace_id: KeyspaceId,
         add: Vec<Run>,
-        min_level: usize,
         remove: HashSet<RunId>,
     ) -> anyhow::Result<()> {
         self.update(|snapshot| {
@@ -159,7 +159,7 @@ impl Index {
                 .keyspaces
                 .get_mut(&keyspace_id)
                 .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?;
-            keyspace.replace(add, min_level, remove)?;
+            keyspace.replace(add, remove)?;
             Ok(())
         })
     }
@@ -302,18 +302,7 @@ impl Keyspace {
             .flatten()
     }
 
-    fn replace(
-        &mut self,
-        add: Vec<Run>,
-        min_level: usize,
-        remove: HashSet<RunId>,
-    ) -> anyhow::Result<()> {
-        if min_level == 0 {
-            return Err(anyhow!(
-                "min_level=0 implies adding to l0, which is not allowed"
-            ));
-        }
-
+    fn replace(&mut self, add: Vec<Run>, remove: HashSet<RunId>) -> anyhow::Result<()> {
         let mut removed = HashSet::new();
 
         let mut l0_sealed = Vec::with_capacity(self.l0_sealed.len());
@@ -326,18 +315,23 @@ impl Keyspace {
             l0_sealed.push(Arc::clone(memtable));
         }
 
+        let mut min_level = 1;
+
         let mut levels_maps = Vec::new();
-        for level in &self.levels {
+        for (i, level) in self.levels.iter().enumerate() {
             let mut level_map = RangeMap::new();
             for run in &level.runs {
                 if remove.contains(&run.id()) {
                     removed.insert(run.id());
+                    min_level = i;
                     continue;
                 }
                 level_map.insert(run.range(), Arc::clone(run));
             }
             levels_maps.push(level_map);
         }
+
+        min_level = min(min_level, self.levels.len() - 1);
 
         for run in add.into_iter() {
             let run_id = run.id();
