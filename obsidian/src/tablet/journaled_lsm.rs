@@ -233,6 +233,7 @@ mod tests {
         let lsm = JournaledLsm::open(
             LsmOptions {
                 l0_max_size: 128,
+                l1_max_size: 1024,
                 block_size_target: 128,
                 run_size_target: 512,
             },

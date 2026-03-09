@@ -40,7 +40,6 @@ async fn test_put_get() -> anyhow::Result<()> {
     let not_k = b"def";
     let v = b"foo";
 
-    lsm.create_keyspace_with_depth(keyspace_id, 2 /*depth*/)?;
     lsm.write(
         Timestamp(5),
         (keyspace_id, k.to_vec()),
@@ -68,6 +67,7 @@ async fn test_compact_l0() -> anyhow::Result<()> {
     let lsm = Lsm::empty(
         LsmOptions {
             l0_max_size: 128,
+            l1_max_size: 1024,
             block_size_target: 128,
             run_size_target: 512,
         },
@@ -75,7 +75,6 @@ async fn test_compact_l0() -> anyhow::Result<()> {
     )
     .await?;
     let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-    lsm.create_keyspace_with_depth(keyspace_id, 2 /*depth*/)?;
     let mut map = BTreeMap::new();
     let mut last_ts = Timestamp::ZERO;
     for _ in 0..10 {
@@ -124,6 +123,7 @@ async fn test_compact_l1() -> anyhow::Result<()> {
     let lsm = Lsm::empty(
         LsmOptions {
             l0_max_size: 128,
+            l1_max_size: 1024,
             block_size_target: 128,
             run_size_target: 512,
         },
@@ -131,7 +131,6 @@ async fn test_compact_l1() -> anyhow::Result<()> {
     )
     .await?;
     let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-    lsm.create_keyspace_with_depth(keyspace_id, 3 /*depth*/)?;
     let mut map = BTreeMap::new();
     let mut last_ts = Timestamp::ZERO;
     let mut ctr = 1u32;
@@ -153,22 +152,16 @@ async fn test_compact_l1() -> anyhow::Result<()> {
                 map.insert(k, v.to_vec());
             }
 
+            log::trace!("waiting for pending compactions");
+            log::trace!("manifest: {:?}", lsm.manifest());
             lsm.pending_compactions().await;
-            if lsm
-                .index_snapshot()
-                .keyspaces
-                .get(&keyspace_id)
-                .unwrap()
-                .levels[2]
-                .runs
-                .len()
-                >= (j + 1) as usize
-            {
+
+            let index_snapshot = lsm.index_snapshot();
+            let keyspace = index_snapshot.keyspaces.get(&keyspace_id).unwrap();
+            if keyspace.levels.len() > 2 && keyspace.levels[2].runs.len() >= (j + 1) as usize {
                 break;
             }
         }
-
-        dump_lsm(&lsm).await?;
 
         for (k, v) in &map {
             let actual = lsm.get(last_ts, keyspace_id, &[*k]).await?.map(|(_, b)| b);
@@ -198,6 +191,7 @@ async fn test_scan_page() -> anyhow::Result<()> {
     let lsm = Lsm::empty(
         LsmOptions {
             l0_max_size: 32,
+            l1_max_size: 256,
             block_size_target: 48,
             run_size_target: 96,
         },
@@ -205,7 +199,6 @@ async fn test_scan_page() -> anyhow::Result<()> {
     )
     .await?;
     let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-    lsm.create_keyspace_with_depth(keyspace_id, 3 /*depth*/)?;
 
     let writes = [
         //   ts=0123456789
@@ -487,6 +480,7 @@ proptest! {
             let lsm = Lsm::empty(
                 LsmOptions {
                     l0_max_size: 128,
+                    l1_max_size: 1024,
                     block_size_target: 128,
                     run_size_target: 512,
                 },
@@ -495,7 +489,6 @@ proptest! {
             .await
             .unwrap();
             let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-            lsm.create_keyspace_with_depth(keyspace_id, 3 /*depth*/).unwrap();
 
             let mut write_ts = 5;
             for (i, index) in write_indexes.iter().enumerate() {

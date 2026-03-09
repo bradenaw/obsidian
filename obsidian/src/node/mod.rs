@@ -176,7 +176,8 @@ impl NodeInner {
             Arc::clone(&self.wals),
             LsmOptions {
                 l0_max_size: 256,
-                run_size_target: 65536,
+                l1_max_size: 100_000,
+                run_size_target: 32768,
                 block_size_target: 4096,
             },
         )

@@ -33,6 +33,7 @@ use crate::WriteError;
 #[derive(Clone)]
 pub(crate) struct LsmOptions {
     pub l0_max_size: u64,
+    pub l1_max_size: u64,
     pub run_size_target: u64,
     pub block_size_target: u64,
 }
@@ -41,7 +42,8 @@ impl Default for LsmOptions {
     fn default() -> Self {
         LsmOptions {
             l0_max_size: 8_000_000,
-            run_size_target: 64_000_000,
+            l1_max_size: 64_000_000,
+            run_size_target: 8_000_000,
             block_size_target: 32768,
         }
     }
@@ -79,6 +81,7 @@ impl Lsm {
             Arc::clone(&storage),
             Arc::clone(&index_arc),
             1, // parallelism
+            options.l1_max_size,
             options.run_size_target,
             options.block_size_target,
         );
@@ -165,15 +168,8 @@ impl Lsm {
     }
 
     pub fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
-        self.create_keyspace_with_depth(keyspace_id, 7 /*depth*/)
-    }
-
-    pub(super) fn create_keyspace_with_depth(
-        &self,
-        keyspace_id: KeyspaceId,
-        depth: usize,
-    ) -> anyhow::Result<()> {
-        self.index.create_keyspace(keyspace_id, depth)
+        self.index.ensure_keyspace(keyspace_id);
+        Ok(())
     }
 
     pub async fn pending_compactions(&self) {

@@ -92,13 +92,16 @@ impl Index {
         ts: Timestamp,
         v: RevisionValue,
     ) -> anyhow::Result<u64> {
-        let snapshot = &self.current[0].read().unwrap();
-        Ok(snapshot
-            .keyspaces
-            .get(&keyspace_id)
-            .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?
-            .l0_active
-            .insert(k, ts, v))
+        loop {
+            {
+                let snapshot = self.snapshot();
+                if let Some(keyspace) = snapshot.keyspaces.get(&keyspace_id) {
+                    return Ok(keyspace.l0_active.insert(k, ts, v));
+                }
+            }
+
+            self.ensure_keyspace(keyspace_id);
+        }
     }
 
     /// Moves l0_active into l0_sealed and creates a new, empty l0_active.
@@ -120,31 +123,19 @@ impl Index {
         })
     }
 
-    pub(super) fn create_keyspace(
-        &self,
-        keyspace_id: KeyspaceId,
-        n_levels: usize,
-    ) -> anyhow::Result<()> {
-        if n_levels < 2 {
-            return Err(anyhow!("not enough levels: {} < 2", n_levels));
-        }
-
-        self.update(|snapshot| {
+    pub(super) fn ensure_keyspace(&self, keyspace_id: KeyspaceId) {
+        let _ = self.update(|snapshot| {
             if snapshot.keyspaces.contains_key(&keyspace_id) {
                 return Ok(());
-            }
-            let mut levels: Vec<Level> = Vec::with_capacity(n_levels);
-            for _ in 0..n_levels {
-                levels.push(Level::new());
             }
             let keyspace = Keyspace {
                 l0_active: Arc::new(Memtable::new()),
                 l0_sealed: Vec::new(),
-                levels,
+                levels: vec![Level::new(), Level::new()],
             };
             snapshot.keyspaces.insert(keyspace_id, keyspace);
             Ok(())
-        })
+        });
     }
 
     /// Adds the given runs into the index and removes the runs/memtables with the given run_ids.
@@ -160,6 +151,29 @@ impl Index {
                 .get_mut(&keyspace_id)
                 .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?;
             keyspace.replace(add, remove)?;
+            Ok(())
+        })
+    }
+
+    /// Increase the depth of the index by inserting an empty L1.
+    pub(super) fn expand(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        self.update(|snapshot| {
+            let keyspace = snapshot
+                .keyspaces
+                .get_mut(&keyspace_id)
+                .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?;
+
+            if keyspace.levels[1].runs.is_empty() {
+                return Ok(());
+            }
+
+            keyspace.levels.insert(0, Level::new());
+            log::trace!(
+                "expanded {:?} to {} levels",
+                keyspace_id,
+                keyspace.levels.len()
+            );
+
             Ok(())
         })
     }
@@ -245,6 +259,8 @@ pub(super) struct Keyspace {
     pub(super) l0_active: Arc<Memtable>,
     pub(super) l0_sealed: Vec<Arc<Memtable>>,
     // For ease of expression, levels[0] is always present but empty because it's represented above.
+    //
+    // Always has at least two elements.
     pub(super) levels: Vec<Level>,
 }
 
@@ -329,6 +345,9 @@ impl Keyspace {
                 level_map.insert(run.range(), Arc::clone(run));
             }
             levels_maps.push(level_map);
+        }
+        while levels_maps.len() < min_level + 1 {
+            levels_maps.push(RangeMap::new());
         }
 
         min_level = min(min_level, self.levels.len() - 1);
