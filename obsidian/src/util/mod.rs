@@ -7,6 +7,7 @@ mod iterator_either;
 mod merge_sorted;
 mod ord_eq_by_first;
 mod retry;
+mod waitable_ord;
 mod waitable_timestamp;
 mod watchable;
 
@@ -25,7 +26,6 @@ pub(crate) use bytes::longest_shared_prefix_len;
 pub(crate) use bytes::shortest_between;
 pub(crate) use bytes::Decode;
 pub(crate) use bytes::Encode;
-pub(crate) use futures::bounded_unordered_for_each;
 pub(crate) use futures::wait_all;
 pub(crate) use iterator_either::IteratorEither;
 pub(crate) use merge_sorted::merge_sorted;
@@ -36,6 +36,8 @@ pub(crate) use ord_eq_by_first::OrdEqByFirst;
 pub(crate) use retry::sleep_for_retry;
 pub(crate) use retry::Retry;
 pub(crate) use retry::RetryResult;
+#[allow(unused_imports)]
+pub(crate) use waitable_ord::WaitableOrd;
 pub(crate) use waitable_timestamp::WaitableTimestamp;
 #[allow(unused_imports)]
 pub(crate) use watchable::Watchable;

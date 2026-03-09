@@ -1,4 +1,5 @@
 use std::array;
+use std::cmp::min;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future::Future;
@@ -24,7 +25,6 @@ use crate::Range;
 use crate::RangeMap;
 use crate::RevisionValue;
 use crate::Timestamp;
-use crate::WalSeq;
 
 const N_STRIPES: usize = 32;
 
@@ -88,18 +88,20 @@ impl Index {
     pub(super) fn insert(
         &self,
         keyspace_id: KeyspaceId,
-        seqno: WalSeq,
         k: Vec<u8>,
         ts: Timestamp,
         v: RevisionValue,
     ) -> anyhow::Result<u64> {
-        let snapshot = &self.current[0].read().unwrap();
-        Ok(snapshot
-            .keyspaces
-            .get(&keyspace_id)
-            .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?
-            .l0_active
-            .insert(seqno, k, ts, v))
+        loop {
+            {
+                let snapshot = self.snapshot();
+                if let Some(keyspace) = snapshot.keyspaces.get(&keyspace_id) {
+                    return Ok(keyspace.l0_active.insert(k, ts, v));
+                }
+            }
+
+            self.ensure_keyspace(keyspace_id);
+        }
     }
 
     /// Moves l0_active into l0_sealed and creates a new, empty l0_active.
@@ -121,31 +123,19 @@ impl Index {
         })
     }
 
-    pub(super) fn create_keyspace(
-        &self,
-        keyspace_id: KeyspaceId,
-        n_levels: usize,
-    ) -> anyhow::Result<()> {
-        if n_levels < 2 {
-            return Err(anyhow!("not enough levels: {} < 2", n_levels));
-        }
-
-        self.update(|snapshot| {
+    pub(super) fn ensure_keyspace(&self, keyspace_id: KeyspaceId) {
+        let _ = self.update(|snapshot| {
             if snapshot.keyspaces.contains_key(&keyspace_id) {
                 return Ok(());
-            }
-            let mut levels: Vec<Level> = Vec::with_capacity(n_levels);
-            for _ in 0..n_levels {
-                levels.push(Level::new());
             }
             let keyspace = Keyspace {
                 l0_active: Arc::new(Memtable::new()),
                 l0_sealed: Vec::new(),
-                levels,
+                levels: vec![Level::new(), Level::new()],
             };
             snapshot.keyspaces.insert(keyspace_id, keyspace);
             Ok(())
-        })
+        });
     }
 
     /// Adds the given runs into the index and removes the runs/memtables with the given run_ids.
@@ -153,7 +143,6 @@ impl Index {
         &self,
         keyspace_id: KeyspaceId,
         add: Vec<Run>,
-        min_level: usize,
         remove: HashSet<RunId>,
     ) -> anyhow::Result<()> {
         self.update(|snapshot| {
@@ -161,7 +150,30 @@ impl Index {
                 .keyspaces
                 .get_mut(&keyspace_id)
                 .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?;
-            keyspace.replace(add, min_level, remove)?;
+            keyspace.replace(add, remove)?;
+            Ok(())
+        })
+    }
+
+    /// Increase the depth of the index by inserting an empty L1.
+    pub(super) fn expand(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        self.update(|snapshot| {
+            let keyspace = snapshot
+                .keyspaces
+                .get_mut(&keyspace_id)
+                .ok_or_else(|| anyhow!("{:?} not found", keyspace_id))?;
+
+            if keyspace.levels[1].runs.is_empty() {
+                return Ok(());
+            }
+
+            keyspace.levels.insert(0, Level::new());
+            log::trace!(
+                "expanded {:?} to {} levels",
+                keyspace_id,
+                keyspace.levels.len()
+            );
+
             Ok(())
         })
     }
@@ -211,6 +223,13 @@ pub(super) struct IndexSnapshot {
 }
 
 impl IndexSnapshot {
+    pub(super) fn empty() -> Self {
+        Self {
+            keyspaces: HashMap::new(),
+            splits: vec![],
+        }
+    }
+
     async fn from_manifest(storage: &dyn Storage, manifest: Manifest) -> anyhow::Result<Self> {
         let mut keyspaces = HashMap::new();
         for (keyspace_id, keyspace_manifest) in manifest.keyspaces {
@@ -240,6 +259,8 @@ pub(super) struct Keyspace {
     pub(super) l0_active: Arc<Memtable>,
     pub(super) l0_sealed: Vec<Arc<Memtable>>,
     // For ease of expression, levels[0] is always present but empty because it's represented above.
+    //
+    // Always has at least two elements.
     pub(super) levels: Vec<Level>,
 }
 
@@ -248,16 +269,12 @@ impl Keyspace {
         storage: &dyn Storage,
         manifest: KeyspaceManifest,
     ) -> anyhow::Result<Self> {
-        if !manifest.levels[0].runs.is_empty() {
-            return Err(anyhow!("manifest with non-empty l0"));
-        }
+        let mut levels = Vec::with_capacity(manifest.levels().len());
 
-        let mut levels = Vec::with_capacity(manifest.levels.len());
+        for level_manifest in manifest.levels() {
+            let mut runs = Vec::with_capacity(level_manifest.runs().len());
 
-        for level_manifest in &manifest.levels {
-            let mut runs = Vec::with_capacity(level_manifest.runs.len());
-
-            for run_manifest in &level_manifest.runs {
+            for run_manifest in level_manifest.runs() {
                 let run = Run::open(storage.get(&run_manifest.run_id.to_string()).await?).await?;
                 runs.push(Arc::new(run));
             }
@@ -274,22 +291,7 @@ impl Keyspace {
 
     pub(super) fn manifest(&self) -> KeyspaceManifest {
         let mut level_manifests = Vec::with_capacity(self.levels.len());
-        {
-            let mut l0_runs = Vec::new();
-            for memtable in &self.l0_sealed {
-                l0_runs.push(RunManifest {
-                    run_id: memtable.id(),
-                    range: memtable.range(),
-                });
-            }
-            if !self.l0_active.is_empty() {
-                l0_runs.push(RunManifest {
-                    run_id: self.l0_active.id(),
-                    range: self.l0_active.range(),
-                });
-            }
-            level_manifests.push(LevelManifest { runs: l0_runs });
-        }
+        level_manifests.push(LevelManifest::empty());
         for level in &self.levels[1..] {
             let mut run_manifests = Vec::with_capacity(level.runs.len());
 
@@ -300,14 +302,12 @@ impl Keyspace {
                 });
             }
 
-            level_manifests.push(LevelManifest {
-                runs: run_manifests,
-            });
+            level_manifests.push(
+                LevelManifest::new(run_manifests).expect("LSM didn't maintain Manifest invariants"),
+            );
         }
 
-        KeyspaceManifest {
-            levels: level_manifests,
-        }
+        KeyspaceManifest::new(level_manifests).expect("LSM didn't maintain Manifest invariants")
     }
 
     pub fn runs(&self) -> impl Iterator<Item = (usize, &Arc<Run>)> {
@@ -318,18 +318,7 @@ impl Keyspace {
             .flatten()
     }
 
-    fn replace(
-        &mut self,
-        add: Vec<Run>,
-        min_level: usize,
-        remove: HashSet<RunId>,
-    ) -> anyhow::Result<()> {
-        if min_level == 0 {
-            return Err(anyhow!(
-                "min_level=0 implies adding to l0, which is not allowed"
-            ));
-        }
-
+    fn replace(&mut self, add: Vec<Run>, remove: HashSet<RunId>) -> anyhow::Result<()> {
         let mut removed = HashSet::new();
 
         let mut l0_sealed = Vec::with_capacity(self.l0_sealed.len());
@@ -342,18 +331,26 @@ impl Keyspace {
             l0_sealed.push(Arc::clone(memtable));
         }
 
+        let mut min_level = 1;
+
         let mut levels_maps = Vec::new();
-        for level in &self.levels {
+        for (i, level) in self.levels.iter().enumerate() {
             let mut level_map = RangeMap::new();
             for run in &level.runs {
                 if remove.contains(&run.id()) {
                     removed.insert(run.id());
+                    min_level = i;
                     continue;
                 }
                 level_map.insert(run.range(), Arc::clone(run));
             }
             levels_maps.push(level_map);
         }
+        while levels_maps.len() < min_level + 1 {
+            levels_maps.push(RangeMap::new());
+        }
+
+        min_level = min(min_level, self.levels.len() - 1);
 
         for run in add.into_iter() {
             let run_id = run.id();

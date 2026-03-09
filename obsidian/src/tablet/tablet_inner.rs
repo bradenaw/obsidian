@@ -326,6 +326,9 @@ impl TabletInner {
         preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
+        // XXX: This is not tolerant of timeouts, since that might cause us to release the locks
+        // before the write completes.
+
         let lsm_rw = self.lsm.read_write()?;
         let _guard = self.acquire_write_locks(&preconds, &muts).await?;
 
@@ -621,9 +624,9 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    use crate::lsm::Lsm;
     use crate::lsm::LsmOptions;
     use crate::meta::TabletState;
+    use crate::tablet::journaled_lsm::JournaledLsm;
     use crate::tablet::protected::ProtectedLsm;
     use crate::tablet::tablet_inner::TabletInner;
     use crate::test::MemStorage;
@@ -641,7 +644,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_preconds() -> anyhow::Result<()> {
-        let lsm = Lsm::new(
+        let lsm = JournaledLsm::open(
             LsmOptions::default(),
             Arc::new(MemWal::new()),
             Arc::new(MemStorage::new()),

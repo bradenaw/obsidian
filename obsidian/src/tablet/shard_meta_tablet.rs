@@ -15,13 +15,16 @@ use futures::TryStreamExt;
 use prost::Message;
 use tokio::sync::mpsc;
 
-use crate::lsm::Lsm;
+use crate::lsm::LsmOptions;
 use crate::lsm::Manifest;
 use crate::meta::MetaSynced;
 use crate::meta::TabletState;
 use crate::pb;
 use crate::runtime::Shards;
+use crate::runtime::Storage;
 use crate::runtime::Tablet;
+use crate::runtime::Wal;
+use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::protected::LsmReadWrite;
 use crate::tablet::protected::ProtectedLsm;
 use crate::tablet::tablet_inner::TabletInner;
@@ -71,10 +74,13 @@ struct ShardMetaTabletInner {
 impl ShardMetaTablet {
     pub(crate) async fn new(
         shard_id: ShardId,
-        lsm: Lsm,
+        wal: Arc<dyn Wal>,
+        storage: Arc<dyn Storage>,
         meta_synced: Arc<MetaSynced>,
         shards: Arc<dyn Shards>,
     ) -> anyhow::Result<Self> {
+        let lsm = JournaledLsm::open(LsmOptions::default(), wal, storage).await?;
+
         lsm.create_keyspace(KeyspaceId::TX_OUTCOMES).await?;
 
         let (commit_sender, commit_receiver) = mpsc::channel(128);

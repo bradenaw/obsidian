@@ -5,7 +5,6 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use crossbeam::sync::ShardedLock;
 
-use crate::lsm::Lsm;
 use crate::lsm::LsmOptions;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
@@ -51,26 +50,15 @@ impl Shard {
         let init_tablets: HashMap<TabletId, Arc<dyn Tablet + 'static>> = {
             let mut init_tablets = HashMap::new();
             if shard_id == TabletId::META.0 {
-                let meta_tablet = MetaTablet::new(
-                    Lsm::new(
-                        LsmOptions::default(),
-                        wals.wal(TabletId::META).await?,
-                        Arc::clone(&storage),
-                    )
-                    .await?,
-                )
-                .await?;
+                let meta_tablet =
+                    MetaTablet::new(wals.wal(TabletId::META).await?, Arc::clone(&storage)).await?;
                 init_tablets.insert(TabletId::META, Arc::new(meta_tablet) as Arc<dyn Tablet>);
             }
 
             let shard_meta_tablet = ShardMetaTablet::new(
                 shard_id,
-                Lsm::new(
-                    LsmOptions::default(),
-                    wals.wal(TabletId::shard_meta(shard_id)).await?,
-                    Arc::clone(&storage),
-                )
-                .await?,
+                wals.wal(TabletId::shard_meta(shard_id)).await?,
+                Arc::clone(&storage),
                 meta_synced.clone(),
                 shards.clone(),
             )
@@ -177,18 +165,12 @@ impl ShardInner {
             range
         );
 
-        let lsm = Lsm::new(
-            self.lsm_options.clone(),
-            self.wals.wal(tablet_id).await?,
-            Arc::clone(&self.storage),
-        )
-        .await?;
-
         let tablet = DataTablet::new(
             tablet_id,
             colo_group_id,
             range,
-            lsm,
+            self.lsm_options.clone(),
+            self.wals.wal(tablet_id).await?,
             Arc::clone(&self.meta_synced),
             Arc::clone(&self.storage),
             Arc::clone(&self.shards),

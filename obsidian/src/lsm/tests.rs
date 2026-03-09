@@ -18,10 +18,8 @@ use crate::lsm::Lsm;
 use crate::lsm::LsmOptions;
 use crate::lsm::LsmRevision;
 use crate::lsm::RunId;
-use crate::runtime::Wal;
 use crate::test::MemFileReader;
 use crate::test::MemStorage;
-use crate::test::MemWal;
 use crate::util::binary_search_by_idx;
 use crate::Bound;
 use crate::ColoGroupId;
@@ -33,28 +31,20 @@ use crate::Range;
 use crate::Revision;
 use crate::RevisionValue;
 use crate::Timestamp;
-use crate::WalSeq;
 
 #[tokio::test]
 async fn test_put_get() -> anyhow::Result<()> {
-    let lsm = Lsm::new(
-        LsmOptions::default(),
-        Arc::new(MemWal::new()),
-        Arc::new(MemStorage::new()),
-    )
-    .await?;
+    let lsm = Lsm::empty(LsmOptions::default(), Arc::new(MemStorage::new())).await?;
     let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
     let k = b"abc";
     let not_k = b"def";
     let v = b"foo";
 
-    lsm.create_keyspace_with_depth(keyspace_id, 2 /*depth*/)
-        .await?;
     lsm.write(
         Timestamp(5),
-        BTreeMap::from([((keyspace_id, k.to_vec()), Mutation::Put(v.to_vec()))]),
-    )
-    .await?;
+        (keyspace_id, k.to_vec()),
+        Mutation::Put(v.to_vec()),
+    )?;
     assert_eq!(lsm.get(Timestamp(4), keyspace_id, k).await?, None);
     assert_eq!(
         lsm.get(Timestamp(5), keyspace_id, k).await?,
@@ -74,19 +64,17 @@ async fn test_put_get() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_compact_l0() -> anyhow::Result<()> {
     _ = pretty_env_logger::try_init();
-    let lsm = Lsm::new(
+    let lsm = Lsm::empty(
         LsmOptions {
             l0_max_size: 128,
+            l1_max_size: 1024,
             block_size_target: 128,
             run_size_target: 512,
         },
-        Arc::new(MemWal::new()),
         Arc::new(MemStorage::new()),
     )
     .await?;
     let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-    lsm.create_keyspace_with_depth(keyspace_id, 2 /*depth*/)
-        .await?;
     let mut map = BTreeMap::new();
     let mut last_ts = Timestamp::ZERO;
     for _ in 0..10 {
@@ -98,9 +86,9 @@ async fn test_compact_l0() -> anyhow::Result<()> {
             last_ts = Timestamp(last_ts.0 + 1);
             lsm.write(
                 last_ts,
-                BTreeMap::from([((keyspace_id, vec![i as u8]), Mutation::Put(vec![v]))]),
-            )
-            .await?;
+                (keyspace_id, vec![i as u8]),
+                Mutation::Put(vec![v]),
+            )?;
             map.insert(i as u8, v);
         }
         compacted.await;
@@ -132,19 +120,17 @@ async fn test_compact_l0() -> anyhow::Result<()> {
 async fn test_compact_l1() -> anyhow::Result<()> {
     _ = pretty_env_logger::try_init();
 
-    let lsm = Lsm::new(
+    let lsm = Lsm::empty(
         LsmOptions {
             l0_max_size: 128,
+            l1_max_size: 1024,
             block_size_target: 128,
             run_size_target: 512,
         },
-        Arc::new(MemWal::new()),
         Arc::new(MemStorage::new()),
     )
     .await?;
     let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-    lsm.create_keyspace_with_depth(keyspace_id, 3 /*depth*/)
-        .await?;
     let mut map = BTreeMap::new();
     let mut last_ts = Timestamp::ZERO;
     let mut ctr = 1u32;
@@ -159,112 +145,28 @@ async fn test_compact_l1() -> anyhow::Result<()> {
                 ctr += 1;
                 lsm.write(
                     Timestamp(ctr as u64),
-                    BTreeMap::from([((keyspace_id, vec![k]), Mutation::Put(v.to_vec()))]),
-                )
-                .await?;
+                    (keyspace_id, vec![k]),
+                    Mutation::Put(v.to_vec()),
+                )?;
                 last_ts = Timestamp(ctr as u64);
                 map.insert(k, v.to_vec());
             }
 
+            log::trace!("waiting for pending compactions");
+            log::trace!("manifest: {:?}", lsm.manifest());
             lsm.pending_compactions().await;
-            if lsm
-                .index_snapshot()
-                .keyspaces
-                .get(&keyspace_id)
-                .unwrap()
-                .levels[2]
-                .runs
-                .len()
-                >= (j + 1) as usize
-            {
+
+            let index_snapshot = lsm.index_snapshot();
+            let keyspace = index_snapshot.keyspaces.get(&keyspace_id).unwrap();
+            if keyspace.levels.len() > 2 && keyspace.levels[2].runs.len() >= (j + 1) as usize {
                 break;
             }
         }
-
-        dump_lsm(&lsm).await?;
 
         for (k, v) in &map {
             let actual = lsm.get(last_ts, keyspace_id, &[*k]).await?.map(|(_, b)| b);
             assert_eq!(actual, Some(RevisionValue::Regular(v.clone())));
         }
-    }
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_recovery() -> anyhow::Result<()> {
-    let wal = Arc::new(MemWal::new()) as Arc<dyn Wal>;
-    let storage = Arc::new(MemStorage::new());
-
-    let lsm = Lsm::new(
-        LsmOptions {
-            l0_max_size: 128,
-            block_size_target: 128,
-            run_size_target: 512,
-        },
-        Arc::clone(&wal),
-        storage.clone(),
-    )
-    .await?;
-
-    let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-    lsm.create_keyspace_with_depth(keyspace_id, 2 /*depth*/)
-        .await?;
-
-    let mut map = BTreeMap::new();
-    let mut write_ts = 5;
-    for _ in 0..10 {
-        // We consider these writes to be 10 bytes (1 key + 8 ts + 1 value), so this is
-        // enough to overfill a memtable.
-        for i in 0..24 {
-            let v = (i % 179) as u8;
-            lsm.write(
-                Timestamp(write_ts),
-                BTreeMap::from([((keyspace_id, vec![i as u8]), Mutation::Put(vec![v]))]),
-            )
-            .await?;
-            write_ts += 2;
-            map.insert(i as u8, v);
-        }
-        lsm.pending_compactions().await;
-
-        for (k, v) in &map {
-            assert_eq!(
-                lsm.get(Timestamp(write_ts), keyspace_id, &[*k])
-                    .await?
-                    .map(|(_, b)| b),
-                Some(RevisionValue::Regular(vec![*v])),
-            );
-        }
-    }
-
-    // Make sure we actually did ever do a compaction.
-    assert!(
-        lsm.index_snapshot()
-            .keyspaces
-            .get(&keyspace_id)
-            .unwrap()
-            .levels[1]
-            .runs
-            .len()
-            >= 1
-    );
-
-    lsm.flush().await?;
-
-    drop(lsm);
-
-    // Rebuild the LSM from the same WAL and storage, this should recover everything.
-    let lsm = Lsm::new(LsmOptions::default(), wal, storage).await?;
-
-    for (k, v) in &map {
-        assert_eq!(
-            lsm.get(Timestamp(write_ts), keyspace_id, &[*k])
-                .await?
-                .map(|(_, b)| b),
-            Some(RevisionValue::Regular(vec![*v]))
-        );
     }
 
     Ok(())
@@ -286,19 +188,17 @@ fn test_binary_search_by_key() {
 
 #[tokio::test]
 async fn test_scan_page() -> anyhow::Result<()> {
-    let lsm = Lsm::new(
+    let lsm = Lsm::empty(
         LsmOptions {
             l0_max_size: 32,
+            l1_max_size: 256,
             block_size_target: 48,
             run_size_target: 96,
         },
-        Arc::new(MemWal::new()),
         Arc::new(MemStorage::new()),
     )
     .await?;
     let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-    lsm.create_keyspace_with_depth(keyspace_id, 3 /*depth*/)
-        .await?;
 
     let writes = [
         //   ts=0123456789
@@ -334,11 +234,7 @@ async fn test_scan_page() -> anyhow::Result<()> {
             //    Mutation::Put(v) => RevisionValue::Regular(v),
             //    Mutation::Delete => RevisionValue::Tombstone,
             //};
-            lsm.write(
-                Timestamp(ts as u64),
-                BTreeMap::from([((keyspace_id, key.into()), mutation)]),
-            )
-            .await?;
+            lsm.write(Timestamp(ts as u64), (keyspace_id, key.into()), mutation)?;
 
             //expected.insert(key, value);
         }
@@ -581,19 +477,18 @@ proptest! {
 
             let mut writes = vec![];
 
-            let lsm = Lsm::new(
+            let lsm = Lsm::empty(
                 LsmOptions {
                     l0_max_size: 128,
+                    l1_max_size: 1024,
                     block_size_target: 128,
                     run_size_target: 512,
                 },
-                Arc::new(MemWal::new()),
                 Arc::new(MemStorage::new()),
             )
             .await
             .unwrap();
             let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
-            lsm.create_keyspace_with_depth(keyspace_id, 3 /*depth*/).await.unwrap();
 
             let mut write_ts = 5;
             for (i, index) in write_indexes.iter().enumerate() {
@@ -603,9 +498,9 @@ proptest! {
                 lsm
                     .write(
                         Timestamp(write_ts),
-                        BTreeMap::from([((keyspace_id, key.clone()), Mutation::Put(value.clone()))]),
+                        (keyspace_id, key.clone()),
+                        Mutation::Put(value.clone()),
                     )
-                    .await
                     .unwrap();
                 writes.push((key.clone(), Timestamp(write_ts), value.clone()));
                 write_ts += 2;
@@ -897,7 +792,7 @@ async fn keyspace_from_diagram(diagram: Vec<(&str, &[u8])>) -> anyhow::Result<Ke
     let l0_active_revisions = find_touching(&diagram[..], &mut visited, x_max, 0);
     let l0_active = Memtable::new();
     for revision in l0_active_revisions {
-        l0_active.insert(WalSeq(1), revision.key, revision.ts, revision.value);
+        l0_active.insert(revision.key, revision.ts, revision.value);
     }
     let mut keyspace = Keyspace {
         l0_active: Arc::new(l0_active),
@@ -914,12 +809,7 @@ async fn keyspace_from_diagram(diagram: Vec<(&str, &[u8])>) -> anyhow::Result<Ke
 
             if keyspace.l0_sealed[0].is_empty() {
                 for revision in revisions {
-                    keyspace.l0_sealed[0].insert(
-                        WalSeq(1),
-                        revision.key,
-                        revision.ts,
-                        revision.value,
-                    );
+                    keyspace.l0_sealed[0].insert(revision.key, revision.ts, revision.value);
                 }
             } else {
                 let mut v = vec![];

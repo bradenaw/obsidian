@@ -169,7 +169,7 @@ impl<T: Tablet> Meta for MetaImpl<T> {
 
     async fn wait_for_newer(&self, ts: Timestamp) -> anyhow::Result<()> {
         log::debug!("Meta::wait_for_newer({:?})", ts);
-        self.ts.wait(ts.plus_one()).await?;
+        self.ts.wait(ts.plus_one()).await;
         log::debug!("Meta::wait_for_newer({:?}) -> done", ts);
         Ok(())
     }
@@ -285,7 +285,7 @@ impl<T: Tablet> MetaImpl<T> {
         Self {
             tablet,
             sync_key: MetaKey::Sync.encode(),
-            ts: WaitableTimestamp::new(),
+            ts: WaitableTimestamp::new(Timestamp::ZERO),
         }
     }
 

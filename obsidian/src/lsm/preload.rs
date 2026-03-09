@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -7,19 +8,19 @@ use crate::lsm::index::IndexSnapshot;
 use crate::lsm::index::Keyspace;
 use crate::lsm::index::Level;
 use crate::lsm::memtable::Memtable;
+use crate::lsm::Manifest;
 use crate::lsm::Run;
 use crate::lsm::RunId;
 use crate::runtime::Storage;
 use crate::util::spawn_owned;
 use crate::util::OwnedJoinHandle;
-use crate::KeyspaceId;
 
 pub(crate) struct Preloader {
     storage: Arc<dyn Storage>,
 
     semaphore: Arc<tokio::sync::Semaphore>,
-    runs: HashMap<RunId, (usize, PreloadRun)>,
-    keyspaces: HashMap<KeyspaceId, usize>,
+    manifest: Manifest,
+    runs: HashMap<RunId, PreloadRun>,
 }
 
 enum PreloadRun {
@@ -32,35 +33,51 @@ impl Preloader {
         Self {
             storage,
             semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
+            manifest: Manifest::empty(),
             runs: HashMap::new(),
-            keyspaces: HashMap::new(),
         }
     }
 
-    pub fn add_keyspace(&mut self, keyspace_id: KeyspaceId, depth: usize) {
-        self.keyspaces.insert(keyspace_id, depth);
-    }
+    /// Sets the current manifest. Will cause the preloader to load all of the runs in this
+    /// manifest in the background. Any previously-loaded runs that are not in this manifest will
+    /// be unloaded.
+    pub fn set_manifest(&mut self, manifest: Manifest) {
+        let manifest_run_ids = manifest
+            .runs()
+            .map(|(_, _, run)| run.run_id)
+            .collect::<HashSet<_>>();
 
-    pub fn queue(&mut self, run_id: RunId, level: usize) {
-        self.runs.insert(
-            run_id,
-            (
-                level,
+        self.runs
+            .retain(|run_id, _| manifest_run_ids.contains(run_id));
+
+        for (_, _, run_manifest) in manifest.runs() {
+            let run_id = run_manifest.run_id;
+            if self.runs.contains_key(&run_id) {
+                continue;
+            }
+            log::debug!("queued {:?} {:?} for preload", run_id, run_manifest.range);
+            self.runs.insert(
+                run_id,
                 PreloadRun::Loading(spawn_owned({
                     let storage = Arc::clone(&self.storage);
                     let semaphore = Arc::clone(&self.semaphore);
                     async move {
                         let _permit = semaphore.acquire().await;
                         let file = storage.get(&run_id.to_string()).await?;
-                        Run::open(file).await
+                        let run = Run::open(file).await;
+                        log::debug!("{:?} finished preload", run_id);
+                        run
                     }
                 })),
-            ),
-        );
+            );
+        }
+
+        self.manifest = manifest;
     }
 
-    pub async fn load(&mut self) -> anyhow::Result<()> {
-        for (_, (_, preload_run)) in self.runs.iter_mut() {
+    /// Wait until all runs in the current manifest are loaded.
+    pub async fn wait(&mut self) -> anyhow::Result<()> {
+        for (_, preload_run) in self.runs.iter_mut() {
             if let PreloadRun::Loading(join_handle) = preload_run {
                 let run = join_handle.await?;
                 *preload_run = PreloadRun::Loaded(run);
@@ -69,58 +86,39 @@ impl Preloader {
         Ok(())
     }
 
-    pub fn unload(&mut self, run_id: RunId) {
-        self.runs.remove(&run_id);
-    }
-
-    pub async fn wait(self) -> anyhow::Result<Preloaded> {
+    /// Wait until all runs in the current manifest are loaded and return a Preloaded which can be
+    /// used to seed an LSM.
+    pub async fn load(mut self) -> anyhow::Result<Preloaded> {
         let mut snapshot = IndexSnapshot {
             keyspaces: HashMap::new(),
             splits: vec![],
         };
 
-        for (keyspace_id, depth) in &self.keyspaces {
-            snapshot.keyspaces.insert(
-                *keyspace_id,
-                Keyspace {
-                    l0_active: Arc::new(Memtable::new()),
-                    l0_sealed: Vec::new(),
-                    levels: (0..*depth)
-                        .into_iter()
-                        .map(|_| Level { runs: Vec::new() })
-                        .collect(),
-                },
-            );
-        }
-        for (run_id, (level, preload_run)) in self.runs.into_iter() {
-            let run = match preload_run {
-                PreloadRun::Loading(join_handle) => join_handle.await?,
-                PreloadRun::Loaded(run) => run,
+        for (keyspace_id, keyspace_manifest) in &self.manifest.keyspaces {
+            let mut keyspace = Keyspace {
+                l0_active: Arc::new(Memtable::new()),
+                l0_sealed: Vec::new(),
+                levels: vec![],
             };
 
-            if let Some(keyspace) = snapshot.keyspaces.get_mut(&run.keyspace_id) {
-                if level >= keyspace.levels.len() {
-                    return Err(anyhow!(
-                        "{:?} in {:?} at depth {} but keyspace only has depth {}",
-                        run_id,
-                        run.keyspace_id,
-                        level,
-                        keyspace.levels.len()
-                    ));
+            for level_manifest in keyspace_manifest.levels() {
+                let mut runs = vec![];
+                for run_manifest in level_manifest.runs() {
+                    let preload_run = self.runs.remove(&run_manifest.run_id).ok_or_else(|| {
+                        anyhow!(
+                            "manifest has run {:?} but missing from preload",
+                            run_manifest.run_id
+                        )
+                    })?;
+                    let run = match preload_run {
+                        PreloadRun::Loading(join_handle) => join_handle.await?,
+                        PreloadRun::Loaded(run) => run,
+                    };
+                    runs.push(Arc::new(run));
                 }
-                keyspace.levels[level].runs.push(Arc::new(run));
-            } else {
-                return Err(anyhow!(
-                    "{:?} in {:?} but keyspace never added to preloader",
-                    run_id,
-                    run.keyspace_id,
-                ));
+                keyspace.levels.push(Level { runs });
             }
-        }
-        for (_, keyspace) in &mut snapshot.keyspaces {
-            for level in &mut keyspace.levels {
-                level.runs.sort_by_key(|run| run.range().lower);
-            }
+            snapshot.keyspaces.insert(*keyspace_id, keyspace);
         }
 
         Ok(Preloaded { snapshot })

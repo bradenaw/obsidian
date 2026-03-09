@@ -59,7 +59,7 @@ impl MetaSynced {
         let bg = Background::new();
 
         let inner = Arc::new(RwLock::new(MetaSyncedInner {
-            synced_ts: Arc::new(WaitableTimestamp::new()),
+            synced_ts: Arc::new(WaitableTimestamp::new(Timestamp::ZERO)),
             kv: MetaSyncedSnapshot::new(),
             router: StaticRouter::new(HashMap::new()),
             owned_ranges: HashMap::new(),
@@ -139,7 +139,7 @@ impl MetaSynced {
             let inner = self.inner.read().unwrap();
             inner.synced_ts.clone()
         };
-        synced_ts.wait(ts).await?;
+        synced_ts.wait(ts).await;
         Ok(())
     }
 

@@ -44,12 +44,14 @@ impl Compactor {
         storage: Arc<dyn Storage>,
         index: Arc<Index>,
         concurrency: usize,
+        l1_max_size: u64,
         run_size_target: u64,
         block_size_target: u64,
     ) -> Self {
         let bg = WithBackground::new(Arc::new(CompactorInner {
             index,
             storage,
+            l1_max_size,
             run_size_target,
             block_size_target,
         }));
@@ -65,6 +67,7 @@ impl Compactor {
 struct CompactorInner {
     index: Arc<Index>,
     storage: Arc<dyn Storage>,
+    l1_max_size: u64,
     run_size_target: u64,
     block_size_target: u64,
 }
@@ -78,11 +81,21 @@ impl CompactorInner {
         loop {
             let (snapshot, snapshot_changed) = self.index.snapshot_subscribe();
 
+            let mut expanded = false;
+            for (keyspace_id, keyspace) in &snapshot.keyspaces {
+                let level_sizes = level_size_estimates(keyspace, &in_flight_from);
+                let lmax_idx = level_sizes.len() - 1;
+                if level_sizes[lmax_idx] > self.level_size_max(lmax_idx) {
+                    let _ = self.index.expand(*keyspace_id);
+                    expanded = true;
+                }
+            }
+            if expanded {
+                continue;
+            }
+
             while compact_futures.len() < concurrency {
-                match self
-                    .schedule_next(&snapshot, &in_flight_from, &in_flight_into)
-                    .await
-                {
+                match self.schedule_next(&snapshot, &in_flight_from, &in_flight_into) {
                     Some((compaction, join_handle)) => {
                         in_flight_from.extend(compaction.from.iter());
                         in_flight_into.extend(compaction.into.iter());
@@ -119,30 +132,27 @@ impl CompactorInner {
         }
     }
 
-    async fn schedule_next(
+    fn schedule_next(
         self: &Arc<Self>,
         snapshot: &Arc<IndexSnapshot>,
         in_flight_from: &HashSet<RunId>,
         in_flight_into: &HashSet<RunId>,
     ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
         for (keyspace_id, keyspace) in &snapshot.keyspaces {
-            if let Some(out) = self
-                .schedule_next_keyspace(
-                    *keyspace_id,
-                    keyspace,
-                    &snapshot.splits,
-                    in_flight_from,
-                    in_flight_into,
-                )
-                .await
-            {
+            if let Some(out) = self.schedule_next_keyspace(
+                *keyspace_id,
+                keyspace,
+                &snapshot.splits,
+                in_flight_from,
+                in_flight_into,
+            ) {
                 return Some(out);
             }
         }
         None
     }
 
-    async fn schedule_next_keyspace(
+    fn schedule_next_keyspace(
         self: &Arc<Self>,
         keyspace_id: KeyspaceId,
         keyspace: &Keyspace,
@@ -226,30 +236,17 @@ impl CompactorInner {
         in_flight_from: &HashSet<RunId>,
         in_flight_into: &HashSet<RunId>,
     ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
-        let level_size_estimates = {
-            let mut level_size_estimates: Vec<_> =
-                keyspace.levels.iter().map(|level| level.size()).collect();
-
-            for i in 1..keyspace.levels.len() - 1 {
-                for run in &keyspace.levels[i].runs {
-                    if in_flight_from.contains(&run.id()) {
-                        level_size_estimates[i] -= run.size();
-                        level_size_estimates[i + 1] += run.size();
-                    }
-                }
-            }
-
-            level_size_estimates
-        };
+        let level_sizes = level_size_estimates(keyspace, in_flight_from);
 
         // Prefer starting lower-level compactions first, since otherwise l0 compactions might
         // regularly lock up all of l1 and we might never be able to compact from l1.
-        for i in (1..keyspace.levels.len() - 1).rev() {
+        for i in (1..keyspace.levels.len()).rev() {
             let level = &keyspace.levels[i];
             if level.runs.len() == 0 {
                 continue;
             }
-            if level_size_estimates[i] * 10 < level_size_estimates[i + 1] {
+
+            if level_sizes[i] < self.l1_max_size * 10u64.pow(i as u32) {
                 continue;
             }
 
@@ -349,7 +346,7 @@ impl CompactorInner {
                     from: siblings.iter().map(|run| run.id()).collect(),
                     into: HashSet::new(),
                 },
-                Either::Right(self.compact_max(keyspace_id, splits, level_idx, siblings)),
+                Either::Right(self.compact_max(keyspace_id, splits, siblings)),
             ));
         }
     }
@@ -457,7 +454,7 @@ impl CompactorInner {
                     add.iter().map(|run| run.id()).collect::<Vec<_>>(),
                 );
 
-                self_.index.replace(keyspace_id, add, 1, remove)?;
+                self_.index.replace(keyspace_id, add, remove)?;
 
                 Ok(())
             }
@@ -523,9 +520,7 @@ impl CompactorInner {
                     into.iter().map(|run| run.id()).collect::<Vec<_>>(),
                     add.iter().map(|run| run.id()).collect::<Vec<_>>(),
                 );
-                self_
-                    .index
-                    .replace(keyspace_id, add, from_level + 1, remove)?;
+                self_.index.replace(keyspace_id, add, remove)?;
                 Ok(())
             }
         })
@@ -555,7 +550,6 @@ impl CompactorInner {
         self: &Arc<Self>,
         keyspace_id: KeyspaceId,
         splits: &[Bound<Vec<u8>>],
-        level: usize,
         runs: &[Arc<Run>],
     ) -> impl Future<Output = anyhow::Result<()>> {
         log::trace!(
@@ -584,7 +578,7 @@ impl CompactorInner {
                     runs.iter().map(|run| run.id()).collect::<Vec<_>>(),
                     add.iter().map(|run| run.id()).collect::<Vec<_>>(),
                 );
-                self_.index.replace(keyspace_id, add, level, remove)?;
+                self_.index.replace(keyspace_id, add, remove)?;
                 Ok(())
             }
         })
@@ -649,6 +643,10 @@ impl CompactorInner {
         }
         Ok(runs)
     }
+
+    fn level_size_max(&self, level_idx: usize) -> u64 {
+        self.l1_max_size * 10u64.pow(level_idx.saturating_sub(1) as u32)
+    }
 }
 
 fn group_by_key(
@@ -693,4 +691,23 @@ fn bounding_range(ranges: impl Iterator<Item = Range<Vec<u8>>>) -> Range<Vec<u8>
         upper = cmp::max(upper, range.upper);
     }
     Range { lower, upper }
+}
+
+fn level_size_estimates(keyspace: &Keyspace, in_flight_from: &HashSet<RunId>) -> Vec<u64> {
+    let mut result: Vec<_> = keyspace
+        .levels
+        .iter()
+        .map(|level| level.size() as u64)
+        .collect();
+
+    for i in 1..keyspace.levels.len() - 1 {
+        for run in &keyspace.levels[i].runs {
+            if in_flight_from.contains(&run.id()) {
+                result[i] -= run.size() as u64;
+                result[i + 1] += run.size() as u64;
+            }
+        }
+    }
+
+    result
 }

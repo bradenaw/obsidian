@@ -8,11 +8,11 @@ use anyhow::anyhow;
 use tokio::sync::watch;
 use tokio::sync::Notify;
 
-use crate::lsm::Lsm;
 use crate::lsm::Manifest;
 use crate::lsm::Preloaded;
 use crate::meta::TabletState;
 use crate::meta::TabletStateProperties;
+use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::Bound;
 use crate::Direction;
 use crate::HistoryRange;
@@ -32,11 +32,11 @@ pub(super) struct ProtectedLsm {
     state: InfrequentlyChanged<TabletStateProperties>,
     changed: watch::Receiver<()>,
     on_change: watch::Sender<()>,
-    lsm: Lsm,
+    lsm: JournaledLsm,
 }
 
 impl ProtectedLsm {
-    pub(super) fn new(tablet_id: TabletId, lsm: Lsm, initial: TabletState) -> Self {
+    pub(super) fn new(tablet_id: TabletId, lsm: JournaledLsm, initial: TabletState) -> Self {
         let (on_change, changed) = watch::channel(());
         Self {
             tablet_id,
@@ -193,7 +193,7 @@ pub(super) trait LsmReadWrite: LsmRead {
 
 pub(super) struct LsmReadGuard<'a> {
     guard: InfrequentlyChangedGuard<'a, TabletStateProperties>,
-    lsm: &'a Lsm,
+    lsm: &'a JournaledLsm,
 }
 
 impl<'a> LsmRead for LsmReadGuard<'a> {
@@ -241,7 +241,7 @@ impl<'a> LsmRead for LsmReadGuard<'a> {
 
 pub(super) struct LsmReadWriteGuard<'a> {
     guard: InfrequentlyChangedGuard<'a, TabletStateProperties>,
-    lsm: &'a Lsm,
+    lsm: &'a JournaledLsm,
 }
 
 impl<'a> LsmRead for LsmReadWriteGuard<'a> {
@@ -299,7 +299,7 @@ impl<'a> LsmReadWrite for LsmReadWriteGuard<'a> {
 
 pub(super) struct LsmLoadGuard<'a> {
     guard: InfrequentlyChangedGuard<'a, TabletStateProperties>,
-    lsm: &'a Lsm,
+    lsm: &'a JournaledLsm,
 }
 
 impl<'a> LsmLoadGuard<'a> {

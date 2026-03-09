@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 #![feature(coroutines)]
+#![feature(iter_from_coroutine)]
 #![feature(thread_id_value)]
 
 mod election;

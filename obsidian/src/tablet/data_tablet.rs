@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::collections::HashSet;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -11,8 +10,9 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
-use crate::lsm::Lsm;
+use crate::lsm::LsmOptions;
 use crate::lsm::Manifest;
 use crate::lsm::Preloader;
 use crate::meta::MetaKey;
@@ -26,6 +26,8 @@ use crate::meta::TabletState;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
 use crate::runtime::Tablet;
+use crate::runtime::Wal;
+use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::protected::LsmRead;
 use crate::tablet::protected::LsmReadWrite;
 use crate::tablet::protected::ProtectedLsm;
@@ -330,11 +332,14 @@ impl DataTablet {
         tablet_id: TabletId,
         colo_group_id: ColoGroupId,
         range: Range<Vec<u8>>,
-        lsm: Lsm,
+        lsm_options: LsmOptions,
+        wal: Arc<dyn Wal>,
         meta_synced: Arc<MetaSynced>,
         storage: Arc<dyn Storage>,
         shards: Arc<dyn Shards>,
     ) -> anyhow::Result<Self> {
+        let lsm = JournaledLsm::open(lsm_options, wal, Arc::clone(&storage)).await?;
+
         let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
 
         lsm.create_keyspace(KeyspaceId::TX_OUTCOMES).await?;
@@ -379,70 +384,6 @@ impl DataTablet {
 impl DataTabletInner {
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
         self.inner.lsm.find_split().await
-    }
-
-    pub(super) async fn sync_meta(
-        self: &Arc<Self>,
-        sync_type: SyncType,
-        snapshot: MetaSyncedSnapshot,
-    ) {
-        Retry::new()
-            .indefinitely(&async || -> anyhow::Result<()> {
-                let sync_type = sync_type.clone();
-                match sync_type {
-                    SyncType::Initial => {
-                        self.refresh_metadata(&snapshot).await?;
-
-                        let tablet_metadata =
-                            snapshot.tablet_metadata(self.inner.tablet_id).await?;
-                        if matches!(
-                            tablet_metadata.state,
-                            MetaState::Stable(TabletState::Active),
-                        ) {
-                            for keyspace_id in snapshot.keyspace_ids().await? {
-                                if keyspace_id.0 != self.inner.colo_group_id {
-                                    continue;
-                                }
-                                self.inner.create_keyspace(keyspace_id).await?;
-                            }
-                        }
-                    }
-                    SyncType::Tx(meta_keys) => {
-                        for meta_key in meta_keys {
-                            match meta_key {
-                                MetaKey::Keyspace(keyspace_id) => {
-                                    if keyspace_id.0 != self.inner.colo_group_id {
-                                        continue;
-                                    }
-
-                                    let tablet_metadata =
-                                        snapshot.tablet_metadata(self.inner.tablet_id).await?;
-
-                                    // TODO: There's a race here where we might drop a keyspace
-                                    // creation on the floor if it's done during a transition. We
-                                    // could make this graceful, but it'd be a lot easier to just
-                                    // make keyspace creation wait until there's an active tablet
-                                    // for every range.
-                                    if matches!(
-                                        tablet_metadata.state,
-                                        MetaState::Stable(TabletState::Active),
-                                    ) {
-                                        self.inner.create_keyspace(keyspace_id).await?;
-                                    }
-                                }
-                                MetaKey::Tablet(tablet_id) => {
-                                    if tablet_id == self.inner.tablet_id {
-                                        self.refresh_metadata(&snapshot).await?;
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-                Ok(())
-            })
-            .await;
     }
 
     // Scans for pending mutations that exist on disk already and delivers them to `sender`.
@@ -530,31 +471,32 @@ impl DataTabletInner {
         &self,
         receiver: mpsc::Receiver<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
     ) {
-        crate::util::bounded_unordered_for_each(
-            receiver,
-            64,
-            |(txid, keyspace_id, key, prepare_type)| async move {
-                let owner_tablet = self.shards.tablet(txid.owner()).unwrap();
-                let tx_outcome = owner_tablet.wait(txid).await.unwrap();
-                // Commits get cleaned up by the owner tablet calling cleanup_committed. Ignore them
-                // here to avoid duplicating work.
-                // TODO: retry instead of unwrap
-                if let TxOutcome::Aborted = tx_outcome {
-                    let lsm_rw = self.inner.lsm.wait_read_write().await;
-                    match prepare_type {
-                        PrepareType::Precondition => self
-                            .cleanup_precond_key(&lsm_rw, txid, keyspace_id, key)
-                            .await
-                            .unwrap(),
-                        PrepareType::Mutation => self
-                            .cleanup_pending_key(&lsm_rw, txid, tx_outcome, keyspace_id, key)
-                            .await
-                            .unwrap(),
+        let stream = ReceiverStream::new(receiver);
+        stream
+            .for_each_concurrent(
+                Some(64),
+                |(txid, keyspace_id, key, prepare_type)| async move {
+                    let owner_tablet = self.shards.tablet(txid.owner()).unwrap();
+                    let tx_outcome = owner_tablet.wait(txid).await.unwrap();
+                    // Commits get cleaned up by the owner tablet calling cleanup_committed. Ignore them
+                    // here to avoid duplicating work.
+                    // TODO: retry instead of unwrap
+                    if let TxOutcome::Aborted = tx_outcome {
+                        let lsm_rw = self.inner.lsm.wait_read_write().await;
+                        match prepare_type {
+                            PrepareType::Precondition => self
+                                .cleanup_precond_key(&lsm_rw, txid, keyspace_id, key)
+                                .await
+                                .unwrap(),
+                            PrepareType::Mutation => self
+                                .cleanup_pending_key(&lsm_rw, txid, tx_outcome, keyspace_id, key)
+                                .await
+                                .unwrap(),
+                        }
                     }
-                }
-            },
-        )
-        .await;
+                },
+            )
+            .await;
     }
 
     async fn cleanup_committed(
@@ -669,12 +611,15 @@ impl DataTabletInner {
 
     async fn hydrate(&self, srcs: &[TabletId]) -> anyhow::Result<()> {
         let mut preloader = Preloader::new(Arc::clone(&self.storage));
-        let mut loaded = HashSet::new();
 
         let mut rounds_with_completed = 0;
 
+        let mut src_manifests = Vec::with_capacity(srcs.len());
+        for _ in 0..srcs.len() {
+            src_manifests.push(Manifest::empty());
+        }
+
         loop {
-            let mut run_ids_seen = HashSet::new();
             // True if there aren't partially-overlapping runs, so that once we do preloader.load()
             // we have all of the data we were aware of.
             let mut complete = true;
@@ -691,20 +636,12 @@ impl DataTabletInner {
                 HydrationState::Catchup,
             );
 
-            for src_id in srcs {
+            let mut any_changed = false;
+            for (i, src_id) in srcs.iter().enumerate() {
                 let src = self.shards.tablet(*src_id)?;
-
                 let manifest = src.manifest().await?;
 
-                for (keyspace_id, keyspace_manifest) in &manifest.keyspaces {
-                    preloader.add_keyspace(*keyspace_id, keyspace_manifest.levels.len());
-                }
-
-                for (_, level, run_manifest) in manifest.runs() {
-                    if level == 0 {
-                        continue;
-                    }
-
+                for (_, _, run_manifest) in manifest.runs() {
                     if !self.inner.range.contains_range(&run_manifest.range) {
                         // If the run partially overlaps, compaction at the source will
                         // eventually make it not.
@@ -718,34 +655,32 @@ impl DataTabletInner {
                         }
                         continue;
                     }
+                }
 
-                    run_ids_seen.insert(run_manifest.run_id);
-
-                    if loaded.contains(&run_manifest.run_id) {
-                        continue;
-                    }
-
-                    preloader.queue(run_manifest.run_id, level);
-                    loaded.insert(run_manifest.run_id);
-                    log::debug!(
-                        "{:?} queued {:?} {:?} for hydration",
-                        self.inner.tablet_id,
-                        run_manifest.run_id,
-                        run_manifest.range
-                    );
+                if src_manifests[i] != manifest {
+                    src_manifests[i] = manifest;
+                    any_changed = true;
                 }
             }
 
-            // Unload the runs that went away because of compaction.
-            for run_id in loaded.extract_if(|run_id| !run_ids_seen.contains(run_id)) {
-                preloader.unload(run_id);
+            if any_changed {
+                let merged_manifest = {
+                    let mut merged_manifest = Manifest::empty();
+                    for src_manifest in &src_manifests {
+                        let mut manifest = src_manifest.clone();
+                        manifest.clip(self.inner.range.borrow());
+                        merged_manifest = merged_manifest.merge(manifest)?;
+                    }
+                    merged_manifest
+                };
+                preloader.set_manifest(merged_manifest);
             }
 
             if done_after_round && complete {
                 break;
             }
 
-            preloader.load().await?;
+            preloader.wait().await?;
 
             if complete {
                 rounds_with_completed += 1;
@@ -773,7 +708,7 @@ impl DataTabletInner {
         }
 
         // TODO: Need to block compactions and only enable after we transition.
-        self.inner.lsm.load()?.load(preloader.wait().await?).await?;
+        self.inner.lsm.load()?.load(preloader.load().await?).await?;
         let _ = self
             .hydration
             .lock()
