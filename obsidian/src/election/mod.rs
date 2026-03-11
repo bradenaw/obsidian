@@ -24,6 +24,7 @@ use tokio_stream::wrappers::IntervalStream;
 use uuid::Uuid;
 
 use crate::election::atomic_instant::AtomicInstant;
+use crate::election::seq_waiters::SeqWaiters;
 use crate::runtime::Journal;
 use crate::util::AtomicTimestamp;
 use crate::util::WithBackground;
@@ -120,6 +121,7 @@ impl ParticipantBuilder {
             state: RwLock::new(Some(InnerParticipantState::Follower(follower))),
             state_change_request: Notify::new(),
             last_confirmation: AtomicInstant::new(),
+            accepted_seqs: SeqWaiters::new(),
         }));
 
         inner.spawn(async |participant| {
@@ -149,6 +151,8 @@ struct ParticipantInner<TEntry, TLeader, TFollower> {
     // The timestamp of the write of the last seen Acquire by self, stored as the duration since
     // self.epoch in nanoseconds.
     last_confirmation: AtomicInstant,
+
+    accepted_seqs: SeqWaiters,
 }
 
 enum InnerParticipantState<TLeader, TFollower> {
@@ -225,25 +229,29 @@ where
         self.0.participant_id
     }
 
-    /// Attempt to append an entry to the log.
-    ///
-    /// It is possible for try_append to succeed but for the entry not to be accepted. Use
-    /// Leader::process / Follower::process to learn if the entry is accepted.
-    pub async fn try_append(&self, entry: TEntry) -> anyhow::Result<()> {
+    /// Append an entry to the log.
+    pub async fn append(&self, entry: TEntry) -> anyhow::Result<()> {
         let state = self.0.state.read().await;
         if let Some(InnerParticipantState::Leader { lease_end, .. }) = state.deref() {
             let ts = Timestamp::now();
             if ts > lease_end.load() {
                 return Err(anyhow!("cannot append: lease expired"));
             }
-            self.0
+
+            let wait = self.0.accepted_seqs.register();
+            let seq = self
+                .0
                 .journal
                 .append(Proposal {
                     participant_id: self.0.participant_id,
                     timestamp: ts,
                     proposal_type: ProposalType::Append(entry),
                 })
-                .await?;
+                .await?; // TODO: If this errors we have to relinquish.
+            let accepted = wait.wait(seq).await;
+            if !accepted {
+                return Err(anyhow!("entry not accepted"));
+            }
         }
 
         Err(anyhow!("cannot append: not currently leader"))
@@ -419,6 +427,8 @@ where
                     let (seq, ratification) = next
                         .transpose()?
                         .ok_or_else(|| anyhow!("journal tail ended"))?;
+
+                    self.accepted_seqs.observe(seq);
 
                     match ratification {
                         Ratification::Accepted(proposal) => match proposal.proposal_type {
