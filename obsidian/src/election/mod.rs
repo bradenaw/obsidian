@@ -1,4 +1,5 @@
 mod atomic_instant;
+mod seq_waiters;
 #[cfg(test)]
 mod tests;
 
