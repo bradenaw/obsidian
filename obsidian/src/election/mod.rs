@@ -247,7 +247,9 @@ where
                     timestamp: ts,
                     proposal_type: ProposalType::Append(entry),
                 })
-                .await?; // TODO: If this errors we have to relinquish.
+                .await
+                .unwrap(); // TODO: We do need to relinquish and change our participant ID etc, but
+                           // unwrap is a little ungraceful.
             let accepted = wait.wait(seq).await;
             if !accepted {
                 return Err(anyhow!("entry not accepted"));
