@@ -708,7 +708,11 @@ impl DataTabletInner {
         }
 
         // TODO: Need to block compactions and only enable after we transition.
-        self.inner.lsm.load()?.load(preloader.load().await?).await?;
+        self.inner.lsm.load()?.load(preloader.load().await?)?;
+        // We need to flush here otherwise after a crash and restart we'd lose track of the runs,
+        // and could erroneously transition to Active with no data.
+        self.inner.lsm.flush().await?;
+
         let _ = self
             .hydration
             .lock()

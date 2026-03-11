@@ -131,8 +131,8 @@ impl JournaledLsm {
         self.lsm.find_split()
     }
 
-    pub async fn load(&self, preloaded: Preloaded) -> anyhow::Result<()> {
-        self.lsm.load(preloaded).await
+    pub fn load(&self, preloaded: Preloaded) -> anyhow::Result<()> {
+        self.lsm.load(preloaded)
     }
 
     pub fn set_splits(&self, splits: Vec<Bound<Vec<u8>>>) {

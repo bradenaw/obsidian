@@ -281,11 +281,9 @@ impl Lsm {
         ))
     }
 
-    pub async fn load(&self, preloaded: Preloaded) -> anyhow::Result<()> {
+    pub fn load(&self, preloaded: Preloaded) -> anyhow::Result<()> {
         self.index.load(preloaded.snapshot)?;
-        // We need to flush here otherwise after a crash and restart we'd lose track of the runs,
-        // and could erroneously transition to Active with no data.
-        self.flush().await
+        Ok(())
     }
 
     pub fn set_splits(&self, splits: Vec<Bound<Vec<u8>>>) {

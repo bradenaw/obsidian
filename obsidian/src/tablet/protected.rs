@@ -303,8 +303,8 @@ pub(super) struct LsmLoadGuard<'a> {
 }
 
 impl<'a> LsmLoadGuard<'a> {
-    pub async fn load(&self, preloaded: Preloaded) -> anyhow::Result<()> {
-        self.lsm.load(preloaded).await
+    pub fn load(&self, preloaded: Preloaded) -> anyhow::Result<()> {
+        self.lsm.load(preloaded)
     }
 }
 
