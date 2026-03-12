@@ -26,6 +26,7 @@ use crate::lsm::RunId;
 use crate::runtime::Storage;
 use crate::util::merge_sorted_streams;
 use crate::util::spawn_owned;
+use crate::util::Pause;
 use crate::util::WithBackground;
 use crate::Bound;
 use crate::KeyspaceId;
@@ -54,6 +55,7 @@ impl Compactor {
             l1_max_size,
             run_size_target,
             block_size_target,
+            pause: Pause::new(),
         }));
 
         bg.spawn(async move |inner| {
@@ -61,6 +63,14 @@ impl Compactor {
         });
 
         Self(bg)
+    }
+
+    pub(super) async fn pause(&self) {
+        self.0.pause.pause().await;
+    }
+
+    pub(super) fn unpause(&self) {
+        self.0.pause.unpause();
     }
 }
 
@@ -70,6 +80,7 @@ struct CompactorInner {
     l1_max_size: u64,
     run_size_target: u64,
     block_size_target: u64,
+    pause: Pause,
 }
 
 impl CompactorInner {
@@ -78,7 +89,11 @@ impl CompactorInner {
         let mut in_flight_from: HashSet<RunId> = HashSet::new();
         let mut in_flight_into: HashSet<RunId> = HashSet::new();
 
+        let mut pause = self.pause.subscribe().await;
+
         loop {
+            pause.maybe().await;
+
             let (snapshot, snapshot_changed) = self.index.snapshot_subscribe();
 
             let mut expanded = false;

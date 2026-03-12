@@ -139,6 +139,14 @@ impl JournaledLsm {
         self.lsm.set_splits(splits)
     }
 
+    pub async fn pause_compaction(&self) {
+        self.lsm.pause_compaction().await;
+    }
+
+    pub fn unpause_compaction(&self) {
+        self.lsm.unpause_compaction();
+    }
+
     async fn recovery(
         lsm_options: LsmOptions,
         wal: &Arc<dyn Wal>,

@@ -293,6 +293,14 @@ impl Lsm {
     pub(super) fn index_snapshot(&self) -> Arc<IndexSnapshot> {
         self.index.snapshot()
     }
+
+    pub async fn pause_compaction(&self) {
+        self.compactor.pause().await;
+    }
+
+    pub fn unpause_compaction(&self) {
+        self.compactor.unpause();
+    }
 }
 
 pub(super) struct KeyspaceReader<'a>(pub &'a Keyspace);

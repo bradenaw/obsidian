@@ -154,6 +154,14 @@ impl ProtectedLsm {
                 .expect("tx also owned by self, must drop together");
         }
     }
+
+    pub async fn pause_compaction(&self) {
+        self.lsm.pause_compaction().await;
+    }
+
+    pub fn unpause_compaction(&self) {
+        self.lsm.unpause_compaction();
+    }
 }
 
 pub(super) trait LsmRead {
