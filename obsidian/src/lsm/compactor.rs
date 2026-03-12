@@ -100,12 +100,7 @@ impl CompactorInner {
                         in_flight_from.extend(compaction.from.iter());
                         in_flight_into.extend(compaction.into.iter());
 
-                        compact_futures.push(join_handle.map(|result| {
-                            if let Err(e) = result {
-                                log::error!("error in compaction: {:?}", e);
-                            }
-                            compaction
-                        }));
+                        compact_futures.push(join_handle.map(|result| (compaction, result)));
                     }
                     None => {
                         break;
@@ -114,12 +109,27 @@ impl CompactorInner {
             }
 
             tokio::select! {
-                Some(compaction) = compact_futures.next() => {
+                Some((compaction, result)) = compact_futures.next() => {
                     for run_id in compaction.from {
                         in_flight_from.remove(&run_id);
                     }
                     for run_id in compaction.into {
                         in_flight_into.remove(&run_id);
+                    }
+
+                    match result {
+                        Ok(compaction_result) => {
+                            if let Err(e) = self.index.replace(
+                                compaction_result.keyspace_id,
+                                compaction_result.add,
+                                compaction_result.remove,
+                            ) {
+                                log::error!("error in compaction: {:?}", e);
+                            }
+                        },
+                        Err(e) => {
+                            log::error!("error in compaction: {:?}", e);
+                        },
                     }
                 },
                 // This happens when compactions 'finish', though the tasks might not be done yet,
@@ -137,7 +147,10 @@ impl CompactorInner {
         snapshot: &Arc<IndexSnapshot>,
         in_flight_from: &HashSet<RunId>,
         in_flight_into: &HashSet<RunId>,
-    ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
+    ) -> Option<(
+        Compaction,
+        impl Future<Output = anyhow::Result<CompactionResult>>,
+    )> {
         for (keyspace_id, keyspace) in &snapshot.keyspaces {
             if let Some(out) = self.schedule_next_keyspace(
                 *keyspace_id,
@@ -159,7 +172,10 @@ impl CompactorInner {
         splits: &[Bound<Vec<u8>>],
         in_flight_from: &HashSet<RunId>,
         in_flight_into: &HashSet<RunId>,
-    ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
+    ) -> Option<(
+        Compaction,
+        impl Future<Output = anyhow::Result<CompactionResult>>,
+    )> {
         if let Some((compaction, future)) = self.schedule_for_splits(
             keyspace_id,
             keyspace,
@@ -202,7 +218,10 @@ impl CompactorInner {
         splits: &[Bound<Vec<u8>>],
         in_flight_from: &HashSet<RunId>,
         in_flight_into: &HashSet<RunId>,
-    ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
+    ) -> Option<(
+        Compaction,
+        impl Future<Output = anyhow::Result<CompactionResult>>,
+    )> {
         if splits.is_empty() {
             return None;
         }
@@ -235,7 +254,10 @@ impl CompactorInner {
         splits: &[Bound<Vec<u8>>],
         in_flight_from: &HashSet<RunId>,
         in_flight_into: &HashSet<RunId>,
-    ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
+    ) -> Option<(
+        Compaction,
+        impl Future<Output = anyhow::Result<CompactionResult>>,
+    )> {
         let level_sizes = level_size_estimates(keyspace, in_flight_from);
 
         // Prefer starting lower-level compactions first, since otherwise l0 compactions might
@@ -282,7 +304,10 @@ impl CompactorInner {
         in_flight_into: &HashSet<RunId>,
         level_idx: usize,
         run: &Arc<Run>,
-    ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
+    ) -> Option<(
+        Compaction,
+        impl Future<Output = anyhow::Result<CompactionResult>>,
+    )> {
         if in_flight_from.contains(&run.id()) {
             return None;
         }
@@ -358,7 +383,10 @@ impl CompactorInner {
         splits: &[Bound<Vec<u8>>],
         in_flight_from: &HashSet<RunId>,
         in_flight_into: &HashSet<RunId>,
-    ) -> Option<(Compaction, impl Future<Output = anyhow::Result<()>>)> {
+    ) -> Option<(
+        Compaction,
+        impl Future<Output = anyhow::Result<CompactionResult>>,
+    )> {
         let l0_available: Vec<_> = keyspace
             .l0_sealed
             .iter()
@@ -422,7 +450,7 @@ impl CompactorInner {
         splits: &[Bound<Vec<u8>>],
         from: &[Arc<Memtable>],
         into: &[Arc<Run>],
-    ) -> impl Future<Output = anyhow::Result<()>> {
+    ) -> impl Future<Output = anyhow::Result<CompactionResult>> {
         let remove: HashSet<_> = Iterator::chain(
             from.iter().map(|memtable| memtable.id()),
             into.iter().map(|run| run.id()),
@@ -454,9 +482,11 @@ impl CompactorInner {
                     add.iter().map(|run| run.id()).collect::<Vec<_>>(),
                 );
 
-                self_.index.replace(keyspace_id, add, remove)?;
-
-                Ok(())
+                Ok(CompactionResult {
+                    keyspace_id,
+                    add,
+                    remove,
+                })
             }
         })
     }
@@ -495,7 +525,7 @@ impl CompactorInner {
         from_level: usize,
         from: &Arc<Run>,
         into: &[Arc<Run>],
-    ) -> impl Future<Output = anyhow::Result<()>> {
+    ) -> impl Future<Output = anyhow::Result<CompactionResult>> {
         log::trace!(
             "compacting l{} {:?} into {:?}",
             from_level,
@@ -520,8 +550,11 @@ impl CompactorInner {
                     into.iter().map(|run| run.id()).collect::<Vec<_>>(),
                     add.iter().map(|run| run.id()).collect::<Vec<_>>(),
                 );
-                self_.index.replace(keyspace_id, add, remove)?;
-                Ok(())
+                Ok(CompactionResult {
+                    keyspace_id,
+                    add,
+                    remove,
+                })
             }
         })
     }
@@ -551,7 +584,7 @@ impl CompactorInner {
         keyspace_id: KeyspaceId,
         splits: &[Bound<Vec<u8>>],
         runs: &[Arc<Run>],
-    ) -> impl Future<Output = anyhow::Result<()>> {
+    ) -> impl Future<Output = anyhow::Result<CompactionResult>> {
         log::trace!(
             "compacting lmax {:?}",
             runs.iter().map(|run| run.id()).collect::<Vec<_>>(),
@@ -578,8 +611,11 @@ impl CompactorInner {
                     runs.iter().map(|run| run.id()).collect::<Vec<_>>(),
                     add.iter().map(|run| run.id()).collect::<Vec<_>>(),
                 );
-                self_.index.replace(keyspace_id, add, remove)?;
-                Ok(())
+                Ok(CompactionResult {
+                    keyspace_id,
+                    add,
+                    remove,
+                })
             }
         })
     }
@@ -677,6 +713,12 @@ struct Compaction {
     from_level: usize,
     from: HashSet<RunId>,
     into: HashSet<RunId>,
+}
+
+struct CompactionResult {
+    keyspace_id: KeyspaceId,
+    add: Vec<Run>,
+    remove: HashSet<RunId>,
 }
 
 /// Like a "bounding box", returns the minimal range that contains all of the given ranges.
