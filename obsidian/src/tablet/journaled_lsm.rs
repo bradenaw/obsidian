@@ -59,13 +59,10 @@ impl JournaledLsm {
             })
             .collect();
 
-        // XXX: Make sure the keyspace exists, since that's the only reason that the write would
-        // fail when processing.
-
         self.wal.append(WalEntry::Write(ts, writes)).await?;
 
         for (key, mutation) in muts {
-            self.lsm.write(ts, key, mutation)?;
+            self.lsm.write(ts, key, mutation);
         }
 
         Ok(())
@@ -204,7 +201,7 @@ impl JournaledLsm {
                     RevisionValue::Tombstone => Mutation::Delete,
                 };
 
-                lsm.write(ts, (keyspace_id, key), mutation)?;
+                lsm.write(ts, (keyspace_id, key), mutation);
             }
         }
 

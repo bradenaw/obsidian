@@ -28,7 +28,6 @@ use crate::Range;
 use crate::Revision;
 use crate::RevisionValue;
 use crate::Timestamp;
-use crate::WriteError;
 
 #[derive(Clone)]
 pub(crate) struct LsmOptions {
@@ -146,7 +145,7 @@ impl Lsm {
             .await
     }
 
-    pub fn write(&self, ts: Timestamp, key: Key, mutation: Mutation) -> Result<(), WriteError> {
+    pub fn write(&self, ts: Timestamp, key: Key, mutation: Mutation) {
         let value = match mutation {
             Mutation::Put(raw_value) => RevisionValue::Regular(raw_value),
             Mutation::Delete => RevisionValue::Tombstone,
@@ -159,12 +158,10 @@ impl Lsm {
             hexlify(&key.1[..])
         );
 
-        let new_size = self.index.insert(key.0, key.1, ts, value)?;
+        let new_size = self.index.insert(key.0, key.1, ts, value);
         if new_size > self.options.l0_max_size {
-            self.index.rotate_l0(key.0)?;
+            let _ = self.index.rotate_l0(key.0);
         }
-
-        Ok(())
     }
 
     pub fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
