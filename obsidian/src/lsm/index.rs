@@ -91,12 +91,12 @@ impl Index {
         k: Vec<u8>,
         ts: Timestamp,
         v: RevisionValue,
-    ) -> anyhow::Result<u64> {
+    ) -> u64 {
         loop {
             {
                 let snapshot = self.snapshot();
                 if let Some(keyspace) = snapshot.keyspaces.get(&keyspace_id) {
-                    return Ok(keyspace.l0_active.insert(k, ts, v));
+                    return keyspace.l0_active.insert(k, ts, v);
                 }
             }
 

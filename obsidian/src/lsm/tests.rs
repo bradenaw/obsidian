@@ -44,7 +44,7 @@ async fn test_put_get() -> anyhow::Result<()> {
         Timestamp(5),
         (keyspace_id, k.to_vec()),
         Mutation::Put(v.to_vec()),
-    )?;
+    );
     assert_eq!(lsm.get(Timestamp(4), keyspace_id, k).await?, None);
     assert_eq!(
         lsm.get(Timestamp(5), keyspace_id, k).await?,
@@ -88,7 +88,7 @@ async fn test_compact_l0() -> anyhow::Result<()> {
                 last_ts,
                 (keyspace_id, vec![i as u8]),
                 Mutation::Put(vec![v]),
-            )?;
+            );
             map.insert(i as u8, v);
         }
         compacted.await;
@@ -147,7 +147,7 @@ async fn test_compact_l1() -> anyhow::Result<()> {
                     Timestamp(ctr as u64),
                     (keyspace_id, vec![k]),
                     Mutation::Put(v.to_vec()),
-                )?;
+                );
                 last_ts = Timestamp(ctr as u64);
                 map.insert(k, v.to_vec());
             }
@@ -234,7 +234,7 @@ async fn test_scan_page() -> anyhow::Result<()> {
             //    Mutation::Put(v) => RevisionValue::Regular(v),
             //    Mutation::Delete => RevisionValue::Tombstone,
             //};
-            lsm.write(Timestamp(ts as u64), (keyspace_id, key.into()), mutation)?;
+            lsm.write(Timestamp(ts as u64), (keyspace_id, key.into()), mutation);
 
             //expected.insert(key, value);
         }
@@ -500,8 +500,7 @@ proptest! {
                         Timestamp(write_ts),
                         (keyspace_id, key.clone()),
                         Mutation::Put(value.clone()),
-                    )
-                    .unwrap();
+                    );
                 writes.push((key.clone(), Timestamp(write_ts), value.clone()));
                 write_ts += 2;
             }

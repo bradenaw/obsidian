@@ -28,7 +28,6 @@ use crate::Range;
 use crate::Revision;
 use crate::RevisionValue;
 use crate::Timestamp;
-use crate::WriteError;
 
 #[derive(Clone)]
 pub(crate) struct LsmOptions {
@@ -146,7 +145,7 @@ impl Lsm {
             .await
     }
 
-    pub fn write(&self, ts: Timestamp, key: Key, mutation: Mutation) -> Result<(), WriteError> {
+    pub fn write(&self, ts: Timestamp, key: Key, mutation: Mutation) {
         let value = match mutation {
             Mutation::Put(raw_value) => RevisionValue::Regular(raw_value),
             Mutation::Delete => RevisionValue::Tombstone,
@@ -159,12 +158,10 @@ impl Lsm {
             hexlify(&key.1[..])
         );
 
-        let new_size = self.index.insert(key.0, key.1, ts, value)?;
+        let new_size = self.index.insert(key.0, key.1, ts, value);
         if new_size > self.options.l0_max_size {
-            self.index.rotate_l0(key.0)?;
+            let _ = self.index.rotate_l0(key.0);
         }
-
-        Ok(())
     }
 
     pub fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
@@ -281,11 +278,9 @@ impl Lsm {
         ))
     }
 
-    pub async fn load(&self, preloaded: Preloaded) -> anyhow::Result<()> {
+    pub fn load(&self, preloaded: Preloaded) -> anyhow::Result<()> {
         self.index.load(preloaded.snapshot)?;
-        // We need to flush here otherwise after a crash and restart we'd lose track of the runs,
-        // and could erroneously transition to Active with no data.
-        self.flush().await
+        Ok(())
     }
 
     pub fn set_splits(&self, splits: Vec<Bound<Vec<u8>>>) {
@@ -294,6 +289,14 @@ impl Lsm {
 
     pub(super) fn index_snapshot(&self) -> Arc<IndexSnapshot> {
         self.index.snapshot()
+    }
+
+    pub async fn pause_compaction(&self) {
+        self.compactor.pause().await;
+    }
+
+    pub fn unpause_compaction(&self) {
+        self.compactor.unpause();
     }
 }
 

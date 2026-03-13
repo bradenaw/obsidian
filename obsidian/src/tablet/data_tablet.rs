@@ -610,6 +610,10 @@ impl DataTabletInner {
     }
 
     async fn hydrate(&self, srcs: &[TabletId]) -> anyhow::Result<()> {
+        // We need the run IDs of the source and destination to match, if we compact we'll
+        // diverge.
+        self.inner.lsm.pause_compaction().await;
+
         let mut preloader = Preloader::new(Arc::clone(&self.storage));
 
         let mut rounds_with_completed = 0;
@@ -707,8 +711,12 @@ impl DataTabletInner {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
-        // TODO: Need to block compactions and only enable after we transition.
-        self.inner.lsm.load()?.load(preloader.load().await?).await?;
+        self.inner.lsm.load()?.load(preloader.load().await?)?;
+        // We need to flush here otherwise after a crash and restart we'd lose track of the runs,
+        // and could erroneously transition to Active with no data.
+        self.inner.lsm.flush().await?;
+        self.inner.lsm.unpause_compaction();
+
         let _ = self
             .hydration
             .lock()
