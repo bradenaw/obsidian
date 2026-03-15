@@ -12,6 +12,7 @@
 //! the system, like Storage.
 
 mod journal;
+mod journals;
 mod meta;
 mod node;
 mod nodes;
@@ -24,6 +25,7 @@ mod wal;
 mod wals;
 
 pub(crate) use journal::Journal;
+pub(crate) use journals::Journals;
 pub(crate) use meta::Meta;
 pub(crate) use node::Node;
 pub(crate) use nodes::Nodes;

@@ -17,6 +17,8 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 
 use crate::gateway::Gateway;
+use crate::lsm::Lsm;
+use crate::lsm::LsmOptions;
 use crate::lsm::Manifest;
 use crate::meta::MetaImpl;
 use crate::meta::MetaSynced;
@@ -27,6 +29,7 @@ use crate::runtime::Tablet;
 use crate::runtime::Wals;
 use crate::storage::CachedStorage;
 use crate::supervisor::Supervisor;
+use crate::tablet::TabletJournalWriter;
 pub(crate) use crate::test::mem_file_reader::MemFileReader;
 pub(crate) use crate::test::mem_file_writer::MemFileWriter;
 pub(crate) use crate::test::mem_journal::MemJournal;
@@ -54,6 +57,7 @@ use crate::TabletId;
 use crate::Timestamp;
 use crate::TxOutcome;
 use crate::Txid;
+use crate::WalEntry;
 
 #[async_trait]
 impl<T: Tablet + ?Sized> Tablet for Arc<T> {
@@ -182,8 +186,12 @@ impl ObsidianForTest {
         let wals = Arc::new(MemWals::new()) as Arc<dyn Wals>;
 
         let meta_tablet = crate::tablet::MetaTablet::new(
-            wals.wal(TabletId::META).await?,
-            Arc::clone(&storage) as Arc<dyn Storage>,
+            Lsm::empty(
+                LsmOptions::default(),
+                Arc::clone(&storage) as Arc<dyn Storage>,
+            )
+            .await?,
+            Arc::new(NoopJournalWriter {}),
         )
         .await?;
         let meta: Arc<dyn Meta> = Arc::new(MetaImpl::new(meta_tablet));
@@ -264,6 +272,15 @@ where
     assert_eq!(x, decoded);
 
     Ok(())
+}
+
+struct NoopJournalWriter {}
+
+#[async_trait]
+impl TabletJournalWriter for NoopJournalWriter {
+    async fn append(&self, _entry: WalEntry) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 macro_rules! obsidian_test_suite {

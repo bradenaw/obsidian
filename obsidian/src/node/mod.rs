@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
@@ -13,13 +14,15 @@ use crate::meta::MetaSubscriber;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::meta::SyncType;
+use crate::replica::ShardEntry;
 use crate::runtime;
+use crate::runtime::Journals;
 use crate::runtime::Meta;
 use crate::runtime::Shard as _;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
-use crate::runtime::Wals;
 use crate::shard::Shard;
+use crate::shard::ShardJournalWriter;
 use crate::supervisor::Supervisor;
 use crate::util::Retry;
 use crate::util::WithBackground;
@@ -34,7 +37,6 @@ struct NodeInner {
     storage: Arc<dyn Storage>,
     meta: Arc<dyn Meta>,
     shards: Arc<dyn Shards>,
-    wals: Arc<dyn Wals>,
     meta_synced: Arc<MetaSynced>,
 
     supervisor: Mutex<Option<Supervisor>>,
@@ -47,7 +49,6 @@ impl Node {
         storage: Arc<dyn Storage>,
         meta: Arc<dyn Meta>,
         shards: Arc<dyn Shards>,
-        wals: Arc<dyn Wals>,
         meta_synced: Arc<MetaSynced>,
     ) -> anyhow::Result<Self> {
         meta.add_node(node_id.clone()).await?;
@@ -57,7 +58,6 @@ impl Node {
             storage,
             meta,
             shards,
-            wals,
             meta_synced: Arc::clone(&meta_synced),
             supervisor: Mutex::new(None),
             shard: RwLock::new(None),
@@ -171,13 +171,14 @@ impl NodeInner {
             Arc::clone(&self.storage),
             Arc::clone(&self.meta),
             Arc::clone(&self.shards),
-            Arc::clone(&self.wals),
             LsmOptions {
                 l0_max_size: 256,
                 l1_max_size: 100_000,
                 run_size_target: 32768,
                 block_size_target: 4096,
             },
+            HashMap::new(),
+            Arc::new(NoopShardJournalWriter {}),
         )
         .await?;
 
@@ -198,5 +199,14 @@ impl MetaSubscriber for NodeInner {
                 self.try_sync_meta(&sync_type, &snapshot).await
             })
             .await;
+    }
+}
+
+struct NoopShardJournalWriter {}
+
+#[async_trait]
+impl ShardJournalWriter for NoopShardJournalWriter {
+    async fn append(&self, _entry: ShardEntry) -> anyhow::Result<()> {
+        Ok(())
     }
 }

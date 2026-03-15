@@ -16,7 +16,6 @@ use crate::election::ParticipantState;
 use crate::lsm::LsmOptions;
 use crate::lsm::Manifest;
 use crate::replica::recovery::ShardRecovery;
-use crate::replica::shard_journal::ShardEntry;
 use crate::runtime;
 use crate::runtime::Shard as _;
 use crate::shard::Shard;
@@ -36,7 +35,13 @@ use crate::TabletId;
 use crate::Timestamp;
 use crate::TxOutcome;
 use crate::Txid;
+use crate::WalEntry;
 use crate::WalSeq;
+
+pub(crate) struct ShardEntry {
+    pub tablet_id: TabletId,
+    pub entry: WalEntry,
+}
 
 struct Replica {
     shard_id: ShardId,

@@ -311,7 +311,10 @@ where
             let last_confirmation = self.0.last_confirmation.load();
 
             if Instant::now().duration_since(last_confirmation)
-                > self.0.lease_duration - self.0.lease_grace_period
+                > self
+                    .0
+                    .lease_duration
+                    .saturating_sub(self.0.lease_grace_period)
             {
                 return Err(anyhow!("lease expired before operation completed").into());
             }

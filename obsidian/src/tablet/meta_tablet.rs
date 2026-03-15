@@ -5,15 +5,13 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use async_trait::async_trait;
 
-use crate::lsm::LsmOptions;
+use crate::lsm::Lsm;
 use crate::lsm::Manifest;
 use crate::meta::TabletState;
-use crate::runtime::Storage;
 use crate::runtime::Tablet;
-use crate::runtime::Wal;
-use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::protected::ProtectedLsm;
 use crate::tablet::tablet_inner::TabletInner;
+use crate::tablet::tablet_journal_writer::TabletJournalWriter;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -45,10 +43,11 @@ pub(crate) struct MetaTablet {
 }
 
 impl MetaTablet {
-    pub(crate) async fn new(wal: Arc<dyn Wal>, storage: Arc<dyn Storage>) -> anyhow::Result<Self> {
-        let lsm = JournaledLsm::open(LsmOptions::default(), wal, storage).await?;
-
-        lsm.create_keyspace(KeyspaceId::META).await?;
+    pub(crate) async fn new(
+        lsm: Lsm,
+        journal: Arc<dyn TabletJournalWriter>,
+    ) -> anyhow::Result<Self> {
+        lsm.create_keyspace(KeyspaceId::META)?;
 
         Ok(Self {
             inner: TabletInner::new(
@@ -56,6 +55,7 @@ impl MetaTablet {
                 ColoGroupId::META,
                 Range::all(),
                 ProtectedLsm::new(TabletId::META, lsm, TabletState::Active),
+                journal,
             ),
         })
     }

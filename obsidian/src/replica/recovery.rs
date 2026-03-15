@@ -8,7 +8,7 @@ use crate::lsm::Lsm;
 use crate::lsm::LsmOptions;
 use crate::lsm::Manifest;
 use crate::lsm::Preloader;
-use crate::replica::shard_journal::ShardEntry;
+use crate::replica::replica::ShardEntry;
 use crate::runtime;
 use crate::util::hexlify;
 use crate::KeyspaceId;

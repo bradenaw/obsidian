@@ -15,19 +15,17 @@ use futures::TryStreamExt;
 use prost::Message;
 use tokio::sync::mpsc;
 
-use crate::lsm::LsmOptions;
+use crate::lsm::Lsm;
 use crate::lsm::Manifest;
 use crate::meta::MetaSynced;
 use crate::meta::TabletState;
 use crate::pb;
 use crate::runtime::Shards;
-use crate::runtime::Storage;
 use crate::runtime::Tablet;
-use crate::runtime::Wal;
-use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::protected::LsmReadWrite;
 use crate::tablet::protected::ProtectedLsm;
 use crate::tablet::tablet_inner::TabletInner;
+use crate::tablet::tablet_journal_writer::TabletJournalWriter;
 use crate::util::Decode;
 use crate::util::Retry;
 use crate::util::WithBackground;
@@ -74,14 +72,12 @@ struct ShardMetaTabletInner {
 impl ShardMetaTablet {
     pub(crate) async fn new(
         shard_id: ShardId,
-        wal: Arc<dyn Wal>,
-        storage: Arc<dyn Storage>,
+        lsm: Lsm,
+        journal: Arc<dyn TabletJournalWriter>,
         meta_synced: Arc<MetaSynced>,
         shards: Arc<dyn Shards>,
     ) -> anyhow::Result<Self> {
-        let lsm = JournaledLsm::open(LsmOptions::default(), wal, storage).await?;
-
-        lsm.create_keyspace(KeyspaceId::TX_OUTCOMES).await?;
+        lsm.create_keyspace(KeyspaceId::TX_OUTCOMES)?;
 
         let (commit_sender, commit_receiver) = mpsc::channel(128);
 
@@ -93,6 +89,7 @@ impl ShardMetaTablet {
                 ColoGroupId::SHARD_META,
                 TabletId::shard_meta_owned_range(shard_id),
                 ProtectedLsm::new(tablet_id, lsm, TabletState::Active),
+                journal,
             ),
             commit_sender: commit_sender.clone(),
             meta_synced,

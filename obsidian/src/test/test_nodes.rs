@@ -67,7 +67,6 @@ impl TestNodes {
                     Arc::clone(&self.inner.storage),
                     Arc::clone(&self.inner.meta),
                     Arc::clone(&self.shards),
-                    Arc::clone(&self.inner.wals) as Arc<dyn Wals>,
                     Arc::new(MetaSynced::new(Arc::clone(&self.inner.meta))),
                 )
                 .await?,

@@ -1,4 +1,5 @@
 mod recovery;
 mod replica;
-mod shard_journal;
-mod tablet_journal;
+
+// TODO: Move.
+pub(crate) use replica::ShardEntry;
