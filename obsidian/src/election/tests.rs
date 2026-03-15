@@ -36,7 +36,8 @@ async fn test_election() -> anyhow::Result<()> {
     let builder = ParticipantBuilder::new()
         .lease_duration(Duration::from_millis(100))
         .heartbeat_interval(Duration::from_millis(50))
-        .renew_interval(Duration::from_millis(10));
+        .renew_interval(Duration::from_millis(10))
+        .lease_grace_period(Duration::from_millis(20));
 
     let mut replica_group = TestReplicaGroup::new(builder);
 

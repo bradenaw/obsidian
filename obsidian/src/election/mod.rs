@@ -130,7 +130,9 @@ impl ParticipantBuilder {
             Retry::new()
                 .indefinitely(&|| async {
                     let participant_id = ParticipantId::new();
-                    participant.background_process(participant_id).await?;
+                    if let Err(e) = participant.background_process(participant_id).await {
+                        log::warn!("error during Participant::background_process: {}", e);
+                    }
                     participant.state_change_request.notify_waiters();
                     {
                         let mut state = participant.state.write().await;
