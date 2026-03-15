@@ -5,6 +5,7 @@ mod tests;
 
 use std::ops::Deref;
 use std::sync::Arc;
+use std::sync::Weak;
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -16,7 +17,7 @@ use futures::StreamExt;
 use rand::Rng;
 use tokio::select;
 use tokio::sync::Notify;
-use tokio::sync::RwLock;
+use tokio::sync::RwLock as AsyncRwLock;
 use tokio::time::interval;
 use tokio::time::sleep_until;
 use tokio::time::Instant;
@@ -27,6 +28,7 @@ use crate::election::atomic_instant::AtomicInstant;
 use crate::election::seq_waiters::SeqWaiters;
 use crate::runtime::Journal;
 use crate::util::AtomicTimestamp;
+use crate::util::Retry;
 use crate::util::WithBackground;
 use crate::Timestamp;
 use crate::WalSeq;
@@ -100,33 +102,43 @@ impl ParticipantBuilder {
         self
     }
 
-    pub fn build<TEntry, TLeader, TFollower>(
+    pub fn build<TEntry, TLeader, TFollower, TFollowerInit>(
         &self,
         journal: Arc<dyn Journal<Proposal<TEntry>>>,
-        follower: TFollower,
+        init: TFollowerInit,
     ) -> Participant<TEntry, TLeader, TFollower>
     where
         TEntry: Send + Sync + 'static,
         TLeader: Leader<TEntry, TFollower> + Send + Sync + 'static,
         TFollower: Follower<TEntry, TLeader> + Send + Sync + 'static,
+        TFollowerInit: FollowerInit<TEntry, TFollower> + Send + Sync + 'static,
     {
         let inner = WithBackground::new(Arc::new(ParticipantInner {
-            participant_id: ParticipantId::new(),
             journal,
             campaign_splay: self.campaign_splay,
             heartbeat_interval: self.heartbeat_interval,
             renew_interval: self.renew_interval,
             lease_duration: self.lease_duration,
             lease_grace_period: self.lease_grace_period,
-            state: RwLock::new(Some(InnerParticipantState::Follower(follower))),
+            state: AsyncRwLock::new(Some(InnerParticipantState::Follower(init.new_follower()))),
             state_change_request: Notify::new(),
             last_confirmation: AtomicInstant::new(),
-            accepted_seqs: SeqWaiters::new(),
+            accepted_seqs: Arc::new(SeqWaiters::new()),
         }));
 
-        inner.spawn(async |participant| {
-            // XXX: Do something with this error.
-            participant.background_process().await.unwrap();
+        inner.spawn(async move |participant| {
+            Retry::new()
+                .indefinitely(&|| async {
+                    let participant_id = ParticipantId::new();
+                    participant.background_process(participant_id).await?;
+                    participant.state_change_request.notify_waiters();
+                    {
+                        let mut state = participant.state.write().await;
+                        *state = Some(InnerParticipantState::Follower(init.new_follower()));
+                    }
+                    Err::<(), anyhow::Error>(anyhow!("background_process terminated"))
+                })
+                .await;
         });
 
         Participant(inner)
@@ -134,8 +146,8 @@ impl ParticipantBuilder {
 }
 
 struct ParticipantInner<TEntry, TLeader, TFollower> {
-    participant_id: ParticipantId,
     journal: Arc<dyn Journal<Proposal<TEntry>>>,
+    accepted_seqs: Arc<SeqWaiters>,
 
     campaign_splay: Duration,
     heartbeat_interval: Duration,
@@ -144,21 +156,20 @@ struct ParticipantInner<TEntry, TLeader, TFollower> {
     lease_grace_period: Duration,
 
     // This is Option just for the convenience of take() when promoting/demoting.
-    state: RwLock<Option<InnerParticipantState<TLeader, TFollower>>>,
+    state: AsyncRwLock<Option<InnerParticipantState<TLeader, TFollower>>>,
     // Notified when the participant needs to be promoted or demoted, so that with_state can early
     // exit.
     state_change_request: Notify,
-    // The timestamp of the write of the last seen Acquire by self, stored as the duration since
-    // self.epoch in nanoseconds.
+    // The instant of the start of the write of the last seen Acquire by us. Since the Acquire
+    // takes some amount of time, it's important that we start counting from the _start_ of this
+    // operation rather than the end, so that our idea of expiration is a lower bound.
     last_confirmation: AtomicInstant,
-
-    accepted_seqs: SeqWaiters,
 }
 
 enum InnerParticipantState<TLeader, TFollower> {
     Leader {
         leader: TLeader,
-        lease_end: AtomicTimestamp,
+        lease_end: Arc<AtomicTimestamp>,
     },
     Follower(TFollower),
 }
@@ -207,16 +218,65 @@ enum ProposalType<TEntry> {
     Heartbeat,
 }
 
+pub trait FollowerInit<TEntry, TFollower> {
+    fn new_follower(&self) -> TFollower;
+}
+
 #[async_trait]
 pub trait Leader<TEntry, TFollower> {
-    async fn process(&self, seq: WalSeq, entry: TEntry);
-    async fn demote(self) -> TFollower;
+    async fn demote(self) -> anyhow::Result<TFollower>;
 }
 
 #[async_trait]
 pub trait Follower<TEntry, TLeader> {
     async fn process(&self, seq: WalSeq, entry: TEntry);
-    async fn promote(self) -> TLeader;
+    async fn promote(self, writer: JournalWriter<TEntry>) -> anyhow::Result<TLeader>;
+}
+
+pub struct JournalWriter<TEntry> {
+    participant_id: ParticipantId,
+    journal: Arc<dyn Journal<Proposal<TEntry>>>,
+    lease_end: Weak<AtomicTimestamp>,
+    accepted_seqs: Arc<SeqWaiters>,
+}
+
+impl<TEntry> JournalWriter<TEntry>
+where
+    TEntry: Send + Sync + 'static,
+{
+    /// Append an entry to the log.
+    pub async fn append(&self, entry: TEntry) -> anyhow::Result<()> {
+        let lease_end = {
+            if let Some(lease_end) = self.lease_end.upgrade() {
+                lease_end.load()
+            } else {
+                return Err(anyhow!("cannot append: lease expired"));
+            }
+        };
+
+        let ts = Timestamp::now();
+        if ts > lease_end {
+            return Err(anyhow!("cannot append: lease expired"));
+        }
+
+        let wait = self.accepted_seqs.register();
+        let seq = self
+            .journal
+            .append(Proposal {
+                participant_id: self.participant_id,
+                timestamp: ts,
+                proposal_type: ProposalType::Append(entry),
+            })
+            .await
+            .unwrap(); // TODO: We do need to relinquish and change our participant ID etc, but
+                       // unwrap is a little ungraceful.
+        let accepted = wait.wait(seq).await;
+        if !accepted {
+            return Err(anyhow!("entry not accepted"));
+        }
+
+        return Ok(());
+    }
 }
 
 impl<TEntry, TLeader, TFollower> Participant<TEntry, TLeader, TFollower>
@@ -225,40 +285,6 @@ where
     TLeader: Leader<TEntry, TFollower> + Send + Sync + 'static,
     TFollower: Follower<TEntry, TLeader> + Send + Sync + 'static,
 {
-    pub fn participant_id(&self) -> ParticipantId {
-        self.0.participant_id
-    }
-
-    /// Append an entry to the log.
-    pub async fn append(&self, entry: TEntry) -> anyhow::Result<()> {
-        let state = self.0.state.read().await;
-        if let Some(InnerParticipantState::Leader { lease_end, .. }) = state.deref() {
-            let ts = Timestamp::now();
-            if ts > lease_end.load() {
-                return Err(anyhow!("cannot append: lease expired"));
-            }
-
-            let wait = self.0.accepted_seqs.register();
-            let seq = self
-                .0
-                .journal
-                .append(Proposal {
-                    participant_id: self.0.participant_id,
-                    timestamp: ts,
-                    proposal_type: ProposalType::Append(entry),
-                })
-                .await
-                .unwrap(); // TODO: We do need to relinquish and change our participant ID etc, but
-                           // unwrap is a little ungraceful.
-            let accepted = wait.wait(seq).await;
-            if !accepted {
-                return Err(anyhow!("entry not accepted"));
-            }
-        }
-
-        Err(anyhow!("cannot append: not currently leader"))
-    }
-
     pub async fn with_state<F, T, E>(&self, f: F) -> Result<T, E>
     where
         F: AsyncFnOnce(ParticipantState<TLeader, TFollower>) -> Result<T, E>,
@@ -305,15 +331,19 @@ where
         Timestamp::now()
     }
 
-    fn propose_at(&self, ts: Timestamp, proposal_type: ProposalType<TEntry>) {
+    fn propose_at(
+        &self,
+        participant_id: ParticipantId,
+        ts: Timestamp,
+        proposal_type: ProposalType<TEntry>,
+    ) {
         tokio::spawn({
             let journal = Arc::clone(&self.journal);
-            let participant_id = self.participant_id;
 
             async move {
                 let _ = journal
                     .append(Proposal {
-                        participant_id: participant_id,
+                        participant_id,
                         timestamp: ts,
                         proposal_type,
                     })
@@ -322,12 +352,16 @@ where
         });
     }
 
-    async fn maybe_promote(&self, new_lease_end: Timestamp) {
+    async fn promote_or_extend(
+        &self,
+        participant_id: ParticipantId,
+        new_lease_end: Timestamp,
+    ) -> anyhow::Result<()> {
         {
             let maybe_state = self.state.read().await;
             if let Some(InnerParticipantState::Leader { lease_end, .. }) = maybe_state.deref() {
                 lease_end.store(new_lease_end);
-                return;
+                return Ok(());
             }
         }
 
@@ -336,28 +370,36 @@ where
         let mut maybe_state = self.state.write().await;
         if let Some(InnerParticipantState::Leader { lease_end, .. }) = maybe_state.deref() {
             lease_end.store(new_lease_end);
-            return;
+            return Ok(());
         }
 
         let state = maybe_state.take().unwrap();
+        let lease_end = Arc::new(AtomicTimestamp::new(new_lease_end));
         let leader = match state {
             InnerParticipantState::Leader { .. } => unreachable!(),
-            InnerParticipantState::Follower(follower) => follower.promote().await,
+            InnerParticipantState::Follower(follower) => {
+                let journal_writer = JournalWriter {
+                    participant_id,
+                    journal: Arc::clone(&self.journal),
+                    lease_end: Arc::downgrade(&lease_end),
+                    accepted_seqs: Arc::clone(&self.accepted_seqs),
+                };
+                follower.promote(journal_writer).await?
+            }
         };
-        *maybe_state = Some(InnerParticipantState::Leader {
-            leader,
-            lease_end: AtomicTimestamp::new(new_lease_end),
-        });
+        *maybe_state = Some(InnerParticipantState::Leader { leader, lease_end });
+
+        Ok(())
     }
 
-    async fn maybe_demote(&self) {
+    async fn demote_if_leader(&self) -> anyhow::Result<()> {
         {
             let maybe_state = self.state.read().await;
             if matches!(
                 maybe_state.deref(),
                 Some(InnerParticipantState::Follower(_))
             ) {
-                return;
+                return Ok(());
             }
         }
 
@@ -368,27 +410,28 @@ where
             maybe_state.deref(),
             Some(InnerParticipantState::Follower(_))
         ) {
-            return;
+            return Ok(());
         }
 
         let state = maybe_state.take().unwrap();
         let follower = match state {
-            InnerParticipantState::Leader { leader, .. } => leader.demote().await,
+            InnerParticipantState::Leader { leader, .. } => leader.demote().await?,
             InnerParticipantState::Follower(_) => unreachable!(),
         };
         *maybe_state = Some(InnerParticipantState::Follower(follower));
+
+        Ok(())
     }
 
     async fn process(&self, seq: WalSeq, entry: TEntry) {
         let maybe_state = self.state.read().await;
         let state = maybe_state.as_ref().unwrap();
-        match state {
-            InnerParticipantState::Leader { leader, .. } => leader.process(seq, entry).await,
-            InnerParticipantState::Follower(follower) => follower.process(seq, entry).await,
+        if let InnerParticipantState::Follower(follower) = state {
+            follower.process(seq, entry).await;
         }
     }
 
-    async fn background_process(&self) -> anyhow::Result<()> {
+    async fn background_process(&self, participant_id: ParticipantId) -> anyhow::Result<()> {
         let mut accepted = accepted_proposals(
             self.journal
                 .tail(self.journal.oldest_available().await?)
@@ -415,12 +458,12 @@ where
                 let lease_end =
                     Timestamp::from_nanos(ts.as_nanos() + (self.lease_duration.as_nanos() as u64));
                 pending_acquire = Some(Instant::now());
-                self.propose_at(ts, ProposalType::Acquire { lease_end });
+                self.propose_at(participant_id, ts, ProposalType::Acquire { lease_end });
                 try_acquire = false;
             }
 
             let self_leader = match current_lease {
-                Some((participant_id, _)) => participant_id == self.participant_id,
+                Some((current_participant_id, _)) => current_participant_id == participant_id,
                 _ => false,
             };
 
@@ -436,7 +479,7 @@ where
                         Ratification::Accepted(proposal) => match proposal.proposal_type {
                             ProposalType::Acquire{lease_end, ..} => {
                                 current_lease = Some((proposal.participant_id, lease_end));
-                                if proposal.participant_id == self.participant_id {
+                                if proposal.participant_id == participant_id {
                                     self.last_confirmation.store(
                                         pending_acquire
                                             .ok_or_else(|| {
@@ -444,22 +487,22 @@ where
                                             })?,
                                     );
                                     pending_acquire = None;
-                                    self.maybe_promote(lease_end).await;
+                                    self.promote_or_extend(participant_id, lease_end).await?;
                                 } else {
-                                    self.maybe_demote().await;
+                                    self.demote_if_leader().await?;
                                 }
                             },
                             ProposalType::Relinquish => {
                                 current_lease = None;
-                                if proposal.participant_id == self.participant_id {
-                                    self.maybe_demote().await;
+                                if proposal.participant_id == participant_id {
+                                    self.demote_if_leader().await?;
                                 }
                             },
                             ProposalType::Append(entry) => {
                                 self.process(seq, entry).await;
                             },
                             ProposalType::Heartbeat => {
-                                if proposal.participant_id == self.participant_id {
+                                if proposal.participant_id == participant_id {
                                     pending_heartbeat = false;
 
                                     // Receiving a heartbeat of our own means we're as close to
@@ -477,7 +520,7 @@ where
                         },
                         Ratification::Rejected(proposal) => match proposal.proposal_type {
                             ProposalType::Acquire{..} => {
-                                if proposal.participant_id == self.participant_id {
+                                if proposal.participant_id == participant_id {
                                     pending_acquire = None;
                                 }
                             }
@@ -488,13 +531,14 @@ where
                 _ = StreamExt::next(&mut heartbeat_ticker), if !pending_heartbeat => {
                     let ts = Timestamp::now_after(last_ts);
                     last_ts = ts;
-                    self.propose_at(ts, ProposalType::Heartbeat);
+                    self.propose_at(participant_id, ts, ProposalType::Heartbeat);
                     pending_heartbeat = true;
                 },
                 _ = StreamExt::next(&mut renew_ticker),
                     if self_leader && pending_acquire.is_none() => {
                     try_acquire = true;
                 },
+                // TODO: maybe_demote() on expiry
             }
         }
     }

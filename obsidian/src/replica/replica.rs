@@ -2,17 +2,21 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
 
 use crate::election::Follower;
+use crate::election::FollowerInit;
+use crate::election::JournalWriter;
 use crate::election::Leader;
 use crate::election::Participant;
 use crate::election::ParticipantState;
+use crate::lsm::LsmOptions;
 use crate::lsm::Manifest;
+use crate::replica::recovery::ShardRecovery;
 use crate::replica::shard_journal::ShardEntry;
-use crate::replica::shard_journal::ShardJournal;
 use crate::runtime;
 use crate::runtime::Shard as _;
 use crate::shard::Shard;
@@ -41,38 +45,44 @@ struct Replica {
     tablets: RwLock<HashMap<TabletId, Arc<dyn runtime::Tablet>>>,
 }
 
-struct ReplicaInner {
-    shard_journal: ShardJournal,
+struct ReplicaOptions {
+    lsm_options: LsmOptions,
+}
+
+impl FollowerInit<ShardEntry, FollowerReplica> for ReplicaOptions {
+    fn new_follower(&self) -> FollowerReplica {
+        FollowerReplica {
+            recovery: Mutex::new(ShardRecovery::empty()),
+            lsm_options: self.lsm_options.clone(),
+        }
+    }
 }
 
 struct LeaderReplica {
-    inner: ReplicaInner,
     shard: Shard,
+    journal_writer: JournalWriter<ShardEntry>,
 }
 
 #[async_trait]
 impl Leader<ShardEntry, FollowerReplica> for LeaderReplica {
-    async fn process(&self, seq: WalSeq, entry: ShardEntry) {
-        self.inner.shard_journal.process_entry(seq, entry);
-    }
-
-    async fn demote(self) -> FollowerReplica {
+    async fn demote(self) -> anyhow::Result<FollowerReplica> {
         todo!();
     }
 }
 
 struct FollowerReplica {
-    inner: ReplicaInner,
+    recovery: Mutex<ShardRecovery>,
+    lsm_options: LsmOptions,
 }
 
 #[async_trait]
 impl Follower<ShardEntry, LeaderReplica> for FollowerReplica {
     async fn process(&self, seq: WalSeq, entry: ShardEntry) {
-        self.inner.shard_journal.process_entry(seq, entry);
+        self.recovery.lock().unwrap().process(seq, entry);
     }
 
-    async fn promote(self) -> LeaderReplica {
-        // XXX: Make sure the readers have actually seen everything.
+    async fn promote(self, writer: JournalWriter<ShardEntry>) -> anyhow::Result<LeaderReplica> {
+        //
         todo!();
     }
 }

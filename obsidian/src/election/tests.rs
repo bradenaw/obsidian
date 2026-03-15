@@ -14,9 +14,12 @@ use futures::StreamExt;
 use tokio::sync::Notify;
 
 use crate::election::Follower;
+use crate::election::FollowerInit;
+use crate::election::JournalWriter;
 use crate::election::Leader;
 use crate::election::Participant;
 use crate::election::ParticipantBuilder;
+use crate::election::ParticipantState;
 use crate::election::Proposal;
 use crate::election::ProposalType;
 use crate::runtime::Journal;
@@ -44,14 +47,14 @@ async fn test_election() -> anyhow::Result<()> {
     let first_leader_id = {
         let first_leader = replica_group.leader().await;
         first_leader.journal_view.pause_tail();
-        first_leader.replica.participant_id()
+        first_leader.id
     };
 
     // Because the leader can't observe its own Acquires, it will eventually stop making them, and
     // someone else will need to take over.
 
     for _ in 0..10 {
-        let leader_id = replica_group.leader().await.replica.participant_id();
+        let leader_id = replica_group.leader().await.id;
         if leader_id != first_leader_id {
             continue;
         }
@@ -82,18 +85,12 @@ impl TestReplicaGroup {
             offset,
             Arc::clone(&self.journal) as Arc<dyn Journal<Proposal<TestEntry>>>,
         ));
-
-        let replica_inner = Arc::new(Mutex::new(ReplicaInner {
-            leader: false,
-            processed_entries: vec![],
-        }));
-
         self.replicas.push(TestReplica {
+            id: offset,
             journal_view: Arc::clone(&journal_view),
-            inner: Arc::clone(&replica_inner),
-            replica: self.builder.build(
+            participant: self.builder.build(
                 journal_view as Arc<dyn Journal<Proposal<TestEntry>>>,
-                TestFollower::new(offset, replica_inner),
+                TestFollowerInit { id: offset },
             ),
         });
     }
@@ -101,82 +98,100 @@ impl TestReplicaGroup {
     async fn leader(&self) -> &TestReplica {
         for _ in 0..5 {
             for replica in &self.replicas {
-                let inner = replica.inner.lock().unwrap();
-                if inner.leader {
+                if replica.is_leader().await.unwrap() {
                     return replica;
                 }
             }
 
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
         panic!("no leader");
     }
 }
 
 struct TestReplica {
+    id: usize,
     journal_view: Arc<TestJournal<Arc<dyn Journal<Proposal<TestEntry>>>>>,
-    inner: Arc<Mutex<ReplicaInner>>,
-    replica: Participant<TestEntry, TestLeader, TestFollower>,
+    participant: Participant<TestEntry, TestLeader, TestFollower>,
 }
 
-struct ReplicaInner {
-    leader: bool,
-    processed_entries: Vec<TestEntry>,
+impl TestReplica {
+    async fn entries(&self) -> anyhow::Result<Vec<TestEntry>> {
+        self.participant
+            .with_state(async move |participant_state| {
+                Ok(match participant_state {
+                    ParticipantState::Leader(leader) => leader.entries.lock().unwrap().clone(),
+                    ParticipantState::Follower(follower) => {
+                        follower.entries.lock().unwrap().clone()
+                    }
+                })
+            })
+            .await
+    }
+
+    async fn is_leader(&self) -> anyhow::Result<bool> {
+        self.participant
+            .with_state(async move |participant_state| {
+                Ok(match participant_state {
+                    ParticipantState::Leader(_) => true,
+                    ParticipantState::Follower(_) => false,
+                })
+            })
+            .await
+    }
+}
+
+struct TestFollowerInit {
+    id: usize,
+}
+
+impl TestFollowerInit {
+    fn new(id: usize) -> Self {
+        Self { id }
+    }
+}
+
+impl FollowerInit<TestEntry, TestFollower> for TestFollowerInit {
+    fn new_follower(&self) -> TestFollower {
+        TestFollower {
+            id: self.id,
+            entries: Mutex::new(vec![]),
+        }
+    }
 }
 
 struct TestLeader {
     id: usize,
-    inner: Arc<Mutex<ReplicaInner>>,
+    entries: Mutex<Vec<TestEntry>>,
 }
 
 #[async_trait]
 impl Leader<TestEntry, TestFollower> for TestLeader {
-    async fn process(&self, _seq: WalSeq, entry: TestEntry) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.processed_entries.push(entry);
-    }
-
-    async fn demote(self) -> TestFollower {
-        {
-            let mut inner = self.inner.lock().unwrap();
-            inner.leader = false;
-        }
-
-        TestFollower {
+    async fn demote(self) -> anyhow::Result<TestFollower> {
+        Ok(TestFollower {
             id: self.id,
-            inner: self.inner,
-        }
+            entries: self.entries,
+        })
     }
 }
 
 struct TestFollower {
     id: usize,
-    inner: Arc<Mutex<ReplicaInner>>,
-}
-
-impl TestFollower {
-    fn new(id: usize, inner: Arc<Mutex<ReplicaInner>>) -> Self {
-        Self { id, inner }
-    }
+    entries: Mutex<Vec<TestEntry>>,
 }
 
 #[async_trait]
 impl Follower<TestEntry, TestLeader> for TestFollower {
     async fn process(&self, _seq: WalSeq, entry: TestEntry) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.processed_entries.push(entry);
+        let mut entries = self.entries.lock().unwrap();
+        entries.push(entry);
     }
 
-    async fn promote(self) -> TestLeader {
-        {
-            let mut inner = self.inner.lock().unwrap();
-            inner.leader = true;
-        }
-
-        TestLeader {
+    async fn promote(self, _writer: JournalWriter<TestEntry>) -> anyhow::Result<TestLeader> {
+        Ok(TestLeader {
             id: self.id,
-            inner: self.inner,
-        }
+            entries: self.entries,
+        })
     }
 }
 
