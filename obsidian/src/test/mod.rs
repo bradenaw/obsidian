@@ -17,6 +17,7 @@ use std::time::Duration;
 use anyhow::anyhow;
 use async_trait::async_trait;
 
+use crate::election::Proposal;
 use crate::gateway::Gateway;
 use crate::lsm::Lsm;
 use crate::lsm::LsmOptions;
@@ -24,10 +25,11 @@ use crate::lsm::Manifest;
 use crate::meta::MetaImpl;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
+use crate::replica::ShardEntry;
+use crate::runtime::Journals;
 use crate::runtime::Meta;
 use crate::runtime::Storage;
 use crate::runtime::Tablet;
-use crate::runtime::Wals;
 use crate::storage::CachedStorage;
 use crate::supervisor::Supervisor;
 use crate::tablet::TabletJournalWriter;
@@ -37,7 +39,6 @@ pub(crate) use crate::test::mem_journal::MemJournal;
 pub(crate) use crate::test::mem_journals::MemJournals;
 pub(crate) use crate::test::mem_storage::MemStorage;
 pub(crate) use crate::test::mem_wal::MemWal;
-pub(crate) use crate::test::mem_wals::MemWals;
 use crate::test::meta_proxy::MetaProxy;
 use crate::test::test_nodes::TestNodes;
 use crate::util::encode;
@@ -184,7 +185,7 @@ impl ObsidianForTest {
             4,  // n_stripes
         ));
 
-        let wals = Arc::new(MemWals::new()) as Arc<dyn Wals>;
+        let journals = Arc::new(MemJournals::new()) as Arc<dyn Journals<Proposal<ShardEntry>>>;
 
         let meta_tablet = crate::tablet::MetaTablet::new(
             Lsm::empty(
@@ -201,7 +202,7 @@ impl ObsidianForTest {
         let nodes = TestNodes::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&meta) as Arc<dyn Meta>,
-            Arc::clone(&wals),
+            journals,
         );
 
         for i in 0..n_shards {

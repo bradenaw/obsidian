@@ -13,11 +13,14 @@ use crate::election::FollowerInit;
 use crate::election::JournalWriter;
 use crate::election::Leader;
 use crate::election::Participant;
+use crate::election::ParticipantBuilder;
 use crate::election::ParticipantState;
+use crate::election::Proposal;
 use crate::lsm::LsmOptions;
 use crate::lsm::Manifest;
 use crate::replica::recovery::ShardRecovery;
 use crate::runtime;
+use crate::runtime::Journal;
 use crate::runtime::Meta;
 use crate::runtime::Shard as _;
 use crate::runtime::Shards;
@@ -43,16 +46,43 @@ use crate::Txid;
 use crate::WalEntry;
 use crate::WalSeq;
 
+#[derive(Clone)]
 pub(crate) struct ShardEntry {
     pub tablet_id: TabletId,
     pub entry: WalEntry,
 }
 
-struct Replica {
+pub(crate) struct Replica {
     shard_id: ShardId,
     participant: Arc<Participant<ShardEntry, LeaderReplica, FollowerReplica>>,
 
     tablets: RwLock<HashMap<TabletId, Arc<dyn runtime::Tablet>>>,
+}
+
+impl Replica {
+    pub fn new(
+        shard_id: ShardId,
+        lsm_options: LsmOptions,
+        storage: Arc<dyn Storage>,
+        meta: Arc<dyn Meta>,
+        shards: Arc<dyn Shards>,
+        journal: Arc<dyn Journal<Proposal<ShardEntry>>>,
+    ) -> Replica {
+        Replica {
+            shard_id,
+            participant: Arc::new(ParticipantBuilder::new().build(
+                journal,
+                ReplicaOptions {
+                    shard_id,
+                    lsm_options,
+                    storage,
+                    meta,
+                    shards,
+                },
+            )),
+            tablets: RwLock::new(HashMap::new()),
+        }
+    }
 }
 
 #[derive(Clone)]
