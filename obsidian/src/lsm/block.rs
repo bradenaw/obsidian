@@ -437,7 +437,20 @@ impl BlockBuilder {
 
         let key_revisions = self.buffer.entry(revision.key).or_insert_with(Vec::new);
 
-        if let Some((prev_ts, _)) = key_revisions.last() {
+        if let Some((prev_ts, prev_value)) = key_revisions.last() {
+            if *prev_ts == revision.ts {
+                if prev_value == &revision.value {
+                    return Err(anyhow!(
+                        "revisions not in descending timestamp order: duplicate revision {:?}",
+                        prev_ts,
+                    ));
+                } else {
+                    return Err(anyhow!(
+                        "revisions not in descending timestamp order: conflicting values for {:?}",
+                        prev_ts,
+                    ));
+                }
+            }
             if *prev_ts <= revision.ts {
                 return Err(anyhow!(
                     "revisions not in descending timestamp order: {:?} then {:?}",
