@@ -1,2 +1,2 @@
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct WalSeq(pub u64);
+pub(crate) struct JournalSeq(pub u64);

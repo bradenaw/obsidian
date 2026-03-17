@@ -30,8 +30,8 @@ use crate::runtime::Journal;
 use crate::util::AtomicTimestamp;
 use crate::util::Retry;
 use crate::util::WithBackground;
+use crate::JournalSeq;
 use crate::Timestamp;
-use crate::WalSeq;
 
 /// A Participant is a member of a replica group. The purpose of election is to select a single
 /// leader, who then has the right to append to a journal and serve reads without consulting any
@@ -202,7 +202,7 @@ impl ParticipantId {
 #[derive(Clone)]
 pub struct Proposal<TEntry> {
     participant_id: ParticipantId,
-    // Timestamps are not necessarily ordered the same way as WalSeqs, since the leader may submit
+    // Timestamps are not necessarily ordered the same way as JournalSeqs, since the leader may submit
     // proposals concurrently that can be committed by the journal in any order.
     timestamp: Timestamp,
     proposal_type: ProposalType<TEntry>,
@@ -231,7 +231,7 @@ pub trait Leader<TEntry, TFollower> {
 
 #[async_trait]
 pub trait Follower<TEntry, TLeader> {
-    async fn process(&self, seq: WalSeq, entry: TEntry);
+    async fn process(&self, seq: JournalSeq, entry: TEntry);
     async fn promote(self, writer: JournalWriter<TEntry>) -> anyhow::Result<TLeader>;
 }
 
@@ -428,7 +428,7 @@ where
         Ok(())
     }
 
-    async fn process(&self, seq: WalSeq, entry: TEntry) {
+    async fn process(&self, seq: JournalSeq, entry: TEntry) {
         let maybe_state = self.state.read().await;
         let state = maybe_state.as_ref().unwrap();
         if let InnerParticipantState::Follower(follower) = state {
@@ -584,9 +584,9 @@ enum Ratification<Entry> {
 
 fn accepted_proposals<S, Entry>(
     mut proposals: S,
-) -> impl Stream<Item = anyhow::Result<(WalSeq, Ratification<Entry>)>>
+) -> impl Stream<Item = anyhow::Result<(JournalSeq, Ratification<Entry>)>>
 where
-    S: Stream<Item = anyhow::Result<(WalSeq, Proposal<Entry>)>> + Send + Unpin,
+    S: Stream<Item = anyhow::Result<(JournalSeq, Proposal<Entry>)>> + Send + Unpin,
 {
     try_stream! {
         // NOTE: If we start anywhere in the middle we might accept an acquire that shouldn't have

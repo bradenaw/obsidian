@@ -3,20 +3,20 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use futures::Stream;
 
-use crate::WalSeq;
+use crate::JournalSeq;
 
 #[async_trait]
 pub(crate) trait Journal<E>: Send + Sync + 'static {
-    async fn append(&self, entry: E) -> anyhow::Result<WalSeq>;
+    async fn append(&self, entry: E) -> anyhow::Result<JournalSeq>;
 
     fn tail(
         &self,
-        first: WalSeq,
-    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(WalSeq, E)>> + Send + '_>>;
+        first: JournalSeq,
+    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(JournalSeq, E)>> + Send + '_>>;
 
-    async fn oldest_available(&self) -> anyhow::Result<WalSeq>;
+    async fn oldest_available(&self) -> anyhow::Result<JournalSeq>;
 
-    async fn latest(&self) -> anyhow::Result<WalSeq>;
+    async fn latest(&self) -> anyhow::Result<JournalSeq>;
 
-    async fn trim(&self, before: WalSeq) -> anyhow::Result<()>;
+    async fn trim(&self, before: JournalSeq) -> anyhow::Result<()>;
 }

@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use priority_queue::PriorityQueue;
 use tokio::sync::oneshot;
 
-use crate::WalSeq;
+use crate::JournalSeq;
 
 /// Journal appenders want to wait to see that their journal entry is accepted.
 ///
@@ -23,23 +23,23 @@ pub(super) struct SeqWaiters(Arc<Mutex<SeqWaitersInner>>);
 
 struct SeqWaitersInner {
     next_id: usize,
-    highest_seen: WalSeq,
+    highest_seen: JournalSeq,
 
-    // Map from waiter ID to the lower bound of the WalSeq they're waiting for.
-    waiting_unknown_above: PriorityQueue<usize, WalSeq>,
+    // Map from waiter ID to the lower bound of the JournalSeq they're waiting for.
+    waiting_unknown_above: PriorityQueue<usize, JournalSeq>,
     // Map from (waiter ID, seq) to a sender to notify them. Only contains waiters with a seq
     // higher than highest_seen.
-    waiting_specific: BTreeMap<(WalSeq, usize), oneshot::Sender<bool>>,
+    waiting_specific: BTreeMap<(JournalSeq, usize), oneshot::Sender<bool>>,
     // Only holds the seqs seen above the minimum seq contained in `waiting_unknown_above`. If
     // `waiting_unknown_above` is empty, so is `seen`.
-    seen: BTreeSet<WalSeq>,
+    seen: BTreeSet<JournalSeq>,
 }
 
 impl SeqWaiters {
     pub fn new() -> SeqWaiters {
         SeqWaiters(Arc::new(Mutex::new(SeqWaitersInner {
             next_id: 0,
-            highest_seen: WalSeq(0),
+            highest_seen: JournalSeq(0),
             waiting_unknown_above: PriorityQueue::new(),
             waiting_specific: BTreeMap::new(),
             seen: BTreeSet::new(),
@@ -63,7 +63,7 @@ impl SeqWaiters {
         }
     }
 
-    pub fn observe(&self, seq: WalSeq) {
+    pub fn observe(&self, seq: JournalSeq) {
         let mut inner = self.0.lock().unwrap();
         if !inner.waiting_unknown_above.is_empty() {
             inner.seen.insert(seq);
@@ -109,7 +109,7 @@ pub(super) struct SeqWaiter {
 }
 
 impl SeqWaiter {
-    pub async fn wait(self, seq: WalSeq) -> bool {
+    pub async fn wait(self, seq: JournalSeq) -> bool {
         let recv = {
             let mut inner = self.parent.lock().unwrap();
             let already_seen = inner.seen.contains(&seq);
@@ -146,7 +146,7 @@ impl Drop for SeqWaiter {
 #[cfg(test)]
 mod tests {
     use crate::election::seq_waiters::SeqWaiters;
-    use crate::WalSeq;
+    use crate::JournalSeq;
 
     #[tokio::test]
     async fn test_seq_waiters() {
@@ -157,16 +157,16 @@ mod tests {
         let w7 = waiters.register();
         let w8 = waiters.register();
 
-        waiters.observe(WalSeq(1));
-        waiters.observe(WalSeq(4));
-        assert_eq!(w1.wait(WalSeq(1)).await, true);
-        assert_eq!(w3.wait(WalSeq(3)).await, false);
-        assert_eq!(w4.wait(WalSeq(4)).await, true);
+        waiters.observe(JournalSeq(1));
+        waiters.observe(JournalSeq(4));
+        assert_eq!(w1.wait(JournalSeq(1)).await, true);
+        assert_eq!(w3.wait(JournalSeq(3)).await, false);
+        assert_eq!(w4.wait(JournalSeq(4)).await, true);
 
-        let w7_fut = w7.wait(WalSeq(7));
-        let w8_fut = w8.wait(WalSeq(8));
+        let w7_fut = w7.wait(JournalSeq(7));
+        let w8_fut = w8.wait(JournalSeq(8));
 
-        waiters.observe(WalSeq(8));
+        waiters.observe(JournalSeq(8));
         assert_eq!(w7_fut.await, false);
         assert_eq!(w8_fut.await, true);
     }

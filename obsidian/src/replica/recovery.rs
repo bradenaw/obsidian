@@ -11,13 +11,13 @@ use crate::lsm::Preloader;
 use crate::runtime;
 use crate::util::hexlify;
 use crate::JournalEntry;
+use crate::JournalSeq;
 use crate::KeyspaceId;
 use crate::Mutation;
 use crate::RevisionValue;
 use crate::TabletId;
 use crate::TabletJournalEntry;
 use crate::Timestamp;
-use crate::WalSeq;
 
 pub(super) struct ShardRecovery {
     lsm_options: LsmOptions,
@@ -50,7 +50,7 @@ impl ShardRecovery {
         recovery
     }
 
-    pub fn process(&mut self, seqno: WalSeq, entry: JournalEntry) {
+    pub fn process(&mut self, seqno: JournalSeq, entry: JournalEntry) {
         let tablet = self.tablets.entry(entry.tablet_id).or_insert_with(|| {
             TabletRecovery::empty(self.lsm_options.clone(), Arc::clone(&self.storage))
         });
@@ -67,7 +67,11 @@ impl ShardRecovery {
 }
 
 struct TabletRecovery {
-    writes: VecDeque<(WalSeq, Timestamp, Vec<(KeyspaceId, Vec<u8>, RevisionValue)>)>,
+    writes: VecDeque<(
+        JournalSeq,
+        Timestamp,
+        Vec<(KeyspaceId, Vec<u8>, RevisionValue)>,
+    )>,
     preloader: Preloader,
     lsm_options: LsmOptions,
     storage: Arc<dyn runtime::Storage>,
@@ -93,7 +97,7 @@ impl TabletRecovery {
         recovery
     }
 
-    fn process(&mut self, seqno: WalSeq, entry: TabletJournalEntry) {
+    fn process(&mut self, seqno: JournalSeq, entry: TabletJournalEntry) {
         match entry {
             TabletJournalEntry::NoOp => {}
             TabletJournalEntry::Write(ts, kvs) => {

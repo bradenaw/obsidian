@@ -24,7 +24,7 @@ use crate::Revision;
 use crate::RevisionValue;
 use crate::Timestamp;
 use crate::TabletJournalEntry;
-use crate::WalSeq;
+use crate::JournalSeq;
 use crate::WriteError;
 
 pub(super) struct JournaledLsm {
@@ -148,9 +148,9 @@ impl JournaledLsm {
         lsm_options: LsmOptions,
         wal: &Arc<dyn Wal>,
         storage: &Arc<dyn Storage>,
-    ) -> anyhow::Result<(Lsm, WalSeq)> {
+    ) -> anyhow::Result<(Lsm, JournalSeq)> {
         let oldest_seqno = wal.oldest_available().await?;
-        let mut newest_seqno = WalSeq(1);
+        let mut newest_seqno = JournalSeq(1);
         let mut wal_stream = wal.read(oldest_seqno);
 
         let mut preloader = Preloader::new(Arc::clone(storage));

@@ -32,6 +32,7 @@ use crate::Direction;
 use crate::HistoryRange;
 use crate::InternalError;
 use crate::JournalEntry;
+use crate::JournalSeq;
 use crate::Key;
 use crate::KeyspaceId;
 use crate::Mutation;
@@ -44,7 +45,6 @@ use crate::TabletId;
 use crate::Timestamp;
 use crate::TxOutcome;
 use crate::Txid;
-use crate::WalSeq;
 
 pub(crate) struct Replica {
     shard_id: ShardId,
@@ -127,7 +127,7 @@ struct FollowerReplica {
 
 #[async_trait]
 impl Follower<JournalEntry, LeaderReplica> for FollowerReplica {
-    async fn process(&self, seq: WalSeq, entry: JournalEntry) {
+    async fn process(&self, seq: JournalSeq, entry: JournalEntry) {
         self.recovery
             .lock()
             .unwrap()

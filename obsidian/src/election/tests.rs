@@ -24,7 +24,7 @@ use crate::election::Proposal;
 use crate::election::ProposalType;
 use crate::runtime::Journal;
 use crate::test::MemJournal;
-use crate::WalSeq;
+use crate::JournalSeq;
 
 #[derive(Clone)]
 struct TestEntry {}
@@ -183,7 +183,7 @@ struct TestFollower {
 
 #[async_trait]
 impl Follower<TestEntry, TestLeader> for TestFollower {
-    async fn process(&self, _seq: WalSeq, entry: TestEntry) {
+    async fn process(&self, _seq: JournalSeq, entry: TestEntry) {
         let mut entries = self.entries.lock().unwrap();
         entries.push(entry);
     }
@@ -233,7 +233,7 @@ impl<J> Journal<Proposal<TestEntry>> for TestJournal<J>
 where
     J: Journal<Proposal<TestEntry>>,
 {
-    async fn append(&self, proposal: Proposal<TestEntry>) -> anyhow::Result<WalSeq> {
+    async fn append(&self, proposal: Proposal<TestEntry>) -> anyhow::Result<JournalSeq> {
         let seq = self.inner.append(proposal.clone()).await?;
         log::info!(
             "{} {:<8} {:<4} {}",
@@ -252,8 +252,8 @@ where
 
     fn tail(
         &self,
-        first: WalSeq,
-    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(WalSeq, Proposal<TestEntry>)>> + Send + '_>>
+        first: JournalSeq,
+    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(JournalSeq, Proposal<TestEntry>)>> + Send + '_>>
     {
         let mut stream = self.inner.tail(first);
 
@@ -286,15 +286,15 @@ where
         })
     }
 
-    async fn latest(&self) -> anyhow::Result<WalSeq> {
+    async fn latest(&self) -> anyhow::Result<JournalSeq> {
         self.inner.latest().await
     }
 
-    async fn oldest_available(&self) -> anyhow::Result<WalSeq> {
+    async fn oldest_available(&self) -> anyhow::Result<JournalSeq> {
         self.inner.oldest_available().await
     }
 
-    async fn trim(&self, before: WalSeq) -> anyhow::Result<()> {
+    async fn trim(&self, before: JournalSeq) -> anyhow::Result<()> {
         self.inner.trim(before).await
     }
 }
@@ -304,26 +304,26 @@ impl<E> Journal<E> for Arc<dyn Journal<E>>
 where
     E: Send + 'static,
 {
-    async fn append(&self, entry: E) -> anyhow::Result<WalSeq> {
+    async fn append(&self, entry: E) -> anyhow::Result<JournalSeq> {
         Journal::append(self.deref(), entry).await
     }
 
     fn tail(
         &self,
-        first: WalSeq,
-    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(WalSeq, E)>> + Send + '_>> {
+        first: JournalSeq,
+    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(JournalSeq, E)>> + Send + '_>> {
         Journal::tail(self.deref(), first)
     }
 
-    async fn latest(&self) -> anyhow::Result<WalSeq> {
+    async fn latest(&self) -> anyhow::Result<JournalSeq> {
         Journal::latest(self.deref()).await
     }
 
-    async fn oldest_available(&self) -> anyhow::Result<WalSeq> {
+    async fn oldest_available(&self) -> anyhow::Result<JournalSeq> {
         Journal::oldest_available(self.deref()).await
     }
 
-    async fn trim(&self, before: WalSeq) -> anyhow::Result<()> {
+    async fn trim(&self, before: JournalSeq) -> anyhow::Result<()> {
         Journal::trim(self.deref(), before).await
     }
 }
