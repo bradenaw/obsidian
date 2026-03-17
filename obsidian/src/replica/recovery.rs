@@ -15,8 +15,8 @@ use crate::KeyspaceId;
 use crate::Mutation;
 use crate::RevisionValue;
 use crate::TabletId;
+use crate::TabletJournalEntry;
 use crate::Timestamp;
-use crate::WalEntry;
 use crate::WalSeq;
 
 pub(super) struct ShardRecovery {
@@ -93,13 +93,13 @@ impl TabletRecovery {
         recovery
     }
 
-    fn process(&mut self, seqno: WalSeq, entry: WalEntry) {
+    fn process(&mut self, seqno: WalSeq, entry: TabletJournalEntry) {
         match entry {
-            WalEntry::NoOp => {}
-            WalEntry::Write(ts, kvs) => {
+            TabletJournalEntry::NoOp => {}
+            TabletJournalEntry::Write(ts, kvs) => {
                 self.writes.push_back((seqno, ts, kvs));
             }
-            WalEntry::Manifest(included_seqno, manifest) => {
+            TabletJournalEntry::Manifest(included_seqno, manifest) => {
                 let trim_to_idx = self
                     .writes
                     .binary_search_by_key(&included_seqno, |(seqno, _, _)| *seqno)
@@ -119,7 +119,7 @@ impl TabletRecovery {
         for (_, ts, kvs) in self.writes {
             for (keyspace_id, key, value) in kvs {
                 // It's possible that this revision is already present since the seqno in
-                // WalEntry::Manifest is a lower bound, the manifest may already contain newer
+                // TabletJournalEntry::Manifest is a lower bound, the manifest may already contain newer
                 // writes.
                 if let Some((existing_ts, existing_value)) = lsm.get(ts, keyspace_id, &key).await? {
                     if existing_ts == ts {

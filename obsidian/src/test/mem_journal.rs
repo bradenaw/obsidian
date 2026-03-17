@@ -126,16 +126,16 @@ mod tests {
 
     use crate::runtime::Journal;
     use crate::test::MemJournal;
+    use crate::TabletJournalEntry;
     use crate::Timestamp;
-    use crate::WalEntry;
     use crate::WalSeq;
 
-    fn wal_entry(i: usize) -> WalEntry {
-        WalEntry::Write(Timestamp(i as u64), vec![])
+    fn wal_entry(i: usize) -> TabletJournalEntry {
+        TabletJournalEntry::Write(Timestamp(i as u64), vec![])
     }
 
-    fn write_timestamp(x: (WalSeq, WalEntry)) -> (WalSeq, Timestamp) {
-        if let WalEntry::Write(ts, _) = x.1 {
+    fn write_timestamp(x: (WalSeq, TabletJournalEntry)) -> (WalSeq, Timestamp) {
+        if let TabletJournalEntry::Write(ts, _) = x.1 {
             (x.0, ts)
         } else {
             panic!();
@@ -143,7 +143,7 @@ mod tests {
     }
 
     fn write_timestamps(
-        iter: impl IntoIterator<Item = (WalSeq, WalEntry)>,
+        iter: impl IntoIterator<Item = (WalSeq, TabletJournalEntry)>,
     ) -> Vec<(WalSeq, Timestamp)> {
         iter.into_iter().map(write_timestamp).collect()
     }

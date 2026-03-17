@@ -32,9 +32,9 @@ use crate::Record;
 use crate::Revision;
 use crate::RevisionValue;
 use crate::TabletId;
+use crate::TabletJournalEntry;
 use crate::Timestamp;
 use crate::Txid;
-use crate::WalEntry;
 
 pub(super) struct TabletInner {
     pub tablet_id: TabletId,
@@ -347,7 +347,7 @@ impl TabletInner {
         let ts = self.sequencer.start_write();
 
         self.journal
-            .append(WalEntry::Write(
+            .append(TabletJournalEntry::Write(
                 *ts,
                 muts.iter()
                     .map(|((keyspace_id, key), mutation)| {
@@ -663,14 +663,14 @@ mod tests {
     use crate::Record;
     use crate::ShardId;
     use crate::TabletId;
+    use crate::TabletJournalEntry;
     use crate::Timestamp;
-    use crate::WalEntry;
 
     struct NoopJournalWriter {}
 
     #[async_trait]
     impl TabletJournalWriter for NoopJournalWriter {
-        async fn append(&self, _entry: WalEntry) -> anyhow::Result<()> {
+        async fn append(&self, _entry: TabletJournalEntry) -> anyhow::Result<()> {
             Ok(())
         }
     }

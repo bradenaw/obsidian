@@ -28,8 +28,8 @@ use crate::ColoGroupId;
 use crate::Range;
 use crate::ShardId;
 use crate::TabletId;
+use crate::TabletJournalEntry;
 use crate::Timestamp;
-use crate::WalEntry;
 
 pub(crate) struct Shard(WithBackground<ShardInner>);
 
@@ -302,7 +302,7 @@ impl ShardTabletJournalWriter {
 
 #[async_trait]
 impl TabletJournalWriter for ShardTabletJournalWriter {
-    async fn append(&self, entry: WalEntry) -> anyhow::Result<()> {
+    async fn append(&self, entry: TabletJournalEntry) -> anyhow::Result<()> {
         self.inner
             .append(ShardEntry {
                 tablet_id: self.tablet_id,

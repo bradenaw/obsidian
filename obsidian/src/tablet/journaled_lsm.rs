@@ -23,7 +23,7 @@ use crate::Range;
 use crate::Revision;
 use crate::RevisionValue;
 use crate::Timestamp;
-use crate::WalEntry;
+use crate::TabletJournalEntry;
 use crate::WalSeq;
 use crate::WriteError;
 
@@ -59,7 +59,7 @@ impl JournaledLsm {
             })
             .collect();
 
-        self.wal.append(WalEntry::Write(ts, writes)).await?;
+        self.wal.append(TabletJournalEntry::Write(ts, writes)).await?;
 
         for (key, mutation) in muts {
             self.lsm.write(ts, key, mutation);
@@ -117,10 +117,10 @@ impl JournaledLsm {
     }
 
     pub async fn flush(&self) -> anyhow::Result<()> {
-        let seqno = self.wal.append(WalEntry::NoOp).await?;
+        let seqno = self.wal.append(TabletJournalEntry::NoOp).await?;
         self.lsm.flush().await?;
         let manifest = self.lsm.manifest();
-        self.wal.append(WalEntry::Manifest(seqno, manifest)).await?;
+        self.wal.append(TabletJournalEntry::Manifest(seqno, manifest)).await?;
         Ok(())
     }
 
@@ -158,11 +158,11 @@ impl JournaledLsm {
 
         while let Some((seqno, entry)) = wal_stream.try_next().await? {
             match entry {
-                WalEntry::NoOp => {}
-                WalEntry::Write(ts, kvs) => {
+                TabletJournalEntry::NoOp => {}
+                TabletJournalEntry::Write(ts, kvs) => {
                     entries.push_back((seqno, ts, kvs));
                 }
-                WalEntry::Manifest(included_seqno, manifest) => {
+                TabletJournalEntry::Manifest(included_seqno, manifest) => {
                     let trim_to_idx = entries
                         .binary_search_by_key(&included_seqno, |(seqno, _, _)| *seqno)
                         .unwrap_or_else(core::convert::identity);
@@ -181,7 +181,7 @@ impl JournaledLsm {
         for (_, ts, kvs) in entries {
             for (keyspace_id, key, value) in kvs {
                 // It's possible that this revision is already present since the seqno in
-                // WalEntry::Manifest is a lower bound, the manifest may already contain newer
+                // TabletJournalEntry::Manifest is a lower bound, the manifest may already contain newer
                 // writes.
                 if let Some((existing_ts, existing_value)) = lsm.get(ts, keyspace_id, &key).await? {
                     if existing_ts == ts {
@@ -226,7 +226,7 @@ mod tests {
     use crate::Mutation;
     use crate::RevisionValue;
     use crate::Timestamp;
-    use crate::WalEntry;
+    use crate::TabletJournalEntry;
 
     #[tokio::test]
     async fn test_recovery() -> anyhow::Result<()> {
@@ -289,7 +289,7 @@ mod tests {
             let mut trim_before = None;
             let mut stream = wal.read(wal.oldest_available().await?);
             while let Some((_, entry)) = stream.try_next().await? {
-                if let WalEntry::Manifest(included_seqno, _) = entry {
+                if let TabletJournalEntry::Manifest(included_seqno, _) = entry {
                     trim_before = Some(included_seqno);
                 }
             }

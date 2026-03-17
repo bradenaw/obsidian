@@ -53,10 +53,10 @@ use crate::Range;
 use crate::Record;
 use crate::Revision;
 use crate::ShardId;
+use crate::TabletJournalEntry;
 use crate::Timestamp;
 use crate::TxOutcome;
 use crate::Txid;
-use crate::WalEntry;
 
 #[async_trait]
 impl<T: Tablet + ?Sized> Tablet for Arc<T> {
@@ -277,7 +277,7 @@ struct NoopJournalWriter {}
 
 #[async_trait]
 impl TabletJournalWriter for NoopJournalWriter {
-    async fn append(&self, _entry: WalEntry) -> anyhow::Result<()> {
+    async fn append(&self, _entry: TabletJournalEntry) -> anyhow::Result<()> {
         Ok(())
     }
 }

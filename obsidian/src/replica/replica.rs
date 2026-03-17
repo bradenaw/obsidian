@@ -40,16 +40,16 @@ use crate::Record;
 use crate::Revision;
 use crate::ShardId;
 use crate::TabletId;
+use crate::TabletJournalEntry;
 use crate::Timestamp;
 use crate::TxOutcome;
 use crate::Txid;
-use crate::WalEntry;
 use crate::WalSeq;
 
 #[derive(Clone)]
 pub(crate) struct ShardEntry {
     pub tablet_id: TabletId,
-    pub entry: WalEntry,
+    pub entry: TabletJournalEntry,
 }
 
 pub(crate) struct Replica {
