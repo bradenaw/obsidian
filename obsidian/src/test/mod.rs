@@ -1,6 +1,7 @@
 mod mem_file_reader;
 mod mem_file_writer;
 mod mem_journal;
+mod mem_journals;
 mod mem_storage;
 mod mem_wal;
 mod mem_wals;
@@ -33,6 +34,7 @@ use crate::tablet::TabletJournalWriter;
 pub(crate) use crate::test::mem_file_reader::MemFileReader;
 pub(crate) use crate::test::mem_file_writer::MemFileWriter;
 pub(crate) use crate::test::mem_journal::MemJournal;
+pub(crate) use crate::test::mem_journals::MemJournals;
 pub(crate) use crate::test::mem_storage::MemStorage;
 pub(crate) use crate::test::mem_wal::MemWal;
 pub(crate) use crate::test::mem_wals::MemWals;
