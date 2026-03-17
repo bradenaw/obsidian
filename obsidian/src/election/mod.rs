@@ -12,6 +12,7 @@ use anyhow::anyhow;
 use async_stream::stream;
 use async_stream::try_stream;
 use async_trait::async_trait;
+use futures::future::pending;
 use futures::Stream;
 use futures::StreamExt;
 use rand::Rng;
@@ -118,6 +119,7 @@ impl ParticipantBuilder {
             state_change_request: Notify::new(),
             last_confirmation: AtomicInstant::new(),
             accepted_seqs: Arc::new(SeqWaiters::new()),
+            abandon: Arc::new(Notify::new()),
         }));
 
         inner.spawn(async move |participant| {
@@ -159,6 +161,7 @@ struct ParticipantInner<TEntry, TLeader, TFollower> {
     // takes some amount of time, it's important that we start counting from the _start_ of this
     // operation rather than the end, so that our idea of expiration is a lower bound.
     last_confirmation: AtomicInstant,
+    abandon: Arc<Notify>,
 }
 
 enum InnerParticipantState<TLeader, TFollower> {
@@ -233,6 +236,7 @@ pub struct JournalWriter<TEntry> {
     journal: Arc<dyn Journal<Proposal<TEntry>>>,
     lease_end: Weak<AtomicTimestamp>,
     accepted_seqs: Arc<SeqWaiters>,
+    abandon: Arc<Notify>,
 }
 
 impl<TEntry> JournalWriter<TEntry>
@@ -255,7 +259,7 @@ where
         }
 
         let wait = self.accepted_seqs.register();
-        let seq = self
+        let seq = match self
             .journal
             .append(Proposal {
                 participant_id: self.participant_id,
@@ -263,8 +267,24 @@ where
                 proposal_type: ProposalType::Append(entry),
             })
             .await
-            .unwrap(); // TODO: We do need to relinquish and change our participant ID etc, but
-                       // unwrap is a little ungraceful.
+        {
+            Ok(seq) => seq,
+            Err(e) => {
+                log::error!(
+                    "error returned from journal append, abandoning lease to enter recovery: {}",
+                    e,
+                );
+
+                self.abandon.notify_one();
+
+                // This function is called from inside of a with_state which'll get cancelled by
+                // the lease abandon, we want to block until then to make sure we don't e.g.
+                // release mutexes that protect the state that we're now unsure of because the
+                // write errored.
+                pending::<()>().await;
+                unreachable!();
+            }
+        };
         let accepted = wait.wait(seq).await;
         if !accepted {
             return Err(anyhow!("entry not accepted"));
@@ -381,6 +401,7 @@ where
                     journal: Arc::clone(&self.journal),
                     lease_end: Arc::downgrade(&lease_end),
                     accepted_seqs: Arc::clone(&self.accepted_seqs),
+                    abandon: Arc::clone(&self.abandon),
                 };
                 follower.promote(journal_writer).await?
             }
@@ -445,6 +466,7 @@ where
         let mut pending_acquire: Option<Instant> = None;
 
         let mut current_lease = None;
+        let mut self_lease_expiration: Option<Instant> = None;
 
         let mut last_ts = Timestamp::now();
         let mut try_acquire = false;
@@ -465,6 +487,8 @@ where
                 _ => false,
             };
 
+            let abandon = self.abandon.notified();
+
             select! {
                 next = StreamExt::next(&mut accepted) => {
                     let (seq, ratification) = next
@@ -478,22 +502,28 @@ where
                             ProposalType::Acquire{lease_end, ..} => {
                                 current_lease = Some((proposal.participant_id, lease_end));
                                 if proposal.participant_id == participant_id {
-                                    self.last_confirmation.store(
-                                        pending_acquire
+                                    let start = pending_acquire
                                             .ok_or_else(|| {
                                                 anyhow!("received acquire that was not pending")
-                                            })?,
+                                            })?;
+                                    self.last_confirmation.store(
+                                        start,
                                     );
                                     pending_acquire = None;
                                     self.promote_or_extend(participant_id, lease_end).await?;
+                                    self_lease_expiration = Some(
+                                        start + self.lease_duration - self.lease_grace_period,
+                                    );
                                 } else {
                                     self.demote_if_leader().await?;
+                                    self_lease_expiration = None;
                                 }
                             },
                             ProposalType::Relinquish => {
                                 current_lease = None;
                                 if proposal.participant_id == participant_id {
                                     self.demote_if_leader().await?;
+                                    self_lease_expiration = None;
                                 }
                             },
                             ProposalType::Append(entry) => {
@@ -536,7 +566,15 @@ where
                     if self_leader && pending_acquire.is_none() => {
                     try_acquire = true;
                 },
-                // TODO: maybe_demote() on expiry
+                _ = maybe_sleep_until(self_lease_expiration) => {
+                    self.demote_if_leader().await?;
+                    self_lease_expiration = None;
+                    pending_acquire = None;
+                    current_lease = None;
+                },
+                _ = abandon => {
+                    return Err(anyhow!("abandoning lease to resolve errored append"));
+                },
             }
         }
     }
