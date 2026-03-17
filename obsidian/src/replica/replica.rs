@@ -31,6 +31,7 @@ use crate::Bound;
 use crate::Direction;
 use crate::HistoryRange;
 use crate::InternalError;
+use crate::JournalEntry;
 use crate::Key;
 use crate::KeyspaceId;
 use crate::Mutation;
@@ -40,21 +41,14 @@ use crate::Record;
 use crate::Revision;
 use crate::ShardId;
 use crate::TabletId;
-use crate::TabletJournalEntry;
 use crate::Timestamp;
 use crate::TxOutcome;
 use crate::Txid;
 use crate::WalSeq;
 
-#[derive(Clone)]
-pub(crate) struct ShardEntry {
-    pub tablet_id: TabletId,
-    pub entry: TabletJournalEntry,
-}
-
 pub(crate) struct Replica {
     shard_id: ShardId,
-    participant: Arc<Participant<ShardEntry, LeaderReplica, FollowerReplica>>,
+    participant: Arc<Participant<JournalEntry, LeaderReplica, FollowerReplica>>,
 
     tablets: RwLock<HashMap<TabletId, Arc<dyn runtime::Tablet>>>,
 }
@@ -66,7 +60,7 @@ impl Replica {
         storage: Arc<dyn Storage>,
         meta: Arc<dyn Meta>,
         shards: Arc<dyn Shards>,
-        journal: Arc<dyn Journal<Proposal<ShardEntry>>>,
+        journal: Arc<dyn Journal<Proposal<JournalEntry>>>,
     ) -> Replica {
         Replica {
             shard_id,
@@ -94,7 +88,7 @@ struct ReplicaOptions {
     shards: Arc<dyn Shards>,
 }
 
-impl FollowerInit<ShardEntry, FollowerReplica> for ReplicaOptions {
+impl FollowerInit<JournalEntry, FollowerReplica> for ReplicaOptions {
     fn new_follower(&self) -> FollowerReplica {
         FollowerReplica {
             options: self.clone(),
@@ -113,7 +107,7 @@ struct LeaderReplica {
 }
 
 #[async_trait]
-impl Leader<ShardEntry, FollowerReplica> for LeaderReplica {
+impl Leader<JournalEntry, FollowerReplica> for LeaderReplica {
     async fn demote(self) -> anyhow::Result<FollowerReplica> {
         Ok(FollowerReplica {
             recovery: Mutex::new(Some(ShardRecovery::from_manifests(
@@ -132,8 +126,8 @@ struct FollowerReplica {
 }
 
 #[async_trait]
-impl Follower<ShardEntry, LeaderReplica> for FollowerReplica {
-    async fn process(&self, seq: WalSeq, entry: ShardEntry) {
+impl Follower<JournalEntry, LeaderReplica> for FollowerReplica {
+    async fn process(&self, seq: WalSeq, entry: JournalEntry) {
         self.recovery
             .lock()
             .unwrap()
@@ -142,7 +136,7 @@ impl Follower<ShardEntry, LeaderReplica> for FollowerReplica {
             .process(seq, entry);
     }
 
-    async fn promote(self, journal: JournalWriter<ShardEntry>) -> anyhow::Result<LeaderReplica> {
+    async fn promote(self, journal: JournalWriter<JournalEntry>) -> anyhow::Result<LeaderReplica> {
         let recovery = self.recovery.lock().unwrap().take().unwrap();
         let lsms = recovery.wait().await?;
 
@@ -219,7 +213,7 @@ impl runtime::Shard for Replica {
 
 struct ReplicaTablet {
     tablet_id: TabletId,
-    participant: Arc<Participant<ShardEntry, LeaderReplica, FollowerReplica>>,
+    participant: Arc<Participant<JournalEntry, LeaderReplica, FollowerReplica>>,
 }
 
 impl ReplicaTablet {
@@ -503,8 +497,8 @@ impl runtime::Tablet for ReplicaTablet {
 }
 
 #[async_trait]
-impl ShardJournalWriter for JournalWriter<ShardEntry> {
-    async fn append(&self, entry: ShardEntry) -> anyhow::Result<()> {
+impl ShardJournalWriter for JournalWriter<JournalEntry> {
+    async fn append(&self, entry: JournalEntry) -> anyhow::Result<()> {
         JournalWriter::append(self, entry).await
     }
 }

@@ -16,7 +16,6 @@ use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::meta::SyncType;
 use crate::replica::Replica;
-use crate::replica::ShardEntry;
 use crate::runtime;
 use crate::runtime::Journals;
 use crate::runtime::Meta;
@@ -29,6 +28,7 @@ use crate::supervisor::Supervisor;
 use crate::util::Retry;
 use crate::util::WithBackground;
 use crate::Direction;
+use crate::JournalEntry;
 use crate::NodeId;
 use crate::ShardId;
 
@@ -41,7 +41,7 @@ struct NodeInner {
     meta: Arc<dyn Meta>,
     shards: Arc<dyn Shards>,
     meta_synced: Arc<MetaSynced>,
-    journals: Arc<dyn Journals<Proposal<ShardEntry>>>,
+    journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
 
     supervisor: Mutex<Option<Supervisor>>,
     replicas: RwLock<HashMap<ShardId, Arc<Replica>>>,
@@ -54,7 +54,7 @@ impl Node {
         meta: Arc<dyn Meta>,
         shards: Arc<dyn Shards>,
         meta_synced: Arc<MetaSynced>,
-        journals: Arc<dyn Journals<Proposal<ShardEntry>>>,
+        journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
     ) -> anyhow::Result<Self> {
         meta.add_node(node_id.clone()).await?;
 
@@ -214,7 +214,7 @@ struct NoopShardJournalWriter {}
 
 #[async_trait]
 impl ShardJournalWriter for NoopShardJournalWriter {
-    async fn append(&self, _entry: ShardEntry) -> anyhow::Result<()> {
+    async fn append(&self, _entry: JournalEntry) -> anyhow::Result<()> {
         Ok(())
     }
 }

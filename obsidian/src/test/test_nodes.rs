@@ -9,7 +9,6 @@ use im::OrdSet;
 
 use crate::election::Proposal;
 use crate::meta::MetaSynced;
-use crate::replica::ShardEntry;
 use crate::runtime::Journals;
 use crate::runtime::Meta;
 use crate::runtime::Node;
@@ -17,6 +16,7 @@ use crate::runtime::Nodes;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
 use crate::util::Watchable;
+use crate::JournalEntry;
 use crate::NodeId;
 
 pub(super) struct TestNodes {
@@ -27,7 +27,7 @@ pub(super) struct TestNodes {
 struct TestNodesInner {
     storage: Arc<dyn Storage>,
     meta: Arc<dyn Meta>,
-    journals: Arc<dyn Journals<Proposal<ShardEntry>>>,
+    journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
 
     routing: Mutex<HashMap<NodeId, Arc<dyn Node>>>,
     node_ids: Watchable<OrdSet<NodeId>>,
@@ -37,7 +37,7 @@ impl TestNodes {
     pub fn new(
         storage: Arc<dyn Storage>,
         meta: Arc<dyn Meta>,
-        journals: Arc<dyn Journals<Proposal<ShardEntry>>>,
+        journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
     ) -> Self {
         let inner = Arc::new(TestNodesInner {
             storage,

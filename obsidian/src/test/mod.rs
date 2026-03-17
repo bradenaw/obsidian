@@ -23,7 +23,6 @@ use crate::lsm::Manifest;
 use crate::meta::MetaImpl;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
-use crate::replica::ShardEntry;
 use crate::runtime::Journals;
 use crate::runtime::Meta;
 use crate::runtime::Storage;
@@ -45,6 +44,7 @@ use crate::Bound;
 use crate::Direction;
 use crate::HistoryRange;
 use crate::InternalError;
+use crate::JournalEntry;
 use crate::Key;
 use crate::KeyspaceId;
 use crate::Mutation;
@@ -182,7 +182,7 @@ impl ObsidianForTest {
             4,  // n_stripes
         ));
 
-        let journals = Arc::new(MemJournals::new()) as Arc<dyn Journals<Proposal<ShardEntry>>>;
+        let journals = Arc::new(MemJournals::new()) as Arc<dyn Journals<Proposal<JournalEntry>>>;
 
         let meta_tablet = crate::tablet::MetaTablet::new(
             Lsm::empty(

@@ -8,9 +8,9 @@ use crate::lsm::Lsm;
 use crate::lsm::LsmOptions;
 use crate::lsm::Manifest;
 use crate::lsm::Preloader;
-use crate::replica::replica::ShardEntry;
 use crate::runtime;
 use crate::util::hexlify;
+use crate::JournalEntry;
 use crate::KeyspaceId;
 use crate::Mutation;
 use crate::RevisionValue;
@@ -50,7 +50,7 @@ impl ShardRecovery {
         recovery
     }
 
-    pub fn process(&mut self, seqno: WalSeq, entry: ShardEntry) {
+    pub fn process(&mut self, seqno: WalSeq, entry: JournalEntry) {
         let tablet = self.tablets.entry(entry.tablet_id).or_insert_with(|| {
             TabletRecovery::empty(self.lsm_options.clone(), Arc::clone(&self.storage))
         });

@@ -13,7 +13,6 @@ use crate::meta::MetaSubscriber;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::meta::SyncType;
-use crate::replica::ShardEntry;
 use crate::runtime::Meta;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
@@ -25,6 +24,7 @@ use crate::tablet::TabletJournalWriter;
 use crate::util::Retry;
 use crate::util::WithBackground;
 use crate::ColoGroupId;
+use crate::JournalEntry;
 use crate::Range;
 use crate::ShardId;
 use crate::TabletId;
@@ -286,7 +286,7 @@ impl MetaSubscriber for ShardInner {
 
 #[async_trait]
 pub(crate) trait ShardJournalWriter: Send + Sync + 'static {
-    async fn append(&self, entry: ShardEntry) -> anyhow::Result<()>;
+    async fn append(&self, entry: JournalEntry) -> anyhow::Result<()>;
 }
 
 struct ShardTabletJournalWriter {
@@ -304,7 +304,7 @@ impl ShardTabletJournalWriter {
 impl TabletJournalWriter for ShardTabletJournalWriter {
     async fn append(&self, entry: TabletJournalEntry) -> anyhow::Result<()> {
         self.inner
-            .append(ShardEntry {
+            .append(JournalEntry {
                 tablet_id: self.tablet_id,
                 entry,
             })
