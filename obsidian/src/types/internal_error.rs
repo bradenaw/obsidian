@@ -2,6 +2,7 @@ use std::fmt::Debug;
 
 use thiserror::Error;
 
+use crate::ShardId;
 use crate::TabletId;
 use crate::Txid;
 
@@ -25,8 +26,8 @@ pub(crate) enum InternalError {
     TabletNotWriteable(TabletId),
     #[error("tablet not currently hydrating")]
     TabletNotHydrating(TabletId),
-    #[error("node not currently leader for tablet {0:?}")]
-    NotLeader(TabletId),
+    #[error("node not currently leader for {0:?}")]
+    NotLeader(ShardId),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

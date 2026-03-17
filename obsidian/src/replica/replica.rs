@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
 
+use anyhow::anyhow;
 use async_trait::async_trait;
 
 use crate::election::Follower;
@@ -17,8 +18,12 @@ use crate::lsm::LsmOptions;
 use crate::lsm::Manifest;
 use crate::replica::recovery::ShardRecovery;
 use crate::runtime;
+use crate::runtime::Meta;
 use crate::runtime::Shard as _;
+use crate::runtime::Shards;
+use crate::runtime::Storage;
 use crate::shard::Shard;
+use crate::shard::ShardJournalWriter;
 use crate::Bound;
 use crate::Direction;
 use crate::HistoryRange;
@@ -50,45 +55,90 @@ struct Replica {
     tablets: RwLock<HashMap<TabletId, Arc<dyn runtime::Tablet>>>,
 }
 
+#[derive(Clone)]
 struct ReplicaOptions {
+    shard_id: ShardId,
     lsm_options: LsmOptions,
+    storage: Arc<dyn Storage>,
+    meta: Arc<dyn Meta>,
+    shards: Arc<dyn Shards>,
 }
 
 impl FollowerInit<ShardEntry, FollowerReplica> for ReplicaOptions {
     fn new_follower(&self) -> FollowerReplica {
         FollowerReplica {
-            recovery: Mutex::new(ShardRecovery::empty()),
-            lsm_options: self.lsm_options.clone(),
+            options: self.clone(),
+            recovery: Mutex::new(Some(ShardRecovery::empty(
+                self.lsm_options.clone(),
+                Arc::clone(&self.storage),
+            ))),
         }
     }
 }
 
 struct LeaderReplica {
+    options: ReplicaOptions,
+    last_persisted_manifests: HashMap<TabletId, Manifest>,
     shard: Shard,
-    journal_writer: JournalWriter<ShardEntry>,
 }
 
 #[async_trait]
 impl Leader<ShardEntry, FollowerReplica> for LeaderReplica {
     async fn demote(self) -> anyhow::Result<FollowerReplica> {
-        todo!();
+        Ok(FollowerReplica {
+            recovery: Mutex::new(Some(ShardRecovery::from_manifests(
+                self.options.lsm_options.clone(),
+                Arc::clone(&self.options.storage),
+                self.last_persisted_manifests,
+            ))),
+            options: self.options,
+        })
     }
 }
 
 struct FollowerReplica {
-    recovery: Mutex<ShardRecovery>,
-    lsm_options: LsmOptions,
+    options: ReplicaOptions,
+    recovery: Mutex<Option<ShardRecovery>>,
 }
 
 #[async_trait]
 impl Follower<ShardEntry, LeaderReplica> for FollowerReplica {
     async fn process(&self, seq: WalSeq, entry: ShardEntry) {
-        self.recovery.lock().unwrap().process(seq, entry);
+        self.recovery
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .process(seq, entry);
     }
 
-    async fn promote(self, writer: JournalWriter<ShardEntry>) -> anyhow::Result<LeaderReplica> {
-        //
-        todo!();
+    async fn promote(self, journal: JournalWriter<ShardEntry>) -> anyhow::Result<LeaderReplica> {
+        let recovery = self.recovery.lock().unwrap().take().unwrap();
+        let lsms = recovery.wait().await?;
+
+        let manifests = lsms
+            .iter()
+            .map(|(tablet_id, lsm)| (*tablet_id, lsm.manifest()))
+            .collect();
+
+        let shard = Shard::new(
+            self.options.shard_id,
+            Arc::clone(&self.options.storage),
+            Arc::clone(&self.options.meta),
+            Arc::clone(&self.options.shards),
+            self.options.lsm_options.clone(),
+            lsms,
+            Arc::new(journal),
+        )
+        .await?;
+
+        // TODO: intercept written manifests into last_persisted_manifests
+
+        Ok(LeaderReplica {
+            options: self.options,
+            last_persisted_manifests: manifests,
+            shard,
+        })
     }
 }
 
@@ -99,6 +149,14 @@ impl runtime::Shard for Replica {
     }
 
     fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn runtime::Tablet>> {
+        if tablet_id.0 != self.shard_id {
+            return Err(anyhow!(
+                "{:?} not a tablet of {:?}",
+                tablet_id,
+                self.shard_id
+            ));
+        }
+
         {
             let tablets = self.tablets.read().unwrap();
             if let Some(tablet) = tablets.get(&tablet_id) {
@@ -118,7 +176,14 @@ impl runtime::Shard for Replica {
     }
 
     async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
-        todo!();
+        self.participant
+            .with_state(async move |participant_state| {
+                if let ParticipantState::Leader(leader) = participant_state {
+                    return leader.shard.wait_meta_sync(ts).await;
+                }
+                Err(InternalError::NotLeader(self.shard_id).into())
+            })
+            .await
     }
 }
 
@@ -135,7 +200,7 @@ impl ReplicaTablet {
                 if let ParticipantState::Leader(leader) = participant_state {
                     return leader.shard.tablet(tablet_id)?.get(ts, key).await;
                 }
-                Err(InternalError::NotLeader(tablet_id))
+                Err(InternalError::NotLeader(tablet_id.0))
             })
             .await
     }
@@ -152,7 +217,7 @@ impl ReplicaTablet {
                     let tablet = leader.shard.tablet(tablet_id)?;
                     return f(tablet).await;
                 }
-                Err(InternalError::NotLeader(tablet_id))
+                Err(InternalError::NotLeader(tablet_id.0))
             })
             .await
     }
@@ -179,7 +244,7 @@ impl runtime::Tablet for ReplicaTablet {
                 if let ParticipantState::Leader(leader) = participant_state {
                     return leader.shard.tablet(tablet_id)?.get_latest(key).await;
                 }
-                Err(InternalError::NotLeader(tablet_id))
+                Err(InternalError::NotLeader(tablet_id.0))
             })
             .await
     }
@@ -191,7 +256,7 @@ impl runtime::Tablet for ReplicaTablet {
                 if let ParticipantState::Leader(leader) = participant_state {
                     return leader.shard.tablet(tablet_id)?.latest_snapshot(keys).await;
                 }
-                Err(InternalError::NotLeader(tablet_id))
+                Err(InternalError::NotLeader(tablet_id.0))
             })
             .await
     }
@@ -214,7 +279,7 @@ impl runtime::Tablet for ReplicaTablet {
                         .scan_page(ts, keyspace_id, range, direction, limit)
                         .await;
                 }
-                Err(InternalError::NotLeader(tablet_id))
+                Err(InternalError::NotLeader(tablet_id.0))
             })
             .await
     }
@@ -236,7 +301,7 @@ impl runtime::Tablet for ReplicaTablet {
                         .history_page(key, range, direction, limit)
                         .await;
                 }
-                Err(InternalError::NotLeader(tablet_id))
+                Err(InternalError::NotLeader(tablet_id.0))
             })
             .await
     }
@@ -252,7 +317,7 @@ impl runtime::Tablet for ReplicaTablet {
                 if let ParticipantState::Leader(leader) = participant_state {
                     return leader.shard.tablet(tablet_id)?.write(preconds, muts).await;
                 }
-                Err(InternalError::NotLeader(tablet_id))
+                Err(InternalError::NotLeader(tablet_id.0))
             })
             .await
     }
@@ -273,7 +338,7 @@ impl runtime::Tablet for ReplicaTablet {
                         .prepare(txid, preconds, muts)
                         .await;
                 }
-                Err(InternalError::NotLeader(tablet_id))
+                Err(InternalError::NotLeader(tablet_id.0))
             })
             .await
     }
@@ -295,7 +360,7 @@ impl runtime::Tablet for ReplicaTablet {
                         .try_commit(txid, ts, precond_keys, mut_keys)
                         .await;
                 }
-                Err(InternalError::NotLeader(tablet_id).into())
+                Err(InternalError::NotLeader(tablet_id.0).into())
             })
             .await
     }
@@ -307,7 +372,7 @@ impl runtime::Tablet for ReplicaTablet {
                 if let ParticipantState::Leader(leader) = participant_state {
                     return leader.shard.tablet(tablet_id)?.try_abort(txid).await;
                 }
-                Err(InternalError::NotLeader(tablet_id).into())
+                Err(InternalError::NotLeader(tablet_id.0).into())
             })
             .await
     }
@@ -319,7 +384,7 @@ impl runtime::Tablet for ReplicaTablet {
                 if let ParticipantState::Leader(leader) = participant_state {
                     return leader.shard.tablet(tablet_id)?.wait(txid).await;
                 }
-                Err(InternalError::NotLeader(tablet_id).into())
+                Err(InternalError::NotLeader(tablet_id.0).into())
             })
             .await
     }
@@ -341,7 +406,7 @@ impl runtime::Tablet for ReplicaTablet {
                         .cleanup_committed(txid, ts, precond_keys, mut_keys)
                         .await;
                 }
-                Err(InternalError::NotLeader(tablet_id).into())
+                Err(InternalError::NotLeader(tablet_id.0).into())
             })
             .await
     }
@@ -353,7 +418,7 @@ impl runtime::Tablet for ReplicaTablet {
                 if let ParticipantState::Leader(leader) = participant_state {
                     return leader.shard.tablet(tablet_id)?.wait_meta_sync(ts).await;
                 }
-                Err(InternalError::NotLeader(tablet_id).into())
+                Err(InternalError::NotLeader(tablet_id.0).into())
             })
             .await
     }
@@ -365,7 +430,7 @@ impl runtime::Tablet for ReplicaTablet {
                 if let ParticipantState::Leader(leader) = participant_state {
                     return leader.shard.tablet(tablet_id)?.manifest().await;
                 }
-                Err(InternalError::NotLeader(tablet_id).into())
+                Err(InternalError::NotLeader(tablet_id.0).into())
             })
             .await
     }
@@ -377,7 +442,7 @@ impl runtime::Tablet for ReplicaTablet {
                 if let ParticipantState::Leader(leader) = participant_state {
                     return leader.shard.tablet(tablet_id)?.wait_mostly_hydrated().await;
                 }
-                Err(InternalError::NotLeader(tablet_id).into())
+                Err(InternalError::NotLeader(tablet_id.0).into())
             })
             .await
     }
@@ -389,7 +454,7 @@ impl runtime::Tablet for ReplicaTablet {
                 if let ParticipantState::Leader(leader) = participant_state {
                     return leader.shard.tablet(tablet_id)?.catchup().await;
                 }
-                Err(InternalError::NotLeader(tablet_id).into())
+                Err(InternalError::NotLeader(tablet_id.0).into())
             })
             .await
     }
@@ -401,8 +466,15 @@ impl runtime::Tablet for ReplicaTablet {
                 if let ParticipantState::Leader(leader) = participant_state {
                     return leader.shard.tablet(tablet_id)?.find_split().await;
                 }
-                Err(InternalError::NotLeader(tablet_id).into())
+                Err(InternalError::NotLeader(tablet_id.0).into())
             })
             .await
+    }
+}
+
+#[async_trait]
+impl ShardJournalWriter for JournalWriter<ShardEntry> {
+    async fn append(&self, entry: ShardEntry) -> anyhow::Result<()> {
+        JournalWriter::append(self, entry).await
     }
 }

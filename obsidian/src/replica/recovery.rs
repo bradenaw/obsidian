@@ -20,28 +20,49 @@ use crate::WalEntry;
 use crate::WalSeq;
 
 pub(super) struct ShardRecovery {
+    lsm_options: LsmOptions,
+    storage: Arc<dyn runtime::Storage>,
+
     tablets: HashMap<TabletId, TabletRecovery>,
 }
 
 impl ShardRecovery {
-    pub fn empty() -> ShardRecovery {
-        todo!();
+    pub fn empty(lsm_options: LsmOptions, storage: Arc<dyn runtime::Storage>) -> ShardRecovery {
+        ShardRecovery {
+            lsm_options,
+            storage,
+            tablets: HashMap::new(),
+        }
     }
 
-    pub fn from_manifests(manifests: HashMap<TabletId, Manifest>) -> ShardRecovery {
-        todo!();
+    pub fn from_manifests(
+        lsm_options: LsmOptions,
+        storage: Arc<dyn runtime::Storage>,
+        manifests: HashMap<TabletId, Manifest>,
+    ) -> ShardRecovery {
+        let mut recovery = ShardRecovery::empty(lsm_options.clone(), Arc::clone(&storage));
+        for (tablet_id, manifest) in manifests {
+            recovery.tablets.insert(
+                tablet_id,
+                TabletRecovery::from_manifest(lsm_options.clone(), Arc::clone(&storage), manifest),
+            );
+        }
+        recovery
     }
 
     pub fn process(&mut self, seqno: WalSeq, entry: ShardEntry) {
-        let tablet = self
-            .tablets
-            .entry(entry.tablet_id)
-            .or_insert_with(TabletRecovery::empty);
+        let tablet = self.tablets.entry(entry.tablet_id).or_insert_with(|| {
+            TabletRecovery::empty(self.lsm_options.clone(), Arc::clone(&self.storage))
+        });
         tablet.process(seqno, entry.entry);
     }
 
-    pub fn wait(self) -> HashMap<TabletId, Lsm> {
-        todo!();
+    pub async fn wait(self) -> anyhow::Result<HashMap<TabletId, Lsm>> {
+        let mut lsms = HashMap::new();
+        for (tablet_id, tablet_recovery) in self.tablets.into_iter() {
+            lsms.insert(tablet_id, tablet_recovery.wait().await?);
+        }
+        Ok(lsms)
     }
 }
 
@@ -53,12 +74,23 @@ struct TabletRecovery {
 }
 
 impl TabletRecovery {
-    fn empty() -> TabletRecovery {
-        todo!();
+    fn empty(lsm_options: LsmOptions, storage: Arc<dyn runtime::Storage>) -> TabletRecovery {
+        TabletRecovery {
+            writes: VecDeque::new(),
+            preloader: Preloader::new(Arc::clone(&storage)),
+            lsm_options,
+            storage,
+        }
     }
 
-    fn from_manifest(manifest: Manifest) -> TabletRecovery {
-        todo!();
+    fn from_manifest(
+        lsm_options: LsmOptions,
+        storage: Arc<dyn runtime::Storage>,
+        manifest: Manifest,
+    ) -> TabletRecovery {
+        let mut recovery = TabletRecovery::empty(lsm_options, storage);
+        recovery.preloader.set_manifest(manifest);
+        recovery
     }
 
     fn process(&mut self, seqno: WalSeq, entry: WalEntry) {

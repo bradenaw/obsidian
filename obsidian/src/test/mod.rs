@@ -53,7 +53,6 @@ use crate::Range;
 use crate::Record;
 use crate::Revision;
 use crate::ShardId;
-use crate::TabletId;
 use crate::Timestamp;
 use crate::TxOutcome;
 use crate::Txid;
