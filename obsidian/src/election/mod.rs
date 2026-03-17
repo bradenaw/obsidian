@@ -59,7 +59,6 @@ pub struct Participant<TEntry, TLeader, TFollower>(
 );
 
 pub struct ParticipantBuilder {
-    campaign_splay: Duration,
     heartbeat_interval: Duration,
     renew_interval: Duration,
     lease_duration: Duration,
@@ -69,17 +68,11 @@ pub struct ParticipantBuilder {
 impl ParticipantBuilder {
     pub fn new() -> Self {
         Self {
-            campaign_splay: Duration::from_millis(2000),
             heartbeat_interval: Duration::from_millis(1000),
             renew_interval: Duration::from_millis(10000),
             lease_duration: Duration::from_millis(10000),
             lease_grace_period: Duration::from_millis(5000),
         }
-    }
-
-    pub fn campaign_splay(mut self, x: Duration) -> Self {
-        self.campaign_splay = x;
-        self
     }
 
     pub fn heartbeat_interval(mut self, x: Duration) -> Self {
@@ -115,7 +108,6 @@ impl ParticipantBuilder {
     {
         let inner = WithBackground::new(Arc::new(ParticipantInner {
             journal,
-            campaign_splay: self.campaign_splay,
             heartbeat_interval: self.heartbeat_interval,
             renew_interval: self.renew_interval,
             lease_duration: self.lease_duration,
@@ -153,7 +145,6 @@ struct ParticipantInner<TEntry, TLeader, TFollower> {
     journal: Arc<dyn Journal<Proposal<TEntry>>>,
     accepted_seqs: Arc<SeqWaiters>,
 
-    campaign_splay: Duration,
     heartbeat_interval: Duration,
     renew_interval: Duration,
     lease_duration: Duration,
