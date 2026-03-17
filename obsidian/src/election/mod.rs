@@ -102,16 +102,16 @@ impl ParticipantBuilder {
         self
     }
 
-    pub fn build<TEntry, TLeader, TFollower, TFollowerInit>(
+    pub fn build<TEntry, TLeader, TFollower, TFollowerBuilder>(
         &self,
         journal: Arc<dyn Journal<Proposal<TEntry>>>,
-        init: TFollowerInit,
+        follower_builder: TFollowerBuilder,
     ) -> Participant<TEntry, TLeader, TFollower>
     where
         TEntry: Send + Sync + 'static,
         TLeader: Leader<TEntry, TFollower> + Send + Sync + 'static,
         TFollower: Follower<TEntry, TLeader> + Send + Sync + 'static,
-        TFollowerInit: FollowerInit<TEntry, TFollower> + Send + Sync + 'static,
+        TFollowerBuilder: FollowerBuilder<TEntry, TFollower> + Send + Sync + 'static,
     {
         let inner = WithBackground::new(Arc::new(ParticipantInner {
             journal,
@@ -120,7 +120,9 @@ impl ParticipantBuilder {
             renew_interval: self.renew_interval,
             lease_duration: self.lease_duration,
             lease_grace_period: self.lease_grace_period,
-            state: AsyncRwLock::new(Some(InnerParticipantState::Follower(init.new_follower()))),
+            state: AsyncRwLock::new(Some(InnerParticipantState::Follower(
+                follower_builder.build(),
+            ))),
             state_change_request: Notify::new(),
             last_confirmation: AtomicInstant::new(),
             accepted_seqs: Arc::new(SeqWaiters::new()),
@@ -136,7 +138,7 @@ impl ParticipantBuilder {
                     participant.state_change_request.notify_waiters();
                     {
                         let mut state = participant.state.write().await;
-                        *state = Some(InnerParticipantState::Follower(init.new_follower()));
+                        *state = Some(InnerParticipantState::Follower(follower_builder.build()));
                     }
                     Err::<(), anyhow::Error>(anyhow!("background_process terminated"))
                 })
@@ -220,8 +222,8 @@ enum ProposalType<TEntry> {
     Heartbeat,
 }
 
-pub trait FollowerInit<TEntry, TFollower> {
-    fn new_follower(&self) -> TFollower;
+pub trait FollowerBuilder<TEntry, TFollower> {
+    fn build(&self) -> TFollower;
 }
 
 #[async_trait]

@@ -9,7 +9,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 
 use crate::election::Follower;
-use crate::election::FollowerInit;
+use crate::election::FollowerBuilder;
 use crate::election::JournalWriter;
 use crate::election::Leader;
 use crate::election::Participant;
@@ -88,8 +88,8 @@ struct ReplicaOptions {
     shards: Arc<dyn Shards>,
 }
 
-impl FollowerInit<JournalEntry, FollowerReplica> for ReplicaOptions {
-    fn new_follower(&self) -> FollowerReplica {
+impl FollowerBuilder<JournalEntry, FollowerReplica> for ReplicaOptions {
+    fn build(&self) -> FollowerReplica {
         FollowerReplica {
             options: self.clone(),
             recovery: Mutex::new(Some(ShardRecovery::empty(

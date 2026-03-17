@@ -14,7 +14,7 @@ use futures::StreamExt;
 use tokio::sync::Notify;
 
 use crate::election::Follower;
-use crate::election::FollowerInit;
+use crate::election::FollowerBuilder;
 use crate::election::JournalWriter;
 use crate::election::Leader;
 use crate::election::Participant;
@@ -91,7 +91,7 @@ impl TestReplicaGroup {
             journal_view: Arc::clone(&journal_view),
             participant: self.builder.build(
                 journal_view as Arc<dyn Journal<Proposal<TestEntry>>>,
-                TestFollowerInit { id: offset },
+                TestFollowerBuilder { id: offset },
             ),
         });
     }
@@ -142,18 +142,18 @@ impl TestReplica {
     }
 }
 
-struct TestFollowerInit {
+struct TestFollowerBuilder {
     id: usize,
 }
 
-impl TestFollowerInit {
+impl TestFollowerBuilder {
     fn new(id: usize) -> Self {
         Self { id }
     }
 }
 
-impl FollowerInit<TestEntry, TestFollower> for TestFollowerInit {
-    fn new_follower(&self) -> TestFollower {
+impl FollowerBuilder<TestEntry, TestFollower> for TestFollowerBuilder {
+    fn build(&self) -> TestFollower {
         TestFollower {
             id: self.id,
             entries: Mutex::new(vec![]),
