@@ -33,14 +33,14 @@ struct TestEntry {}
 async fn test_election() -> anyhow::Result<()> {
     let _ = pretty_env_logger::try_init();
 
-    let lease_duration = Duration::from_millis(1000);
-    let heartbeat_duration = Duration::from_millis(500);
+    let lease_duration = Duration::from_millis(100);
+    let heartbeat_duration = Duration::from_millis(50);
 
     let builder = ParticipantBuilder::new()
         .lease_duration(lease_duration)
         .heartbeat_interval(heartbeat_duration)
-        .renew_interval(Duration::from_millis(100))
-        .lease_grace_period(Duration::from_millis(200));
+        .renew_interval(Duration::from_millis(10))
+        .lease_grace_period(Duration::from_millis(20));
 
     let mut replica_group = TestReplicaGroup::new(builder);
 
