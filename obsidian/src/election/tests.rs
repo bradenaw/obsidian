@@ -33,9 +33,12 @@ struct TestEntry {}
 async fn test_election() -> anyhow::Result<()> {
     let _ = pretty_env_logger::try_init();
 
+    let lease_duration = Duration::from_millis(1000);
+    let heartbeat_duration = Duration::from_millis(500);
+
     let builder = ParticipantBuilder::new()
-        .lease_duration(Duration::from_millis(1000))
-        .heartbeat_interval(Duration::from_millis(500))
+        .lease_duration(lease_duration)
+        .heartbeat_interval(heartbeat_duration)
         .renew_interval(Duration::from_millis(100))
         .lease_grace_period(Duration::from_millis(200));
 
@@ -50,6 +53,8 @@ async fn test_election() -> anyhow::Result<()> {
         first_leader.journal_view.pause_tail();
         first_leader.id
     };
+
+    tokio::time::sleep(lease_duration + heartbeat_duration).await;
 
     // Because the leader can't observe its own Acquires, it will eventually stop making them, and
     // someone else will need to take over.
