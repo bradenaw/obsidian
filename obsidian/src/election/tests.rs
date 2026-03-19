@@ -59,12 +59,17 @@ async fn test_election() -> anyhow::Result<()> {
     // Because the leader can't observe its own Acquires, it will eventually stop making them, and
     // someone else will need to take over.
 
-    for _ in 0..10 {
+    let mut new_leader = false;
+    for _ in 0..20 {
         let leader_id = replica_group.leader().await.id;
         if leader_id != first_leader_id {
-            continue;
+            new_leader = true;
+            break;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if !new_leader {
+        panic!("no new leader elected");
     }
 
     Ok(())
