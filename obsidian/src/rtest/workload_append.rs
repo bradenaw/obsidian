@@ -67,7 +67,7 @@ impl<O: Obsidian + 'static> WorkloadAppend<O> {
     async fn run(self: &Arc<Self>) -> anyhow::Result<()> {
         let mut futures = FuturesUnordered::new();
         let workload_start = Instant::now();
-        let workload_deadline = workload_start + Duration::from_millis(20_000);
+        let workload_deadline = workload_start + Duration::from_millis(5_000);
         for _ in 0..32 {
             let self_ = self.clone();
             futures.push(tokio::spawn(async move {
