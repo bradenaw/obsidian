@@ -4,6 +4,8 @@ mod seq_waiters;
 mod tests;
 
 use std::ops::Deref;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Weak;
 use std::time::Duration;
@@ -119,6 +121,7 @@ impl ParticipantBuilder {
             state_change_request: Notify::new(),
             accepted_seqs: Arc::new(SeqWaiters::new()),
             abandon: Arc::new(Notify::new()),
+            poison: Arc::new(AtomicBool::new(false)),
         }));
 
         inner.spawn(async move |participant| {
@@ -128,10 +131,12 @@ impl ParticipantBuilder {
                     if let Err(e) = participant.background_process(participant_id).await {
                         log::warn!("error during Participant::background_process: {}", e);
                     }
+                    participant.poison.store(true, Ordering::SeqCst);
                     participant.state_change_request.notify_waiters();
                     {
                         let mut state = participant.state.write().await;
                         *state = Some(InnerParticipantState::Follower(follower_builder.build()));
+                        participant.poison.store(false, Ordering::SeqCst);
                     }
                     Err::<(), anyhow::Error>(anyhow!("background_process terminated"))
                 })
@@ -157,6 +162,7 @@ struct ParticipantInner<TEntry, TLeader, TFollower> {
     // Notified when the participant needs to be promoted or demoted, so that with_state can early
     // exit.
     state_change_request: Notify,
+    poison: Arc<AtomicBool>,
     abandon: Arc<Notify>,
 }
 
@@ -238,6 +244,7 @@ pub struct JournalWriter<TEntry> {
     journal: Arc<dyn Journal<Proposal<TEntry>>>,
     lease_end: Weak<AtomicTimestamp>,
     accepted_seqs: Arc<SeqWaiters>,
+    poison: Arc<AtomicBool>,
     abandon: Arc<Notify>,
 }
 
@@ -258,6 +265,10 @@ where
         let ts = Timestamp::now();
         if ts > lease_end {
             return Err(anyhow!("cannot append: lease expired"));
+        }
+
+        if self.poison.load(Ordering::SeqCst) {
+            return Err(anyhow!("cannot append: participant state changing"));
         }
 
         let wait = self.accepted_seqs.register();
@@ -310,15 +321,10 @@ where
     {
         let state_change_request = self.0.state_change_request.notified();
         let state = self.0.state.read().await;
+        if self.0.poison.load(Ordering::SeqCst) {
+            return Err(anyhow!("aborted: participant state change requested").into());
+        }
 
-        // TODO: This could lead to bad behavior on abandon, since if a write exits first it might
-        // release its locks and then allow a read to use them, even though we're abandoning
-        // because something is in indeterminate state.
-        //
-        // We need to at least poison everything first: make sure that the journalwriter isn't able
-        // to do any writes and the reads are all _guaranteed_ to error, and then just hope that
-        // there are no visible side-effects either from reads or in a write before a journal
-        // write.
         let out = select! {
             out =
                 f(state
@@ -336,6 +342,9 @@ where
             last_confirmation, ..
         }) = state.deref()
         {
+            if self.0.poison.load(Ordering::SeqCst) {
+                return Err(anyhow!("aborted: participant state change requested").into());
+            }
             if Instant::now().duration_since(last_confirmation.load())
                 > self
                     .0
@@ -420,6 +429,7 @@ where
                     lease_end: Arc::downgrade(&lease_end),
                     accepted_seqs: Arc::clone(&self.accepted_seqs),
                     abandon: Arc::clone(&self.abandon),
+                    poison: Arc::clone(&self.poison),
                 };
                 follower.promote(journal_writer).await?
             }
