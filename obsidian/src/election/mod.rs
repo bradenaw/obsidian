@@ -117,8 +117,6 @@ impl ParticipantBuilder {
                 follower_builder.build(),
             ))),
             state_change_request: Notify::new(),
-            // XXX: This defaults to now!
-            last_confirmation: AtomicInstant::new(),
             accepted_seqs: Arc::new(SeqWaiters::new()),
             abandon: Arc::new(Notify::new()),
         }));
@@ -159,10 +157,6 @@ struct ParticipantInner<TEntry, TLeader, TFollower> {
     // Notified when the participant needs to be promoted or demoted, so that with_state can early
     // exit.
     state_change_request: Notify,
-    // The instant of the start of the write of the last seen Acquire by us. Since the Acquire
-    // takes some amount of time, it's important that we start counting from the _start_ of this
-    // operation rather than the end, so that our idea of expiration is a lower bound.
-    last_confirmation: AtomicInstant,
     abandon: Arc<Notify>,
 }
 
@@ -170,6 +164,10 @@ enum InnerParticipantState<TLeader, TFollower> {
     Leader {
         leader: TLeader,
         lease_end: Arc<AtomicTimestamp>,
+        // The instant of the start of the write of the last seen Acquire by us. Since the Acquire
+        // takes some amount of time, it's important that we start counting from the _start_ of
+        // this operation rather than the end, so that our idea of expiration is a lower bound.
+        last_confirmation: AtomicInstant,
     },
     Follower(TFollower),
 }
@@ -334,10 +332,11 @@ where
             },
         };
 
-        if matches!(state.deref(), Some(InnerParticipantState::Leader { .. })) {
-            let last_confirmation = self.0.last_confirmation.load();
-
-            if Instant::now().duration_since(last_confirmation)
+        if let Some(InnerParticipantState::Leader {
+            last_confirmation, ..
+        }) = state.deref()
+        {
+            if Instant::now().duration_since(last_confirmation.load())
                 > self
                     .0
                     .lease_duration
@@ -386,11 +385,18 @@ where
         &self,
         participant_id: ParticipantId,
         new_lease_end: Timestamp,
+        new_confirmation: Instant,
     ) -> anyhow::Result<()> {
         {
             let maybe_state = self.state.read().await;
-            if let Some(InnerParticipantState::Leader { lease_end, .. }) = maybe_state.deref() {
+            if let Some(InnerParticipantState::Leader {
+                lease_end,
+                last_confirmation,
+                ..
+            }) = maybe_state.deref()
+            {
                 lease_end.store(new_lease_end);
+                last_confirmation.store(new_confirmation);
                 return Ok(());
             }
         }
@@ -418,7 +424,11 @@ where
                 follower.promote(journal_writer).await?
             }
         };
-        *maybe_state = Some(InnerParticipantState::Leader { leader, lease_end });
+        *maybe_state = Some(InnerParticipantState::Leader {
+            leader,
+            lease_end,
+            last_confirmation: AtomicInstant::new(new_confirmation),
+        });
 
         Ok(())
     }
@@ -518,11 +528,8 @@ where
                                             .ok_or_else(|| {
                                                 anyhow!("received acquire that was not pending")
                                             })?;
-                                    self.last_confirmation.store(
-                                        start,
-                                    );
                                     pending_acquire = None;
-                                    self.promote_or_extend(participant_id, lease_end).await?;
+                                    self.promote_or_extend(participant_id, lease_end, start).await?;
                                     self_lease_expiration = Some(
                                         start + self.lease_duration - self.lease_grace_period,
                                     );

@@ -10,9 +10,9 @@ pub(super) struct AtomicInstant {
 }
 
 impl AtomicInstant {
-    pub fn new() -> Self {
+    pub fn new(value: Instant) -> Self {
         Self {
-            epoch: Instant::now(),
+            epoch: value,
             elapsed: AtomicI64::new(0),
         }
     }
