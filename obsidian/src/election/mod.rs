@@ -239,6 +239,11 @@ pub trait Follower<TEntry, TLeader> {
     async fn promote(self, writer: JournalWriter<TEntry>) -> anyhow::Result<TLeader>;
 }
 
+/// A JournalWriter is used to append entries into the journal, usually used as a write-ahead.
+///
+/// A JournalWriter is associated with a particular leadership lease. That is, the JournalWriter
+/// passed to [`Follower::promote`] will not accept any further writes after the call to
+/// [`Leader::demote`].
 pub struct JournalWriter<TEntry> {
     participant_id: ParticipantId,
     journal: Arc<dyn Journal<Proposal<TEntry>>>,
@@ -252,7 +257,20 @@ impl<TEntry> JournalWriter<TEntry>
 where
     TEntry: Send + Sync + 'static,
 {
-    /// Append an entry to the log.
+    /// Append an entry to the journal.
+    ///
+    /// Contrary to many other operations, if append errors, the entry was definitely not appended.
+    /// This is odd because normally it is possible for an error to occur after a write completed
+    /// but before a response was received.
+    ///
+    /// If append is left in this kind of indeterminate state, it instead blocks forever and causes
+    /// a recovery. This will cause a new, empty follower to be created from
+    /// [`FollowerBuilder::build`] which will then process the journal to become up-to-date. This
+    /// inherently will resolve the indeterminate write, since eventually some election participant
+    /// will be able to acquire a lease. This means either the indeterminate write already
+    /// succeeded (and so appears in the journal before the lease acquisition), or it has yet to
+    /// succeed in which case it will not be accepted because all future leaders will have a
+    /// different participant ID than the one on the write.
     pub async fn append(&self, entry: TEntry) -> anyhow::Result<()> {
         let lease_end = {
             if let Some(lease_end) = self.lease_end.upgrade() {
@@ -313,6 +331,11 @@ where
     TLeader: Leader<TEntry, TFollower> + Send + Sync + 'static,
     TFollower: Follower<TEntry, TLeader> + Send + Sync + 'static,
 {
+    /// Do some action with the current state of the participant. Calls `f`, supplying whether this
+    /// participant is currently a leader or a follower.
+    ///
+    /// `f`'s future may be cancelled if the participant needs to change state, for example because
+    /// this participant's lease expired and we need to demote.
     pub async fn with_state<F, T, E>(&self, f: F) -> Result<T, E>
     where
         F: AsyncFnOnce(ParticipantState<TLeader, TFollower>) -> Result<T, E>,
