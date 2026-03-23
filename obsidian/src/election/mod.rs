@@ -349,15 +349,20 @@ where
         }
 
         let out = select! {
+            biased; // Important: causes the state_change_request to take precedence. This is
+                    // important because otherwise we might cancel an `f` (causing its mutexes to
+                    // be released, even if state is intermediate) but continue running another
+                    // future that then acquires those mutexes.
+
+            _ = state_change_request => {
+                return Err(anyhow!("aborted: participant state change requested").into());
+            },
             out =
                 f(state
                 .as_ref()
                 .ok_or_else(|| anyhow!("no participant state present"))?
                 .as_participant_state()) => {
                 out?
-            },
-            _ = state_change_request => {
-                return Err(anyhow!("aborted: participant state change requested").into());
             },
         };
 
