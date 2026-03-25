@@ -73,10 +73,10 @@ pub struct ParticipantBuilder {
 impl ParticipantBuilder {
     pub fn new() -> Self {
         Self {
-            heartbeat_interval: Duration::from_millis(1000),
-            renew_interval: Duration::from_millis(10000),
+            heartbeat_interval: Duration::from_millis(3000),
+            renew_interval: Duration::from_millis(3000),
             lease_duration: Duration::from_millis(10000),
-            lease_grace_period: Duration::from_millis(5000),
+            lease_grace_period: Duration::from_millis(2000),
         }
     }
 
@@ -642,6 +642,7 @@ where
                     try_acquire = true;
                 },
                 _ = maybe_sleep_until(self_lease_expiration) => {
+                    log::info!("demoting for lease expiration");
                     self.demote_if_leader().await?;
                     self_lease_expiration = None;
                     pending_acquire = None;
