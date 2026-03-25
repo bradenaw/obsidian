@@ -456,6 +456,8 @@ where
             return Ok(());
         }
 
+        log::info!("promoting");
+
         let state = maybe_state.take().unwrap();
         let lease_end = Arc::new(AtomicTimestamp::new(new_lease_end));
         let leader = match state {
@@ -502,6 +504,8 @@ where
         ) {
             return Ok(());
         }
+
+        log::info!("demoting");
 
         let state = maybe_state.take().unwrap();
         let follower = match state {

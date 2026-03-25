@@ -475,27 +475,47 @@ impl DataTabletInner {
             .for_each_concurrent(
                 Some(64),
                 |(txid, keyspace_id, key, prepare_type)| async move {
-                    let owner_tablet = self.shards.tablet(txid.owner()).unwrap();
-                    let tx_outcome = owner_tablet.wait(txid).await.unwrap();
-                    // Commits get cleaned up by the owner tablet calling cleanup_committed. Ignore them
-                    // here to avoid duplicating work.
-                    // TODO: retry instead of unwrap
-                    if let TxOutcome::Aborted = tx_outcome {
-                        let lsm_rw = self.inner.lsm.wait_read_write().await;
-                        match prepare_type {
-                            PrepareType::Precondition => self
-                                .cleanup_precond_key(&lsm_rw, txid, keyspace_id, key)
-                                .await
-                                .unwrap(),
-                            PrepareType::Mutation => self
-                                .cleanup_pending_key(&lsm_rw, txid, tx_outcome, keyspace_id, key)
-                                .await
-                                .unwrap(),
-                        }
-                    }
+                    Retry::new()
+                        .indefinitely(&async || {
+                            self.resolve_prepared_single(
+                                txid,
+                                keyspace_id,
+                                key.clone(),
+                                prepare_type,
+                            )
+                            .await
+                        })
+                        .await
                 },
             )
             .await;
+    }
+
+    async fn resolve_prepared_single(
+        &self,
+        txid: Txid,
+        keyspace_id: KeyspaceId,
+        key: Vec<u8>,
+        prepare_type: PrepareType,
+    ) -> anyhow::Result<()> {
+        let owner_tablet = self.shards.tablet(txid.owner())?;
+        let tx_outcome = owner_tablet.wait(txid).await?;
+        // Commits get cleaned up by the owner tablet calling cleanup_committed. Ignore them
+        // here to avoid duplicating work.
+        if let TxOutcome::Aborted = tx_outcome {
+            let lsm_rw = self.inner.lsm.wait_read_write().await;
+            match prepare_type {
+                PrepareType::Precondition => {
+                    self.cleanup_precond_key(&lsm_rw, txid, keyspace_id, key)
+                        .await?;
+                }
+                PrepareType::Mutation => {
+                    self.cleanup_pending_key(&lsm_rw, txid, tx_outcome, keyspace_id, key)
+                        .await?;
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn cleanup_committed(
@@ -890,6 +910,7 @@ fn ranges_to_splits(mut ranges: Vec<Range<Vec<u8>>>) -> anyhow::Result<Vec<Bound
     Ok(out)
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum PrepareType {
     Precondition,
     Mutation,
