@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
@@ -76,6 +77,10 @@ impl Replica {
             )),
             tablets: RwLock::new(HashMap::new()),
         }
+    }
+
+    pub fn became_leader_at_subscribe(&self) -> (Option<JournalSeq>, impl Future<Output = ()>) {
+        self.participant.became_leader_at_subscribe()
     }
 }
 

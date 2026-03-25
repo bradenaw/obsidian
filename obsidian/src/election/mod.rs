@@ -3,6 +3,7 @@ mod seq_waiters;
 #[cfg(test)]
 mod tests;
 
+use std::future::Future;
 use std::ops::Deref;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -32,6 +33,7 @@ use crate::election::seq_waiters::SeqWaiters;
 use crate::runtime::Journal;
 use crate::util::AtomicTimestamp;
 use crate::util::Retry;
+use crate::util::Watchable;
 use crate::util::WithBackground;
 use crate::JournalSeq;
 use crate::Timestamp;
@@ -111,6 +113,7 @@ impl ParticipantBuilder {
     {
         let inner = WithBackground::new(Arc::new(ParticipantInner {
             journal,
+            accepted_seqs: Arc::new(SeqWaiters::new()),
             heartbeat_interval: self.heartbeat_interval,
             renew_interval: self.renew_interval,
             lease_duration: self.lease_duration,
@@ -119,9 +122,9 @@ impl ParticipantBuilder {
                 follower_builder.build(),
             ))),
             state_change_request: Notify::new(),
-            accepted_seqs: Arc::new(SeqWaiters::new()),
-            abandon: Arc::new(Notify::new()),
+            became_leader_at: Watchable::new(None),
             poison: Arc::new(AtomicBool::new(false)),
+            abandon: Arc::new(Notify::new()),
         }));
 
         inner.spawn(async move |participant| {
@@ -162,6 +165,8 @@ struct ParticipantInner<TEntry, TLeader, TFollower> {
     // Notified when the participant needs to be promoted or demoted, so that with_state can early
     // exit.
     state_change_request: Notify,
+    // Just for the sake of became_leader_at_subscribe().
+    became_leader_at: Watchable<Option<JournalSeq>>,
     poison: Arc<AtomicBool>,
     abandon: Arc<Notify>,
 }
@@ -385,6 +390,10 @@ where
 
         Ok(out)
     }
+
+    pub fn became_leader_at_subscribe(&self) -> (Option<JournalSeq>, impl Future<Output = ()>) {
+        self.0.became_leader_at.get()
+    }
 }
 
 impl<TEntry, TLeader, TFollower> ParticipantInner<TEntry, TLeader, TFollower>
@@ -421,6 +430,7 @@ where
     async fn promote_or_extend(
         &self,
         participant_id: ParticipantId,
+        seq: JournalSeq,
         new_lease_end: Timestamp,
         new_confirmation: Instant,
     ) -> anyhow::Result<()> {
@@ -467,6 +477,7 @@ where
             lease_end,
             last_confirmation: AtomicInstant::new(new_confirmation),
         });
+        self.became_leader_at.set(Some(seq));
 
         Ok(())
     }
@@ -498,6 +509,7 @@ where
             InnerParticipantState::Follower(_) => unreachable!(),
         };
         *maybe_state = Some(InnerParticipantState::Follower(follower));
+        self.became_leader_at.set(None);
 
         Ok(())
     }
@@ -567,7 +579,9 @@ where
                                                 anyhow!("received acquire that was not pending")
                                             })?;
                                     pending_acquire = None;
-                                    self.promote_or_extend(participant_id, lease_end, start).await?;
+                                    self
+                                        .promote_or_extend(participant_id, seq, lease_end, start)
+                                        .await?;
                                     self_lease_expiration = Some(
                                         start + self.lease_duration - self.lease_grace_period,
                                     );

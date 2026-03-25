@@ -4,8 +4,14 @@ use std::sync::Mutex;
 use std::sync::RwLock;
 
 use anyhow::anyhow;
+use async_stream::stream;
 use async_trait::async_trait;
+use futures::future::Either;
+use futures::stream::FuturesUnordered;
+use futures::Stream;
+use futures::StreamExt;
 use futures::TryStreamExt;
+use tokio::sync::Notify;
 
 use crate::election::Proposal;
 use crate::lsm::LsmOptions;
@@ -19,6 +25,7 @@ use crate::replica::Replica;
 use crate::runtime;
 use crate::runtime::Journals;
 use crate::runtime::Meta;
+use crate::runtime::Shard as _;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
 use crate::shard::ShardJournalWriter;
@@ -27,6 +34,7 @@ use crate::util::Retry;
 use crate::util::WithBackground;
 use crate::Direction;
 use crate::JournalEntry;
+use crate::JournalSeq;
 use crate::NodeId;
 use crate::ShardId;
 
@@ -43,6 +51,7 @@ struct NodeInner {
 
     supervisor: Mutex<Option<Supervisor>>,
     replicas: RwLock<HashMap<ShardId, Arc<Replica>>>,
+    replicas_changed: Notify,
 }
 
 impl Node {
@@ -72,6 +81,7 @@ impl Node {
 
             supervisor: Mutex::new(None),
             replicas: RwLock::new(HashMap::new()),
+            replicas_changed: Notify::new(),
         });
         let node = Node(WithBackground::new(Arc::clone(&inner)));
 
@@ -93,6 +103,32 @@ impl runtime::Node for Node {
         } else {
             return Err(anyhow!("{:?} does not own {:?}", self.0.node_id, shard_id));
         }
+    }
+
+    fn became_leader_at_subscribe(
+        &self,
+    ) -> Box<dyn Stream<Item = anyhow::Result<HashMap<ShardId, JournalSeq>>> + Send + Unpin + '_>
+    {
+        Box::new(Box::pin(stream! {
+            loop {
+                let mut leader_shards = HashMap::new();
+                let mut futures = FuturesUnordered::new();
+                let replicas_changed = self.0.replicas_changed.notified();
+                futures.push(Either::Left(replicas_changed));
+                {
+                    let replicas = self.0.replicas.read().unwrap();
+                    for (_, replica) in replicas.iter() {
+                        let (became_leader_at, changed) = replica.became_leader_at_subscribe();
+                        if let Some(seq) = became_leader_at {
+                            leader_shards.insert(replica.id(), seq);
+                        }
+                        futures.push(Either::Right(changed));
+                    }
+                }
+                yield Ok(leader_shards);
+                futures.next().await;
+            }
+        }))
     }
 }
 
@@ -178,6 +214,8 @@ impl NodeInner {
                 let mut replicas = self.replicas.write().unwrap();
                 replicas.remove(&shard_id);
             }
+
+            self.replicas_changed.notify_waiters();
         }
 
         Ok(())
