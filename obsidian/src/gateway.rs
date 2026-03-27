@@ -125,9 +125,8 @@ impl Obsidian for Gateway {
 
         let owner_shard_id =
             choose_shard(write_by_tablet.keys().copied()).ok_or_else(|| anyhow!("empty write"))?;
-        let owner_tablet_id = TabletId::shard_meta(owner_shard_id);
 
-        let mut txid = Txid::new(owner_tablet_id);
+        let mut txid = Txid::new(owner_shard_id);
 
         if write_by_tablet.len() == 1 {
             let (tablet_id, (preconds, muts)) = write_by_tablet.into_iter().next().unwrap();
@@ -164,7 +163,7 @@ impl Obsidian for Gateway {
             let tablets = write_by_tablet
                 .keys()
                 .copied()
-                .chain(std::iter::once(owner_tablet_id))
+                .chain(std::iter::once(TabletId::shard_meta(owner_shard_id)))
                 .map(|tablet_id| {
                     self.shards
                         .tablet(tablet_id)
@@ -213,7 +212,8 @@ impl Obsidian for Gateway {
                 if !wait_conflicts.is_empty() {
                     future::try_join_all(wait_conflicts.iter().cloned().map(
                         |other_txid| async move {
-                            let tablet = self.shards.tablet(other_txid.owner)?;
+                            let tablet =
+                                self.shards.tablet(TabletId::shard_meta(other_txid.owner))?;
                             tablet.wait(other_txid).await
                         },
                     ))
@@ -227,7 +227,8 @@ impl Obsidian for Gateway {
                 if !preempt_conflicts.is_empty() {
                     future::try_join_all(preempt_conflicts.iter().cloned().map(
                         |other_txid| async move {
-                            let tablet = self.shards.tablet(other_txid.owner)?;
+                            let tablet =
+                                self.shards.tablet(TabletId::shard_meta(other_txid.owner))?;
                             tablet.try_abort(other_txid).await
                         },
                     ))
@@ -248,7 +249,7 @@ impl Obsidian for Gateway {
             let commit_ts = max_prepare_ts.plus_one();
 
             match tablets
-                .get(&owner_tablet_id)
+                .get(&TabletId::shard_meta(owner_shard_id))
                 .unwrap()
                 .try_commit(
                     txid,
@@ -358,7 +359,7 @@ impl Gateway {
         // We can use an 'arbitrary' txid here even with a nonexistent tablet because this
         // never surfaces anywhere else, we just use it to decide if we can preempt other
         // transactions.
-        let txid = Txid::new(TabletId(ShardId(0), 0));
+        let txid = Txid::new(ShardId(0));
 
         let already_seen_conflicts = Mutex::new(HashSet::new());
 
@@ -375,12 +376,13 @@ impl Gateway {
                             return RetryResult::Retry(InternalError::Conflict(other_txid));
                         }
 
-                        let other_txid_owner_tablet = match self.shards.tablet(other_txid.owner) {
-                            Ok(tablet_id) => tablet_id,
-                            Err(e) => {
-                                return RetryResult::Err(InternalError::Other(e));
-                            }
-                        };
+                        let other_txid_owner_tablet =
+                            match self.shards.tablet(TabletId::shard_meta(other_txid.owner)) {
+                                Ok(tablet_id) => tablet_id,
+                                Err(e) => {
+                                    return RetryResult::Err(InternalError::Other(e));
+                                }
+                            };
                         if txid.can_preempt(&other_txid) {
                             log::debug!("{:?} preempting {:?}", txid, other_txid);
                             if let Err(e) = other_txid_owner_tablet.try_abort(other_txid).await {

@@ -498,7 +498,7 @@ impl DataTabletInner {
         key: Vec<u8>,
         prepare_type: PrepareType,
     ) -> anyhow::Result<()> {
-        let owner_tablet = self.shards.tablet(txid.owner())?;
+        let owner_tablet = self.shards.tablet(TabletId::shard_meta(txid.owner()))?;
         let tx_outcome = owner_tablet.wait(txid).await?;
         // Commits get cleaned up by the owner tablet calling cleanup_committed. Ignore them
         // here to avoid duplicating work.

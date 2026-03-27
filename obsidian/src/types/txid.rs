@@ -8,19 +8,19 @@ use crate::util::hexlify;
 use crate::util::Decode;
 use crate::util::Encode;
 use crate::ShardId;
-use crate::TabletId;
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct Txid {
     pub ts: u64,
     pub rand: [u8; 16],
-    pub owner: TabletId,
+    /// The shard that will host the TxOutcome for this transaction in its ShardMetaTablet.
+    pub owner: ShardId,
 }
 
 impl Txid {
-    pub const ENCODED_LEN: usize = 36;
+    pub const ENCODED_LEN: usize = 28;
 
-    pub fn new(owner: TabletId) -> Self {
+    pub fn new(owner: ShardId) -> Self {
         Txid {
             ts: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -41,7 +41,7 @@ impl Txid {
         self < other
     }
 
-    pub fn owner(&self) -> TabletId {
+    pub fn owner(&self) -> ShardId {
         self.owner
     }
 
@@ -49,10 +49,9 @@ impl Txid {
         // Encode with tablet ID first so that they're routed properly as a part of TABLET_META
         // when used as a key.
         let mut out = [0u8; Self::ENCODED_LEN];
-        BigEndian::write_u32(&mut out[0..4], self.owner.0 .0);
-        BigEndian::write_u64(&mut out[4..12], self.owner.1);
-        BigEndian::write_u64(&mut out[12..20], self.ts);
-        out[20..36].copy_from_slice(&self.rand[..]);
+        BigEndian::write_u32(&mut out[0..4], self.owner.0);
+        BigEndian::write_u64(&mut out[4..12], self.ts);
+        out[12..28].copy_from_slice(&self.rand[..]);
         out
     }
 }
@@ -72,13 +71,10 @@ impl Decode for Txid {
         if value.len() != Txid::ENCODED_LEN {
             anyhow::bail!("txid not {} bytes", Txid::ENCODED_LEN);
         }
-        let owner = TabletId(
-            ShardId(BigEndian::read_u32(&value[0..4])),
-            BigEndian::read_u64(&value[4..12]),
-        );
-        let ts = BigEndian::read_u64(&value[12..20]);
+        let owner = ShardId(BigEndian::read_u32(&value[0..4]));
+        let ts = BigEndian::read_u64(&value[4..12]);
         let mut rand = [0u8; 16];
-        rand.copy_from_slice(&value[20..36]);
+        rand.copy_from_slice(&value[12..28]);
 
         Ok(Self { ts, rand, owner })
     }
@@ -86,13 +82,6 @@ impl Decode for Txid {
 
 impl Debug for Txid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "tx:{}/{}/{}/{}",
-            self.ts,
-            hexlify(&self.rand),
-            self.owner.0 .0,
-            self.owner.1
-        )
+        write!(f, "tx:{}/{}/{}", self.ts, hexlify(&self.rand), self.owner.0,)
     }
 }
