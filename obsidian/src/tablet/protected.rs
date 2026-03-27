@@ -25,7 +25,6 @@ use crate::Revision;
 use crate::RevisionValue;
 use crate::TabletId;
 use crate::Timestamp;
-use crate::WriteError;
 
 pub(super) struct ProtectedLsm {
     tablet_id: TabletId,
@@ -194,9 +193,9 @@ pub(super) trait LsmRead {
 }
 
 pub(super) trait LsmReadWrite: LsmRead {
-    async fn write(&self, ts: Timestamp, muts: BTreeMap<Key, Mutation>) -> Result<(), WriteError>;
+    fn write(&self, ts: Timestamp, muts: BTreeMap<Key, Mutation>);
 
-    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()>;
+    fn create_keyspace(&self, keyspace_id: KeyspaceId);
 }
 
 pub(super) struct LsmReadGuard<'a> {
@@ -296,15 +295,14 @@ impl<'a> LsmRead for LsmReadWriteGuard<'a> {
 }
 
 impl<'a> LsmReadWrite for LsmReadWriteGuard<'a> {
-    async fn write(&self, ts: Timestamp, muts: BTreeMap<Key, Mutation>) -> Result<(), WriteError> {
+    fn write(&self, ts: Timestamp, muts: BTreeMap<Key, Mutation>) {
         for (key, mutation) in muts {
             self.lsm.write(ts, key, mutation);
         }
-        Ok(())
     }
 
-    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
-        Ok(self.lsm.create_keyspace(keyspace_id)?)
+    fn create_keyspace(&self, keyspace_id: KeyspaceId) {
+        self.lsm.create_keyspace(keyspace_id);
     }
 }
 

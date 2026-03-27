@@ -204,10 +204,7 @@ impl Tablet for DataTablet {
             );
         }
 
-        lsm_rw
-            .write(*ts, actual_muts)
-            .await
-            .map_err(|e| InternalError::Other(e.into()))?;
+        lsm_rw.write(*ts, actual_muts);
 
         for precond in preconds {
             _ = self
@@ -327,7 +324,7 @@ impl Tablet for DataTablet {
 }
 
 impl DataTablet {
-    pub async fn new(
+    pub fn new(
         tablet_id: TabletId,
         colo_group_id: ColoGroupId,
         range: Range<Vec<u8>>,
@@ -336,11 +333,8 @@ impl DataTablet {
         meta_synced: Arc<MetaSynced>,
         storage: Arc<dyn Storage>,
         shards: Arc<dyn Shards>,
-    ) -> anyhow::Result<Self> {
+    ) -> Self {
         let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
-
-        // TODO: Remove?
-        lsm.create_keyspace(KeyspaceId::TX_OUTCOMES)?;
 
         let tablet = DataTablet(WithBackground::new(Arc::new(Arc::new(DataTabletInner {
             inner: TabletInner::new(
@@ -376,7 +370,7 @@ impl DataTablet {
 
         meta_synced.subscribe(&tablet.0);
 
-        Ok(tablet)
+        tablet
     }
 }
 
@@ -587,7 +581,7 @@ impl DataTabletInner {
         if let TxOutcome::Committed(_) = tx_outcome {
             muts.insert((keyspace_id, key.clone()), m);
         }
-        lsm_rw.write(resolve_ts, muts).await?;
+        lsm_rw.write(resolve_ts, muts);
         Ok(())
     }
 
@@ -624,7 +618,7 @@ impl DataTabletInner {
             return Ok(());
         };
         muts.insert((precond_keyspace_id, key.clone()), m);
-        lsm_rw.write(overwrite_ts, muts).await?;
+        lsm_rw.write(overwrite_ts, muts);
         Ok(())
     }
 

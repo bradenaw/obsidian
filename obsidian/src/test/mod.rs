@@ -191,8 +191,7 @@ impl ObsidianForTest {
             )
             .await?,
             Arc::new(NoopJournalWriter {}),
-        )
-        .await?;
+        );
         let meta: Arc<dyn Meta> = Arc::new(MetaImpl::new(meta_tablet));
         meta_proxy.put(Arc::clone(&meta) as Arc<dyn Meta>);
 

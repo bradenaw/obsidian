@@ -43,13 +43,10 @@ pub(crate) struct MetaTablet {
 }
 
 impl MetaTablet {
-    pub(crate) async fn new(
-        lsm: Lsm,
-        journal: Arc<dyn TabletJournalWriter>,
-    ) -> anyhow::Result<Self> {
-        lsm.create_keyspace(KeyspaceId::META)?;
+    pub(crate) fn new(lsm: Lsm, journal: Arc<dyn TabletJournalWriter>) -> Self {
+        lsm.create_keyspace(KeyspaceId::META);
 
-        Ok(Self {
+        Self {
             inner: TabletInner::new(
                 TabletId::META,
                 ColoGroupId::META,
@@ -57,7 +54,7 @@ impl MetaTablet {
                 ProtectedLsm::new(TabletId::META, lsm, TabletState::Active),
                 journal,
             ),
-        })
+        }
     }
 }
 

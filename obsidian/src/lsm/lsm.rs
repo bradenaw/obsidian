@@ -164,9 +164,9 @@ impl Lsm {
         }
     }
 
-    pub fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+    /// Creates the given keyspace, if it does not already exist.
+    pub fn create_keyspace(&self, keyspace_id: KeyspaceId) {
         self.index.ensure_keyspace(keyspace_id);
-        Ok(())
     }
 
     pub async fn pending_compactions(&self) {

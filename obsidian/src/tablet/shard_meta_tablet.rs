@@ -70,14 +70,14 @@ struct ShardMetaTabletInner {
 }
 
 impl ShardMetaTablet {
-    pub(crate) async fn new(
+    pub(crate) fn new(
         shard_id: ShardId,
         lsm: Lsm,
         journal: Arc<dyn TabletJournalWriter>,
         meta_synced: Arc<MetaSynced>,
         shards: Arc<dyn Shards>,
-    ) -> anyhow::Result<Self> {
-        lsm.create_keyspace(KeyspaceId::TX_OUTCOMES)?;
+    ) -> Self {
+        lsm.create_keyspace(KeyspaceId::TX_OUTCOMES);
 
         let (commit_sender, commit_receiver) = mpsc::channel(128);
 
@@ -107,7 +107,7 @@ impl ShardMetaTablet {
             inner.cleanup_committed_outcomes(commit_receiver).await;
         });
 
-        Ok(tablet)
+        tablet
     }
 }
 
@@ -296,16 +296,13 @@ impl ShardMetaTabletInner {
 
             let tx_outcome_record_bytes =
                 pb::internal::TxOutcomeRecord::from(tx_outcome_record.clone()).encode_to_vec();
-            lsm_rw
-                .write(
-                    Timestamp::ZERO,
-                    BTreeMap::from([(
-                        (KeyspaceId::TX_OUTCOMES, tx_outcome_key.to_vec()),
-                        Mutation::Put(tx_outcome_record_bytes),
-                    )]),
-                )
-                .await
-                .map_err(|e| InternalError::Other(e.into()))?;
+            lsm_rw.write(
+                Timestamp::ZERO,
+                BTreeMap::from([(
+                    (KeyspaceId::TX_OUTCOMES, tx_outcome_key.to_vec()),
+                    Mutation::Put(tx_outcome_record_bytes),
+                )]),
+            );
         }
         let tx_outcome = tx_outcome_record.tx_outcome();
         if let TxOutcomeRecord::Committed {
@@ -421,16 +418,13 @@ impl ShardMetaTabletInner {
         // TODO: mutual exclusion
         let tx_outcome_key = txid.encode_fixed();
         let _guard = self.inner.lock_mgr.write_lock(&tx_outcome_key[..]);
-        lsm_rw
-            .write(
-                Timestamp::ZERO.plus_one(),
-                BTreeMap::from([(
-                    (KeyspaceId::TX_OUTCOMES, tx_outcome_key.to_vec()),
-                    Mutation::Delete,
-                )]),
-            )
-            .await
-            .map_err(|e| InternalError::Other(e.into()))?;
+        lsm_rw.write(
+            Timestamp::ZERO.plus_one(),
+            BTreeMap::from([(
+                (KeyspaceId::TX_OUTCOMES, tx_outcome_key.to_vec()),
+                Mutation::Delete,
+            )]),
+        );
         Ok(())
     }
 

@@ -361,10 +361,7 @@ impl TabletInner {
             ))
             .await?;
 
-        lsm_rw
-            .write(*ts, muts)
-            .await
-            .map_err(|e| InternalError::Other(e.into()))?;
+        lsm_rw.write(*ts, muts);
 
         Ok(*ts)
     }
@@ -520,12 +517,12 @@ impl TabletInner {
 
     pub(super) async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
         let lsm_rw = self.lsm.read_write()?;
-        lsm_rw.create_keyspace(keyspace_id).await?;
+        lsm_rw.create_keyspace(keyspace_id);
         if let Some(pending_keyspace_id) = keyspace_id.pending() {
-            lsm_rw.create_keyspace(pending_keyspace_id).await?;
+            lsm_rw.create_keyspace(pending_keyspace_id);
         }
         if let Some(precond_keyspace_id) = keyspace_id.precond() {
-            lsm_rw.create_keyspace(precond_keyspace_id).await?;
+            lsm_rw.create_keyspace(precond_keyspace_id);
         }
 
         Ok(())
@@ -683,8 +680,8 @@ mod tests {
         let ka = b"a";
         let kb = b"b";
 
-        lsm.create_keyspace(keyspace_id)?;
-        lsm.create_keyspace(keyspace_id.pending().unwrap())?;
+        lsm.create_keyspace(keyspace_id);
+        lsm.create_keyspace(keyspace_id.pending().unwrap());
 
         let tablet_id = TabletId(ShardId(1), 1);
         let tablet_inner = TabletInner::new(

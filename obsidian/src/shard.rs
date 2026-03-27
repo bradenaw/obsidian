@@ -65,8 +65,7 @@ impl Shard {
                         TabletId::META,
                         Arc::clone(&journal),
                     )),
-                )
-                .await?;
+                );
                 init_tablets.insert(TabletId::META, Arc::new(meta_tablet) as Arc<dyn Tablet>);
             }
 
@@ -83,8 +82,7 @@ impl Shard {
                 )),
                 meta_synced.clone(),
                 shards.clone(),
-            )
-            .await?;
+            );
             init_tablets.insert(
                 TabletId::shard_meta(shard_id),
                 Arc::new(shard_meta_tablet) as Arc<dyn Tablet>,
@@ -106,8 +104,7 @@ impl Shard {
                     Arc::clone(&meta_synced),
                     Arc::clone(&storage),
                     Arc::clone(&shards),
-                )
-                .await?;
+                );
 
                 init_tablets.insert(tablet_id, Arc::new(data_tablet));
             }
@@ -221,8 +218,7 @@ impl ShardInner {
             Arc::clone(&self.meta_synced),
             Arc::clone(&self.storage),
             Arc::clone(&self.shards),
-        )
-        .await?;
+        );
 
         let mut tablets = self.tablets.write().unwrap();
         if tablets.contains_key(&tablet_id) {
