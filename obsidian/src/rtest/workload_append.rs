@@ -39,8 +39,8 @@ use crate::Precondition;
 use crate::Range;
 use crate::Timestamp;
 
-struct WorkloadAppend<O> {
-    obsidian: O,
+struct WorkloadAppend {
+    obsidian: Arc<dyn Obsidian>,
 
     list_keyspace_id: KeyspaceId,
     list_item_keyspace_id: KeyspaceId,
@@ -53,8 +53,8 @@ struct WorkloadAppend<O> {
 // customized for Obsidian.
 //
 // https://github.com/jepsen-io/elle/raw/master/paper/elle.pdf
-impl<O: Obsidian + 'static> WorkloadAppend<O> {
-    fn new(obsidian: O) -> Self {
+impl WorkloadAppend {
+    fn new(obsidian: Arc<dyn Obsidian>) -> Self {
         Self {
             obsidian,
 
@@ -756,7 +756,7 @@ mod tests {
             .create_keyspace(KeyspaceId(ColoGroupId(1), 2))
             .await?;
 
-        let wl = WorkloadAppend::new(obs.gateway);
+        let wl = WorkloadAppend::new(Arc::new(obs.gateway));
 
         Arc::new(wl).run().await?;
 

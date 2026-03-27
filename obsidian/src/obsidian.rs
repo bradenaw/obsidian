@@ -57,7 +57,10 @@ pub trait ObsidianExt {
     ) -> Box<dyn Stream<Item = anyhow::Result<Record>> + Send + '_>;
 }
 
-impl<T: Obsidian> ObsidianExt for T {
+impl<T> ObsidianExt for T
+where
+    T: Obsidian + ?Sized,
+{
     // TODO: This needs to give access to the underlying cursor in case it gets interrupted between
     // results (e.g. timing out between yielding two results).
     fn scan(
