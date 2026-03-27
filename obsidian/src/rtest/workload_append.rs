@@ -22,6 +22,7 @@ use futures::TryStreamExt;
 use rand::thread_rng;
 use rand::Rng;
 
+use crate::rtest::graph::Graph;
 use crate::util::encode;
 use crate::util::merge_sorted;
 use crate::util::Decode;
@@ -93,13 +94,17 @@ impl<O: Obsidian + 'static> WorkloadAppend<O> {
         );
 
         let gen_graph_start = Instant::now();
-        let edges = gen_graph(&histories)?;
+        let graph = gen_graph(&histories)?;
 
-        println!("graph has {} edges", edges.len());
+        println!(
+            "graph has {} vertices and {} edges",
+            graph.num_vertices(),
+            graph.num_edges()
+        );
         println!("gen_graph took {:?}", gen_graph_start.elapsed());
 
         let find_cycle_start = Instant::now();
-        let maybe_cycle = find_cycle(&edges);
+        let maybe_cycle = find_cycle(&graph);
         println!("find_cycle took {:?}", find_cycle_start.elapsed());
 
         if let Some(cycle) = maybe_cycle {
@@ -112,8 +117,7 @@ impl<O: Obsidian + 'static> WorkloadAppend<O> {
                     cycle[i + 1].0
                 };
 
-                let curr_out_edges = edges.get(&curr).unwrap();
-                let expected_edge_type = curr_out_edges.get(&next).unwrap();
+                let expected_edge_type = graph.edge(&curr, &next).unwrap();
                 assert_eq!(*expected_edge_type, cycle[i].1);
             }
 
@@ -297,10 +301,14 @@ impl<O: Obsidian + 'static> WorkloadAppend<O> {
     }
 }
 
-fn gen_graph(
-    histories: &Vec<Vec<(Seq, HistoryItem)>>,
-) -> anyhow::Result<HashMap<Txid, HashMap<Txid, EdgeType>>> {
-    let mut edges = HashMap::new();
+fn gen_graph(histories: &Vec<Vec<(Seq, HistoryItem)>>) -> anyhow::Result<Graph<Txid, EdgeType>> {
+    // Note that graph only allows one edge between any pair of vertices, so our graph building
+    // here may overwrite edges.
+    //
+    // The types of the edges is purely for explanitory reasons, any cycle is a problem, so this
+    // overwriting behavior should be fine. However, a cycle of certain edge types over others may
+    // be easier to understand so it might be worth preferring some edge types.
+    let mut graph = Graph::new();
 
     let mut longests = BTreeMap::new();
     let mut possible_txids = HashMap::new();
@@ -330,10 +338,7 @@ fn gen_graph(
         for txid in longest {
             if let Some(prev_txid) = prev_txid {
                 println!("  {:?} -ww-> {:?}", txid, prev_txid);
-                edges
-                    .entry(*txid)
-                    .or_insert_with(HashMap::new)
-                    .insert(prev_txid, EdgeType::WriteWrite);
+                graph.insert(*txid, EdgeType::WriteWrite, prev_txid);
             }
 
             match possible_txids.get(&txid) {
@@ -377,20 +382,14 @@ fn gen_graph(
             HistoryItem::StartRead(txid) | HistoryItem::StartAppend(txid, _) => {
                 for other_txid in most_recent_txid.values() {
                     println!("  {:?} -rt-> {:?}", txid, other_txid);
-                    edges
-                        .entry(*txid)
-                        .or_insert_with(HashMap::new)
-                        .insert(*other_txid, EdgeType::RealTime);
+                    graph.insert(*txid, EdgeType::RealTime, *other_txid);
                 }
             }
             HistoryItem::Commit(txid, ts, list_id) => {
                 if let Some((other_ts, other_txid)) = highest_timestamp.get(list_id) {
                     if ts > other_ts {
                         println!("  {:?} -ts-> {:?}", txid, other_txid);
-                        edges
-                            .entry(*txid)
-                            .or_insert_with(HashMap::new)
-                            .insert(*other_txid, EdgeType::SameKeyTimestamp);
+                        graph.insert(*txid, EdgeType::SameKeyTimestamp, *other_txid);
                         highest_timestamp.insert(*list_id, (*ts, *txid));
                     }
                 } else {
@@ -400,10 +399,7 @@ fn gen_graph(
             HistoryItem::FinishRead(txid, _, list_id, txids) => {
                 if let Some(last_txid) = txids.last() {
                     println!("  {:?} -wr-> {:?}", txid, last_txid);
-                    edges
-                        .entry(*txid)
-                        .or_insert_with(HashMap::new)
-                        .insert(*last_txid, EdgeType::WriteRead);
+                    graph.insert(*txid, EdgeType::WriteRead, *last_txid);
                 }
 
                 let longest = longests.get(&list_id).unwrap();
@@ -418,10 +414,7 @@ fn gen_graph(
 
                 if !longest.is_empty() && longest.len() > txids.len() {
                     println!("  {:?} -rw-> {:?}", longest[txids.len()], txid);
-                    edges
-                        .entry(longest[txids.len()])
-                        .or_insert_with(HashMap::new)
-                        .insert(*txid, EdgeType::ReadWrite);
+                    graph.insert(longest[txids.len()], EdgeType::ReadWrite, *txid);
                 }
             }
             _ => {}
@@ -437,7 +430,7 @@ fn gen_graph(
         }
     }
 
-    Ok(edges)
+    Ok(graph)
 }
 
 enum TxResult {
@@ -516,11 +509,11 @@ fn find_results(
     result
 }
 
-fn find_cycle(edges: &HashMap<Txid, HashMap<Txid, EdgeType>>) -> Option<Vec<(Txid, EdgeType)>> {
-    let sccs = strongly_connected_components(edges);
+fn find_cycle(graph: &Graph<Txid, EdgeType>) -> Option<Vec<(Txid, EdgeType)>> {
+    let sccs = strongly_connected_components(graph);
     let smallest_scc = sccs.iter().min_by_key(|scc| scc.len())?;
 
-    let cycle_txids = small_cycle(smallest_scc, edges);
+    let cycle_txids = small_cycle(smallest_scc, graph);
 
     let mut result = vec![];
     for i in 0..cycle_txids.len() {
@@ -531,16 +524,14 @@ fn find_cycle(edges: &HashMap<Txid, HashMap<Txid, EdgeType>>) -> Option<Vec<(Txi
             cycle_txids[i + 1]
         };
 
-        let edge_type = *(edges.get(&a).unwrap().get(&b).unwrap());
+        let edge_type = *graph.edge(&a, &b).unwrap();
 
         result.push((a, edge_type));
     }
     return Some(result);
 }
 
-fn strongly_connected_components(
-    edges: &HashMap<Txid, HashMap<Txid, EdgeType>>,
-) -> Vec<HashSet<Txid>> {
+fn strongly_connected_components(graph: &Graph<Txid, EdgeType>) -> Vec<HashSet<Txid>> {
     // This is Tarjan's algorithm for finding strongly connected components, which is O(V+E).
 
     let mut low_links: HashMap<Txid, usize> = HashMap::new();
@@ -551,7 +542,7 @@ fn strongly_connected_components(
 
     fn visit(
         txid: Txid,
-        edges: &HashMap<Txid, HashMap<Txid, EdgeType>>,
+        graph: &Graph<Txid, EdgeType>,
         stack: &mut Vec<Txid>,
         set: &mut HashSet<Txid>,
         low_links: &mut HashMap<Txid, usize>,
@@ -564,23 +555,21 @@ fn strongly_connected_components(
         stack.push(txid);
         set.insert(txid);
 
-        if let Some(out_edges) = edges.get(&txid) {
-            for next in out_edges.keys() {
-                if !low_links.contains_key(&next) {
-                    visit(*next, edges, stack, set, low_links, ids, sccs);
-                    low_links.insert(
-                        txid,
-                        cmp::min(
-                            *(low_links.get(&txid).unwrap()),
-                            *(low_links.get(next).unwrap()),
-                        ),
-                    );
-                } else if set.contains(next) {
-                    low_links.insert(
-                        txid,
-                        cmp::min(*(low_links.get(&txid).unwrap()), *(ids.get(next).unwrap())),
-                    );
-                }
+        for (next, _) in graph.out_edges(&txid) {
+            if !low_links.contains_key(&next) {
+                visit(*next, graph, stack, set, low_links, ids, sccs);
+                low_links.insert(
+                    txid,
+                    cmp::min(
+                        *(low_links.get(&txid).unwrap()),
+                        *(low_links.get(next).unwrap()),
+                    ),
+                );
+            } else if set.contains(next) {
+                low_links.insert(
+                    txid,
+                    cmp::min(*(low_links.get(&txid).unwrap()), *(ids.get(next).unwrap())),
+                );
             }
         }
 
@@ -599,13 +588,13 @@ fn strongly_connected_components(
         }
     }
 
-    for txid in edges.keys() {
+    for txid in graph.vertices() {
         if low_links.contains_key(txid) {
             continue;
         }
         visit(
             *txid,
-            edges,
+            graph,
             &mut stack,
             &mut set,
             &mut low_links,
@@ -617,10 +606,7 @@ fn strongly_connected_components(
     sccs
 }
 
-fn small_cycle(
-    component: &HashSet<Txid>,
-    edges: &HashMap<Txid, HashMap<Txid, EdgeType>>,
-) -> Vec<Txid> {
+fn small_cycle(component: &HashSet<Txid>, graph: &Graph<Txid, EdgeType>) -> Vec<Txid> {
     // Keys are each vertex visited.
     // Values are the previous vertex along the shortest path from start to here.
     let mut path = HashMap::new();
@@ -635,7 +621,7 @@ fn small_cycle(
         queue.push_back(*start);
 
         while let Some(curr) = queue.pop_front() {
-            for next in edges.get(&curr).unwrap().keys() {
+            for (next, _) in graph.out_edges(&curr) {
                 if !component.contains(next) {
                     continue;
                 }
@@ -738,13 +724,13 @@ impl Decode for Txid {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     use super::strongly_connected_components;
     use super::EdgeType;
     use super::Txid;
     use super::WorkloadAppend;
+    use crate::rtest::graph::Graph;
     use crate::Bound;
     use crate::ColoGroupId;
     use crate::KeyspaceId;
@@ -810,15 +796,12 @@ mod tests {
             (6, 2),
         ];
 
-        let mut edges = HashMap::new();
+        let mut graph = Graph::new();
         for (src, dst) in edges_simple {
-            edges
-                .entry(Txid(src))
-                .or_insert_with(HashMap::new)
-                .insert(Txid(dst), EdgeType::ReadWrite);
+            graph.insert(Txid(src), EdgeType::ReadWrite, Txid(dst));
         }
 
-        let sccs = strongly_connected_components(&edges);
+        let sccs = strongly_connected_components(&graph);
 
         let mut sccs_vecs = sccs
             .iter()
