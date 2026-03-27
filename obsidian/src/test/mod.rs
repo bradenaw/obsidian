@@ -6,8 +6,6 @@ mod mem_storage;
 mod meta_proxy;
 mod test_nodes;
 
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,14 +17,12 @@ use crate::election::Proposal;
 use crate::gateway::Gateway;
 use crate::lsm::Lsm;
 use crate::lsm::LsmOptions;
-use crate::lsm::Manifest;
 use crate::meta::MetaImpl;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::runtime::Journals;
 use crate::runtime::Meta;
 use crate::runtime::Storage;
-use crate::runtime::Tablet;
 use crate::storage::CachedStorage;
 use crate::supervisor::Supervisor;
 use crate::tablet::TabletJournalWriter;
@@ -41,123 +37,9 @@ use crate::util::encode;
 use crate::util::Decode;
 use crate::util::Encode;
 use crate::Bound;
-use crate::Direction;
-use crate::HistoryRange;
-use crate::InternalError;
 use crate::JournalEntry;
-use crate::Key;
-use crate::KeyspaceId;
-use crate::Mutation;
-use crate::Precondition;
-use crate::Range;
-use crate::Record;
-use crate::Revision;
 use crate::ShardId;
 use crate::TabletJournalEntry;
-use crate::Timestamp;
-use crate::TxOutcome;
-use crate::Txid;
-
-#[async_trait]
-impl<T: Tablet + ?Sized> Tablet for Arc<T> {
-    async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
-        T::get(self, ts, key).await
-    }
-
-    async fn get_latest(&self, key: Key) -> Result<(Timestamp, Option<Record>), InternalError> {
-        T::get_latest(self, key).await
-    }
-
-    async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError> {
-        T::latest_snapshot(self, keys).await
-    }
-
-    async fn scan_page(
-        &self,
-        ts: Timestamp,
-        keyspace_id: KeyspaceId,
-        range: Range<&[u8]>,
-        direction: Direction,
-        limit: usize,
-    ) -> Result<(Vec<Record>, Option<Range<Vec<u8>>>), InternalError> {
-        T::scan_page(self, ts, keyspace_id, range, direction, limit).await
-    }
-
-    async fn history_page(
-        &self,
-        key: Key,
-        range: HistoryRange,
-        direction: Direction,
-        limit: usize,
-    ) -> Result<(Vec<Revision>, Option<HistoryRange>), InternalError> {
-        T::history_page(self, key, range, direction, limit).await
-    }
-
-    async fn write(
-        &self,
-        preconds: Vec<Precondition>,
-        muts: BTreeMap<Key, Mutation>,
-    ) -> Result<Timestamp, InternalError> {
-        T::write(self, preconds, muts).await
-    }
-
-    async fn prepare(
-        &self,
-        txid: Txid,
-        preconds: Vec<Precondition>,
-        muts: BTreeMap<Key, Mutation>,
-    ) -> Result<Timestamp, InternalError> {
-        T::prepare(self, txid, preconds, muts).await
-    }
-
-    async fn try_commit(
-        &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<Key>,
-        mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<TxOutcome> {
-        T::try_commit(self, txid, ts, precond_keys, mut_keys).await
-    }
-
-    async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
-        T::try_abort(self, txid).await
-    }
-
-    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
-        T::wait(self, txid).await
-    }
-
-    async fn cleanup_committed(
-        &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<Key>,
-        mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<()> {
-        T::cleanup_committed(self, txid, ts, precond_keys, mut_keys).await
-    }
-
-    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
-        T::wait_meta_sync(self, ts).await
-    }
-
-    async fn manifest(&self) -> anyhow::Result<Manifest> {
-        T::manifest(self).await
-    }
-
-    async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
-        T::wait_mostly_hydrated(self).await
-    }
-
-    async fn catchup(&self) -> anyhow::Result<()> {
-        T::catchup(self).await
-    }
-
-    async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
-        T::find_split(self).await
-    }
-}
 
 pub(crate) struct ObsidianForTest {
     pub gateway: Gateway,
