@@ -445,9 +445,11 @@ impl BlockBuilder {
                         ));
                     } else {
                         return Err(anyhow!(
-                            "revisions not in descending timestamp order: conflicting values for {:?}@{:?}",
+                            "revisions not in descending timestamp order: conflicting values for {}@{:?}: {:?} != {:?}",
                             hexlify(&revision.key),
                             prev_ts,
+                            prev_value,
+                            revision.value,
                         ));
                     }
                 }
