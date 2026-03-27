@@ -56,7 +56,7 @@ enum TransferState {
 }
 
 message ShardMetadata {
-    NodeId assigned_node_id = 1;
+    repeated NodeId assigned_node_ids = 1;
 }
 
 message TabletId {

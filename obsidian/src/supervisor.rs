@@ -611,9 +611,10 @@ impl SupervisorInner {
         for shard_id in shard_ids {
             let shard_metadata = snapshot.shard_metadata(shard_id).await?;
 
-            if let Some(node_id) = shard_metadata.assigned_node_id {
+            for node_id in &shard_metadata.assigned_node_ids {
                 unassigned_node_ids.remove(&node_id);
-            } else {
+            }
+            if shard_metadata.assigned_node_ids.is_empty() {
                 unassigned_shard_ids.insert(shard_id);
             }
         }
@@ -626,7 +627,7 @@ impl SupervisorInner {
             (unassigned_node_ids.next(), unassigned_shard_ids.next())
         {
             let mut shard_metadata = snapshot.shard_metadata(shard_id).await?;
-            shard_metadata.assigned_node_id = Some(node_id);
+            shard_metadata.assigned_node_ids.insert(node_id);
             muts.insert(
                 MetaKey::Shard(shard_id),
                 MetaMutation::Put(MetaValue::ShardMetadata(shard_metadata)),

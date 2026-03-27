@@ -7,14 +7,16 @@ use std::sync::Mutex;
 
 use im::OrdSet;
 
+use crate::election::Proposal;
 use crate::meta::MetaSynced;
+use crate::runtime::Journals;
 use crate::runtime::Meta;
 use crate::runtime::Node;
 use crate::runtime::Nodes;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
-use crate::runtime::Wals;
 use crate::util::Watchable;
+use crate::JournalEntry;
 use crate::NodeId;
 
 pub(super) struct TestNodes {
@@ -25,17 +27,21 @@ pub(super) struct TestNodes {
 struct TestNodesInner {
     storage: Arc<dyn Storage>,
     meta: Arc<dyn Meta>,
-    wals: Arc<dyn Wals>,
+    journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
 
     routing: Mutex<HashMap<NodeId, Arc<dyn Node>>>,
     node_ids: Watchable<OrdSet<NodeId>>,
 }
 
 impl TestNodes {
-    pub fn new(storage: Arc<dyn Storage>, meta: Arc<dyn Meta>, wals: Arc<dyn Wals>) -> Self {
+    pub fn new(
+        storage: Arc<dyn Storage>,
+        meta: Arc<dyn Meta>,
+        journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
+    ) -> Self {
         let inner = Arc::new(TestNodesInner {
             storage,
-            wals,
+            journals,
             meta: Arc::clone(&meta),
             routing: Mutex::new(HashMap::new()),
             node_ids: Watchable::new(OrdSet::new()),
@@ -67,8 +73,8 @@ impl TestNodes {
                     Arc::clone(&self.inner.storage),
                     Arc::clone(&self.inner.meta),
                     Arc::clone(&self.shards),
-                    Arc::clone(&self.inner.wals) as Arc<dyn Wals>,
                     Arc::new(MetaSynced::new(Arc::clone(&self.inner.meta))),
+                    Arc::clone(&self.inner.journals),
                 )
                 .await?,
             ) as Arc<dyn Node>,

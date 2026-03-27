@@ -1,11 +1,11 @@
 mod data_tablet;
-mod journaled_lsm;
 mod lock_mgr;
 mod meta_tablet;
 mod protected;
 mod sequencer;
 mod shard_meta_tablet;
 mod tablet_inner;
+mod tablet_journal_writer;
 
 #[allow(unused_imports)]
 pub(crate) use data_tablet::DataTablet;
@@ -13,3 +13,4 @@ pub(crate) use data_tablet::DataTablet;
 pub(crate) use meta_tablet::MetaTablet;
 #[allow(unused_imports)]
 pub(crate) use shard_meta_tablet::ShardMetaTablet;
+pub(crate) use tablet_journal_writer::TabletJournalWriter;

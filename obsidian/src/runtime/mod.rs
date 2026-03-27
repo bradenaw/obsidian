@@ -11,6 +11,8 @@
 //! Some of the traits here are also third-party dependencies that are expected to be provided for
 //! the system, like Storage.
 
+mod journal;
+mod journals;
 mod meta;
 mod node;
 mod nodes;
@@ -19,9 +21,9 @@ mod shards;
 mod storage;
 mod supervisor;
 mod tablet;
-mod wal;
-mod wals;
 
+pub(crate) use journal::Journal;
+pub(crate) use journals::Journals;
 pub(crate) use meta::Meta;
 pub(crate) use node::Node;
 pub(crate) use nodes::Nodes;
@@ -32,5 +34,3 @@ pub(crate) use storage::FileWriter;
 pub(crate) use storage::Storage;
 pub(crate) use supervisor::Supervisor;
 pub(crate) use tablet::Tablet;
-pub(crate) use wal::Wal;
-pub(crate) use wals::Wals;

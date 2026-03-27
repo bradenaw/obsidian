@@ -1,11 +1,19 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
 
 use anyhow::anyhow;
+use async_stream::stream;
 use async_trait::async_trait;
+use futures::future::Either;
+use futures::stream::FuturesUnordered;
+use futures::Stream;
+use futures::StreamExt;
 use futures::TryStreamExt;
+use tokio::sync::Notify;
 
+use crate::election::Proposal;
 use crate::lsm::LsmOptions;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
@@ -13,17 +21,20 @@ use crate::meta::MetaSubscriber;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::meta::SyncType;
+use crate::replica::Replica;
 use crate::runtime;
+use crate::runtime::Journals;
 use crate::runtime::Meta;
 use crate::runtime::Shard as _;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
-use crate::runtime::Wals;
-use crate::shard::Shard;
+use crate::shard::ShardJournalWriter;
 use crate::supervisor::Supervisor;
 use crate::util::Retry;
 use crate::util::WithBackground;
 use crate::Direction;
+use crate::JournalEntry;
+use crate::JournalSeq;
 use crate::NodeId;
 use crate::ShardId;
 
@@ -31,14 +42,16 @@ pub(crate) struct Node(WithBackground<NodeInner>);
 
 struct NodeInner {
     node_id: NodeId,
+    lsm_options: LsmOptions,
     storage: Arc<dyn Storage>,
     meta: Arc<dyn Meta>,
     shards: Arc<dyn Shards>,
-    wals: Arc<dyn Wals>,
     meta_synced: Arc<MetaSynced>,
+    journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
 
     supervisor: Mutex<Option<Supervisor>>,
-    shard: RwLock<Option<Arc<Shard>>>,
+    replicas: RwLock<HashMap<ShardId, Arc<Replica>>>,
+    replicas_changed: Notify,
 }
 
 impl Node {
@@ -47,20 +60,28 @@ impl Node {
         storage: Arc<dyn Storage>,
         meta: Arc<dyn Meta>,
         shards: Arc<dyn Shards>,
-        wals: Arc<dyn Wals>,
         meta_synced: Arc<MetaSynced>,
+        journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
     ) -> anyhow::Result<Self> {
         meta.add_node(node_id.clone()).await?;
 
         let inner = Arc::new(NodeInner {
             node_id,
+            lsm_options: LsmOptions {
+                l0_max_size: 256,
+                l1_max_size: 100_000,
+                run_size_target: 32768,
+                block_size_target: 4096,
+            },
             storage,
             meta,
             shards,
-            wals,
             meta_synced: Arc::clone(&meta_synced),
+            journals,
+
             supervisor: Mutex::new(None),
-            shard: RwLock::new(None),
+            replicas: RwLock::new(HashMap::new()),
+            replicas_changed: Notify::new(),
         });
         let node = Node(WithBackground::new(Arc::clone(&inner)));
 
@@ -76,12 +97,38 @@ impl runtime::Node for Node {
     }
 
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn runtime::Shard>> {
-        let maybe_shard = self.0.shard.read().unwrap();
-        if let Some(shard) = maybe_shard.as_ref() {
+        let replicas = self.0.replicas.read().unwrap();
+        if let Some(shard) = replicas.get(&shard_id).as_ref() {
             return Ok(Arc::clone(shard) as Arc<dyn runtime::Shard>);
         } else {
             return Err(anyhow!("{:?} does not own {:?}", self.0.node_id, shard_id));
         }
+    }
+
+    fn became_leader_at_subscribe(
+        &self,
+    ) -> Box<dyn Stream<Item = anyhow::Result<HashMap<ShardId, JournalSeq>>> + Send + Unpin + '_>
+    {
+        Box::new(Box::pin(stream! {
+            loop {
+                let mut leader_shards = HashMap::new();
+                let mut futures = FuturesUnordered::new();
+                let replicas_changed = self.0.replicas_changed.notified();
+                futures.push(Either::Left(replicas_changed));
+                {
+                    let replicas = self.0.replicas.read().unwrap();
+                    for (_, replica) in replicas.iter() {
+                        let (became_leader_at, changed) = replica.became_leader_at_subscribe();
+                        if let Some(seq) = became_leader_at {
+                            leader_shards.insert(replica.id(), seq);
+                        }
+                        futures.push(Either::Right(changed));
+                    }
+                }
+                yield Ok(leader_shards);
+                futures.next().await;
+            }
+        }))
     }
 }
 
@@ -136,10 +183,39 @@ impl NodeInner {
     ) -> anyhow::Result<()> {
         let shard_metadata = snapshot.shard_metadata(shard_id).await?;
 
-        if let Some(node_id) = shard_metadata.assigned_node_id {
-            if node_id == self.node_id {
-                self.maybe_spawn_shard(shard_id).await?;
+        let action = {
+            let replicas = self.replicas.read().unwrap();
+            if shard_metadata.assigned_node_ids.contains(&self.node_id)
+                && !replicas.contains_key(&shard_id)
+            {
+                Some(true)
+            } else if !shard_metadata.assigned_node_ids.contains(&self.node_id)
+                && replicas.contains_key(&shard_id)
+            {
+                Some(false)
+            } else {
+                None
             }
+        };
+
+        if let Some(join) = action {
+            if join {
+                let replica = Replica::new(
+                    shard_id,
+                    self.lsm_options.clone(),
+                    Arc::clone(&self.storage),
+                    Arc::clone(&self.meta),
+                    Arc::clone(&self.shards),
+                    self.journals.journal(shard_id).await?,
+                );
+                let mut replicas = self.replicas.write().unwrap();
+                replicas.insert(shard_id, Arc::new(replica));
+            } else {
+                let mut replicas = self.replicas.write().unwrap();
+                replicas.remove(&shard_id);
+            }
+
+            self.replicas_changed.notify_waiters();
         }
 
         Ok(())
@@ -157,39 +233,6 @@ impl NodeInner {
             Arc::clone(&self.shards),
         ));
     }
-
-    async fn maybe_spawn_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
-        {
-            let maybe_shard = self.shard.write().unwrap();
-            if let Some(shard) = maybe_shard.as_ref() {
-                if shard.id() == shard_id {
-                    return Ok(());
-                }
-            }
-        }
-
-        let shard = Shard::new(
-            shard_id,
-            Arc::clone(&self.storage),
-            Arc::clone(&self.meta),
-            Arc::clone(&self.shards),
-            Arc::clone(&self.wals),
-            LsmOptions {
-                l0_max_size: 256,
-                l1_max_size: 100_000,
-                run_size_target: 32768,
-                block_size_target: 4096,
-            },
-        )
-        .await?;
-
-        {
-            let mut maybe_shard = self.shard.write().unwrap();
-            *maybe_shard = Some(Arc::new(shard));
-        }
-
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -200,5 +243,14 @@ impl MetaSubscriber for NodeInner {
                 self.try_sync_meta(&sync_type, &snapshot).await
             })
             .await;
+    }
+}
+
+struct NoopShardJournalWriter {}
+
+#[async_trait]
+impl ShardJournalWriter for NoopShardJournalWriter {
+    async fn append(&self, _entry: JournalEntry) -> anyhow::Result<()> {
+        Ok(())
     }
 }

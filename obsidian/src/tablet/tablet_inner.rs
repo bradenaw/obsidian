@@ -2,6 +2,7 @@ use std::cmp;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_stream::try_stream;
@@ -15,6 +16,7 @@ use crate::tablet::protected::LsmRead;
 use crate::tablet::protected::LsmReadWrite;
 use crate::tablet::protected::ProtectedLsm;
 use crate::tablet::sequencer::Sequencer;
+use crate::tablet::tablet_journal_writer::TabletJournalWriter;
 use crate::util::Decode;
 use crate::util::Encode;
 use crate::ColoGroupId;
@@ -30,6 +32,7 @@ use crate::Record;
 use crate::Revision;
 use crate::RevisionValue;
 use crate::TabletId;
+use crate::TabletJournalEntry;
 use crate::Timestamp;
 use crate::Txid;
 
@@ -39,6 +42,7 @@ pub(super) struct TabletInner {
     pub range: Range<Vec<u8>>,
 
     pub lsm: ProtectedLsm,
+    pub journal: Arc<dyn TabletJournalWriter>,
     pub sequencer: Sequencer,
     pub lock_mgr: LockMgr,
 }
@@ -49,12 +53,14 @@ impl TabletInner {
         colo_group_id: ColoGroupId,
         range: Range<Vec<u8>>,
         lsm: ProtectedLsm,
+        journal: Arc<dyn TabletJournalWriter>,
     ) -> Self {
         Self {
             tablet_id,
             colo_group_id,
             range,
-            lsm: lsm,
+            lsm,
+            journal,
             sequencer: Sequencer::new(),
             lock_mgr: LockMgr::new(1),
         }
@@ -340,6 +346,21 @@ impl TabletInner {
 
         let ts = self.sequencer.start_write();
 
+        self.journal
+            .append(TabletJournalEntry::Write(
+                *ts,
+                muts.iter()
+                    .map(|((keyspace_id, key), mutation)| {
+                        let value = match mutation {
+                            Mutation::Put(value) => RevisionValue::Regular(value.clone()),
+                            Mutation::Delete => RevisionValue::Tombstone,
+                        };
+                        (*keyspace_id, key.clone(), value)
+                    })
+                    .collect(),
+            ))
+            .await?;
+
         lsm_rw
             .write(*ts, muts)
             .await
@@ -624,13 +645,15 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
+    use async_trait::async_trait;
+
+    use crate::lsm::Lsm;
     use crate::lsm::LsmOptions;
     use crate::meta::TabletState;
-    use crate::tablet::journaled_lsm::JournaledLsm;
     use crate::tablet::protected::ProtectedLsm;
     use crate::tablet::tablet_inner::TabletInner;
+    use crate::tablet::tablet_journal_writer::TabletJournalWriter;
     use crate::test::MemStorage;
-    use crate::test::MemWal;
     use crate::ColoGroupId;
     use crate::InternalError;
     use crate::KeyspaceId;
@@ -640,23 +663,28 @@ mod tests {
     use crate::Record;
     use crate::ShardId;
     use crate::TabletId;
+    use crate::TabletJournalEntry;
     use crate::Timestamp;
+
+    struct NoopJournalWriter {}
+
+    #[async_trait]
+    impl TabletJournalWriter for NoopJournalWriter {
+        async fn append(&self, _entry: TabletJournalEntry) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
 
     #[tokio::test]
     async fn test_write_preconds() -> anyhow::Result<()> {
-        let lsm = JournaledLsm::open(
-            LsmOptions::default(),
-            Arc::new(MemWal::new()),
-            Arc::new(MemStorage::new()),
-        )
-        .await?;
+        let lsm = Lsm::empty(LsmOptions::default(), Arc::new(MemStorage::new())).await?;
 
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
         let ka = b"a";
         let kb = b"b";
 
-        lsm.create_keyspace(keyspace_id).await?;
-        lsm.create_keyspace(keyspace_id.pending().unwrap()).await?;
+        lsm.create_keyspace(keyspace_id)?;
+        lsm.create_keyspace(keyspace_id.pending().unwrap())?;
 
         let tablet_id = TabletId(ShardId(1), 1);
         let tablet_inner = TabletInner::new(
@@ -664,6 +692,7 @@ mod tests {
             keyspace_id.0,
             Range::all(),
             ProtectedLsm::new(tablet_id, lsm, TabletState::Active),
+            Arc::new(NoopJournalWriter {}),
         );
 
         let write_0_ts = tablet_inner

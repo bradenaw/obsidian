@@ -12,7 +12,7 @@ use futures::TryStreamExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::lsm::LsmOptions;
+use crate::lsm::Lsm;
 use crate::lsm::Manifest;
 use crate::lsm::Preloader;
 use crate::meta::MetaKey;
@@ -26,14 +26,13 @@ use crate::meta::TabletState;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
 use crate::runtime::Tablet;
-use crate::runtime::Wal;
-use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::protected::LsmRead;
 use crate::tablet::protected::LsmReadWrite;
 use crate::tablet::protected::ProtectedLsm;
 use crate::tablet::tablet_inner::PendingMutation;
 use crate::tablet::tablet_inner::PrecondLocks;
 use crate::tablet::tablet_inner::TabletInner;
+use crate::tablet::tablet_journal_writer::TabletJournalWriter;
 use crate::util::encode;
 use crate::util::spawn_owned;
 use crate::util::Decode;
@@ -332,17 +331,16 @@ impl DataTablet {
         tablet_id: TabletId,
         colo_group_id: ColoGroupId,
         range: Range<Vec<u8>>,
-        lsm_options: LsmOptions,
-        wal: Arc<dyn Wal>,
+        lsm: Lsm,
+        journal: Arc<dyn TabletJournalWriter>,
         meta_synced: Arc<MetaSynced>,
         storage: Arc<dyn Storage>,
         shards: Arc<dyn Shards>,
     ) -> anyhow::Result<Self> {
-        let lsm = JournaledLsm::open(lsm_options, wal, Arc::clone(&storage)).await?;
-
         let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
 
-        lsm.create_keyspace(KeyspaceId::TX_OUTCOMES).await?;
+        // TODO: Remove?
+        lsm.create_keyspace(KeyspaceId::TX_OUTCOMES)?;
 
         let tablet = DataTablet(WithBackground::new(Arc::new(Arc::new(DataTabletInner {
             inner: TabletInner::new(
@@ -352,6 +350,7 @@ impl DataTablet {
                 // Start out in Defunct because it has no permissions to do anything and we don't
                 // actually know what we should be allowed to do until the meta sync finishes.
                 ProtectedLsm::new(tablet_id, lsm, TabletState::Defunct),
+                journal,
             ),
             meta_synced: Arc::clone(&meta_synced),
             storage: storage,
@@ -476,27 +475,47 @@ impl DataTabletInner {
             .for_each_concurrent(
                 Some(64),
                 |(txid, keyspace_id, key, prepare_type)| async move {
-                    let owner_tablet = self.shards.tablet(txid.owner()).unwrap();
-                    let tx_outcome = owner_tablet.wait(txid).await.unwrap();
-                    // Commits get cleaned up by the owner tablet calling cleanup_committed. Ignore them
-                    // here to avoid duplicating work.
-                    // TODO: retry instead of unwrap
-                    if let TxOutcome::Aborted = tx_outcome {
-                        let lsm_rw = self.inner.lsm.wait_read_write().await;
-                        match prepare_type {
-                            PrepareType::Precondition => self
-                                .cleanup_precond_key(&lsm_rw, txid, keyspace_id, key)
-                                .await
-                                .unwrap(),
-                            PrepareType::Mutation => self
-                                .cleanup_pending_key(&lsm_rw, txid, tx_outcome, keyspace_id, key)
-                                .await
-                                .unwrap(),
-                        }
-                    }
+                    Retry::new()
+                        .indefinitely(&async || {
+                            self.resolve_prepared_single(
+                                txid,
+                                keyspace_id,
+                                key.clone(),
+                                prepare_type,
+                            )
+                            .await
+                        })
+                        .await
                 },
             )
             .await;
+    }
+
+    async fn resolve_prepared_single(
+        &self,
+        txid: Txid,
+        keyspace_id: KeyspaceId,
+        key: Vec<u8>,
+        prepare_type: PrepareType,
+    ) -> anyhow::Result<()> {
+        let owner_tablet = self.shards.tablet(txid.owner())?;
+        let tx_outcome = owner_tablet.wait(txid).await?;
+        // Commits get cleaned up by the owner tablet calling cleanup_committed. Ignore them
+        // here to avoid duplicating work.
+        if let TxOutcome::Aborted = tx_outcome {
+            let lsm_rw = self.inner.lsm.wait_read_write().await;
+            match prepare_type {
+                PrepareType::Precondition => {
+                    self.cleanup_precond_key(&lsm_rw, txid, keyspace_id, key)
+                        .await?;
+                }
+                PrepareType::Mutation => {
+                    self.cleanup_pending_key(&lsm_rw, txid, tx_outcome, keyspace_id, key)
+                        .await?;
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn cleanup_committed(
@@ -891,6 +910,7 @@ fn ranges_to_splits(mut ranges: Vec<Range<Vec<u8>>>) -> anyhow::Result<Vec<Bound
     Ok(out)
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum PrepareType {
     Precondition,
     Mutation,

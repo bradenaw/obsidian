@@ -8,11 +8,11 @@ use anyhow::anyhow;
 use tokio::sync::watch;
 use tokio::sync::Notify;
 
+use crate::lsm::Lsm;
 use crate::lsm::Manifest;
 use crate::lsm::Preloaded;
 use crate::meta::TabletState;
 use crate::meta::TabletStateProperties;
-use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::Bound;
 use crate::Direction;
 use crate::HistoryRange;
@@ -32,11 +32,11 @@ pub(super) struct ProtectedLsm {
     state: InfrequentlyChanged<TabletStateProperties>,
     changed: watch::Receiver<()>,
     on_change: watch::Sender<()>,
-    lsm: JournaledLsm,
+    lsm: Lsm,
 }
 
 impl ProtectedLsm {
-    pub(super) fn new(tablet_id: TabletId, lsm: JournaledLsm, initial: TabletState) -> Self {
+    pub(super) fn new(tablet_id: TabletId, lsm: Lsm, initial: TabletState) -> Self {
         let (on_change, changed) = watch::channel(());
         Self {
             tablet_id,
@@ -201,7 +201,7 @@ pub(super) trait LsmReadWrite: LsmRead {
 
 pub(super) struct LsmReadGuard<'a> {
     guard: InfrequentlyChangedGuard<'a, TabletStateProperties>,
-    lsm: &'a JournaledLsm,
+    lsm: &'a Lsm,
 }
 
 impl<'a> LsmRead for LsmReadGuard<'a> {
@@ -249,7 +249,7 @@ impl<'a> LsmRead for LsmReadGuard<'a> {
 
 pub(super) struct LsmReadWriteGuard<'a> {
     guard: InfrequentlyChangedGuard<'a, TabletStateProperties>,
-    lsm: &'a JournaledLsm,
+    lsm: &'a Lsm,
 }
 
 impl<'a> LsmRead for LsmReadWriteGuard<'a> {
@@ -297,17 +297,20 @@ impl<'a> LsmRead for LsmReadWriteGuard<'a> {
 
 impl<'a> LsmReadWrite for LsmReadWriteGuard<'a> {
     async fn write(&self, ts: Timestamp, muts: BTreeMap<Key, Mutation>) -> Result<(), WriteError> {
-        Ok(self.lsm.write(ts, muts).await?)
+        for (key, mutation) in muts {
+            self.lsm.write(ts, key, mutation);
+        }
+        Ok(())
     }
 
     async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
-        Ok(self.lsm.create_keyspace(keyspace_id).await?)
+        Ok(self.lsm.create_keyspace(keyspace_id)?)
     }
 }
 
 pub(super) struct LsmLoadGuard<'a> {
     guard: InfrequentlyChangedGuard<'a, TabletStateProperties>,
-    lsm: &'a JournaledLsm,
+    lsm: &'a Lsm,
 }
 
 impl<'a> LsmLoadGuard<'a> {

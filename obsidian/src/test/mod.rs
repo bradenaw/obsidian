@@ -1,8 +1,8 @@
 mod mem_file_reader;
 mod mem_file_writer;
+mod mem_journal;
+mod mem_journals;
 mod mem_storage;
-mod mem_wal;
-mod mem_wals;
 mod meta_proxy;
 mod test_nodes;
 
@@ -15,22 +15,26 @@ use std::time::Duration;
 use anyhow::anyhow;
 use async_trait::async_trait;
 
+use crate::election::Proposal;
 use crate::gateway::Gateway;
+use crate::lsm::Lsm;
+use crate::lsm::LsmOptions;
 use crate::lsm::Manifest;
 use crate::meta::MetaImpl;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
+use crate::runtime::Journals;
 use crate::runtime::Meta;
 use crate::runtime::Storage;
 use crate::runtime::Tablet;
-use crate::runtime::Wals;
 use crate::storage::CachedStorage;
 use crate::supervisor::Supervisor;
+use crate::tablet::TabletJournalWriter;
 pub(crate) use crate::test::mem_file_reader::MemFileReader;
 pub(crate) use crate::test::mem_file_writer::MemFileWriter;
+pub(crate) use crate::test::mem_journal::MemJournal;
+pub(crate) use crate::test::mem_journals::MemJournals;
 pub(crate) use crate::test::mem_storage::MemStorage;
-pub(crate) use crate::test::mem_wal::MemWal;
-pub(crate) use crate::test::mem_wals::MemWals;
 use crate::test::meta_proxy::MetaProxy;
 use crate::test::test_nodes::TestNodes;
 use crate::util::encode;
@@ -40,6 +44,7 @@ use crate::Bound;
 use crate::Direction;
 use crate::HistoryRange;
 use crate::InternalError;
+use crate::JournalEntry;
 use crate::Key;
 use crate::KeyspaceId;
 use crate::Mutation;
@@ -48,7 +53,7 @@ use crate::Range;
 use crate::Record;
 use crate::Revision;
 use crate::ShardId;
-use crate::TabletId;
+use crate::TabletJournalEntry;
 use crate::Timestamp;
 use crate::TxOutcome;
 use crate::Txid;
@@ -177,11 +182,15 @@ impl ObsidianForTest {
             4,  // n_stripes
         ));
 
-        let wals = Arc::new(MemWals::new()) as Arc<dyn Wals>;
+        let journals = Arc::new(MemJournals::new()) as Arc<dyn Journals<Proposal<JournalEntry>>>;
 
         let meta_tablet = crate::tablet::MetaTablet::new(
-            wals.wal(TabletId::META).await?,
-            Arc::clone(&storage) as Arc<dyn Storage>,
+            Lsm::empty(
+                LsmOptions::default(),
+                Arc::clone(&storage) as Arc<dyn Storage>,
+            )
+            .await?,
+            Arc::new(NoopJournalWriter {}),
         )
         .await?;
         let meta: Arc<dyn Meta> = Arc::new(MetaImpl::new(meta_tablet));
@@ -190,7 +199,7 @@ impl ObsidianForTest {
         let nodes = TestNodes::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&meta) as Arc<dyn Meta>,
-            Arc::clone(&wals),
+            journals,
         );
 
         for i in 0..n_shards {
@@ -262,6 +271,15 @@ where
     assert_eq!(x, decoded);
 
     Ok(())
+}
+
+struct NoopJournalWriter {}
+
+#[async_trait]
+impl TabletJournalWriter for NoopJournalWriter {
+    async fn append(&self, _entry: TabletJournalEntry) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 macro_rules! obsidian_test_suite {

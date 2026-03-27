@@ -403,7 +403,6 @@ impl Gateway {
                         RetryResult::Retry(InternalError::Conflict(other_txid))
                     }
                     Err(e) => {
-                        log::info!("error returned by inner: {:?}", e);
                         return RetryResult::Err(e.into());
                     }
                 }
@@ -433,9 +432,7 @@ impl Gateway {
 
         futures::stream::iter(tablet_ids.into_iter())
             .map(|tablet_id| async move {
-                log::info!("wait_meta_sync({:?}) for {:?}", ts, tablet_id);
                 self.shards.tablet(tablet_id)?.wait_meta_sync(ts).await?;
-                log::info!("wait_meta_sync({:?}) for {:?} -> done", ts, tablet_id);
                 Ok::<_, anyhow::Error>(())
             })
             .buffer_unordered(64)

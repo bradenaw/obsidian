@@ -3,12 +3,14 @@
 #![feature(iter_from_coroutine)]
 #![feature(thread_id_value)]
 
+mod election;
 mod gateway;
 mod grpc;
 mod lsm;
 mod meta;
 mod node;
 mod obsidian;
+mod replica;
 mod router;
 mod rtest;
 mod runtime;
@@ -66,6 +68,8 @@ pub(crate) use crate::types::ColoGroupId;
 pub(crate) use crate::types::Direction;
 pub(crate) use crate::types::HistoryRange;
 pub(crate) use crate::types::InternalError;
+pub(crate) use crate::types::JournalEntry;
+pub(crate) use crate::types::JournalSeq;
 pub(crate) use crate::types::Key;
 pub(crate) use crate::types::KeyOrBound;
 pub(crate) use crate::types::KeyspaceId;
@@ -80,10 +84,9 @@ pub(crate) use crate::types::Revision;
 pub(crate) use crate::types::RevisionValue;
 pub(crate) use crate::types::ShardId;
 pub(crate) use crate::types::TabletId;
+pub(crate) use crate::types::TabletJournalEntry;
 pub(crate) use crate::types::Timestamp;
 pub(crate) use crate::types::TransferId;
 pub(crate) use crate::types::TxOutcome;
 pub(crate) use crate::types::Txid;
-pub(crate) use crate::types::WalEntry;
-pub(crate) use crate::types::WalSeq;
 pub(crate) use crate::types::WriteError;
