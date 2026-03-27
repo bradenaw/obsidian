@@ -382,8 +382,6 @@ impl ShardMetaTabletInner {
         precond_keys: &BTreeSet<Key>,
         mut_keys: &BTreeSet<Key>,
     ) -> anyhow::Result<()> {
-        let lsm_rw = self.inner.lsm.read_write()?;
-
         let mut by_tablet = HashMap::new();
 
         for (keyspace_id, key) in precond_keys {
@@ -419,16 +417,6 @@ impl ShardMetaTabletInner {
         }
         future::try_join_all(futures).await?;
 
-        // TODO: mutual exclusion
-        let tx_outcome_key = txid.encode_fixed();
-        let _guard = self.inner.lock_mgr.write_lock(&tx_outcome_key[..]);
-        lsm_rw.write(
-            Timestamp::ZERO.plus_one(),
-            BTreeMap::from([(
-                (KeyspaceId::TX_OUTCOMES, tx_outcome_key.to_vec()),
-                Mutation::Delete,
-            )]),
-        );
         Ok(())
     }
 
