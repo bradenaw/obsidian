@@ -39,7 +39,7 @@ impl Obsidian for GatewayClient {
             .acquire()
             .await
             .get(pb::GetReq {
-                snapshot_ts: ts.as_nanos(),
+                snapshot_ts: ts.as_micros(),
                 keys: Vec::from([pb::Key::from(key.clone())]),
             })
             .await?
@@ -75,7 +75,7 @@ impl Obsidian for GatewayClient {
             .acquire()
             .await
             .scan(pb::ScanReq {
-                snapshot_ts: ts.as_nanos(),
+                snapshot_ts: ts.as_micros(),
                 keyspace_id: Some(keyspace_id.into()),
                 range: Some(range.to_vec().into()),
                 direction: pb::Direction::from(direction).into(),
@@ -106,7 +106,7 @@ impl Obsidian for GatewayClient {
             .await?
             .into_inner();
 
-        Ok(Timestamp::from_nanos(resp.snapshot_ts))
+        Ok(Timestamp::from_micros(resp.snapshot_ts))
     }
 
     async fn write(
@@ -137,7 +137,7 @@ impl Obsidian for GatewayClient {
             .map_err(anyhow::Error::from)?
             .into_inner();
 
-        let write_ts = Timestamp::from_nanos(resp.write_ts);
+        let write_ts = Timestamp::from_micros(resp.write_ts);
 
         Ok(write_ts)
     }

@@ -82,7 +82,7 @@ impl<'a> Block<'a> {
         // values in the block, and encode all of them using only that many. That means they're
         // fixed-size within a block and easy to search, but also do not take up much space.
         //
-        //   block_max_ts - block_min_ts       bytes needed for (timestamp, tombstone)
+        //   block_max_ts - block_min_ts       bytes needed for timestamp
         //   =========================================================================
         //   256us                             1
         //   ~66ms                             2
@@ -476,7 +476,7 @@ impl BlockBuilder {
         let timestamp_size = if self.buffer.is_empty() {
             1
         } else {
-            byte_width(self.max_ts.as_nanos() - self.min_ts.as_nanos())
+            byte_width(self.max_ts.as_micros() - self.min_ts.as_micros())
         };
         let n_keys = self.buffer.len();
         (self.key_size_estimate
@@ -579,7 +579,7 @@ impl<B> BlockVersionIndex<B> {
                     false => 0u64,
                 };
                 (
-                    (ts.as_nanos() - min_ts.as_nanos()),
+                    (ts.as_micros() - min_ts.as_micros()),
                     (*value_offset as u64) << 1 | tombstone_bit,
                 )
             })
@@ -587,7 +587,7 @@ impl<B> BlockVersionIndex<B> {
 
         PackedVec2::<()>::write(out, &packed);
         let mut footer = [0u8; 12];
-        LittleEndian::write_u64(&mut footer[..8], min_ts.as_nanos());
+        LittleEndian::write_u64(&mut footer[..8], min_ts.as_micros());
         LittleEndian::write_u32(&mut footer[8..], values_len);
         out.extend_from_slice(&footer[..])
     }
@@ -599,7 +599,7 @@ impl<B: Deref<Target = [u8]> + Slice> BlockVersionIndex<B> {
             return Err(anyhow!("BlockVersionIndex too short: {} < {}", b.len(), 12));
         }
 
-        let min_ts = Timestamp::from_nanos(LittleEndian::read_u64(&b[b.len() - 12..b.len() - 4]));
+        let min_ts = Timestamp::from_micros(LittleEndian::read_u64(&b[b.len() - 12..b.len() - 4]));
         let values_len = LittleEndian::read_u32(&b[b.len() - 4..]);
         let packed_end = b.len() - 12;
 
@@ -616,7 +616,7 @@ impl<B: Deref<Target = [u8]> + Slice> BlockVersionIndex<B> {
 
     pub(super) fn elem(&self, idx: usize) -> (Timestamp, bool, u32) {
         let (ts_offset, value_offset_and_tombstone) = self.encoded.get(idx);
-        let ts = Timestamp::from_nanos(ts_offset + self.min_ts.as_nanos());
+        let ts = Timestamp::from_micros(ts_offset + self.min_ts.as_micros());
         let tombstone = value_offset_and_tombstone & 1 == 1;
         let value_offset = (value_offset_and_tombstone >> 1) as u32;
 

@@ -10,15 +10,15 @@ pub(crate) struct AtomicTimestamp {
 impl AtomicTimestamp {
     pub fn new(ts: Timestamp) -> Self {
         Self {
-            inner: AtomicU64::new(ts.as_nanos()),
+            inner: AtomicU64::new(ts.as_micros()),
         }
     }
 
     pub fn load(&self) -> Timestamp {
-        Timestamp::from_nanos(self.inner.load(Ordering::SeqCst))
+        Timestamp::from_micros(self.inner.load(Ordering::SeqCst))
     }
 
     pub fn store(&self, ts: Timestamp) {
-        self.inner.store(ts.as_nanos(), Ordering::SeqCst);
+        self.inner.store(ts.as_micros(), Ordering::SeqCst);
     }
 }

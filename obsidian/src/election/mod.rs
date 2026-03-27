@@ -551,7 +551,7 @@ where
                 let ts = Timestamp::now_after(last_ts);
                 last_ts = ts;
                 let lease_end =
-                    Timestamp::from_nanos(ts.as_nanos() + (self.lease_duration.as_nanos() as u64));
+                    Timestamp::from_micros(ts.as_micros() + (self.lease_duration.as_micros() as u64));
                 pending_acquire = Some(Instant::now());
                 self.propose_at(participant_id, ts, ProposalType::Acquire { lease_end });
                 try_acquire = false;

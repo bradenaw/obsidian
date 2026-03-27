@@ -476,7 +476,7 @@ impl From<TxOutcomeRecord> for pb::internal::TxOutcomeRecord {
                     mut_keys,
                 } => Some(pb::internal::tx_outcome_record::OutcomeType::Committed(
                     pb::internal::tx_outcome_record::Committed {
-                        ts: ts.as_nanos(),
+                        ts: ts.as_micros(),
                         precond_keys: Some(precond_keys.into()),
                         mut_keys: Some(mut_keys.into()),
                     },
@@ -501,7 +501,7 @@ impl TryFrom<pb::internal::TxOutcomeRecord> for TxOutcomeRecord {
                     mut_keys,
                 },
             )) => TxOutcomeRecord::Committed {
-                ts: Timestamp::from_nanos(ts),
+                ts: Timestamp::from_micros(ts),
                 mut_keys: BTreeSet::<Key>::try_from(
                     mut_keys.ok_or_else(|| anyhow!("missing mut_keys"))?,
                 )?,

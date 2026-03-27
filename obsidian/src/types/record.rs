@@ -22,7 +22,7 @@ impl TryFrom<pb::Record> for Record {
             .key
             .ok_or_else(|| anyhow!("missing key"))?
             .try_into()?;
-        let ts = Timestamp::from_nanos(value.ts);
+        let ts = Timestamp::from_micros(value.ts);
 
         Ok(Self {
             key,
@@ -36,7 +36,7 @@ impl From<Record> for pb::Record {
     fn from(value: Record) -> Self {
         Self {
             key: Some(value.key.into()),
-            ts: value.ts.as_nanos(),
+            ts: value.ts.as_micros(),
             value: value.value,
         }
     }

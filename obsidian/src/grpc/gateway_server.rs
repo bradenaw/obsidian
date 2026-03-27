@@ -39,7 +39,7 @@ impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for GatewayServer<O> {
         let req_inner = req.into_inner();
 
         let (keys, key_idxs) = key_set_from_pb(req_inner.keys).map_err(invalid_argument)?;
-        let ts = Timestamp::from_nanos(req_inner.snapshot_ts);
+        let ts = Timestamp::from_micros(req_inner.snapshot_ts);
 
         if keys.len() != 1 {
             return Err(tonic::Status::invalid_argument(
@@ -95,7 +95,7 @@ impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for GatewayServer<O> {
         }
 
         Ok(tonic::Response::new(pb::GetLatestResp {
-            snapshot_ts: ts.as_nanos(),
+            snapshot_ts: ts.as_micros(),
             results: options_to_get_results(values),
         }))
     }
@@ -106,7 +106,7 @@ impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for GatewayServer<O> {
     ) -> Result<tonic::Response<pb::ScanResp>, tonic::Status> {
         let req_inner = req.into_inner();
 
-        let snapshot_ts = Timestamp::from_nanos(req_inner.snapshot_ts);
+        let snapshot_ts = Timestamp::from_micros(req_inner.snapshot_ts);
         let keyspace_id: KeyspaceId = required("keyspace_id", req_inner.keyspace_id)?;
         let range: Range<Vec<u8>> = required("range", req_inner.range)?;
         let direction: Direction = pb::Direction::from_i32(req_inner.direction)
@@ -176,7 +176,7 @@ impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for GatewayServer<O> {
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
         Ok(tonic::Response::new(pb::WriteResp {
-            write_ts: ts.as_nanos(),
+            write_ts: ts.as_micros(),
         }))
     }
 

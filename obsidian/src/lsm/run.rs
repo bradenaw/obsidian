@@ -376,8 +376,8 @@ impl RunTrailer {
             ColoGroupId(LittleEndian::read_u32(&trailer[16..20])),
             LittleEndian::read_u32(&trailer[20..24]),
         );
-        let min_ts = Timestamp::from_nanos(LittleEndian::read_u64(&trailer[24..32]));
-        let max_ts = Timestamp::from_nanos(LittleEndian::read_u64(&trailer[32..40]));
+        let min_ts = Timestamp::from_micros(LittleEndian::read_u64(&trailer[24..32]));
+        let max_ts = Timestamp::from_micros(LittleEndian::read_u64(&trailer[32..40]));
         let index_offset = LittleEndian::read_u64(&trailer[40..48]);
         let index_len = LittleEndian::read_u64(&trailer[48..56]);
         let max_key_offset = LittleEndian::read_u64(&trailer[56..64]);
@@ -405,8 +405,8 @@ impl RunTrailer {
         trailer[0..16].copy_from_slice(&self.id.encode_fixed()[..]);
         LittleEndian::write_u32(&mut trailer[16..20], self.keyspace_id.0 .0);
         LittleEndian::write_u32(&mut trailer[20..24], self.keyspace_id.1);
-        LittleEndian::write_u64(&mut trailer[24..32], self.min_ts.as_nanos());
-        LittleEndian::write_u64(&mut trailer[32..40], self.max_ts.as_nanos());
+        LittleEndian::write_u64(&mut trailer[24..32], self.min_ts.as_micros());
+        LittleEndian::write_u64(&mut trailer[32..40], self.max_ts.as_micros());
         LittleEndian::write_u64(&mut trailer[40..48], self.index_offset);
         LittleEndian::write_u64(&mut trailer[48..56], self.index_len);
         LittleEndian::write_u64(&mut trailer[56..64], self.max_key_offset);

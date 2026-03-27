@@ -25,7 +25,7 @@ impl Txid {
             ts: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos() as u64,
+                .as_micros() as u64,
             rand: rand::random(),
             owner,
         }

@@ -11,11 +11,11 @@ impl Timestamp {
     pub const MAX: Self = Timestamp(u64::MAX);
 
     pub fn now() -> Self {
-        Timestamp::from_nanos(
+        Timestamp::from_micros(
             SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("now before UNIX_EPOCH?")
-                .as_nanos() as u64,
+                .as_micros() as u64,
         )
     }
 
@@ -23,11 +23,11 @@ impl Timestamp {
         std::cmp::max(Timestamp(other.0 + 1), Self::now())
     }
 
-    pub fn from_nanos(x: u64) -> Self {
+    pub fn from_micros(x: u64) -> Self {
         Timestamp(x)
     }
 
-    pub fn as_nanos(&self) -> u64 {
+    pub fn as_micros(&self) -> u64 {
         self.0
     }
 
@@ -40,11 +40,11 @@ impl Timestamp {
     }
 
     pub fn checked_duration_since(&self, earlier: Timestamp) -> Option<Duration> {
-        self.0.checked_sub(earlier.0).map(Duration::from_nanos)
+        self.0.checked_sub(earlier.0).map(Duration::from_micros)
     }
 
     pub fn saturating_duration_since(&self, earlier: Timestamp) -> Duration {
-        Duration::from_nanos(self.0.saturating_sub(earlier.0))
+        Duration::from_micros(self.0.saturating_sub(earlier.0))
     }
 }
 

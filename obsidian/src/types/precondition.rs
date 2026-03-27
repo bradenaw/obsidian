@@ -35,7 +35,7 @@ impl TryFrom<pb::Precondition> for Precondition {
                     .key
                     .ok_or_else(|| anyhow!("missing key"))?
                     .try_into()?;
-                let ts = Timestamp::from_nanos(not_changed_since.ts);
+                let ts = Timestamp::from_micros(not_changed_since.ts);
                 Ok(Precondition::NotChangedSince(keyspace_id, key_bytes, ts))
             }
             None => return Err(anyhow!("missing precond_type on Precondition")),
