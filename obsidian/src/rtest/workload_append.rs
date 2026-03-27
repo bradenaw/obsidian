@@ -334,10 +334,10 @@ fn gen_graph(histories: &Vec<Vec<(Seq, HistoryItem)>>) -> anyhow::Result<Graph<T
 
     for (list_id, longest) in &longests {
         let mut prev_txid: Option<Txid> = None;
-        println!("{:?} longest {:?}", list_id, longest);
+        log::debug!("{:?} longest {:?}", list_id, longest);
         for txid in longest {
             if let Some(prev_txid) = prev_txid {
-                println!("  {:?} -ww-> {:?}", txid, prev_txid);
+                log::debug!("  {:?} -ww-> {:?}", txid, prev_txid);
                 graph.insert(*txid, EdgeType::WriteWrite, prev_txid);
             }
 
@@ -377,18 +377,18 @@ fn gen_graph(histories: &Vec<Vec<(Seq, HistoryItem)>>) -> anyhow::Result<Graph<T
     let mut most_recent_txid = HashMap::new();
     let mut highest_timestamp: HashMap<ListId, (Timestamp, Txid)> = HashMap::new();
     for OrdEqByFirst(seq, (thread_id, item)) in merged_history {
-        println!("{:?}: thread {}: {:?}", seq, thread_id, item);
+        log::debug!("{:?}: thread {}: {:?}", seq, thread_id, item);
         match item {
             HistoryItem::StartRead(txid) | HistoryItem::StartAppend(txid, _) => {
                 for other_txid in most_recent_txid.values() {
-                    println!("  {:?} -rt-> {:?}", txid, other_txid);
+                    log::debug!("  {:?} -rt-> {:?}", txid, other_txid);
                     graph.insert(*txid, EdgeType::RealTime, *other_txid);
                 }
             }
             HistoryItem::Commit(txid, ts, list_id) => {
                 if let Some((other_ts, other_txid)) = highest_timestamp.get(list_id) {
                     if ts > other_ts {
-                        println!("  {:?} -ts-> {:?}", txid, other_txid);
+                        log::debug!("  {:?} -ts-> {:?}", txid, other_txid);
                         graph.insert(*txid, EdgeType::SameKeyTimestamp, *other_txid);
                         highest_timestamp.insert(*list_id, (*ts, *txid));
                     }
@@ -398,7 +398,7 @@ fn gen_graph(histories: &Vec<Vec<(Seq, HistoryItem)>>) -> anyhow::Result<Graph<T
             }
             HistoryItem::FinishRead(txid, _, list_id, txids) => {
                 if let Some(last_txid) = txids.last() {
-                    println!("  {:?} -wr-> {:?}", txid, last_txid);
+                    log::debug!("  {:?} -wr-> {:?}", txid, last_txid);
                     graph.insert(*txid, EdgeType::WriteRead, *last_txid);
                 }
 
@@ -413,7 +413,7 @@ fn gen_graph(histories: &Vec<Vec<(Seq, HistoryItem)>>) -> anyhow::Result<Graph<T
                 }
 
                 if !longest.is_empty() && longest.len() > txids.len() {
-                    println!("  {:?} -rw-> {:?}", longest[txids.len()], txid);
+                    log::debug!("  {:?} -rw-> {:?}", longest[txids.len()], txid);
                     graph.insert(longest[txids.len()], EdgeType::ReadWrite, *txid);
                 }
             }
