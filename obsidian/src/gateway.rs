@@ -210,16 +210,9 @@ impl Obsidian for Gateway {
                     }
                 }
                 if !wait_conflicts.is_empty() {
-                    future::try_join_all(wait_conflicts.iter().cloned().map(
-                        |other_txid| async move {
-                            let tablet =
-                                self.shards.tablet(TabletId::shard_meta(other_txid.owner))?;
-                            tablet.wait(other_txid).await
-                        },
-                    ))
-                    .await
-                    .map_err(|e| WriteError::Other(e.into()))?;
-
+                    self.wait_all(&wait_conflicts)
+                        .await
+                        .map_err(|e| WriteError::Other(e.into()))?;
                     for other_txid in wait_conflicts {
                         already_seen_conflicts.insert(other_txid);
                     }
@@ -410,6 +403,26 @@ impl Gateway {
                 }
             })
             .await
+    }
+
+    async fn wait_all(&self, txids: &BTreeSet<Txid>) -> Result<(), InternalError> {
+        let mut futures = FuturesUnordered::new();
+        for txid in txids {
+            futures.push(async move {
+                let tablet = self.shards.tablet(TabletId::shard_meta(txid.owner))?;
+                tablet.wait(*txid).await
+            });
+        }
+        while let Some(result) = futures.next().await {
+            match result {
+                // TxOutcomeMissing happens when the cleanup has already finished before we get
+                // there, which means we got what we wanted.
+                Ok(_) | Err(InternalError::TxOutcomeMissing) => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(())
     }
 
     async fn sync_meta(&self) -> anyhow::Result<()> {

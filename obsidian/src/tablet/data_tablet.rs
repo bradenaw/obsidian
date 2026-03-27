@@ -493,7 +493,13 @@ impl DataTabletInner {
         prepare_type: PrepareType,
     ) -> anyhow::Result<()> {
         let owner_tablet = self.shards.tablet(TabletId::shard_meta(txid.owner()))?;
-        let tx_outcome = owner_tablet.wait(txid).await?;
+        let tx_outcome = match owner_tablet.wait(txid).await {
+            Ok(tx_outcome) => tx_outcome,
+            // This implies that the other side already successfully cleaned this up by calling
+            // cleanup_committed on us, so we don't need to do anything.
+            Err(InternalError::TxOutcomeMissing) => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
         // Commits get cleaned up by the owner tablet calling cleanup_committed. Ignore them
         // here to avoid duplicating work.
         if let TxOutcome::Aborted = tx_outcome {

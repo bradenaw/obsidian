@@ -8,6 +8,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::anyhow;
+use anyhow::Context;
 use async_trait::async_trait;
 use futures::future;
 use futures::StreamExt;
@@ -364,7 +365,10 @@ impl ShardMetaTabletInner {
             Retry::new()
                 .indefinitely(&async || -> anyhow::Result<()> {
                     self.cleanup_one_committed_outcome(txid, ts, &precond_keys, &mut_keys)
-                        .await?;
+                        .await
+                        .with_context(|| {
+                            format!("error while cleaning up committed outcome for {:?}", txid)
+                        })?;
                     Ok::<_, anyhow::Error>(())
                 })
                 .await;
