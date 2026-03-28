@@ -124,6 +124,7 @@ impl WorkloadAppend {
         println!("find_cycle took {:?}", find_cycle_start.elapsed());
 
         if let Some(cycle) = maybe_cycle {
+            println!("Arrows show dependencies (i.e., reverse of implied chronological order).");
             for i in 0..cycle.len() {
                 let curr = cycle[i].0;
                 let next = if i == cycle.len() - 1 {
@@ -142,10 +143,9 @@ impl WorkloadAppend {
             );
 
             println!("");
-            println!("arrows show the observed chronology");
             for (i, (txid, next_edge)) in cycle.iter().enumerate() {
                 let edge_expl = match next_edge {
-                    EdgeType::RealTime => "[rt] happened before",
+                    EdgeType::RealTime => "[rt] happened after",
                     EdgeType::SameKeyTimestamp => {
                         "[ts] observed a lower timestamp of the same key as"
                     }
@@ -167,7 +167,7 @@ impl WorkloadAppend {
                     println!("  │     v");
                 }
             }
-            println!("a contradiction! these events appear to have happened both before and after one another");
+            println!("A contradiction! These events appear to have happened both before and after one another.");
             return Err(anyhow!("cycle found"));
         }
 
@@ -457,7 +457,14 @@ impl Debug for TxResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TxResult::Read(ts, list_id, list_items) => {
-                write!(f, "read({}, {:?}) -> {:?}", ts, list_id, list_items)?;
+                write!(f, "read({}, {:?}) -> [", ts, list_id)?;
+                for (i, list_item) in list_items.iter().enumerate() {
+                    if i != 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", list_item.0)?;
+                }
+                write!(f, "]")?;
             }
             TxResult::Append(txid, list_id, write_result) => {
                 write!(f, "append({:?}, {:?}), {:?}", list_id, txid, write_result)?;
