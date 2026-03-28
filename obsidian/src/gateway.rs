@@ -149,6 +149,7 @@ impl Obsidian for Gateway {
         }
 
         let mut already_seen_conflicts = HashSet::new();
+        let mut any_prepare_succeeded = false;
         for i in 0..MAX_CONFLICT_RETRIES {
             if i != 0 {
                 sleep_for_retry(
@@ -158,107 +159,35 @@ impl Obsidian for Gateway {
                 )
                 .await;
             }
-            let mut pending_tablets: BTreeSet<_> = write_by_tablet.keys().collect();
-            let mut max_prepare_ts = Timestamp::ZERO;
-            let tablets = write_by_tablet
-                .keys()
-                .copied()
-                .chain(std::iter::once(TabletId::shard_meta(owner_shard_id)))
-                .map(|tablet_id| {
-                    self.shards
-                        .tablet(tablet_id)
-                        .map(|tablet| (tablet_id, tablet))
-                })
-                .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
 
-            let mut j = 0;
-            while !pending_tablets.is_empty() {
-                let mut prepare_futures = Vec::with_capacity(write_by_tablet.len());
-                for tablet_id in &pending_tablets {
-                    let (tablet_preconds, tablet_muts) = write_by_tablet.get(tablet_id).unwrap();
-                    let tablet_id = *tablet_id;
-                    let tablet = tablets.get(&tablet_id).unwrap();
-                    prepare_futures.push(async move {
-                        (
-                            tablet_id,
-                            tablet
-                                .prepare(txid, tablet_preconds.to_vec(), tablet_muts.clone())
-                                .await,
-                        )
-                    });
-                }
-                let prepare_results = future::join_all(prepare_futures).await;
-                let mut preempt_conflicts = BTreeSet::new();
-                let mut wait_conflicts = BTreeSet::new();
-                let mut saw_an_already_seen = false;
-                for (tablet_id, prepare_result) in prepare_results {
-                    match prepare_result {
-                        Ok(prepare_ts) => {
-                            pending_tablets.remove(&tablet_id);
-                            max_prepare_ts = cmp::max(max_prepare_ts, prepare_ts);
-                        }
-                        Err(InternalError::Conflict(other_txid)) => {
-                            if already_seen_conflicts.contains(&other_txid) {
-                                saw_an_already_seen = true;
-                            } else if txid.can_preempt(&other_txid) {
-                                preempt_conflicts.insert(other_txid);
-                            } else {
-                                wait_conflicts.insert(other_txid);
-                            }
-                        }
-                        Err(e) => return Err(WriteError::Other(e.into())),
-                    }
-                }
-                if !wait_conflicts.is_empty() {
-                    self.wait_all(&wait_conflicts)
-                        .await
-                        .map_err(|e| WriteError::Other(e.into()))?;
-                    for other_txid in wait_conflicts {
-                        already_seen_conflicts.insert(other_txid);
-                    }
-                }
-                if !preempt_conflicts.is_empty() {
-                    future::try_join_all(preempt_conflicts.iter().cloned().map(
-                        |other_txid| async move {
-                            let tablet =
-                                self.shards.tablet(TabletId::shard_meta(other_txid.owner))?;
-                            tablet.try_abort(other_txid).await
-                        },
-                    ))
-                    .await
-                    .map_err(|e| WriteError::Other(e.into()))?;
-                    for other_txid in preempt_conflicts {
-                        already_seen_conflicts.insert(other_txid);
-                    }
-                }
-                if saw_an_already_seen {
-                    sleep_for_retry(j, Duration::from_millis(10), Duration::from_millis(5000))
-                        .await;
-                }
-                j += 1
-            }
-            // We have to commit at a _higher_ timestamp so that the resolution of the pending
-            // records is at a higher timestamp than the pending records themselves.
-            let commit_ts = max_prepare_ts.plus_one();
-
-            match tablets
-                .get(&TabletId::shard_meta(owner_shard_id))
-                .unwrap()
-                .try_commit(
+            match self
+                .write_2pc_one_try(
                     txid,
-                    commit_ts,
-                    preconds
-                        .iter()
-                        .map(|precond| (precond.keyspace_id(), precond.key().to_vec()))
-                        .collect(),
-                    muts.keys().cloned().collect(),
+                    &write_by_tablet,
+                    &mut already_seen_conflicts,
+                    &mut any_prepare_succeeded,
                 )
-                .await?
+                .await
             {
-                TxOutcome::Committed(commit_ts) => return Ok(commit_ts),
-                TxOutcome::Aborted => {
+                Ok(TxOutcome::Committed(commit_ts)) => return Ok(commit_ts),
+                Ok(TxOutcome::Aborted) => {
                     txid = txid.next();
                     continue;
+                }
+                Err(e) => {
+                    // If any prepare succeeded then there might be other operations waiting for
+                    // this abort. It's a little wasteful for them to have to wait out the abort
+                    // timeout since we are going to abandon this transaction.
+                    if any_prepare_succeeded {
+                        // Don't return any errors from doing this because we want to surface `e`,
+                        // the actual cause.
+                        if let Ok(owner_tablet) =
+                            self.shards.tablet(TabletId::shard_meta(txid.owner))
+                        {
+                            let _ = owner_tablet.try_abort(txid).await;
+                        }
+                    }
+                    return Err(e);
                 }
             }
         }
@@ -423,6 +352,126 @@ impl Gateway {
         }
 
         Ok(())
+    }
+
+    async fn write_2pc_one_try(
+        &self,
+        txid: Txid,
+        write_by_tablet: &BTreeMap<
+            TabletId,
+            (Vec<Precondition>, BTreeMap<(KeyspaceId, Vec<u8>), Mutation>),
+        >,
+        already_seen_conflicts: &mut HashSet<Txid>,
+        any_prepare_succeeded: &mut bool,
+    ) -> Result<TxOutcome, WriteError> {
+        let mut pending_tablets: BTreeSet<_> = write_by_tablet.keys().collect();
+        let mut max_prepare_ts = Timestamp::ZERO;
+        let tablets = write_by_tablet
+            .keys()
+            .copied()
+            .chain(std::iter::once(TabletId::shard_meta(txid.owner)))
+            .map(|tablet_id| {
+                self.shards
+                    .tablet(tablet_id)
+                    .map(|tablet| (tablet_id, tablet))
+            })
+            .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+
+        let mut j = 0;
+        while !pending_tablets.is_empty() {
+            let mut prepare_futures = Vec::with_capacity(write_by_tablet.len());
+            for tablet_id in &pending_tablets {
+                let (tablet_preconds, tablet_muts) = write_by_tablet.get(tablet_id).unwrap();
+                let tablet_id = *tablet_id;
+                let tablet = tablets.get(&tablet_id).unwrap();
+                prepare_futures.push(async move {
+                    (
+                        tablet_id,
+                        tablet
+                            .prepare(txid, tablet_preconds.to_vec(), tablet_muts.clone())
+                            .await,
+                    )
+                });
+            }
+            let prepare_results = future::join_all(prepare_futures).await;
+            let mut preempt_conflicts = BTreeSet::new();
+            let mut wait_conflicts = BTreeSet::new();
+            let mut saw_an_already_seen = false;
+            *any_prepare_succeeded =
+                *any_prepare_succeeded || prepare_results.iter().any(|(_, result)| result.is_ok());
+            for (tablet_id, prepare_result) in prepare_results {
+                match prepare_result {
+                    Ok(prepare_ts) => {
+                        pending_tablets.remove(&tablet_id);
+                        max_prepare_ts = cmp::max(max_prepare_ts, prepare_ts);
+                    }
+                    Err(InternalError::Conflict(other_txid)) => {
+                        if already_seen_conflicts.contains(&other_txid) {
+                            saw_an_already_seen = true;
+                        } else if txid.can_preempt(&other_txid) {
+                            preempt_conflicts.insert(other_txid);
+                        } else {
+                            wait_conflicts.insert(other_txid);
+                        }
+                    }
+                    // TODO: If any of the prepares succeeded we should go ahead and abort
+                    // ourselves so that we don't have other transactions waiting around for
+                    // the timeout.
+                    Err(e) => return Err(WriteError::Other(e.into())),
+                }
+            }
+            if !wait_conflicts.is_empty() {
+                self.wait_all(&wait_conflicts)
+                    .await
+                    .map_err(|e| WriteError::Other(e.into()))?;
+                for other_txid in wait_conflicts {
+                    already_seen_conflicts.insert(other_txid);
+                }
+            }
+            if !preempt_conflicts.is_empty() {
+                future::try_join_all(preempt_conflicts.iter().cloned().map(
+                    |other_txid| async move {
+                        let tablet = self.shards.tablet(TabletId::shard_meta(other_txid.owner))?;
+                        tablet.try_abort(other_txid).await
+                    },
+                ))
+                .await
+                .map_err(|e| WriteError::Other(e.into()))?;
+                for other_txid in preempt_conflicts {
+                    already_seen_conflicts.insert(other_txid);
+                }
+            }
+            if saw_an_already_seen {
+                sleep_for_retry(j, Duration::from_millis(10), Duration::from_millis(5000)).await;
+            }
+            j += 1
+        }
+        // We have to commit at a _higher_ timestamp so that the resolution of the pending
+        // records is at a higher timestamp than the pending records themselves.
+        let commit_ts = max_prepare_ts.plus_one();
+
+        let precond_keys: BTreeSet<_> = write_by_tablet
+            .values()
+            .map(|(preconds, _)| {
+                preconds
+                    .iter()
+                    .map(|precond| (precond.keyspace_id(), precond.key().to_vec()))
+            })
+            .flatten()
+            .collect();
+
+        let mut_keys: BTreeSet<_> = write_by_tablet
+            .values()
+            .map(|(_, muts)| muts.keys())
+            .flatten()
+            .cloned()
+            .collect();
+
+        Ok(tablets
+            .get(&TabletId::shard_meta(txid.owner))
+            .unwrap()
+            .try_commit(txid, commit_ts, precond_keys, mut_keys)
+            .await?)
     }
 
     async fn sync_meta(&self) -> anyhow::Result<()> {
