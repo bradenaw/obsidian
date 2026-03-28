@@ -427,7 +427,7 @@ impl TabletInner {
         keyspace_id: KeyspaceId,
         range: Range<Vec<u8>>,
         direction: Direction,
-    ) -> impl Stream<Item = anyhow::Result<Record>> + '_ {
+    ) -> impl Stream<Item = Result<Record, InternalError>> + '_ {
         scan_all(
             move |ts, keyspace_id, range, direction| async move {
                 self.scan_page(ts, keyspace_id, range.borrow(), direction, 1000)
@@ -539,7 +539,7 @@ fn scan_all<F, Fut>(
     keyspace_id: KeyspaceId,
     range: Range<Vec<u8>>,
     direction: Direction,
-) -> impl Stream<Item = anyhow::Result<Record>>
+) -> impl Stream<Item = Result<Record, InternalError>>
 where
     F: Fn(Timestamp, KeyspaceId, Range<Vec<u8>>, Direction) -> Fut,
     Fut: Future<Output = Result<(Vec<Record>, Option<Range<Vec<u8>>>), InternalError>>,
@@ -639,19 +639,25 @@ impl Decode for PrecondLocks {
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::max;
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    use futures::StreamExt;
 
     use crate::lsm::Lsm;
     use crate::lsm::LsmOptions;
     use crate::meta::TabletState;
     use crate::tablet::protected::ProtectedLsm;
+    use crate::tablet::tablet_inner::PendingMutation;
     use crate::tablet::tablet_inner::TabletInner;
     use crate::tablet::tablet_journal_writer::TabletJournalWriter;
     use crate::test::MemStorage;
+    use crate::util::encode;
+    use crate::Bound;
     use crate::ColoGroupId;
+    use crate::Direction;
     use crate::InternalError;
     use crate::KeyspaceId;
     use crate::Mutation;
@@ -662,6 +668,7 @@ mod tests {
     use crate::TabletId;
     use crate::TabletJournalEntry;
     use crate::Timestamp;
+    use crate::Txid;
 
     struct NoopJournalWriter {}
 
@@ -782,6 +789,81 @@ mod tests {
                 .get(write_1_ts, &(keyspace_id, kb.to_vec()))
                 .await?,
             None,
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_scan_conflict() -> anyhow::Result<()> {
+        let _ = pretty_env_logger::try_init();
+        let lsm = Lsm::empty(LsmOptions::default(), Arc::new(MemStorage::new())).await?;
+
+        let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
+
+        lsm.create_keyspace(keyspace_id);
+        lsm.create_keyspace(keyspace_id.pending().unwrap());
+
+        let tablet_id = TabletId(ShardId(1), 1);
+        let tablet_inner = TabletInner::new(
+            tablet_id,
+            keyspace_id.0,
+            Range::all(),
+            ProtectedLsm::new(tablet_id, lsm, TabletState::Active),
+            Arc::new(NoopJournalWriter {}),
+        );
+
+        let mut ts = Timestamp::ZERO;
+
+        for i in 0..20 {
+            ts = max(
+                ts,
+                tablet_inner
+                    .write(
+                        vec![],
+                        BTreeMap::from([((keyspace_id, vec![i as u8]), Mutation::Put(vec![]))]),
+                    )
+                    .await?,
+            );
+        }
+
+        let other_txid = Txid::new(ShardId(0));
+
+        ts = max(
+            ts,
+            tablet_inner
+                .write(
+                    vec![],
+                    BTreeMap::from([(
+                        (keyspace_id.pending().unwrap(), vec![20u8]),
+                        Mutation::Put(encode(&PendingMutation {
+                            txid: other_txid,
+                            m: Mutation::Put(vec![]),
+                        })),
+                    )]),
+                )
+                .await?,
+        );
+
+        let scan = tablet_inner.scan_all(
+            ts,
+            keyspace_id,
+            Range {
+                lower: Bound::Before(vec![0]),
+                upper: Bound::After(vec![20]),
+            },
+            Direction::Asc,
+        );
+
+        assert_eq!(
+            scan.any(async |result| {
+                if let Err(InternalError::Conflict(conflict_txid)) = result {
+                    return conflict_txid == other_txid;
+                }
+                false
+            })
+            .await,
+            true,
         );
 
         Ok(())
