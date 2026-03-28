@@ -41,6 +41,7 @@ use crate::Timestamp;
 
 struct WorkloadAppend {
     obsidian: Arc<dyn Obsidian>,
+    options: WorkloadAppendOptions,
 
     list_keyspace_id: KeyspaceId,
     list_item_keyspace_id: KeyspaceId,
@@ -49,14 +50,29 @@ struct WorkloadAppend {
     txid_gen: AtomicUsize,
 }
 
+struct WorkloadAppendOptions {
+    duration: Duration,
+    /// The number of worker threads to run concurrently. More total threads may be run than this,
+    /// because when a write terminates indeterminately we abandon the worker thread for the sake
+    /// of preserving ordering semantics - the write may still complete in the future, so we cannot
+    /// continue using the same thread because the thread's actions imply ordering. In that case,
+    /// we'll terminate the indeterminate thread and spawn a new one.
+    concurrency: usize,
+    /// The number of lists that actions have to choose between. Fewer lists means more contention.
+    n_lists: usize,
+    /// The fraction of operations that are writes, versus reads.
+    write_fraction: f64,
+}
+
 // This is an implementation (more or less) of the techniques described in Elle, slightly
 // customized for Obsidian.
 //
 // https://github.com/jepsen-io/elle/raw/master/paper/elle.pdf
 impl WorkloadAppend {
-    fn new(obsidian: Arc<dyn Obsidian>) -> Self {
+    fn new(obsidian: Arc<dyn Obsidian>, options: WorkloadAppendOptions) -> Self {
         Self {
             obsidian,
+            options,
 
             list_keyspace_id: KeyspaceId(ColoGroupId(1), 1),
             list_item_keyspace_id: KeyspaceId(ColoGroupId(1), 2),
@@ -68,8 +84,8 @@ impl WorkloadAppend {
     async fn run(self: &Arc<Self>) -> anyhow::Result<()> {
         let mut futures = FuturesUnordered::new();
         let workload_start = Instant::now();
-        let workload_deadline = workload_start + Duration::from_millis(5_000);
-        for _ in 0..32 {
+        let workload_deadline = workload_start + self.options.duration;
+        for _ in 0..self.options.concurrency {
             let self_ = self.clone();
             futures.push(tokio::spawn(async move {
                 self_.thread(workload_deadline).await
@@ -108,7 +124,6 @@ impl WorkloadAppend {
         println!("find_cycle took {:?}", find_cycle_start.elapsed());
 
         if let Some(cycle) = maybe_cycle {
-            println!("expected cycle {:?}", cycle);
             for i in 0..cycle.len() {
                 let curr = cycle[i].0;
                 let next = if i == cycle.len() - 1 {
@@ -130,13 +145,13 @@ impl WorkloadAppend {
             println!("arrows show the observed chronology");
             for (i, (txid, next_edge)) in cycle.iter().enumerate() {
                 let edge_expl = match next_edge {
-                    EdgeType::RealTime => "[rt] which happened before",
+                    EdgeType::RealTime => "[rt] happened before",
                     EdgeType::SameKeyTimestamp => {
-                        "[ts] which observed a lower timestamp of the same key as"
+                        "[ts] observed a lower timestamp of the same key as"
                     }
-                    EdgeType::WriteWrite => "[ww] which wrote the version later overwritten by",
-                    EdgeType::WriteRead => "[wr] which wrote the version seen by",
-                    EdgeType::ReadWrite => "[rw] saw the version before the one written by",
+                    EdgeType::WriteWrite => "[ww] wrote the version later overwritten by",
+                    EdgeType::WriteRead => "[wr] wrote the version seen by",
+                    EdgeType::ReadWrite => "[rw] wrote the version after the one seen by",
                 };
 
                 if i == 0 {
@@ -164,7 +179,7 @@ impl WorkloadAppend {
         while Instant::now() < deadline {
             let txid = self.new_txid();
 
-            let choice = thread_rng().gen_bool(0.1);
+            let choice = thread_rng().gen_bool(self.options.write_fraction);
             match choice {
                 true => {
                     let list_id = self.choose_list();
@@ -289,7 +304,7 @@ impl WorkloadAppend {
     }
 
     fn choose_list(&self) -> ListId {
-        ListId(thread_rng().gen_range(0..10))
+        ListId(thread_rng().gen_range(0..(self.options.n_lists as u64)))
     }
 
     fn new_txid(&self) -> Txid {
@@ -445,8 +460,7 @@ impl Debug for TxResult {
                 write!(f, "read({}, {:?}) -> {:?}", ts, list_id, list_items)?;
             }
             TxResult::Append(txid, list_id, write_result) => {
-                write!(f, "append({:?}, {:?}), ", list_id, txid)?;
-                Debug::fmt(write_result, f)?;
+                write!(f, "append({:?}, {:?}), {:?}", list_id, txid, write_result)?;
             }
         }
         Ok(())
@@ -660,18 +674,21 @@ enum HistoryItem {
     Commit(Txid, Timestamp, ListId),
 }
 
-// Dependency edges between two transactions T1 and T2.
+// Dependency edges between two transactions A and B.
+//
+// Because they're dependency edges, they go in the opposite direction of the chronology they imply
+// - an edge from A to B means B must have occurred first.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EdgeType {
-    // T1 finished before T2 started.
+    // A -rt-> B means that B finished before A started.
     RealTime,
-    // T1 executed at some timestamp and T2 executed at a higher timestamp on the same key.
+    // A -ts-> B means that A executed at a higher timestamp on the same key.
     SameKeyTimestamp,
-    // T1 wrote a version and T2 wrote the next version.
+    // A -ww-> B means that A wrote the next version of a key that B wrote.
     WriteWrite,
-    // T1 wrote a version and T2 read that version.
+    // A -wr-> B means A observed the version that B wrote.
     WriteRead,
-    // T1 read a version and T2 installed a later version.
+    // A -rw-> B means B read a version of a key and A wrote the next one.
     ReadWrite,
 }
 
@@ -725,12 +742,14 @@ impl Decode for Txid {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use super::strongly_connected_components;
     use super::EdgeType;
     use super::Txid;
     use super::WorkloadAppend;
     use crate::rtest::graph::Graph;
+    use crate::rtest::workload_append::WorkloadAppendOptions;
     use crate::Bound;
     use crate::ColoGroupId;
     use crate::KeyspaceId;
@@ -756,7 +775,15 @@ mod tests {
             .create_keyspace(KeyspaceId(ColoGroupId(1), 2))
             .await?;
 
-        let wl = WorkloadAppend::new(Arc::new(obs.gateway));
+        let wl = WorkloadAppend::new(
+            Arc::new(obs.gateway),
+            WorkloadAppendOptions {
+                duration: Duration::from_millis(5000),
+                concurrency: 4,
+                n_lists: 10,
+                write_fraction: 0.1,
+            },
+        );
 
         Arc::new(wl).run().await?;
 
