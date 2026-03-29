@@ -37,6 +37,13 @@ use crate::NodeId;
 use crate::ShardId;
 use crate::TabletId;
 
+/// Node represents one of the processes of Obsidian running in a system. All nodes serve the
+/// gateway service as well as being available to having shards assigned to them.
+///
+/// Most shards are assigned by the Supervisor via metadata stored in Meta. However, this obviously
+/// cannot work for the Meta shard itself nor the Supervisor, so those are boostrapped specially.
+/// Instead, the Meta shard is assigned to a handful of the nodes with the lowest NodeIds in sorted
+/// order, and the Supervisor is run by whichever is elected as the leader for the Meta shard.
 pub(crate) struct Node(WithBackground<NodeInner>);
 
 struct NodeInner {
@@ -66,8 +73,6 @@ impl Node {
         meta_synced: Arc<MetaSynced>,
         journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
     ) -> anyhow::Result<Self> {
-        meta.add_node(node_id.clone()).await?;
-
         let inner = Arc::new(NodeInner {
             node_id,
             discovery: Arc::clone(&discovery),
@@ -94,8 +99,21 @@ impl Node {
         meta_synced.subscribe(&node.0);
 
         node.0.spawn(async |inner| {
+            // We just need this to succeed once so that meta is willing to assign shards to us.
+            // However, if (for example) we're the first node in a cluster, we're going to be meta,
+            // so we need to wait to do this until after the leader election is finished.
+            Retry::new()
+                .indefinitely(&async || {
+                    inner.meta.add_node(inner.node_id.clone()).await?;
+                    Ok::<(), anyhow::Error>(())
+                })
+                .await;
+        });
+
+        node.0.spawn(async |inner| {
             inner.background_watch_nodes().await;
         });
+
         node.0.spawn(async |inner| {
             inner.background_spawn_meta().await;
         });
