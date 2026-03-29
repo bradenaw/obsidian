@@ -17,11 +17,12 @@ use crate::election::Proposal;
 use crate::gateway::Gateway;
 use crate::lsm::Lsm;
 use crate::lsm::LsmOptions;
-use crate::meta::MetaImpl;
+use crate::meta::Meta;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
+use crate::runtime;
 use crate::runtime::Journals;
-use crate::runtime::Meta;
+use crate::runtime::Meta as _;
 use crate::runtime::Storage;
 use crate::storage::CachedStorage;
 use crate::supervisor::Supervisor;
@@ -43,7 +44,7 @@ use crate::TabletJournalEntry;
 
 pub(crate) struct ObsidianForTest {
     pub gateway: Gateway,
-    pub meta: Arc<dyn Meta>,
+    pub meta: Arc<dyn runtime::Meta>,
     pub meta_synced: Arc<MetaSynced>,
     pub supervisor: Supervisor,
 
@@ -74,12 +75,12 @@ impl ObsidianForTest {
             .await?,
             Arc::new(NoopJournalWriter {}),
         );
-        let meta: Arc<dyn Meta> = Arc::new(MetaImpl::new(Arc::new(meta_tablet)));
-        meta_proxy.put(Arc::clone(&meta) as Arc<dyn Meta>);
+        let meta: Arc<dyn runtime::Meta> = Arc::new(Meta::new(Arc::new(meta_tablet)));
+        meta_proxy.put(Arc::clone(&meta) as Arc<dyn runtime::Meta>);
 
         let nodes = TestNodes::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&meta) as Arc<dyn Meta>,
+            Arc::clone(&meta) as Arc<dyn runtime::Meta>,
             journals,
         );
 
@@ -92,7 +93,7 @@ impl ObsidianForTest {
         let meta_synced = Arc::new(MetaSynced::new(Arc::clone(&meta)));
 
         let supervisor = Supervisor::new(
-            Arc::clone(&meta) as Arc<dyn Meta>,
+            Arc::clone(&meta) as Arc<dyn runtime::Meta>,
             Arc::clone(&meta_synced),
             nodes.shards(),
         );

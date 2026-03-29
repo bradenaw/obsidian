@@ -20,7 +20,8 @@ use crate::meta::MetaValue;
 use crate::meta::ShardMetadata;
 use crate::meta::TabletMetadata;
 use crate::meta::TabletState;
-use crate::runtime::Meta;
+use crate::runtime;
+use crate::runtime::Meta as _;
 use crate::runtime::Tablet;
 use crate::util::WaitableTimestamp;
 use crate::Bound;
@@ -40,14 +41,14 @@ use crate::ShardId;
 use crate::TabletId;
 use crate::Timestamp;
 
-pub(crate) struct MetaImpl {
+pub(crate) struct Meta {
     tablet: Arc<dyn Tablet>,
     sync_key: Vec<u8>,
     ts: WaitableTimestamp,
 }
 
 #[async_trait]
-impl Meta for MetaImpl {
+impl runtime::Meta for Meta {
     async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
         let snapshot = self.latest_snapshot_().await?;
 
@@ -281,7 +282,7 @@ impl Meta for MetaImpl {
     }
 }
 
-impl MetaImpl {
+impl Meta {
     pub(crate) fn new(tablet: Arc<dyn Tablet>) -> Self {
         Self {
             tablet,
@@ -395,7 +396,7 @@ fn ranges_from_splits(splits: Vec<Bound<Vec<u8>>>) -> anyhow::Result<Vec<Range<V
 }
 
 #[async_trait]
-impl<T: Meta + ?Sized> Meta for Box<T> {
+impl<T: runtime::Meta + ?Sized> runtime::Meta for Box<T> {
     async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
         T::add_shard(self, shard_id).await
     }
@@ -450,7 +451,7 @@ impl<T: Meta + ?Sized> Meta for Box<T> {
 }
 
 #[async_trait]
-impl<T: Meta + ?Sized> Meta for Arc<T> {
+impl<T: runtime::Meta + ?Sized> runtime::Meta for Arc<T> {
     async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
         T::add_shard(self, shard_id).await
     }

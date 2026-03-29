@@ -13,7 +13,7 @@ mod transfer;
 mod transfer_metadata;
 
 #[cfg(test)]
-pub(crate) use meta::MetaImpl;
+pub(crate) use meta::Meta;
 #[allow(unused_imports)]
 pub(crate) use meta::MetaSnapshot;
 pub(crate) use meta_key::MetaKey;
