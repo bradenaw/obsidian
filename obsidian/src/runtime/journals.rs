@@ -7,5 +7,5 @@ use crate::ShardId;
 
 #[async_trait]
 pub(crate) trait Journals<E>: Send + Sync + 'static {
-    async fn journal(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn Journal<E>>>;
+    async fn journal(&self, shard_id: ShardId) -> Arc<dyn Journal<E>>;
 }

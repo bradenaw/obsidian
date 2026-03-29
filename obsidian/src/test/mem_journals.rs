@@ -27,12 +27,12 @@ impl<E> Journals<E> for MemJournals<E>
 where
     E: Clone + Send + Sync + 'static,
 {
-    async fn journal(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn Journal<E>>> {
+    async fn journal(&self, shard_id: ShardId) -> Arc<dyn Journal<E>> {
         let mut m = self.m.lock().unwrap();
 
-        Ok(Arc::clone(
+        Arc::clone(
             m.entry(shard_id)
                 .or_insert_with(|| Arc::new(MemJournal::new())),
-        ))
+        )
     }
 }

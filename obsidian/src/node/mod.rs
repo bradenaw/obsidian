@@ -206,7 +206,7 @@ impl NodeInner {
                     Arc::clone(&self.storage),
                     Arc::clone(&self.meta),
                     Arc::clone(&self.shards),
-                    self.journals.journal(shard_id).await?,
+                    self.journals.journal(shard_id).await,
                 );
                 let mut replicas = self.replicas.write().unwrap();
                 replicas.insert(shard_id, Arc::new(replica));
