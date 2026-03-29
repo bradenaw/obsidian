@@ -15,6 +15,7 @@ use crate::tablet::lock_mgr::LockMgr;
 use crate::tablet::protected::LsmRead;
 use crate::tablet::protected::LsmReadWrite;
 use crate::tablet::protected::ProtectedLsm;
+use crate::tablet::scan_locks::ScanLocks;
 use crate::tablet::sequencer::Sequencer;
 use crate::tablet::tablet_journal_writer::TabletJournalWriter;
 use crate::util::Decode;
@@ -45,6 +46,7 @@ pub(super) struct TabletInner {
     pub journal: Arc<dyn TabletJournalWriter>,
     pub sequencer: Sequencer,
     pub lock_mgr: LockMgr,
+    pub scan_locks: ScanLocks,
 }
 
 impl TabletInner {
@@ -62,7 +64,9 @@ impl TabletInner {
             lsm,
             journal,
             sequencer: Sequencer::new(),
+            // XXX: 1???
             lock_mgr: LockMgr::new(1),
+            scan_locks: ScanLocks::new(),
         }
     }
 
@@ -182,6 +186,8 @@ impl TabletInner {
         self.sequencer.wait_for_safe_read(ts).await?;
 
         let lsm_read = self.lsm.read()?;
+
+        let _guard = self.scan_locks.scan();
 
         // range                          |-----------|
         // self.range               |---------|

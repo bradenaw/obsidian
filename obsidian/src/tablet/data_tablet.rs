@@ -552,7 +552,6 @@ impl DataTabletInner {
             anyhow::anyhow!("attempted cleanup of non-data keyspace {:?}", keyspace_id)
         })?;
 
-        let mut muts = BTreeMap::new();
         let _guard = self.inner.lock_mgr.write_lock(&key[..]).await;
 
         let (pending_ts, value) =
@@ -583,11 +582,28 @@ impl DataTabletInner {
             }
             TxOutcome::Aborted => Timestamp(pending_ts.0 + 1),
         };
-        muts.insert((pending_keyspace_id, key.clone()), Mutation::Delete);
         if let TxOutcome::Committed(_) = tx_outcome {
-            muts.insert((keyspace_id, key.clone()), m);
+            // Important: this guard protects against a race in scan. Without it, it would be
+            // possible for a scan to observe neither this promoted record nor the pending record,
+            // and elide this key entirely in its results: the scan reads the page of records, then
+            // we come and clean up, and then the scan looks for conflicts, not finding any because
+            // we already removed it.
+            //
+            // This guard guarantees that any concurrent scans complete before we remove the
+            // pending record.
+            let cleanup_guard = self.inner.scan_locks.cleanup();
+            lsm_rw.write(
+                resolve_ts,
+                BTreeMap::from([((keyspace_id, key.clone()), m)]),
+            );
+            log::info!("cleanup_pending_key wait");
+            cleanup_guard.wait().await;
+            log::info!("cleanup_pending_key wait -> done");
         }
-        lsm_rw.write(resolve_ts, muts);
+        lsm_rw.write(
+            resolve_ts,
+            BTreeMap::from([((pending_keyspace_id, key.clone()), Mutation::Delete)]),
+        );
         Ok(())
     }
 

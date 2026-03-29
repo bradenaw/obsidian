@@ -786,7 +786,7 @@ mod tests {
             Arc::new(obs.gateway),
             WorkloadAppendOptions {
                 duration: Duration::from_millis(5000),
-                concurrency: 4,
+                concurrency: 32,
                 n_lists: 10,
                 write_fraction: 0.1,
             },

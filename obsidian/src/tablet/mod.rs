@@ -2,6 +2,7 @@ mod data_tablet;
 mod lock_mgr;
 mod meta_tablet;
 mod protected;
+mod scan_locks;
 mod sequencer;
 mod shard_meta_tablet;
 mod tablet_inner;
