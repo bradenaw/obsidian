@@ -64,8 +64,7 @@ impl TabletInner {
             lsm,
             journal,
             sequencer: Sequencer::new(),
-            // XXX: 1???
-            lock_mgr: LockMgr::new(1),
+            lock_mgr: LockMgr::new(1 << 16 /*buckets*/),
             scan_locks: ScanLocks::new(),
         }
     }
