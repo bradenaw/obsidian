@@ -5,6 +5,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -14,7 +15,6 @@ use crate::election::FollowerBuilder;
 use crate::election::JournalWriter;
 use crate::election::Leader;
 use crate::election::Participant;
-use crate::election::ParticipantBuilder;
 use crate::election::ParticipantState;
 use crate::election::Proposal;
 use crate::lsm::LsmOptions;
@@ -47,6 +47,8 @@ use crate::Timestamp;
 use crate::TxOutcome;
 use crate::Txid;
 
+const LEASE_DURATION: Duration = Duration::from_millis(10_000);
+
 pub(crate) struct Replica {
     shard_id: ShardId,
     participant: Arc<Participant<JournalEntry, LeaderReplica, FollowerReplica>>,
@@ -65,7 +67,7 @@ impl Replica {
     ) -> Replica {
         Replica {
             shard_id,
-            participant: Arc::new(ParticipantBuilder::new().build(
+            participant: Arc::new(Participant::new(
                 journal,
                 ReplicaOptions {
                     shard_id,
@@ -74,6 +76,7 @@ impl Replica {
                     meta,
                     shards,
                 },
+                LEASE_DURATION,
             )),
             tablets: RwLock::new(HashMap::new()),
         }

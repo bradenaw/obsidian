@@ -62,93 +62,6 @@ pub struct Participant<TEntry, TLeader, TFollower>(
     WithBackground<ParticipantInner<TEntry, TLeader, TFollower>>,
 );
 
-pub struct ParticipantBuilder {
-    heartbeat_interval: Duration,
-    renew_interval: Duration,
-    lease_duration: Duration,
-    lease_grace_period: Duration,
-}
-
-impl ParticipantBuilder {
-    pub fn new() -> Self {
-        Self {
-            heartbeat_interval: Duration::from_millis(3000),
-            renew_interval: Duration::from_millis(3000),
-            lease_duration: Duration::from_millis(10000),
-            lease_grace_period: Duration::from_millis(2000),
-        }
-    }
-
-    pub fn heartbeat_interval(mut self, x: Duration) -> Self {
-        self.heartbeat_interval = x;
-        self
-    }
-
-    pub fn renew_interval(mut self, x: Duration) -> Self {
-        self.renew_interval = x;
-        self
-    }
-
-    pub fn lease_duration(mut self, x: Duration) -> Self {
-        self.lease_duration = x;
-        self
-    }
-
-    pub fn lease_grace_period(mut self, x: Duration) -> Self {
-        self.lease_grace_period = x;
-        self
-    }
-
-    pub fn build<TEntry, TLeader, TFollower, TFollowerBuilder>(
-        &self,
-        journal: Arc<dyn Journal<Proposal<TEntry>>>,
-        follower_builder: TFollowerBuilder,
-    ) -> Participant<TEntry, TLeader, TFollower>
-    where
-        TEntry: Send + Sync + 'static,
-        TLeader: Leader<TEntry, TFollower> + Send + Sync + 'static,
-        TFollower: Follower<TEntry, TLeader> + Send + Sync + 'static,
-        TFollowerBuilder: FollowerBuilder<TEntry, TFollower> + Send + Sync + 'static,
-    {
-        let inner = WithBackground::new(Arc::new(ParticipantInner {
-            journal,
-            accepted_seqs: Arc::new(SeqWaiters::new()),
-            heartbeat_interval: self.heartbeat_interval,
-            renew_interval: self.renew_interval,
-            lease_duration: self.lease_duration,
-            lease_grace_period: self.lease_grace_period,
-            state: AsyncRwLock::new(Some(InnerParticipantState::Follower(
-                follower_builder.build(),
-            ))),
-            state_change_request: Notify::new(),
-            became_leader_at: Watchable::new(None),
-            poison: Arc::new(AtomicBool::new(false)),
-            abandon: Arc::new(Notify::new()),
-        }));
-
-        inner.spawn(async move |participant| {
-            Retry::new()
-                .indefinitely(&|| async {
-                    let participant_id = ParticipantId::new();
-                    if let Err(e) = participant.background_process(participant_id).await {
-                        log::warn!("error during Participant::background_process: {}", e);
-                    }
-                    participant.poison.store(true, Ordering::SeqCst);
-                    participant.state_change_request.notify_waiters();
-                    {
-                        let mut state = participant.state.write().await;
-                        *state = Some(InnerParticipantState::Follower(follower_builder.build()));
-                        participant.poison.store(false, Ordering::SeqCst);
-                    }
-                    Err::<(), anyhow::Error>(anyhow!("background_process terminated"))
-                })
-                .await;
-        });
-
-        Participant(inner)
-    }
-}
-
 struct ParticipantInner<TEntry, TLeader, TFollower> {
     journal: Arc<dyn Journal<Proposal<TEntry>>>,
     accepted_seqs: Arc<SeqWaiters>,
@@ -335,6 +248,52 @@ where
     TLeader: Leader<TEntry, TFollower> + Send + Sync + 'static,
     TFollower: Follower<TEntry, TLeader> + Send + Sync + 'static,
 {
+    pub fn new<TFollowerBuilder>(
+        journal: Arc<dyn Journal<Proposal<TEntry>>>,
+        follower_builder: TFollowerBuilder,
+        lease_duration: Duration,
+    ) -> Participant<TEntry, TLeader, TFollower>
+    where
+        TFollowerBuilder: FollowerBuilder<TEntry, TFollower> + Send + Sync + 'static,
+    {
+        let inner = WithBackground::new(Arc::new(ParticipantInner {
+            journal,
+            accepted_seqs: Arc::new(SeqWaiters::new()),
+            lease_duration,
+            heartbeat_interval: lease_duration * 3 / 10,
+            renew_interval: lease_duration * 3 / 10,
+            lease_grace_period: lease_duration * 2 / 10,
+            state: AsyncRwLock::new(Some(InnerParticipantState::Follower(
+                follower_builder.build(),
+            ))),
+            state_change_request: Notify::new(),
+            became_leader_at: Watchable::new(None),
+            poison: Arc::new(AtomicBool::new(false)),
+            abandon: Arc::new(Notify::new()),
+        }));
+
+        inner.spawn(async move |participant| {
+            Retry::new()
+                .indefinitely(&|| async {
+                    let participant_id = ParticipantId::new();
+                    if let Err(e) = participant.background_process(participant_id).await {
+                        log::warn!("error during Participant::background_process: {}", e);
+                    }
+                    participant.poison.store(true, Ordering::SeqCst);
+                    participant.state_change_request.notify_waiters();
+                    {
+                        let mut state = participant.state.write().await;
+                        *state = Some(InnerParticipantState::Follower(follower_builder.build()));
+                        participant.poison.store(false, Ordering::SeqCst);
+                    }
+                    Err::<(), anyhow::Error>(anyhow!("background_process terminated"))
+                })
+                .await;
+        });
+
+        Participant(inner)
+    }
+
     /// Do some action with the current state of the participant. Calls `f`, supplying whether this
     /// participant is currently a leader or a follower.
     ///
@@ -550,8 +509,9 @@ where
             if try_acquire && pending_acquire.is_none() {
                 let ts = Timestamp::now_after(last_ts);
                 last_ts = ts;
-                let lease_end =
-                    Timestamp::from_micros(ts.as_micros() + (self.lease_duration.as_micros() as u64));
+                let lease_end = Timestamp::from_micros(
+                    ts.as_micros() + (self.lease_duration.as_micros() as u64),
+                );
                 pending_acquire = Some(Instant::now());
                 self.propose_at(participant_id, ts, ProposalType::Acquire { lease_end });
                 try_acquire = false;

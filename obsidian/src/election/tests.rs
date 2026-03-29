@@ -18,7 +18,6 @@ use crate::election::FollowerBuilder;
 use crate::election::JournalWriter;
 use crate::election::Leader;
 use crate::election::Participant;
-use crate::election::ParticipantBuilder;
 use crate::election::ParticipantState;
 use crate::election::Proposal;
 use crate::election::ProposalType;
@@ -34,15 +33,8 @@ async fn test_election() -> anyhow::Result<()> {
     let _ = pretty_env_logger::try_init();
 
     let lease_duration = Duration::from_millis(100);
-    let heartbeat_duration = Duration::from_millis(50);
 
-    let builder = ParticipantBuilder::new()
-        .lease_duration(lease_duration)
-        .heartbeat_interval(heartbeat_duration)
-        .renew_interval(Duration::from_millis(10))
-        .lease_grace_period(Duration::from_millis(20));
-
-    let mut replica_group = TestReplicaGroup::new(builder);
+    let mut replica_group = TestReplicaGroup::new(lease_duration);
 
     replica_group.add_replica();
     replica_group.add_replica();
@@ -54,7 +46,7 @@ async fn test_election() -> anyhow::Result<()> {
         first_leader.id
     };
 
-    tokio::time::sleep(lease_duration + heartbeat_duration).await;
+    tokio::time::sleep(lease_duration * 2).await;
 
     // Because the leader can't observe its own Acquires, it will eventually stop making them, and
     // someone else will need to take over.
@@ -78,15 +70,15 @@ async fn test_election() -> anyhow::Result<()> {
 struct TestReplicaGroup {
     journal: Arc<MemJournal<Proposal<TestEntry>>>,
     replicas: Vec<TestReplica>,
-    builder: ParticipantBuilder,
+    lease_duration: Duration,
 }
 
 impl TestReplicaGroup {
-    fn new(builder: ParticipantBuilder) -> Self {
+    fn new(lease_duration: Duration) -> Self {
         Self {
             journal: Arc::new(MemJournal::new()),
             replicas: vec![],
-            builder,
+            lease_duration,
         }
     }
 
@@ -99,9 +91,10 @@ impl TestReplicaGroup {
         self.replicas.push(TestReplica {
             id: offset,
             journal_view: Arc::clone(&journal_view),
-            participant: self.builder.build(
+            participant: Participant::new(
                 journal_view as Arc<dyn Journal<Proposal<TestEntry>>>,
                 TestFollowerBuilder { id: offset },
+                self.lease_duration,
             ),
         });
     }
