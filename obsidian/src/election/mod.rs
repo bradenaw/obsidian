@@ -63,6 +63,9 @@ pub struct Participant<TEntry, TLeader, TFollower>(
 );
 
 struct ParticipantInner<TEntry, TLeader, TFollower> {
+    // No function other than attached to log lines/error messages for debugging.
+    name: String,
+
     journal: Arc<dyn Journal<Proposal<TEntry>>>,
     accepted_seqs: Arc<SeqWaiters>,
 
@@ -162,6 +165,8 @@ pub trait Follower<TEntry, TLeader> {
 /// passed to [`Follower::promote`] will not accept any further writes after the call to
 /// [`Leader::demote`].
 pub struct JournalWriter<TEntry> {
+    name: String,
+
     participant_id: ParticipantId,
     journal: Arc<dyn Journal<Proposal<TEntry>>>,
     lease_end: Weak<AtomicTimestamp>,
@@ -193,17 +198,20 @@ where
             if let Some(lease_end) = self.lease_end.upgrade() {
                 lease_end.load()
             } else {
-                return Err(anyhow!("cannot append: lease expired"));
+                return Err(anyhow!("{} cannot append: lease expired", self.name));
             }
         };
 
         let ts = Timestamp::now();
         if ts > lease_end {
-            return Err(anyhow!("cannot append: lease expired"));
+            return Err(anyhow!("{} cannot append: lease expired", self.name));
         }
 
         if self.poison.load(Ordering::SeqCst) {
-            return Err(anyhow!("cannot append: participant state changing"));
+            return Err(anyhow!(
+                "{} cannot append: participant state changing",
+                self.name
+            ));
         }
 
         let wait = self.accepted_seqs.register();
@@ -219,7 +227,8 @@ where
             Ok(seq) => seq,
             Err(e) => {
                 log::error!(
-                    "error returned from journal append, abandoning lease to enter recovery: {}",
+                    "{} error returned from journal append, abandoning lease to enter recovery: {}",
+                    self.name,
                     e,
                 );
 
@@ -235,7 +244,7 @@ where
         };
         let accepted = wait.wait(seq).await;
         if !accepted {
-            return Err(anyhow!("entry not accepted"));
+            return Err(anyhow!("{} entry not accepted", self.name));
         }
 
         return Ok(());
@@ -249,6 +258,7 @@ where
     TFollower: Follower<TEntry, TLeader> + Send + Sync + 'static,
 {
     pub fn new<TFollowerBuilder>(
+        name: String,
         journal: Arc<dyn Journal<Proposal<TEntry>>>,
         follower_builder: TFollowerBuilder,
         lease_duration: Duration,
@@ -257,6 +267,7 @@ where
         TFollowerBuilder: FollowerBuilder<TEntry, TFollower> + Send + Sync + 'static,
     {
         let inner = WithBackground::new(Arc::new(ParticipantInner {
+            name,
             journal,
             accepted_seqs: Arc::new(SeqWaiters::new()),
             lease_duration,
@@ -277,7 +288,11 @@ where
                 .indefinitely(&|| async {
                     let participant_id = ParticipantId::new();
                     if let Err(e) = participant.background_process(participant_id).await {
-                        log::warn!("error during Participant::background_process: {}", e);
+                        log::warn!(
+                            "{} error during Participant::background_process: {}",
+                            participant.name,
+                            e
+                        );
                     }
                     participant.poison.store(true, Ordering::SeqCst);
                     participant.state_change_request.notify_waiters();
@@ -286,7 +301,10 @@ where
                         *state = Some(InnerParticipantState::Follower(follower_builder.build()));
                         participant.poison.store(false, Ordering::SeqCst);
                     }
-                    Err::<(), anyhow::Error>(anyhow!("background_process terminated"))
+                    Err::<(), anyhow::Error>(anyhow!(
+                        "{} background_process terminated",
+                        participant.name,
+                    ))
                 })
                 .await;
         });
@@ -308,7 +326,11 @@ where
         let state_change_request = self.0.state_change_request.notified();
         let state = self.0.state.read().await;
         if self.0.poison.load(Ordering::SeqCst) {
-            return Err(anyhow!("aborted: participant state change requested").into());
+            return Err(anyhow!(
+                "{} aborted operation: participant state change requested",
+                self.0.name,
+            )
+            .into());
         }
 
         let out = select! {
@@ -318,12 +340,16 @@ where
                     // future that then acquires those mutexes.
 
             _ = state_change_request => {
-                return Err(anyhow!("aborted: participant state change requested").into());
+                return Err(anyhow!(
+                    "{} aborted operation: participant state change requested",
+                    self.0.name,
+                )
+                .into());
             },
             out =
                 f(state
                 .as_ref()
-                .ok_or_else(|| anyhow!("no participant state present"))?
+                .ok_or_else(|| anyhow!("{} no participant state present", self.0.name))?
                 .as_participant_state()) => {
                 out?
             },
@@ -334,7 +360,11 @@ where
         }) = state.deref()
         {
             if self.0.poison.load(Ordering::SeqCst) {
-                return Err(anyhow!("aborted: participant state change requested").into());
+                return Err(anyhow!(
+                    "{} aborted operation: participant state change requested",
+                    self.0.name
+                )
+                .into());
             }
             if Instant::now().duration_since(last_confirmation.load())
                 > self
@@ -342,7 +372,11 @@ where
                     .lease_duration
                     .saturating_sub(self.0.lease_grace_period)
             {
-                return Err(anyhow!("lease expired before operation completed").into());
+                return Err(anyhow!(
+                    "{} aborted operation: lease expired before completion",
+                    self.0.name
+                )
+                .into());
             }
         }
 
@@ -414,7 +448,7 @@ where
             return Ok(());
         }
 
-        log::info!("promoting");
+        log::info!("{} promoting to leader", self.name);
 
         let state = maybe_state.take().unwrap();
         let lease_end = Arc::new(AtomicTimestamp::new(new_lease_end));
@@ -422,6 +456,7 @@ where
             InnerParticipantState::Leader { .. } => unreachable!(),
             InnerParticipantState::Follower(follower) => {
                 let journal_writer = JournalWriter {
+                    name: self.name.clone(),
                     participant_id,
                     journal: Arc::clone(&self.journal),
                     lease_end: Arc::downgrade(&lease_end),
@@ -463,7 +498,7 @@ where
             return Ok(());
         }
 
-        log::info!("demoting");
+        log::info!("{} demoting to follower", self.name);
 
         let state = maybe_state.take().unwrap();
         let follower = match state {
@@ -528,7 +563,7 @@ where
                 next = StreamExt::next(&mut accepted) => {
                     let (seq, ratification) = next
                         .transpose()?
-                        .ok_or_else(|| anyhow!("journal tail ended"))?;
+                        .ok_or_else(|| anyhow!("{} journal tail ended", self.name))?;
 
                     self.accepted_seqs.observe(seq);
 
@@ -539,7 +574,7 @@ where
                                 if proposal.participant_id == participant_id {
                                     let start = pending_acquire
                                             .ok_or_else(|| {
-                                                anyhow!("received acquire that was not pending")
+                                                anyhow!("{} received acquire that was not pending", self.name)
                                             })?;
                                     pending_acquire = None;
                                     self
@@ -601,14 +636,14 @@ where
                     try_acquire = true;
                 },
                 _ = maybe_sleep_until(self_lease_expiration) => {
-                    log::info!("demoting for lease expiration");
+                    log::info!("{} demoting for lease expiration", self.name);
                     self.demote_if_leader().await?;
                     self_lease_expiration = None;
                     pending_acquire = None;
                     current_lease = None;
                 },
                 _ = abandon => {
-                    return Err(anyhow!("abandoning lease to resolve errored append"));
+                    return Err(anyhow!("{} abandoning lease to resolve errored append", self.name));
                 },
             }
         }
@@ -674,7 +709,7 @@ where
                 };
 
                 if accept_acquire {
-                    log::info!(
+                    log::trace!(
                         "{:?} is leader for {:?} - {:?}",
                         proposal.participant_id,
                         proposal.timestamp,
@@ -682,7 +717,7 @@ where
                     );
                     current_leader = Some((proposal.participant_id, new_lease_end));
                 } else {
-                    log::info!(
+                    log::trace!(
                         "acquire at {:?} {:?} by {:?} rejected",
                         seq,
                         proposal.timestamp,
@@ -701,7 +736,7 @@ where
                     })
                     .unwrap_or(true)
             {
-                log::info!(
+                log::trace!(
                     "proposal at {:?} {:?} by {:?} rejected",
                     seq,
                     proposal.timestamp,

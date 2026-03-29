@@ -58,6 +58,7 @@ pub(crate) struct Replica {
 
 impl Replica {
     pub fn new(
+        name: String,
         shard_id: ShardId,
         lsm_options: LsmOptions,
         storage: Arc<dyn Storage>,
@@ -68,6 +69,7 @@ impl Replica {
         Replica {
             shard_id,
             participant: Arc::new(Participant::new(
+                name,
                 journal,
                 ReplicaOptions {
                     shard_id,

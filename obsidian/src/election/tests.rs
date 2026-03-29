@@ -92,6 +92,7 @@ impl TestReplicaGroup {
             id: offset,
             journal_view: Arc::clone(&journal_view),
             participant: Participant::new(
+                format!("{}", offset),
                 journal_view as Arc<dyn Journal<Proposal<TestEntry>>>,
                 TestFollowerBuilder { id: offset },
                 self.lease_duration,
