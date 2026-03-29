@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -39,14 +40,14 @@ use crate::ShardId;
 use crate::TabletId;
 use crate::Timestamp;
 
-pub(crate) struct MetaImpl<T> {
-    tablet: T,
+pub(crate) struct MetaImpl {
+    tablet: Arc<dyn Tablet>,
     sync_key: Vec<u8>,
     ts: WaitableTimestamp,
 }
 
 #[async_trait]
-impl<T: Tablet> Meta for MetaImpl<T> {
+impl Meta for MetaImpl {
     async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
         let snapshot = self.latest_snapshot_().await?;
 
@@ -280,8 +281,8 @@ impl<T: Tablet> Meta for MetaImpl<T> {
     }
 }
 
-impl<T: Tablet> MetaImpl<T> {
-    pub(crate) fn new(tablet: T) -> Self {
+impl MetaImpl {
+    pub(crate) fn new(tablet: Arc<dyn Tablet>) -> Self {
         Self {
             tablet,
             sync_key: MetaKey::Sync.encode(),
@@ -289,36 +290,36 @@ impl<T: Tablet> MetaImpl<T> {
         }
     }
 
-    pub(crate) async fn latest_snapshot_(&self) -> anyhow::Result<MetaSnapshot<'_, T>> {
+    pub(crate) async fn latest_snapshot_(&self) -> anyhow::Result<MetaSnapshot<'_>> {
         let ts = self.latest_snapshot().await?;
 
         Ok(MetaSnapshot {
-            tablet: &self.tablet,
+            tablet: self.tablet.deref(),
             ts,
         })
     }
 
-    fn snapshot_at(&self, ts: Timestamp) -> MetaSnapshot<'_, T> {
+    fn snapshot_at(&self, ts: Timestamp) -> MetaSnapshot<'_> {
         MetaSnapshot {
-            tablet: &self.tablet,
+            tablet: self.tablet.deref(),
             ts,
         }
     }
 }
 
-pub(crate) struct MetaSnapshot<'a, T> {
-    tablet: &'a T,
+pub(crate) struct MetaSnapshot<'a> {
+    tablet: &'a dyn Tablet,
     ts: Timestamp,
 }
 
-impl<'a, T> MetaSnapshot<'a, T> {
+impl<'a> MetaSnapshot<'a> {
     pub(crate) fn ts(&self) -> Timestamp {
         self.ts
     }
 }
 
 #[async_trait]
-impl<'a, T: Tablet> MetaReader for MetaSnapshot<'a, T> {
+impl<'a> MetaReader for MetaSnapshot<'a> {
     async fn get_raw(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(self
             .tablet
