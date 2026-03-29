@@ -4,6 +4,7 @@ mod mem_journal;
 mod mem_journals;
 mod mem_storage;
 mod meta_proxy;
+mod test_discovery;
 mod test_nodes;
 
 use std::fmt::Debug;
@@ -33,6 +34,7 @@ pub(crate) use crate::test::mem_journal::MemJournal;
 pub(crate) use crate::test::mem_journals::MemJournals;
 pub(crate) use crate::test::mem_storage::MemStorage;
 use crate::test::meta_proxy::MetaProxy;
+pub(crate) use crate::test::test_discovery::TestDiscovery;
 use crate::test::test_nodes::TestNodes;
 use crate::util::encode;
 use crate::util::Decode;

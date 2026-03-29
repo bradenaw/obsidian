@@ -11,6 +11,7 @@
 //! Some of the traits here are also third-party dependencies that are expected to be provided for
 //! the system, like Storage.
 
+mod discovery;
 mod journal;
 mod journals;
 mod meta;
@@ -22,6 +23,8 @@ mod storage;
 mod supervisor;
 mod tablet;
 
+pub(crate) use discovery::Discovery;
+pub(crate) use discovery::Registration;
 pub(crate) use journal::Journal;
 pub(crate) use journals::Journals;
 pub(crate) use meta::Meta;

@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use futures::Stream;
 
+use crate::runtime::Meta;
 use crate::runtime::Shard;
+use crate::runtime::Supervisor;
 use crate::runtime::Tablet;
 use crate::JournalSeq;
 use crate::NodeId;
@@ -18,6 +20,10 @@ pub(crate) trait Node: Send + Sync {
     fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet>> {
         self.shard(tablet_id.0)?.tablet(tablet_id)
     }
+
+    fn meta(&self) -> anyhow::Result<Arc<dyn Meta>>;
+
+    fn supervisor(&self) -> anyhow::Result<Arc<dyn Supervisor>>;
 
     fn became_leader_at_subscribe(
         &self,

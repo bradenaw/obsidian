@@ -9,6 +9,7 @@ pub(crate) struct ShardId(pub(crate) u32);
 
 impl ShardId {
     pub(crate) const ENCODED_LEN: usize = 4;
+    pub(crate) const META: Self = ShardId(u32::MAX);
 
     pub(crate) fn encode_fixed(&self) -> [u8; Self::ENCODED_LEN] {
         let mut out = [0u8; Self::ENCODED_LEN];
@@ -19,7 +20,12 @@ impl ShardId {
 
 impl Display for ShardId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        if *self == ShardId::META {
+            write!(f, "meta")?;
+        } else {
+            write!(f, "{}", self.0)?;
+        }
+        Ok(())
     }
 }
 

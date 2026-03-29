@@ -190,6 +190,7 @@ impl Supervisor {
     }
 }
 
+#[async_trait]
 impl runtime::Supervisor for Supervisor {
     async fn start_move(&self, src: TabletId, dst: ShardId) -> anyhow::Result<TransferId> {
         let snapshot = self.0.latest_snapshot().await?;

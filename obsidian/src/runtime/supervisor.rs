@@ -1,7 +1,10 @@
+use async_trait::async_trait;
+
 use crate::ShardId;
 use crate::TabletId;
 use crate::TransferId;
 
+#[async_trait]
 pub(crate) trait Supervisor {
     async fn start_move(&self, src: TabletId, dst: ShardId) -> anyhow::Result<TransferId>;
 
