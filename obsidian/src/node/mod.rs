@@ -28,7 +28,6 @@ use crate::runtime::Meta;
 use crate::runtime::Shard as _;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
-use crate::shard::ShardJournalWriter;
 use crate::supervisor::Supervisor;
 use crate::util::Retry;
 use crate::util::WithBackground;
@@ -244,14 +243,5 @@ impl MetaSubscriber for NodeInner {
                 self.try_sync_meta(&sync_type, &snapshot).await
             })
             .await;
-    }
-}
-
-struct NoopShardJournalWriter {}
-
-#[async_trait]
-impl ShardJournalWriter for NoopShardJournalWriter {
-    async fn append(&self, _entry: JournalEntry) -> anyhow::Result<()> {
-        Ok(())
     }
 }
