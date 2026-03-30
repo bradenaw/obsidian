@@ -7,6 +7,7 @@ mod test_nodes;
 
 use std::fmt::Debug;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -119,6 +120,12 @@ impl ObsidianForTest {
                 })
                 .await;
         }
+
+        // JANK: Wait for things to settle, else we get flakes on the supervisor conflicting with
+        // other operations on meta (e.g. creating a colo group).
+        //
+        // TODO: Internal retries in meta for writes on conflict.
+        tokio::time::sleep(Duration::from_millis(1000)).await;
 
         Ok(Self {
             gateway,
