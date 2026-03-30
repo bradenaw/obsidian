@@ -9,14 +9,12 @@ use im::OrdSet;
 
 use crate::election::Proposal;
 use crate::meta::MetaSynced;
-use crate::runtime::Discovery;
 use crate::runtime::Journals;
 use crate::runtime::Meta;
 use crate::runtime::Node;
 use crate::runtime::Nodes;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
-use crate::test::TestDiscovery;
 use crate::util::Watchable;
 use crate::JournalEntry;
 use crate::NodeId;
@@ -31,7 +29,6 @@ struct TestNodesInner {
     meta: Arc<dyn Meta>,
     journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
 
-    discovery: Arc<dyn Discovery>,
     routing: Mutex<HashMap<NodeId, Arc<dyn Node>>>,
     node_ids: Watchable<OrdSet<NodeId>>,
 }
@@ -46,7 +43,6 @@ impl TestNodes {
             storage,
             journals,
             meta: Arc::clone(&meta),
-            discovery: Arc::new(TestDiscovery::new()),
             routing: Mutex::new(HashMap::new()),
             node_ids: Watchable::new(OrdSet::new()),
         });
@@ -74,7 +70,7 @@ impl TestNodes {
             Arc::new(
                 crate::node::Node::new(
                     node_id,
-                    Arc::clone(&self.inner.discovery),
+                    Arc::clone(&self.inner) as Arc<dyn Nodes>,
                     Arc::clone(&self.inner.storage),
                     Arc::clone(&self.inner.meta),
                     Arc::clone(&self.shards),
@@ -97,7 +93,7 @@ impl Nodes for TestNodes {
         self.inner.node(node_id)
     }
 
-    fn node_ids(&self) -> (OrdSet<NodeId>, Box<dyn Future<Output = ()>>) {
+    fn node_ids(&self) -> (OrdSet<NodeId>, Box<dyn Future<Output = ()> + Send + Unpin>) {
         self.inner.node_ids()
     }
 }
@@ -112,8 +108,8 @@ impl Nodes for TestNodesInner {
         Ok(Arc::clone(node_arc) as Arc<dyn Node>)
     }
 
-    fn node_ids(&self) -> (OrdSet<NodeId>, Box<dyn Future<Output = ()>>) {
+    fn node_ids(&self) -> (OrdSet<NodeId>, Box<dyn Future<Output = ()> + Send + Unpin>) {
         let (node_ids, changed) = self.node_ids.get();
-        (node_ids, Box::new(changed))
+        (node_ids, Box::new(Box::pin(changed)))
     }
 }

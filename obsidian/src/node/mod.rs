@@ -22,9 +22,8 @@ use crate::meta::MetaSyncedSnapshot;
 use crate::meta::SyncType;
 use crate::replica::Replica;
 use crate::runtime;
-use crate::runtime::Discovery;
 use crate::runtime::Journals;
-use crate::runtime::Registration;
+use crate::runtime::Nodes;
 use crate::runtime::Shard as _;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
@@ -49,8 +48,7 @@ pub(crate) struct Node(WithBackground<NodeInner>);
 struct NodeInner {
     node_id: NodeId,
     lsm_options: LsmOptions,
-    discovery: Arc<dyn Discovery>,
-    registration: Box<dyn Registration>,
+    nodes: Arc<dyn Nodes>,
     storage: Arc<dyn Storage>,
     meta: Arc<dyn runtime::Meta>,
     shards: Arc<dyn Shards>,
@@ -66,7 +64,7 @@ struct NodeInner {
 impl Node {
     pub async fn new(
         node_id: NodeId,
-        discovery: Arc<dyn Discovery>,
+        nodes: Arc<dyn Nodes>,
         storage: Arc<dyn Storage>,
         meta: Arc<dyn runtime::Meta>,
         shards: Arc<dyn Shards>,
@@ -75,8 +73,7 @@ impl Node {
     ) -> anyhow::Result<Self> {
         let inner = Arc::new(NodeInner {
             node_id,
-            discovery: Arc::clone(&discovery),
-            registration: discovery.register(node_id),
+            nodes,
             lsm_options: LsmOptions {
                 l0_max_size: 256,
                 l1_max_size: 100_000,
@@ -257,7 +254,7 @@ impl NodeInner {
 
     async fn background_watch_nodes(&self) {
         loop {
-            let (node_ids, nodes_changed) = self.discovery.node_ids();
+            let (node_ids, nodes_changed) = self.nodes.node_ids();
             let should_join_meta = node_ids
                 .iter()
                 .take(3)
