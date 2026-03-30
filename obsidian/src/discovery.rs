@@ -10,6 +10,8 @@ use futures::TryStreamExt;
 use im::OrdSet;
 
 use crate::lsm::Manifest;
+use crate::meta::MetaKey;
+use crate::meta::MetaMutation;
 use crate::runtime;
 use crate::runtime::Nodes;
 use crate::util::spawn_owned;
@@ -17,6 +19,7 @@ use crate::util::OwnedJoinHandle;
 use crate::util::Retry;
 use crate::util::WithBackground;
 use crate::Bound;
+use crate::ColoGroupId;
 use crate::Direction;
 use crate::HistoryRange;
 use crate::InternalError;
@@ -38,6 +41,7 @@ use crate::Txid;
 pub(crate) struct Discovery {
     bg: WithBackground<DiscoveryInner>,
     inner: Arc<DiscoveryInner>,
+    meta_proxy: Arc<dyn runtime::Meta>,
 }
 
 struct DiscoveryInner {
@@ -51,8 +55,12 @@ impl Discovery {
             nodes,
             routing: Arc::new(RwLock::new(HashMap::new())),
         });
+
         let discovery = Discovery {
             bg: WithBackground::new(Arc::clone(&inner)),
+            meta_proxy: Arc::new(MetaProxy {
+                parent: Arc::clone(&inner),
+            }),
             inner,
         };
 
@@ -61,6 +69,10 @@ impl Discovery {
         });
 
         discovery
+    }
+
+    fn meta(&self) -> Arc<dyn runtime::Meta> {
+        Arc::clone(&self.meta_proxy)
     }
 }
 
@@ -127,18 +139,18 @@ impl DiscoveryInner {
         })
     }
 
-    fn current_leader(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn runtime::Shard>> {
-        let leader_node_id = {
-            let routing = self.routing.read().unwrap();
-            routing
-                .get(&shard_id)
-                .ok_or_else(|| anyhow!("{:?} not in the routing table", shard_id))?
-                .leader
-                .map(|(node_id, _)| node_id)
-                .ok_or_else(|| anyhow!("{:?}'s leader is not known", shard_id))?
-        };
+    fn current_leader(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn runtime::Node>> {
+        self.nodes.node(self.current_leader_id(shard_id)?)
+    }
 
-        self.nodes.node(leader_node_id)?.shard(shard_id)
+    fn current_leader_id(&self, shard_id: ShardId) -> anyhow::Result<NodeId> {
+        let routing = self.routing.read().unwrap();
+        Ok(routing
+            .get(&shard_id)
+            .ok_or_else(|| anyhow!("{:?} not in the routing table", shard_id))?
+            .leader
+            .map(|(node_id, _)| node_id)
+            .ok_or_else(|| anyhow!("{:?}'s leader is not known", shard_id))?)
     }
 }
 
@@ -185,6 +197,7 @@ impl runtime::Shard for ShardProxy {
     async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
         self.parent
             .current_leader(self.shard_id)?
+            .shard(self.shard_id)?
             .wait_meta_sync(ts)
             .await
     }
@@ -197,30 +210,26 @@ struct TabletProxy {
     tablet_id: TabletId,
 }
 
+impl TabletProxy {
+    fn get_tablet(&self) -> anyhow::Result<Arc<dyn runtime::Tablet>> {
+        self.parent
+            .current_leader(self.tablet_id.0)?
+            .tablet(self.tablet_id)
+    }
+}
+
 #[async_trait]
 impl runtime::Tablet for TabletProxy {
     async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
-        self.parent
-            .current_leader(self.tablet_id.0)?
-            .tablet(self.tablet_id)?
-            .get(ts, key)
-            .await
+        self.get_tablet()?.get(ts, key).await
     }
 
     async fn get_latest(&self, key: Key) -> Result<(Timestamp, Option<Record>), InternalError> {
-        self.parent
-            .current_leader(self.tablet_id.0)?
-            .tablet(self.tablet_id)?
-            .get_latest(key)
-            .await
+        self.get_tablet()?.get_latest(key).await
     }
 
     async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError> {
-        self.parent
-            .current_leader(self.tablet_id.0)?
-            .tablet(self.tablet_id)?
-            .latest_snapshot(keys)
-            .await
+        self.get_tablet()?.latest_snapshot(keys).await
     }
 
     async fn scan_page(
@@ -231,9 +240,7 @@ impl runtime::Tablet for TabletProxy {
         direction: Direction,
         limit: usize,
     ) -> Result<(Vec<Record>, Option<Range<Vec<u8>>>), InternalError> {
-        self.parent
-            .current_leader(self.tablet_id.0)?
-            .tablet(self.tablet_id)?
+        self.get_tablet()?
             .scan_page(ts, keyspace_id, range, direction, limit)
             .await
     }
@@ -245,9 +252,7 @@ impl runtime::Tablet for TabletProxy {
         direction: Direction,
         limit: usize,
     ) -> Result<(Vec<Revision>, Option<HistoryRange>), InternalError> {
-        self.parent
-            .current_leader(self.tablet_id.0)?
-            .tablet(self.tablet_id)?
+        self.get_tablet()?
             .history_page(key, range, direction, limit)
             .await
     }
@@ -257,11 +262,7 @@ impl runtime::Tablet for TabletProxy {
         preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
-        self.parent
-            .current_leader(self.tablet_id.0)?
-            .tablet(self.tablet_id)?
-            .write(preconds, muts)
-            .await
+        self.get_tablet()?.write(preconds, muts).await
     }
 
     async fn prepare(
@@ -270,11 +271,7 @@ impl runtime::Tablet for TabletProxy {
         preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
-        self.parent
-            .current_leader(self.tablet_id.0)?
-            .tablet(self.tablet_id)?
-            .prepare(txid, preconds, muts)
-            .await
+        self.get_tablet()?.prepare(txid, preconds, muts).await
     }
 
     async fn try_commit(
@@ -284,27 +281,17 @@ impl runtime::Tablet for TabletProxy {
         precond_keys: BTreeSet<Key>,
         mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<TxOutcome> {
-        self.parent
-            .current_leader(self.tablet_id.0)?
-            .tablet(self.tablet_id)?
+        self.get_tablet()?
             .try_commit(txid, ts, precond_keys, mut_keys)
             .await
     }
 
     async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
-        self.parent
-            .current_leader(self.tablet_id.0)?
-            .tablet(self.tablet_id)?
-            .try_abort(txid)
-            .await
+        self.get_tablet()?.try_abort(txid).await
     }
 
     async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
-        self.parent
-            .current_leader(self.tablet_id.0)?
-            .tablet(self.tablet_id)?
-            .wait(txid)
-            .await
+        self.get_tablet()?.wait(txid).await
     }
 
     async fn cleanup_committed(
@@ -314,50 +301,96 @@ impl runtime::Tablet for TabletProxy {
         precond_keys: BTreeSet<Key>,
         mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()> {
-        self.parent
-            .current_leader(self.tablet_id.0)?
-            .tablet(self.tablet_id)?
+        self.get_tablet()?
             .cleanup_committed(txid, ts, precond_keys, mut_keys)
             .await
     }
 
     async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
-        self.parent
-            .current_leader(self.tablet_id.0)?
-            .tablet(self.tablet_id)?
-            .wait_meta_sync(ts)
-            .await
+        self.get_tablet()?.wait_meta_sync(ts).await
     }
 
     async fn manifest(&self) -> anyhow::Result<Manifest> {
-        self.parent
-            .current_leader(self.tablet_id.0)?
-            .tablet(self.tablet_id)?
-            .manifest()
-            .await
+        self.get_tablet()?.manifest().await
     }
 
     async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
-        self.parent
-            .current_leader(self.tablet_id.0)?
-            .tablet(self.tablet_id)?
-            .wait_mostly_hydrated()
-            .await
+        self.get_tablet()?.wait_mostly_hydrated().await
     }
 
     async fn catchup(&self) -> anyhow::Result<()> {
-        self.parent
-            .current_leader(self.tablet_id.0)?
-            .tablet(self.tablet_id)?
-            .catchup()
-            .await
+        self.get_tablet()?.catchup().await
     }
 
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
-        self.parent
-            .current_leader(self.tablet_id.0)?
-            .tablet(self.tablet_id)?
-            .find_split()
-            .await
+        self.get_tablet()?.find_split().await
     }
 }
+
+struct MetaProxy {
+    parent: Arc<DiscoveryInner>,
+}
+
+impl MetaProxy {
+    fn get_meta(&self) -> anyhow::Result<Arc<dyn runtime::Meta>> {
+        self.parent.current_leader(ShardId::META)?.meta()
+    }
+}
+
+#[async_trait]
+impl runtime::Meta for MetaProxy {
+    async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
+        self.get_meta()?.add_shard(shard_id).await
+    }
+
+    async fn add_node(&self, node_id: NodeId) -> anyhow::Result<()> {
+        self.get_meta()?.add_node(node_id).await
+    }
+
+    async fn create_colo_group(
+        &self,
+        colo_group_id: ColoGroupId,
+        initial_splits: Vec<Bound<Vec<u8>>>,
+    ) -> anyhow::Result<()> {
+        self.get_meta()?
+            .create_colo_group(colo_group_id, initial_splits)
+            .await
+    }
+
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        self.get_meta()?.create_keyspace(keyspace_id).await
+    }
+
+    async fn latest_snapshot(&self) -> anyhow::Result<Timestamp> {
+        self.get_meta()?.latest_snapshot().await
+    }
+
+    async fn wait_for_newer(&self, ts: Timestamp) -> anyhow::Result<()> {
+        self.get_meta()?.wait_for_newer(ts).await
+    }
+
+    async fn scan_page(
+        &self,
+        ts: Timestamp,
+        range: Range<Vec<u8>>,
+    ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
+        self.get_meta()?.scan_page(ts, range).await
+    }
+
+    async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Revision>, Timestamp)> {
+        self.get_meta()?.sync(ts).await
+    }
+
+    async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
+        self.get_meta()?.tablet_ids(ts).await
+    }
+
+    async fn write(
+        &self,
+        snapshot_ts: Timestamp,
+        muts: HashMap<MetaKey, MetaMutation>,
+    ) -> anyhow::Result<Timestamp> {
+        self.get_meta()?.write(snapshot_ts, muts).await
+    }
+}
+
