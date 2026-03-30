@@ -59,10 +59,6 @@ impl runtime::Shards for Shards {
 
         self.0.nodes.node(leader_node_id)?.shard(shard_id)
     }
-
-    fn shards(&self) -> Vec<Box<dyn runtime::Shard>> {
-        todo!()
-    }
 }
 
 impl ShardsInner {
