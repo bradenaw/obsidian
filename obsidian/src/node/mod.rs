@@ -56,7 +56,7 @@ struct NodeInner {
     journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
 
     supervisor: RwLock<Option<Supervisor>>,
-    maybe_meta: RwLock<Option<Meta>>,
+    maybe_meta: RwLock<Option<Arc<Meta>>>,
     replicas: RwLock<HashMap<ShardId, Arc<Replica>>>,
     replicas_changed: Notify,
 }
@@ -134,7 +134,11 @@ impl runtime::Node for Node {
     }
 
     fn meta(&self) -> anyhow::Result<Arc<dyn runtime::Meta>> {
-        todo!();
+        let maybe_meta = self.0.maybe_meta.read().unwrap();
+        let meta = maybe_meta
+            .as_ref()
+            .ok_or_else(|| anyhow!("{:?} is not currently hosting meta", self.0.node_id))?;
+        Ok(Arc::clone(meta) as Arc<dyn runtime::Meta>)
     }
 
     fn supervisor(&self) -> anyhow::Result<Arc<dyn runtime::Supervisor>> {
@@ -233,17 +237,18 @@ impl NodeInner {
                     // leader and a later entry in `stream` should tell us that.
                     if let Some(meta_shard) = replicas.get(&ShardId::META) {
                         if let Ok(meta_tablet) = meta_shard.tablet(TabletId::META) {
-                            *maybe_meta = Some(Meta::new(meta_tablet));
+                            *maybe_meta = Some(Arc::new(Meta::new(meta_tablet)));
                         }
                     }
                 }
 
                 if supervisor.is_none() {
-                    *supervisor = Some(Supervisor::new(
-                        Arc::clone(&self.meta),
-                        Arc::clone(&self.meta_synced),
-                        Arc::clone(&self.shards),
-                    ));
+                    // TODO: Remove the spawm from ObsidianForTest and use this one.
+                    //*supervisor = Some(Supervisor::new(
+                    //    Arc::clone(&self.meta),
+                    //    Arc::clone(&self.meta_synced),
+                    //    Arc::clone(&self.shards),
+                    //));
                 }
             } else {
                 *maybe_meta = None;

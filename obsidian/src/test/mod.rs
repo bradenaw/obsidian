@@ -3,26 +3,23 @@ mod mem_file_writer;
 mod mem_journal;
 mod mem_journals;
 mod mem_storage;
-mod meta_proxy;
 mod test_nodes;
 
 use std::fmt::Debug;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
 
 use crate::election::Proposal;
 use crate::gateway::Gateway;
-use crate::lsm::Lsm;
-use crate::lsm::LsmOptions;
-use crate::meta::Meta;
+use crate::meta::MetaReader;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::runtime;
 use crate::runtime::Journals;
 use crate::runtime::Meta as _;
+use crate::runtime::Shards as _;
 use crate::runtime::Storage;
 use crate::storage::CachedStorage;
 use crate::supervisor::Supervisor;
@@ -32,11 +29,11 @@ pub(crate) use crate::test::mem_file_writer::MemFileWriter;
 pub(crate) use crate::test::mem_journal::MemJournal;
 pub(crate) use crate::test::mem_journals::MemJournals;
 pub(crate) use crate::test::mem_storage::MemStorage;
-use crate::test::meta_proxy::MetaProxy;
 use crate::test::test_nodes::TestNodes;
 use crate::util::encode;
 use crate::util::Decode;
 use crate::util::Encode;
+use crate::util::Retry;
 use crate::Bound;
 use crate::JournalEntry;
 use crate::ShardId;
@@ -57,7 +54,6 @@ impl ObsidianForTest {
             return Err(anyhow!("need at least one shard to host the meta tablet"));
         }
 
-        let meta_proxy = Arc::new(MetaProxy::new());
         let storage = Arc::new(CachedStorage::new(
             MemStorage::new(),
             64, // page_size
@@ -67,45 +63,62 @@ impl ObsidianForTest {
 
         let journals = Arc::new(MemJournals::new()) as Arc<dyn Journals<Proposal<JournalEntry>>>;
 
-        let meta_tablet = crate::tablet::MetaTablet::new(
-            Lsm::empty(
-                LsmOptions::default(),
-                Arc::clone(&storage) as Arc<dyn Storage>,
-            )
-            .await?,
-            Arc::new(NoopJournalWriter {}),
-        );
-        let meta: Arc<dyn runtime::Meta> = Arc::new(Meta::new(Arc::new(meta_tablet)));
-        meta_proxy.put(Arc::clone(&meta) as Arc<dyn runtime::Meta>);
+        let nodes = TestNodes::new(Arc::clone(&storage) as Arc<dyn Storage>, journals);
 
-        let nodes = TestNodes::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&meta) as Arc<dyn runtime::Meta>,
-            journals,
-        );
-
-        for i in 0..n_shards {
-            let shard_id = ShardId((2 + i) as u32);
-            meta.add_shard(shard_id).await?;
+        for _ in 0..n_shards {
             nodes.create_node().await?;
         }
 
-        let meta_synced = Arc::new(MetaSynced::new(Arc::clone(&meta)));
+        let meta = nodes.discovery().meta();
 
+        // Wait for a meta to get elected.
+        Retry::new()
+            .indefinitely(&async || meta.latest_snapshot().await)
+            .await;
+
+        let shard_ids: Vec<_> = (0..n_shards).map(|i| ShardId((i + 1) as u32)).collect();
+
+        for shard_id in &shard_ids {
+            meta.add_shard(*shard_id).await?;
+        }
+
+        let meta_synced = Arc::new(MetaSynced::new(nodes.discovery().meta()));
         let supervisor = Supervisor::new(
             Arc::clone(&meta) as Arc<dyn runtime::Meta>,
             Arc::clone(&meta_synced),
             nodes.shards(),
         );
 
+        // Wait for supervisor to assign shards to nodes.
+        for shard_id in &shard_ids {
+            Retry::new()
+                .indefinitely(&async || {
+                    let shard_metadata = meta_synced.snapshot().shard_metadata(*shard_id).await?;
+                    if shard_metadata.assigned_node_ids.is_empty() {
+                        return Err(anyhow!("{:?} not assigned yet", shard_id));
+                    }
+                    Ok(())
+                })
+                .await;
+        }
+
         let gateway = Gateway::new(
-            Box::new(meta_proxy.clone()),
-            MetaSynced::new(meta_proxy),
+            Box::new(Arc::clone(&meta)),
+            MetaSynced::new(Arc::clone(&meta)),
             nodes.shards(),
         );
 
-        // JANK: Need to wait for everything to come to life.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Wait for the nodes to finish leader election.
+        let meta_ts = meta.latest_snapshot().await?;
+        for shard_id in &shard_ids {
+            Retry::new()
+                .indefinitely(&async || {
+                    let shard = nodes.discovery().shard(*shard_id)?;
+                    shard.wait_meta_sync(meta_ts).await?;
+                    Ok::<(), anyhow::Error>(())
+                })
+                .await;
+        }
 
         Ok(Self {
             gateway,

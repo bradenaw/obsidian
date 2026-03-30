@@ -71,7 +71,7 @@ impl Discovery {
         discovery
     }
 
-    fn meta(&self) -> Arc<dyn runtime::Meta> {
+    pub fn meta(&self) -> Arc<dyn runtime::Meta> {
         Arc::clone(&self.meta_proxy)
     }
 }
@@ -393,4 +393,3 @@ impl runtime::Meta for MetaProxy {
         self.get_meta()?.write(snapshot_ts, muts).await
     }
 }
-
