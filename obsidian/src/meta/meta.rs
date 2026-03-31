@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use async_stream::try_stream;
@@ -15,7 +16,7 @@ use crate::meta::MetaKey;
 use crate::meta::MetaMutation;
 use crate::meta::MetaReader;
 use crate::meta::MetaState;
-use crate::meta::MetaTx;
+use crate::meta::MetaSync;
 use crate::meta::MetaValue;
 use crate::meta::ShardMetadata;
 use crate::meta::TabletMetadata;
@@ -23,11 +24,13 @@ use crate::meta::TabletState;
 use crate::runtime;
 use crate::runtime::Meta as _;
 use crate::runtime::Tablet;
+use crate::util::sleep_for_retry;
 use crate::util::WaitableTimestamp;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
 use crate::HistoryRange;
+use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
 use crate::Mutation;
@@ -50,40 +53,43 @@ pub(crate) struct Meta {
 #[async_trait]
 impl runtime::Meta for Meta {
     async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
-        let snapshot = self.latest_snapshot_().await?;
-
-        if snapshot.shard_exists(shard_id).await? {
-            return Err(anyhow!("{:?} already exists", shard_id));
+        if shard_id == ShardId::META {
+            return Err(anyhow!(
+                "{:?} cannot be added, it is implicit",
+                ShardId::META,
+            ));
         }
 
-        self.write(
-            snapshot.ts,
-            HashMap::from([(
-                MetaKey::Shard(shard_id),
-                MetaMutation::Put(MetaValue::ShardMetadata(ShardMetadata {
-                    assigned_node_ids: HashSet::new(),
-                })),
-            )]),
-        )
-        .await?;
+        self.transact(&async move |tx| {
+            if tx.shard_exists(shard_id).await? {
+                return Err(anyhow!("{:?} already exists", shard_id).into());
+            }
 
-        Ok(())
+            tx.put(
+                MetaKey::Shard(shard_id),
+                MetaValue::ShardMetadata(ShardMetadata {
+                    assigned_node_ids: HashSet::new(),
+                }),
+            );
+
+            Ok(())
+        })
+        .await
+        .map_err(|e| e.into())
     }
 
     async fn add_node(&self, node_id: NodeId) -> anyhow::Result<()> {
-        let snapshot = self.latest_snapshot_().await?;
+        self.transact(&async move |tx| {
+            if tx.node_exists(node_id).await? {
+                return Err(anyhow!("{:?} already exists", node_id).into());
+            }
 
-        if snapshot.node_exists(node_id).await? {
-            return Err(anyhow!("{:?} already exists", node_id));
-        }
+            tx.put(MetaKey::Node(node_id), MetaValue::Empty);
 
-        self.write(
-            snapshot.ts,
-            HashMap::from([(MetaKey::Node(node_id), MetaMutation::Put(MetaValue::Empty))]),
-        )
-        .await?;
-
-        Ok(())
+            Ok(())
+        })
+        .await
+        .map_err(|e| e.into())
     }
 
     async fn create_colo_group(
@@ -91,74 +97,77 @@ impl runtime::Meta for Meta {
         colo_group_id: ColoGroupId,
         initial_splits: Vec<Bound<Vec<u8>>>,
     ) -> anyhow::Result<()> {
+        if colo_group_id == ColoGroupId::META || colo_group_id == ColoGroupId::SHARD_META {
+            return Err(anyhow!(
+                "{:?} cannot be created, it is implicit",
+                colo_group_id,
+            ));
+        }
+
         let ranges = ranges_from_splits(initial_splits)?;
 
-        let snapshot = self.latest_snapshot_().await?;
+        self.transact(&async move |tx| {
+            if tx.colo_group_exists(colo_group_id).await? {
+                return Err(anyhow!("{:?} already exists", colo_group_id).into());
+            }
 
-        if snapshot.colo_group_exists(colo_group_id).await? {
-            return Err(anyhow!("{:?} already exists", colo_group_id));
-        }
+            let mut shard_ids: Vec<_> = tx.shard_ids().await?;
+            shard_ids.shuffle(&mut rand::thread_rng());
 
-        let mut shard_ids: Vec<_> = snapshot.shard_ids().await?;
-        shard_ids.shuffle(&mut rand::thread_rng());
+            tx.put(MetaKey::ColoGroup(colo_group_id), MetaValue::Empty);
 
-        let mut muts = HashMap::from([(
-            MetaKey::ColoGroup(colo_group_id),
-            MetaMutation::Put(MetaValue::Empty),
-        )]);
+            let mut next_tablet_id_by_shard = BTreeMap::new();
+            for shard_id in &shard_ids {
+                next_tablet_id_by_shard.insert(*shard_id, tx.next_tablet_id(*shard_id).await?.1);
+            }
 
-        let mut next_tablet_id_by_shard = BTreeMap::new();
-        for shard_id in &shard_ids {
-            next_tablet_id_by_shard.insert(*shard_id, snapshot.next_tablet_id(*shard_id).await?.1);
-        }
+            // Round-robin the created ranges among the shards.
+            for (i, range) in ranges.iter().enumerate() {
+                let shard_id = shard_ids[i % shard_ids.len()];
+                let tablet_id = TabletId(
+                    shard_id,
+                    *next_tablet_id_by_shard.get(&shard_id).unwrap_or(&1),
+                );
+                next_tablet_id_by_shard.insert(shard_id, tablet_id.1 + 1);
 
-        // Round-robin the created ranges among the shards.
-        for (i, range) in ranges.into_iter().enumerate() {
-            let shard_id = shard_ids[i % shard_ids.len()];
-            let tablet_id = TabletId(
-                shard_id,
-                *next_tablet_id_by_shard.get(&shard_id).unwrap_or(&1),
-            );
-            next_tablet_id_by_shard.insert(shard_id, tablet_id.1 + 1);
+                tx.put(
+                    MetaKey::Tablet(tablet_id),
+                    MetaValue::TabletMetadata(TabletMetadata {
+                        colo_group_id,
+                        range: range.clone(),
+                        state: MetaState::Stable(TabletState::Active),
+                        transfer_id: None,
+                    }),
+                );
+            }
 
-            muts.insert(
-                MetaKey::Tablet(tablet_id),
-                MetaMutation::Put(MetaValue::TabletMetadata(TabletMetadata {
-                    colo_group_id,
-                    range,
-                    state: MetaState::Stable(TabletState::Active),
-                    transfer_id: None,
-                })),
-            );
-        }
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::Error::from(e))?;
 
-        let write_ts = self.write(snapshot.ts, muts).await?;
-
-        log::info!("create_colo_group({:?}) -> {:?}", colo_group_id, write_ts);
+        log::info!("create_colo_group({:?})", colo_group_id);
 
         Ok(())
     }
 
     async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
-        let snapshot = self.latest_snapshot_().await?;
+        self.transact(&async move |tx| {
+            if !tx.colo_group_exists(keyspace_id.0).await? {
+                return Err(anyhow!("{:?} does not exist", keyspace_id.0).into());
+            }
 
-        if !snapshot.colo_group_exists(keyspace_id.0).await? {
-            return Err(anyhow!("{:?} does not exist", keyspace_id.0));
-        }
+            let keyspace_key = MetaKey::Keyspace(keyspace_id);
 
-        let keyspace_key = MetaKey::Keyspace(keyspace_id);
+            if tx.exists(&keyspace_key).await? {
+                return Err(anyhow!("{:?} already exists", keyspace_id).into());
+            }
 
-        if snapshot.exists(&keyspace_key).await? {
-            return Err(anyhow!("{:?} already exists", keyspace_id));
-        }
-
-        self.write(
-            snapshot.ts,
-            HashMap::from([(keyspace_key, MetaMutation::Put(MetaValue::Empty))]),
-        )
-        .await?;
-
-        Ok(())
+            tx.put(keyspace_key, MetaValue::Empty);
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::Error::from(e))
     }
 
     async fn latest_snapshot(&self) -> anyhow::Result<Timestamp> {
@@ -204,7 +213,7 @@ impl runtime::Meta for Meta {
         for revision in page {
             if let RevisionValue::Regular(value) = revision.value {
                 let meta_tx = match MetaValue::decode(&value)? {
-                    MetaValue::MetaTx(meta_tx) => meta_tx,
+                    MetaValue::MetaSync(meta_tx) => meta_tx,
                     other => return Err(anyhow!("unexpected MetaValue {:?}", other)),
                 };
 
@@ -245,12 +254,16 @@ impl runtime::Meta for Meta {
         &self,
         snapshot_ts: Timestamp,
         mut muts: HashMap<MetaKey, MetaMutation>,
-    ) -> anyhow::Result<Timestamp> {
+    ) -> Result<Timestamp, InternalError> {
         if muts.contains_key(&MetaKey::Sync) {
-            return Err(anyhow!("write contains a mutation to sync_key already"));
+            return Err(anyhow!("write contains a mutation to sync_key already").into());
         }
 
-        log::trace!("attempting meta write {:?}", muts);
+        log::trace!(
+            "attempting meta write on snapshot {:?}: {:?}",
+            snapshot_ts,
+            muts
+        );
 
         let preconds = vec![Precondition::NotChangedSince(
             KeyspaceId::META,
@@ -262,7 +275,7 @@ impl runtime::Meta for Meta {
 
         muts.insert(
             MetaKey::Sync,
-            MetaMutation::Put(MetaValue::MetaTx(MetaTx { keys: changed_keys })),
+            MetaMutation::Put(MetaValue::MetaSync(MetaSync { keys: changed_keys })),
         );
 
         let raw_muts = muts
@@ -305,6 +318,64 @@ impl Meta {
             tablet: self.tablet.deref(),
             ts,
         }
+    }
+
+    /// Perform a transaction using optimistic concurrency control. If the state of meta changes
+    /// since the snapshot from the tx supplied to f by the time the write is attempted, f will be
+    /// called again.
+    async fn transact<F, T>(&self, f: &F) -> Result<T, InternalError>
+    where
+        F: AsyncFn(&mut MetaTx<'_>) -> Result<T, InternalError>,
+    {
+        for i in 0..10 {
+            let mut tx = MetaTx {
+                snapshot: self.latest_snapshot_().await?,
+                muts: HashMap::new(),
+            };
+
+            let out = f(&mut tx).await?;
+
+            match self.write(tx.snapshot.ts, tx.muts).await {
+                Ok(_) => return Ok(out),
+                Err(InternalError::PreconditionFailed) => {
+                    sleep_for_retry(i, Duration::from_millis(50), Duration::from_millis(5000))
+                        .await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        return Err(InternalError::PreconditionFailed);
+    }
+}
+
+struct MetaTx<'a> {
+    snapshot: MetaSnapshot<'a>,
+    muts: HashMap<MetaKey, MetaMutation>,
+}
+
+impl<'a> MetaTx<'a> {
+    fn put(&mut self, key: MetaKey, value: MetaValue) {
+        self.muts.insert(key, MetaMutation::Put(value));
+    }
+
+    fn delete(&mut self, key: MetaKey) {
+        self.muts.insert(key, MetaMutation::Delete);
+    }
+}
+
+#[async_trait]
+impl<'a> MetaReader for MetaTx<'a> {
+    async fn get_raw(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+        self.snapshot.get_raw(key).await
+    }
+
+    fn scan_raw(
+        &self,
+        range: Range<Vec<u8>>,
+        direction: Direction,
+    ) -> Box<dyn Stream<Item = anyhow::Result<(Vec<u8>, Vec<u8>)>> + Unpin + Send + '_> {
+        self.snapshot.scan_raw(range, direction)
     }
 }
 
@@ -445,7 +516,7 @@ impl<T: runtime::Meta + ?Sized> runtime::Meta for Box<T> {
         &self,
         snapshot_ts: Timestamp,
         muts: HashMap<MetaKey, MetaMutation>,
-    ) -> anyhow::Result<Timestamp> {
+    ) -> Result<Timestamp, InternalError> {
         T::write(self, snapshot_ts, muts).await
     }
 }
@@ -500,7 +571,7 @@ impl<T: runtime::Meta + ?Sized> runtime::Meta for Arc<T> {
         &self,
         snapshot_ts: Timestamp,
         muts: HashMap<MetaKey, MetaMutation>,
-    ) -> anyhow::Result<Timestamp> {
+    ) -> Result<Timestamp, InternalError> {
         T::write(self, snapshot_ts, muts).await
     }
 }

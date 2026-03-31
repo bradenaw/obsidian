@@ -10,14 +10,14 @@ import "obsidian.proto";
 message MetaValue {
     oneof value_type {
         google.protobuf.Empty empty = 1;
-        MetaTx meta_tx = 2;
+        MetaSync meta_sync = 2;
         ShardMetadata shard_metadata = 3;
         TabletMetadata tablet_metadata = 4;
         TransferMetadata transfer_metadata = 5;
     }
 }
 
-message MetaTx {
+message MetaSync {
     CompressedKeySet keys = 1;
 }
 

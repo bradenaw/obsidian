@@ -6,6 +6,7 @@ use crate::meta::MetaKey;
 use crate::meta::MetaMutation;
 use crate::Bound;
 use crate::ColoGroupId;
+use crate::InternalError;
 use crate::KeyspaceId;
 use crate::NodeId;
 use crate::Range;
@@ -43,5 +44,5 @@ pub(crate) trait Meta: Send + Sync {
         &self,
         snapshot_ts: Timestamp,
         muts: HashMap<MetaKey, MetaMutation>,
-    ) -> anyhow::Result<Timestamp>;
+    ) -> Result<Timestamp, InternalError>;
 }

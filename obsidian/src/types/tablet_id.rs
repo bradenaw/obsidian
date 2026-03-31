@@ -14,7 +14,7 @@ pub(crate) struct TabletId(pub ShardId, pub u64);
 
 impl TabletId {
     pub(crate) const ENCODED_LEN: usize = ShardId::ENCODED_LEN + 8;
-    pub(crate) const META: Self = TabletId(ShardId(1), u64::MAX);
+    pub(crate) const META: Self = TabletId(ShardId::META, u64::MAX);
     pub(crate) const SHARD_META_SEQ: u64 = u64::MAX - 1;
 
     pub(crate) fn shard_meta(shard_id: ShardId) -> Self {

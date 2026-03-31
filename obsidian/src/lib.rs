@@ -3,6 +3,7 @@
 #![feature(iter_from_coroutine)]
 #![feature(thread_id_value)]
 
+mod discovery;
 mod election;
 mod gateway;
 mod grpc;

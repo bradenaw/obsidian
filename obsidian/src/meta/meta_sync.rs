@@ -8,19 +8,19 @@ use crate::pb;
 use crate::KeyspaceId;
 
 #[derive(Clone, Debug)]
-pub(crate) struct MetaTx {
+pub(crate) struct MetaSync {
     pub keys: HashSet<MetaKey>,
 }
 
-impl TryFrom<pb::internal::MetaTx> for MetaTx {
+impl TryFrom<pb::internal::MetaSync> for MetaSync {
     type Error = anyhow::Error;
 
-    fn try_from(value_pb: pb::internal::MetaTx) -> Result<Self, Self::Error> {
+    fn try_from(value_pb: pb::internal::MetaSync) -> Result<Self, Self::Error> {
         Ok(Self {
             keys: BTreeSet::try_from(
                 value_pb
                     .keys
-                    .ok_or_else(|| anyhow!("MetaTx missing field keys"))?,
+                    .ok_or_else(|| anyhow!("MetaSync missing field keys"))?,
             )?
             .into_iter()
             .map(|(_, key)| MetaKey::decode(&key))
@@ -29,8 +29,8 @@ impl TryFrom<pb::internal::MetaTx> for MetaTx {
     }
 }
 
-impl From<MetaTx> for pb::internal::MetaTx {
-    fn from(value: MetaTx) -> Self {
+impl From<MetaSync> for pb::internal::MetaSync {
+    fn from(value: MetaSync) -> Self {
         Self {
             keys: Some(pb::internal::CompressedKeySet::from(
                 value

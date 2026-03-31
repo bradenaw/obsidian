@@ -7,10 +7,10 @@ use std::sync::Mutex;
 
 use im::OrdSet;
 
+use crate::discovery::Discovery;
 use crate::election::Proposal;
 use crate::meta::MetaSynced;
 use crate::runtime::Journals;
-use crate::runtime::Meta;
 use crate::runtime::Node;
 use crate::runtime::Nodes;
 use crate::runtime::Shards;
@@ -21,12 +21,11 @@ use crate::NodeId;
 
 pub(super) struct TestNodes {
     inner: Arc<TestNodesInner>,
-    shards: Arc<dyn Shards>,
+    discovery: Arc<Discovery>,
 }
 
 struct TestNodesInner {
     storage: Arc<dyn Storage>,
-    meta: Arc<dyn Meta>,
     journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
 
     routing: Mutex<HashMap<NodeId, Arc<dyn Node>>>,
@@ -36,28 +35,27 @@ struct TestNodesInner {
 impl TestNodes {
     pub fn new(
         storage: Arc<dyn Storage>,
-        meta: Arc<dyn Meta>,
         journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
     ) -> Self {
         let inner = Arc::new(TestNodesInner {
             storage,
             journals,
-            meta: Arc::clone(&meta),
             routing: Mutex::new(HashMap::new()),
             node_ids: Watchable::new(OrdSet::new()),
         });
 
         Self {
             inner: Arc::clone(&inner),
-            shards: Arc::new(crate::shards::Shards::new(
-                Arc::new(MetaSynced::new(meta)),
-                Arc::clone(&inner) as Arc<dyn Nodes>,
-            )),
+            discovery: Arc::new(Discovery::new(Arc::clone(&inner) as Arc<dyn Nodes>)),
         }
     }
 
+    pub fn discovery(&self) -> Arc<Discovery> {
+        Arc::clone(&self.discovery)
+    }
+
     pub fn shards(&self) -> Arc<dyn Shards> {
-        Arc::clone(&self.shards)
+        Arc::clone(&self.discovery) as Arc<dyn Shards>
     }
 
     pub async fn create_node(&self) -> anyhow::Result<NodeId> {
@@ -70,10 +68,11 @@ impl TestNodes {
             Arc::new(
                 crate::node::Node::new(
                     node_id,
+                    Arc::clone(&self.inner) as Arc<dyn Nodes>,
                     Arc::clone(&self.inner.storage),
-                    Arc::clone(&self.inner.meta),
-                    Arc::clone(&self.shards),
-                    Arc::new(MetaSynced::new(Arc::clone(&self.inner.meta))),
+                    self.discovery.meta(),
+                    self.shards(),
+                    Arc::new(MetaSynced::new(self.discovery.meta())),
                     Arc::clone(&self.inner.journals),
                 )
                 .await?,
@@ -92,7 +91,7 @@ impl Nodes for TestNodes {
         self.inner.node(node_id)
     }
 
-    fn node_ids(&self) -> (OrdSet<NodeId>, Box<dyn Future<Output = ()>>) {
+    fn node_ids(&self) -> (OrdSet<NodeId>, Box<dyn Future<Output = ()> + Send + Unpin>) {
         self.inner.node_ids()
     }
 }
@@ -107,8 +106,8 @@ impl Nodes for TestNodesInner {
         Ok(Arc::clone(node_arc) as Arc<dyn Node>)
     }
 
-    fn node_ids(&self) -> (OrdSet<NodeId>, Box<dyn Future<Output = ()>>) {
+    fn node_ids(&self) -> (OrdSet<NodeId>, Box<dyn Future<Output = ()> + Send + Unpin>) {
         let (node_ids, changed) = self.node_ids.get();
-        (node_ids, Box::new(changed))
+        (node_ids, Box::new(Box::pin(changed)))
     }
 }
