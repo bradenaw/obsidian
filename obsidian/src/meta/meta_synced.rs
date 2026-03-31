@@ -1,6 +1,7 @@
 use std::cmp;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::ops::Deref as _;
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -55,7 +56,7 @@ struct MetaSyncedInner {
 }
 
 impl MetaSynced {
-    pub(crate) fn new<M: Meta + 'static>(m: M) -> Self {
+    pub(crate) fn new(meta: Arc<dyn Meta>) -> Self {
         let bg = Background::new();
 
         let inner = Arc::new(RwLock::new(MetaSyncedInner {
@@ -68,7 +69,7 @@ impl MetaSynced {
 
         bg.spawn({
             let inner = inner.clone();
-            async move { MetaSyncedInner::sync(inner, m).await }
+            async move { MetaSyncedInner::sync(inner, meta).await }
         });
 
         Self { bg, inner }
@@ -166,10 +167,10 @@ impl MetaSynced {
 }
 
 impl MetaSyncedInner {
-    async fn sync<M: Meta>(inner_lock: Arc<RwLock<Self>>, meta: M) {
+    async fn sync(inner_lock: Arc<RwLock<Self>>, meta: Arc<dyn Meta>) {
         let mut ts = Retry::new()
             .indefinitely(&async || -> anyhow::Result<Timestamp> {
-                let ts = Self::initial_sync_once(&inner_lock, &meta).await?;
+                let ts = Self::initial_sync_once(&inner_lock, meta.deref()).await?;
                 Ok(ts)
             })
             .await;
@@ -177,16 +178,16 @@ impl MetaSyncedInner {
         loop {
             ts = Retry::new()
                 .indefinitely(&async || -> anyhow::Result<Timestamp> {
-                    let new_ts = Self::incremental_sync_once(&inner_lock, &meta, ts).await?;
+                    let new_ts = Self::incremental_sync_once(&inner_lock, meta.deref(), ts).await?;
                     Ok(new_ts)
                 })
                 .await;
         }
     }
 
-    async fn initial_sync_once<M: Meta>(
+    async fn initial_sync_once(
         inner_lock: &Arc<RwLock<Self>>,
-        meta: &M,
+        meta: &dyn Meta,
     ) -> anyhow::Result<Timestamp> {
         let ts = Retry::new()
             .indefinitely(&|| async {
@@ -270,9 +271,9 @@ impl MetaSyncedInner {
         }
     }
 
-    async fn incremental_sync_once<M: Meta>(
+    async fn incremental_sync_once(
         inner_lock: &Arc<RwLock<Self>>,
-        meta: &M,
+        meta: &dyn Meta,
         ts: Timestamp,
     ) -> anyhow::Result<Timestamp> {
         let (revisions, new_ts) = Retry::new()

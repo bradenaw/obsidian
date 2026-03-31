@@ -17,7 +17,6 @@ use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::runtime;
 use crate::runtime::Journals;
-use crate::runtime::Meta as _;
 use crate::runtime::Shards as _;
 use crate::runtime::Storage;
 use crate::storage::CachedStorage;
@@ -93,7 +92,7 @@ impl ObsidianForTest {
         }
 
         let gateway = Gateway::new(
-            Box::new(Arc::clone(&meta)),
+            Arc::clone(&meta),
             MetaSynced::new(Arc::clone(&meta)),
             nodes.shards(),
         );

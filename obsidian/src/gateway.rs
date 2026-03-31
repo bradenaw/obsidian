@@ -41,7 +41,7 @@ use crate::Txid;
 use crate::WriteError;
 
 pub(crate) struct Gateway {
-    meta: Box<dyn Meta>,
+    meta: Arc<dyn Meta>,
     meta_synced: MetaSynced,
     shards: Arc<dyn Shards>,
 }
@@ -232,7 +232,7 @@ fn choose_shard<I: Iterator<Item = TabletId>>(iter: I) -> Option<ShardId> {
 
 impl Gateway {
     pub(crate) fn new(
-        meta: Box<dyn Meta>,
+        meta: Arc<dyn Meta>,
         meta_synced: MetaSynced,
         shards: Arc<dyn Shards>,
     ) -> Self {
