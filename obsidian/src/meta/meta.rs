@@ -306,12 +306,15 @@ impl Meta {
         }
     }
 
+    /// Perform a transaction using optimistic concurrency control. If the state of meta changes
+    /// since the snapshot from the tx supplied to f by the time the write is attempted, f will be
+    /// called again.
     async fn transact<F, T>(&self, f: &F) -> Result<T, InternalError>
     where
-        F: AsyncFn(&mut MetaTx2<'_>) -> Result<T, InternalError>,
+        F: AsyncFn(&mut MetaTx<'_>) -> Result<T, InternalError>,
     {
         for i in 0..10 {
-            let mut tx = MetaTx2 {
+            let mut tx = MetaTx {
                 snapshot: self.latest_snapshot_().await?,
                 muts: HashMap::new(),
             };
@@ -332,13 +335,12 @@ impl Meta {
     }
 }
 
-// TODO: Rename MetaTx out of the way, since it's a better name for this.
-struct MetaTx2<'a> {
+struct MetaTx<'a> {
     snapshot: MetaSnapshot<'a>,
     muts: HashMap<MetaKey, MetaMutation>,
 }
 
-impl<'a> MetaTx2<'a> {
+impl<'a> MetaTx<'a> {
     fn put(&mut self, key: MetaKey, value: MetaValue) {
         self.muts.insert(key, MetaMutation::Put(value));
     }
@@ -349,7 +351,7 @@ impl<'a> MetaTx2<'a> {
 }
 
 #[async_trait]
-impl<'a> MetaReader for MetaTx2<'a> {
+impl<'a> MetaReader for MetaTx<'a> {
     async fn get_raw(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         self.snapshot.get_raw(key).await
     }
