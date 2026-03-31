@@ -3,7 +3,7 @@ use std::fmt::Debug;
 use anyhow::anyhow;
 use prost::Message;
 
-use crate::meta::MetaTx;
+use crate::meta::MetaSync;
 use crate::meta::ShardMetadata;
 use crate::meta::TabletMetadata;
 use crate::meta::TransferMetadata;
@@ -12,7 +12,7 @@ use crate::pb;
 #[derive(Clone, Debug)]
 pub(crate) enum MetaValue {
     Empty,
-    MetaTx(MetaTx),
+    MetaSync(MetaSync),
     ShardMetadata(ShardMetadata),
     TabletMetadata(TabletMetadata),
     TransferMetadata(TransferMetadata),
@@ -29,8 +29,8 @@ impl From<MetaValue> for pb::internal::MetaValue {
         pb::internal::MetaValue {
             value_type: Some(match value {
                 MetaValue::Empty => pb::internal::meta_value::ValueType::Empty(()),
-                MetaValue::MetaTx(meta_tx) => {
-                    pb::internal::meta_value::ValueType::MetaTx(meta_tx.into())
+                MetaValue::MetaSync(meta_tx) => {
+                    pb::internal::meta_value::ValueType::MetaSync(meta_tx.into())
                 }
                 MetaValue::ShardMetadata(shard_metadata) => {
                     pb::internal::meta_value::ValueType::ShardMetadata(shard_metadata.into())
@@ -56,8 +56,8 @@ impl TryFrom<pb::internal::MetaValue> for MetaValue {
                 .ok_or_else(|| anyhow!("missing value_type"))?
             {
                 pb::internal::meta_value::ValueType::Empty(()) => MetaValue::Empty,
-                pb::internal::meta_value::ValueType::MetaTx(meta_tx_pb) => {
-                    MetaValue::MetaTx(MetaTx::try_from(meta_tx_pb)?)
+                pb::internal::meta_value::ValueType::MetaSync(meta_tx_pb) => {
+                    MetaValue::MetaSync(MetaSync::try_from(meta_tx_pb)?)
                 }
                 pb::internal::meta_value::ValueType::ShardMetadata(shard_metadata_pb) => {
                     MetaValue::ShardMetadata(ShardMetadata::try_from(shard_metadata_pb)?)

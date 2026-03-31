@@ -26,7 +26,7 @@ pub(crate) enum MetaKey {
 }
 
 impl MetaKey {
-    // (PFX_SYNC) -> pb::internal::MetaTx
+    // (PFX_SYNC) -> pb::internal::MetaSync
     const PFX_SYNC: u64 = 1;
 
     // (PFX_SHARDS, shard_id) => ShardMetadata

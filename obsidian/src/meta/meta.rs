@@ -16,7 +16,7 @@ use crate::meta::MetaKey;
 use crate::meta::MetaMutation;
 use crate::meta::MetaReader;
 use crate::meta::MetaState;
-use crate::meta::MetaTx;
+use crate::meta::MetaSync;
 use crate::meta::MetaValue;
 use crate::meta::ShardMetadata;
 use crate::meta::TabletMetadata;
@@ -199,7 +199,7 @@ impl runtime::Meta for Meta {
         for revision in page {
             if let RevisionValue::Regular(value) = revision.value {
                 let meta_tx = match MetaValue::decode(&value)? {
-                    MetaValue::MetaTx(meta_tx) => meta_tx,
+                    MetaValue::MetaSync(meta_tx) => meta_tx,
                     other => return Err(anyhow!("unexpected MetaValue {:?}", other)),
                 };
 
@@ -261,7 +261,7 @@ impl runtime::Meta for Meta {
 
         muts.insert(
             MetaKey::Sync,
-            MetaMutation::Put(MetaValue::MetaTx(MetaTx { keys: changed_keys })),
+            MetaMutation::Put(MetaValue::MetaSync(MetaSync { keys: changed_keys })),
         );
 
         let raw_muts = muts
