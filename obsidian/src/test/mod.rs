@@ -14,7 +14,6 @@ use async_trait::async_trait;
 
 use crate::election::Proposal;
 use crate::gateway::Gateway;
-use crate::meta::MetaReader;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::runtime;
@@ -23,7 +22,6 @@ use crate::runtime::Meta as _;
 use crate::runtime::Shards as _;
 use crate::runtime::Storage;
 use crate::storage::CachedStorage;
-use crate::supervisor::Supervisor;
 use crate::tablet::TabletJournalWriter;
 pub(crate) use crate::test::mem_file_reader::MemFileReader;
 pub(crate) use crate::test::mem_file_writer::MemFileWriter;
@@ -44,7 +42,7 @@ pub(crate) struct ObsidianForTest {
     pub gateway: Gateway,
     pub meta: Arc<dyn runtime::Meta>,
     pub meta_synced: Arc<MetaSynced>,
-    pub supervisor: Supervisor,
+    pub supervisor: Arc<dyn runtime::Supervisor>,
 
     nodes: TestNodes,
 }
@@ -83,33 +81,7 @@ impl ObsidianForTest {
             meta.add_shard(*shard_id).await?;
         }
 
-        let meta_synced = Arc::new(MetaSynced::new(nodes.discovery().meta()));
-        let supervisor = Supervisor::new(
-            Arc::clone(&meta) as Arc<dyn runtime::Meta>,
-            Arc::clone(&meta_synced),
-            nodes.shards(),
-        );
-
-        // Wait for supervisor to assign shards to nodes.
-        for shard_id in &shard_ids {
-            Retry::new()
-                .indefinitely(&async || {
-                    let shard_metadata = meta_synced.snapshot().shard_metadata(*shard_id).await?;
-                    if shard_metadata.assigned_node_ids.is_empty() {
-                        return Err(anyhow!("{:?} not assigned yet", shard_id));
-                    }
-                    Ok(())
-                })
-                .await;
-        }
-
-        let gateway = Gateway::new(
-            Box::new(Arc::clone(&meta)),
-            MetaSynced::new(Arc::clone(&meta)),
-            nodes.shards(),
-        );
-
-        // Wait for the nodes to finish leader election.
+        // Wait for the supervisor to assign shards and for replicas to finish leader election.
         let meta_ts = meta.latest_snapshot().await?;
         for shard_id in &shard_ids {
             Retry::new()
@@ -121,17 +93,24 @@ impl ObsidianForTest {
                 .await;
         }
 
+        let gateway = Gateway::new(
+            Box::new(Arc::clone(&meta)),
+            MetaSynced::new(Arc::clone(&meta)),
+            nodes.shards(),
+        );
+
         // JANK: Wait for things to settle, else we get flakes on the supervisor conflicting with
         // other operations on meta (e.g. creating a colo group).
         //
         // TODO: Internal retries in meta for writes on conflict.
         tokio::time::sleep(Duration::from_millis(1000)).await;
 
+        let meta_synced = Arc::new(MetaSynced::new(nodes.discovery().meta()));
         Ok(Self {
             gateway,
             meta,
             meta_synced,
-            supervisor,
+            supervisor: nodes.discovery().supervisor(),
             nodes,
         })
     }

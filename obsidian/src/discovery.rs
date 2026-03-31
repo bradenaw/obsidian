@@ -35,6 +35,7 @@ use crate::Revision;
 use crate::ShardId;
 use crate::TabletId;
 use crate::Timestamp;
+use crate::TransferId;
 use crate::TxOutcome;
 use crate::Txid;
 
@@ -42,6 +43,7 @@ pub(crate) struct Discovery {
     bg: WithBackground<DiscoveryInner>,
     inner: Arc<DiscoveryInner>,
     meta_proxy: Arc<dyn runtime::Meta>,
+    supervisor_proxy: Arc<dyn runtime::Supervisor>,
 }
 
 struct DiscoveryInner {
@@ -61,6 +63,9 @@ impl Discovery {
             meta_proxy: Arc::new(MetaProxy {
                 parent: Arc::clone(&inner),
             }),
+            supervisor_proxy: Arc::new(SupervisorProxy {
+                parent: Arc::clone(&inner),
+            }),
             inner,
         };
 
@@ -73,6 +78,10 @@ impl Discovery {
 
     pub fn meta(&self) -> Arc<dyn runtime::Meta> {
         Arc::clone(&self.meta_proxy)
+    }
+
+    pub fn supervisor(&self) -> Arc<dyn runtime::Supervisor> {
+        Arc::clone(&self.supervisor_proxy)
     }
 }
 
@@ -391,5 +400,39 @@ impl runtime::Meta for MetaProxy {
         muts: HashMap<MetaKey, MetaMutation>,
     ) -> anyhow::Result<Timestamp> {
         self.get_meta()?.write(snapshot_ts, muts).await
+    }
+}
+
+struct SupervisorProxy {
+    parent: Arc<DiscoveryInner>,
+}
+
+impl SupervisorProxy {
+    fn get_supervisor(&self) -> anyhow::Result<Arc<dyn runtime::Supervisor>> {
+        self.parent.current_leader(ShardId::META)?.supervisor()
+    }
+}
+
+#[async_trait]
+impl runtime::Supervisor for SupervisorProxy {
+    async fn start_move(&self, src: TabletId, dst: ShardId) -> anyhow::Result<TransferId> {
+        self.get_supervisor()?.start_move(src, dst).await
+    }
+
+    async fn start_split(
+        &self,
+        src: TabletId,
+        dst_a: ShardId,
+        dst_b: ShardId,
+    ) -> anyhow::Result<TransferId> {
+        self.get_supervisor()?.start_split(src, dst_a, dst_b).await
+    }
+
+    async fn start_merge(&self, srcs: Vec<TabletId>, dst: ShardId) -> anyhow::Result<TransferId> {
+        self.get_supervisor()?.start_merge(srcs, dst).await
+    }
+
+    async fn wait_transfer(&self, transfer_id: TransferId) -> anyhow::Result<()> {
+        self.get_supervisor()?.wait_transfer(transfer_id).await
     }
 }

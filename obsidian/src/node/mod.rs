@@ -55,7 +55,9 @@ struct NodeInner {
     meta_synced: Arc<MetaSynced>,
     journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
 
-    supervisor: RwLock<Option<Supervisor>>,
+    // TODO: We want to be able to stop these just by setting them to None, but handing
+    // out an Arc from meta()/supervisor() means any caller can keep it alive indefinitely.
+    supervisor: RwLock<Option<Arc<Supervisor>>>,
     maybe_meta: RwLock<Option<Arc<Meta>>>,
     replicas: RwLock<HashMap<ShardId, Arc<Replica>>>,
     replicas_changed: Notify,
@@ -142,7 +144,14 @@ impl runtime::Node for Node {
     }
 
     fn supervisor(&self) -> anyhow::Result<Arc<dyn runtime::Supervisor>> {
-        todo!();
+        let maybe_supervisor = self.0.supervisor.read().unwrap();
+        let supervisor = maybe_supervisor.as_ref().ok_or_else(|| {
+            anyhow!(
+                "{:?} is not currently hosting the supervisor",
+                self.0.node_id
+            )
+        })?;
+        Ok(Arc::clone(supervisor) as Arc<dyn runtime::Supervisor>)
     }
 
     fn became_leader_at_subscribe(
@@ -237,18 +246,15 @@ impl NodeInner {
                     // leader and a later entry in `stream` should tell us that.
                     if let Some(meta_shard) = replicas.get(&ShardId::META) {
                         if let Ok(meta_tablet) = meta_shard.tablet(TabletId::META) {
-                            *maybe_meta = Some(Arc::new(Meta::new(meta_tablet)));
+                            let meta = Arc::new(Meta::new(meta_tablet));
+                            *supervisor = Some(Arc::new(Supervisor::new(
+                                Arc::clone(&meta) as Arc<dyn runtime::Meta>,
+                                Arc::clone(&self.meta_synced),
+                                Arc::clone(&self.shards),
+                            )));
+                            *maybe_meta = Some(meta);
                         }
                     }
-                }
-
-                if supervisor.is_none() {
-                    // TODO: Remove the spawm from ObsidianForTest and use this one.
-                    //*supervisor = Some(Supervisor::new(
-                    //    Arc::clone(&self.meta),
-                    //    Arc::clone(&self.meta_synced),
-                    //    Arc::clone(&self.shards),
-                    //));
                 }
             } else {
                 *maybe_meta = None;

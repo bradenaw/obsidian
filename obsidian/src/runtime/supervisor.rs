@@ -5,7 +5,7 @@ use crate::TabletId;
 use crate::TransferId;
 
 #[async_trait]
-pub(crate) trait Supervisor {
+pub(crate) trait Supervisor: Send + Sync {
     async fn start_move(&self, src: TabletId, dst: ShardId) -> anyhow::Result<TransferId>;
 
     async fn start_split(
