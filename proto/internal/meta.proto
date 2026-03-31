@@ -58,38 +58,3 @@ enum TransferState {
 message ShardMetadata {
     repeated NodeId assigned_node_ids = 1;
 }
-
-message TabletId {
-    uint32 shard_id = 1;
-    uint64 id = 2;
-}
-
-message NodeId {
-    IpAddr addr = 1;
-    uint32 port = 2;
-    Uuid uuid = 3;
-}
-
-message IpAddr {
-    oneof addr_type {
-        Ipv4Addr v4 = 1;
-        Ipv6Addr v6 = 2;
-    }
-}
-
-message Ipv4Addr {
-    // Big-endian.
-    fixed32 bits = 1;
-}
-
-message Ipv6Addr {
-    // Big-endian.
-    fixed64 a = 1;
-    fixed64 b = 2;
-}
-
-message Uuid {
-    // Both in big-endian order.
-    fixed64 high = 1;
-    fixed64 low = 2;
-}

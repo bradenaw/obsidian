@@ -3,6 +3,7 @@ fn main() -> std::io::Result<()> {
     tonic_build::configure().compile(
         &[
             "../proto/internal/meta.proto",
+            "../proto/internal/node.proto",
             "../proto/internal/tablet.proto",
         ],
         &["../proto", "../proto/internal/"],

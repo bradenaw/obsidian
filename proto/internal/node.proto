@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package obsidian_internal;
+
+import "google/protobuf/empty.proto";
+
+import "internal/internal.proto";
+import "obsidian.proto";
+
+service Node {
+    rpc TabletGet(TabletGetReq) returns (obsidian.GetResp);
+    rpc TabletGetLatest(TabletGetLatestReq) returns (obsidian.GetLatestResp);
+    //rpc TabletLatestSnapshot(TabletLatestSnapshotReq) returns (obsidian.LatestSnapshotResp);
+    rpc TabletScanPage(TabletScanPageReq) returns (obsidian.ScanResp);
+    //rpc TabletHistoryPage(TabletHistoryPageReq) returns (obsidian.HistoryPageResp);
+    rpc TabletWrite(TabletWriteReq) returns (obsidian.WriteResp);
+    //rpc TabletPrepare(TabletPrepareReq) returns (TabletPrepareResp);
+    //rpc TabletTryCommit(TabletTryCommitReq) returns (TabletTryCommitResp);
+    //rpc TabletTryAbort(TabletTryAbortReq) returns (TabletTryAbortResp);
+    //rpc TabletWait(TabletWaitReq) returns (TabletWaitResp);
+    //rpc TabletCleanupCommitted(TabletCleanupCommittedReq) returns (TabletCleanupCommittedResp);
+    //rpc TabletWaitMetaSync(TabletWaitMetaSyncReq) returns (google.protobuf.Empty);
+    //rpc TabletManifest(google.protobuf.Empty) returns (TabletManifestResp);
+    //rpc TabletWaitMostlyHydrated(google.protobuf.Empty) returns (google.protobuf.Empty);
+    //rpc TabletCatchup(google.protobuf.Empty) returns (google.protobuf.Empty);
+    //rpc TabletFindSplit(google.protobuf.Empty) returns (TabletFindSplitResp);
+}
+
+message TabletGetReq {
+  TabletId tablet_id = 1;
+  NodeId node_id = 2;
+  obsidian.GetReq inner = 3;
+}
+
+message TabletGetLatestReq {
+  TabletId tablet_id = 1;
+  NodeId node_id = 2;
+  obsidian.GetLatestReq inner = 3;
+}
+
+//message TabletLatestSnapshotReq {
+//  TabletId tablet_id = 1;
+//  NodeId node_id = 2;
+//  obsidian.LatestSnapshotReq inner = 3;
+//}
+
+message TabletScanPageReq {
+  TabletId tablet_id = 1;
+  NodeId node_id = 2;
+  obsidian.ScanReq inner = 3;
+}
+
+//message TabletHistoryPageReq {
+//  TabletId tablet_id = 1;
+//  NodeId node_id = 2;
+//  obsidian.HistoryPageReq inner = 3;
+//}
+
+message TabletWriteReq {
+  TabletId tablet_id = 1;
+  NodeId node_id = 2;
+  obsidian.WriteReq inner = 3;
+}
