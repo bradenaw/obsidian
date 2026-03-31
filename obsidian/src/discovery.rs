@@ -39,6 +39,14 @@ use crate::TransferId;
 use crate::TxOutcome;
 use crate::Txid;
 
+/// Discovery's purpose is to locate logical objects in the system.
+///
+/// [`runtime::Nodes`]'s purpose, by contrast, is just to provide the 'physical' nodes in the
+/// system.
+///
+/// Nodes get assigned shards, and then nodes assigned to the same shard elect a leader amongst
+/// themselves, which means a logical shard moves around among nodes. Discovery keeps track of
+/// where that logical shard is.
 pub(crate) struct Discovery {
     bg: WithBackground<DiscoveryInner>,
     inner: Arc<DiscoveryInner>,
