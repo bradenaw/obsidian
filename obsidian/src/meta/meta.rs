@@ -53,6 +53,13 @@ pub(crate) struct Meta {
 #[async_trait]
 impl runtime::Meta for Meta {
     async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
+        if shard_id == ShardId::META {
+            return Err(anyhow!(
+                "{:?} cannot be added, it is implicit",
+                ShardId::META,
+            ));
+        }
+
         self.transact(&async move |tx| {
             if tx.shard_exists(shard_id).await? {
                 return Err(anyhow!("{:?} already exists", shard_id).into());
@@ -90,6 +97,13 @@ impl runtime::Meta for Meta {
         colo_group_id: ColoGroupId,
         initial_splits: Vec<Bound<Vec<u8>>>,
     ) -> anyhow::Result<()> {
+        if colo_group_id == ColoGroupId::META || colo_group_id == ColoGroupId::SHARD_META {
+            return Err(anyhow!(
+                "{:?} cannot be created, it is implicit",
+                colo_group_id,
+            ));
+        }
+
         let ranges = ranges_from_splits(initial_splits)?;
 
         self.transact(&async move |tx| {
