@@ -398,7 +398,7 @@ impl runtime::Meta for MetaProxy {
         &self,
         snapshot_ts: Timestamp,
         muts: HashMap<MetaKey, MetaMutation>,
-    ) -> anyhow::Result<Timestamp> {
+    ) -> Result<Timestamp, InternalError> {
         self.get_meta()?.write(snapshot_ts, muts).await
     }
 }

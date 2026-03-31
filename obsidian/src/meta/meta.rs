@@ -28,6 +28,7 @@ use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
 use crate::HistoryRange;
+use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
 use crate::Mutation;
@@ -245,9 +246,9 @@ impl runtime::Meta for Meta {
         &self,
         snapshot_ts: Timestamp,
         mut muts: HashMap<MetaKey, MetaMutation>,
-    ) -> anyhow::Result<Timestamp> {
+    ) -> Result<Timestamp, InternalError> {
         if muts.contains_key(&MetaKey::Sync) {
-            return Err(anyhow!("write contains a mutation to sync_key already"));
+            return Err(anyhow!("write contains a mutation to sync_key already").into());
         }
 
         log::trace!("attempting meta write {:?}", muts);
@@ -445,7 +446,7 @@ impl<T: runtime::Meta + ?Sized> runtime::Meta for Box<T> {
         &self,
         snapshot_ts: Timestamp,
         muts: HashMap<MetaKey, MetaMutation>,
-    ) -> anyhow::Result<Timestamp> {
+    ) -> Result<Timestamp, InternalError> {
         T::write(self, snapshot_ts, muts).await
     }
 }
@@ -500,7 +501,7 @@ impl<T: runtime::Meta + ?Sized> runtime::Meta for Arc<T> {
         &self,
         snapshot_ts: Timestamp,
         muts: HashMap<MetaKey, MetaMutation>,
-    ) -> anyhow::Result<Timestamp> {
+    ) -> Result<Timestamp, InternalError> {
         T::write(self, snapshot_ts, muts).await
     }
 }
