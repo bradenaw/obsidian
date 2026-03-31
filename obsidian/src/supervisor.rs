@@ -709,7 +709,6 @@ mod tests {
     use rand::RngCore;
 
     use crate::meta::MetaReader;
-    use crate::runtime::Supervisor;
     use crate::test::ObsidianForTest;
     use crate::Bound;
     use crate::ColoGroupId;
