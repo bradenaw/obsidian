@@ -227,12 +227,16 @@ struct ReplicaTablet {
 }
 
 impl ReplicaTablet {
-    async fn get_inner(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
+    async fn get_inner(
+        &self,
+        ts: Timestamp,
+        keys: BTreeSet<Key>,
+    ) -> Result<BTreeMap<Key, Record>, InternalError> {
         let tablet_id = self.tablet_id;
         self.participant
             .with_state(async move |participant_state| {
                 if let ParticipantState::Leader(leader) = participant_state {
-                    return leader.shard.tablet(tablet_id)?.get(ts, key).await;
+                    return leader.shard.tablet(tablet_id)?.get_multi(ts, keys).await;
                 }
                 Err(InternalError::NotLeader(tablet_id.0))
             })
@@ -267,16 +271,23 @@ impl ReplicaTablet {
 
 #[async_trait]
 impl runtime::Tablet for ReplicaTablet {
-    async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
-        self.get_inner(ts, key).await
+    async fn get_multi(
+        &self,
+        ts: Timestamp,
+        keys: BTreeSet<Key>,
+    ) -> Result<BTreeMap<Key, Record>, InternalError> {
+        self.get_inner(ts, keys).await
     }
 
-    async fn get_latest(&self, key: Key) -> Result<(Timestamp, Option<Record>), InternalError> {
+    async fn get_latest_multi(
+        &self,
+        keys: BTreeSet<Key>,
+    ) -> Result<(Timestamp, BTreeMap<Key, Record>), InternalError> {
         let tablet_id = self.tablet_id;
         self.participant
             .with_state(async move |participant_state| {
                 if let ParticipantState::Leader(leader) = participant_state {
-                    return leader.shard.tablet(tablet_id)?.get_latest(key).await;
+                    return leader.shard.tablet(tablet_id)?.get_latest_multi(keys).await;
                 }
                 Err(InternalError::NotLeader(tablet_id.0))
             })

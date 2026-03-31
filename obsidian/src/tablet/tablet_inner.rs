@@ -1,4 +1,5 @@
 use std::cmp;
+use std::cmp::max;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -74,84 +75,104 @@ impl TabletInner {
         ts: Timestamp,
         key: &Key,
     ) -> Result<Option<Record>, InternalError> {
+        Ok(self
+            .get_multi(ts, BTreeSet::from([key.clone()]))
+            .await?
+            .remove(key))
+    }
+
+    pub(super) async fn get_multi(
+        &self,
+        ts: Timestamp,
+        keys: BTreeSet<Key>,
+    ) -> Result<BTreeMap<Key, Record>, InternalError> {
         self.sequencer.wait_for_safe_read(ts).await?;
 
         let lsm_read = self.lsm.read()?;
 
-        let keyspace_id = key.0;
-        self.check_key(keyspace_id.0, &key.1)?;
+        let mut results = BTreeMap::new();
+        for key in keys {
+            let keyspace_id = key.0;
+            self.check_key(keyspace_id.0, &key.1)?;
 
-        let key_future = lsm_read.get(ts, keyspace_id, &key.1);
-        let (maybe_record, maybe_pending_value) = match keyspace_id.pending() {
-            Some(pending_keyspace_id) => {
-                future::try_join(key_future, lsm_read.get(ts, pending_keyspace_id, &key.1)).await?
+            let key_future = lsm_read.get(ts, keyspace_id, &key.1);
+            let (maybe_record, maybe_pending_value) = match keyspace_id.pending() {
+                Some(pending_keyspace_id) => {
+                    future::try_join(key_future, lsm_read.get(ts, pending_keyspace_id, &key.1))
+                        .await?
+                }
+                None => (key_future.await?, None),
+            };
+
+            if let Some((_, RevisionValue::Regular(bytes))) = maybe_pending_value {
+                let pending_mut = PendingMutation::decode(&bytes)?;
+                return Err(InternalError::Conflict(pending_mut.txid));
             }
-            None => (key_future.await?, None),
-        };
 
-        if let Some((_, RevisionValue::Regular(bytes))) = maybe_pending_value {
-            let pending_mut = PendingMutation::decode(&bytes)?;
-            return Err(InternalError::Conflict(pending_mut.txid));
+            if let Some((ts, RevisionValue::Regular(value))) = maybe_record {
+                results.insert(key.clone(), Record { key, ts, value });
+            }
+
+            // TODO: InternalError::PartialGet if too big
         }
 
-        Ok(match maybe_record {
-            Some((ts, value)) => match value {
-                RevisionValue::Regular(v) => Some(Record {
-                    key: key.clone(),
-                    ts: ts,
-                    value: v,
-                }),
-                RevisionValue::Tombstone => None,
-            },
-            None => None,
-        })
+        Ok(results)
     }
 
-    pub(super) async fn get_latest(
+    pub(super) async fn get_latest_multi(
         &self,
-        key: Key,
-    ) -> Result<(Timestamp, Option<Record>), InternalError> {
+        keys: BTreeSet<Key>,
+    ) -> Result<(Timestamp, BTreeMap<Key, Record>), InternalError> {
         let lsm_read = self.lsm.read()?;
 
-        let keyspace_id = key.0;
-        self.check_key(keyspace_id.0, &key.1)?;
-
-        let _guard = self.lock_mgr.read_lock(&key.1).await;
-
-        let safe_read_ts = self.sequencer.safe_read_ts();
-
-        let key_future = Self::unsafe_get_latest_record(&lsm_read, keyspace_id, &key.1);
-
-        let (maybe_record, maybe_pending_value) = match keyspace_id.pending() {
-            Some(pending_keyspace_id) => {
-                future::try_join(
-                    key_future,
-                    Self::unsafe_get_latest_record(&lsm_read, pending_keyspace_id, &key.1),
-                )
-                .await?
-            }
-            None => (key_future.await?, None),
-        };
-
-        if let Some((_, RevisionValue::Regular(bytes))) = maybe_pending_value {
-            let pending_mut = PendingMutation::decode(&bytes)?;
-            return Err(InternalError::Conflict(pending_mut.txid));
+        for key in &keys {
+            self.check_key(key.0 .0, &key.1)?;
         }
 
-        Ok(match maybe_record {
-            Some((ts, value)) => match value {
-                RevisionValue::Regular(v) => (
-                    ts,
-                    Some(Record {
-                        key: key,
-                        ts: ts,
-                        value: v,
-                    }),
-                ),
-                RevisionValue::Tombstone => (ts, None),
-            },
-            None => (safe_read_ts, None),
-        })
+        let _guard = self
+            .lock_mgr
+            .read_lock_all(keys.iter().map(|(_, key_bytes)| &key_bytes[..]))
+            .await;
+        let safe_read_ts = self.sequencer.safe_read_ts();
+        let mut snapshot_ts = Timestamp::ZERO;
+
+        let mut results = BTreeMap::new();
+
+        for key in keys {
+            let keyspace_id = key.0;
+
+            let key_future = Self::unsafe_get_latest_record(&lsm_read, keyspace_id, &key.1);
+
+            let (maybe_record, maybe_pending_value) = match keyspace_id.pending() {
+                Some(pending_keyspace_id) => {
+                    future::try_join(
+                        key_future,
+                        Self::unsafe_get_latest_record(&lsm_read, pending_keyspace_id, &key.1),
+                    )
+                    .await?
+                }
+                None => (key_future.await?, None),
+            };
+
+            if let Some((_, RevisionValue::Regular(bytes))) = maybe_pending_value {
+                let pending_mut = PendingMutation::decode(&bytes)?;
+                return Err(InternalError::Conflict(pending_mut.txid));
+            }
+
+            match maybe_record {
+                Some((ts, revision_value)) => {
+                    snapshot_ts = max(snapshot_ts, ts);
+                    if let RevisionValue::Regular(value) = revision_value {
+                        results.insert(key.clone(), Record { key, ts, value });
+                    }
+                }
+                None => {
+                    snapshot_ts = safe_read_ts;
+                }
+            }
+        }
+
+        Ok((snapshot_ts, results))
     }
 
     pub(super) async fn latest_snapshot(
@@ -160,12 +181,8 @@ impl TabletInner {
     ) -> Result<Timestamp, InternalError> {
         // TODO: This doesn't require loading the values, so we could optimize here to do less
         // work.
-        let mut result = Timestamp::ZERO;
-        for key in keys {
-            let (ts, _) = self.get_latest(key).await?;
-            result = cmp::max(result, ts);
-        }
-        Ok(result)
+        let (ts, _) = self.get_latest_multi(keys).await?;
+        Ok(ts)
     }
 
     pub(super) async fn scan_page(

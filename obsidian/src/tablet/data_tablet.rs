@@ -93,12 +93,19 @@ enum HydrationState {
 
 #[async_trait]
 impl Tablet for DataTablet {
-    async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
-        self.0.inner.get(ts, key).await
+    async fn get_multi(
+        &self,
+        ts: Timestamp,
+        keys: BTreeSet<Key>,
+    ) -> Result<BTreeMap<Key, Record>, InternalError> {
+        self.0.inner.get_multi(ts, keys).await
     }
 
-    async fn get_latest(&self, key: Key) -> Result<(Timestamp, Option<Record>), InternalError> {
-        self.0.inner.get_latest(key).await
+    async fn get_latest_multi(
+        &self,
+        keys: BTreeSet<Key>,
+    ) -> Result<(Timestamp, BTreeMap<Key, Record>), InternalError> {
+        self.0.inner.get_latest_multi(keys).await
     }
 
     async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError> {

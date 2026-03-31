@@ -21,9 +21,28 @@ use crate::Txid;
 
 #[async_trait]
 pub(crate) trait Tablet: Send + Sync {
-    async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError>;
+    async fn get_multi(
+        &self,
+        ts: Timestamp,
+        keys: BTreeSet<Key>,
+    ) -> Result<BTreeMap<Key, Record>, InternalError>;
 
-    async fn get_latest(&self, key: Key) -> Result<(Timestamp, Option<Record>), InternalError>;
+    async fn get(&self, ts: Timestamp, key: &Key) -> Result<Option<Record>, InternalError> {
+        Ok(self
+            .get_multi(ts, BTreeSet::from([key.clone()]))
+            .await?
+            .remove(key))
+    }
+
+    async fn get_latest_multi(
+        &self,
+        keys: BTreeSet<Key>,
+    ) -> Result<(Timestamp, BTreeMap<Key, Record>), InternalError>;
+
+    async fn get_latest(&self, key: Key) -> Result<(Timestamp, Option<Record>), InternalError> {
+        let (ts, mut records) = self.get_latest_multi(BTreeSet::from([key.clone()])).await?;
+        Ok((ts, records.remove(&key)))
+    }
 
     async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError>;
 
@@ -84,3 +103,5 @@ pub(crate) trait Tablet: Send + Sync {
 
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>>;
 }
+
+trait TabletExt {}
