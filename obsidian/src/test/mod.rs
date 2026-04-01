@@ -3,7 +3,8 @@ mod mem_file_writer;
 mod mem_journal;
 mod mem_journals;
 mod mem_storage;
-pub(crate) mod suite;
+pub(crate) mod obsidian_suite;
+pub(crate) mod tablet_suite;
 mod test_nodes;
 
 use std::fmt::Debug;
@@ -27,8 +28,9 @@ pub(crate) use crate::test::mem_file_writer::MemFileWriter;
 pub(crate) use crate::test::mem_journal::MemJournal;
 pub(crate) use crate::test::mem_journals::MemJournals;
 pub(crate) use crate::test::mem_storage::MemStorage;
-pub(crate) use crate::test::suite::obsidian_test_suite;
-use crate::test::test_nodes::TestNodes;
+pub(crate) use crate::test::obsidian_suite::obsidian_test_suite;
+pub(crate) use crate::test::tablet_suite::tablet_test_suite;
+pub(crate) use crate::test::test_nodes::TestNodes;
 use crate::util::encode;
 use crate::util::Decode;
 use crate::util::Encode;
@@ -43,8 +45,7 @@ pub(crate) struct ObsidianForTest {
     pub meta: Arc<dyn runtime::Meta>,
     pub meta_synced: Arc<MetaSynced>,
     pub supervisor: Arc<dyn runtime::Supervisor>,
-
-    nodes: TestNodes,
+    pub nodes: TestNodes,
 }
 
 impl ObsidianForTest {

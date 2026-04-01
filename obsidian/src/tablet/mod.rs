@@ -7,6 +7,7 @@ mod sequencer;
 mod shard_meta_tablet;
 mod tablet_inner;
 mod tablet_journal_writer;
+mod tests;
 
 #[allow(unused_imports)]
 pub(crate) use data_tablet::DataTablet;
