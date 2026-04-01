@@ -117,6 +117,36 @@ pub(super) fn parse_write_req(
     Ok((preconds, muts_map))
 }
 
+pub(crate) fn scan_req_to_proto(
+    ts: Timestamp,
+    keyspace_id: KeyspaceId,
+    range: Range<&[u8]>,
+    direction: Direction,
+    limit: usize,
+) -> anyhow::Result<pb::ScanReq> {
+    Ok(pb::ScanReq {
+        snapshot_ts: ts.as_micros(),
+        keyspace_id: Some(keyspace_id.into()),
+        range: Some(range.to_vec().into()),
+        direction: pb::Direction::from(direction).into(),
+        limit: u64::try_from(limit)?,
+    })
+}
+
+pub(super) fn preconds_muts_to_proto(
+    preconds: Vec<Precondition>,
+    muts: BTreeMap<Key, Mutation>,
+) -> (Vec<pb::Precondition>, Vec<pb::Key>, Vec<pb::Mutation>) {
+    let preconds_pb: Vec<_> = preconds.into_iter().map(pb::Precondition::from).collect();
+    let mut keys_pb = Vec::with_capacity(muts.len());
+    let mut muts_pb = Vec::with_capacity(muts.len());
+    for (key, m) in muts.into_iter() {
+        keys_pb.push(pb::Key::from(key));
+        muts_pb.push(pb::Mutation::from(m));
+    }
+    (preconds_pb, keys_pb, muts_pb)
+}
+
 pub(super) fn required<T, U>(name: &'static str, v: Option<T>) -> Result<U, tonic::Status>
 where
     U: TryFrom<T, Error = anyhow::Error>,

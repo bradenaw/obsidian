@@ -4,6 +4,8 @@ use std::collections::BTreeSet;
 use anyhow::anyhow;
 use async_trait::async_trait;
 
+use crate::grpc::util::preconds_muts_to_proto;
+use crate::grpc::util::scan_req_to_proto;
 use crate::grpc::util::Pool;
 use crate::pb;
 use crate::Bound;
@@ -78,13 +80,7 @@ impl Obsidian for GatewayClient {
             .inner
             .acquire()
             .await
-            .scan(pb::ScanReq {
-                snapshot_ts: ts.as_micros(),
-                keyspace_id: Some(keyspace_id.into()),
-                range: Some(range.to_vec().into()),
-                direction: pb::Direction::from(direction).into(),
-                limit: u64::try_from(limit)?,
-            })
+            .scan(scan_req_to_proto(ts, keyspace_id, range, direction, limit)?)
             .await?
             .into_inner();
 
@@ -100,6 +96,7 @@ impl Obsidian for GatewayClient {
     }
 
     async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> anyhow::Result<Timestamp> {
+        // TODO: Use the native one.
         let resp = self
             .inner
             .acquire()
@@ -118,14 +115,7 @@ impl Obsidian for GatewayClient {
         preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, WriteError> {
-        let preconds_pb: Vec<_> = preconds.into_iter().map(pb::Precondition::from).collect();
-
-        let mut keys_pb = Vec::with_capacity(muts.len());
-        let mut muts_pb = Vec::with_capacity(muts.len());
-        for (key, m) in muts.into_iter() {
-            keys_pb.push(pb::Key::from(key));
-            muts_pb.push(pb::Mutation::from(m));
-        }
+        let (preconds_pb, keys_pb, muts_pb) = preconds_muts_to_proto(preconds, muts);
 
         let resp = self
             .inner
