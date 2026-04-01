@@ -41,28 +41,23 @@ impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for GatewayServer<O> {
         let (keys, key_idxs) = key_set_from_pb(req_inner.keys).map_err(invalid_argument)?;
         let ts = Timestamp::from_micros(req_inner.snapshot_ts);
 
-        if keys.len() != 1 {
-            return Err(tonic::Status::invalid_argument(
-                "TODO: Get() only allows one key",
-            ));
-        }
-
-        let mut values = Vec::with_capacity(keys.len());
+        let mut results = Vec::with_capacity(keys.len());
         for _ in &keys {
-            values.push(None);
+            results.push(None);
         }
-        for key in keys {
-            let maybe_value = self
-                .inner
-                .get(ts, &key)
-                .await
-                .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
-            values[key_idxs[&key]] = maybe_value;
+        let records = self
+            .inner
+            .get_multi(ts, keys)
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        for (key, record) in records {
+            results[key_idxs[&key]] = Some(record);
         }
 
         Ok(tonic::Response::new(pb::GetResp {
-            results: options_to_get_results(values),
+            results: options_to_get_results(results),
         }))
     }
 

@@ -10,6 +10,7 @@ use std::time::Duration;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::future;
+use futures::future::try_join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use futures::TryStreamExt;
@@ -50,14 +51,30 @@ const MAX_CONFLICT_RETRIES: usize = 10;
 
 #[async_trait]
 impl Obsidian for Gateway {
-    async fn get(&self, ts: Timestamp, key: &Key) -> anyhow::Result<Option<Record>> {
-        let keyspace_id = key.0;
-        self.with_resolve_conflicts(|| async move {
-            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key.1)?;
-            let tablet = self.shards.tablet(tablet_id)?;
-            tablet.get(ts, key).await
-        })
-        .await
+    async fn get_multi(
+        &self,
+        ts: Timestamp,
+        keys: BTreeSet<Key>,
+    ) -> anyhow::Result<BTreeMap<Key, Record>> {
+        let by_tablet = self.split_keys(keys)?;
+        let results = try_join_all(by_tablet.into_iter().map(
+            |(tablet_id, tablet_keys)| async move {
+                self.with_resolve_conflicts(|| {
+                    let tablet_keys = tablet_keys.clone();
+                    async move {
+                        let tablet = self.shards.tablet(tablet_id)?;
+                        tablet.get_multi(ts, tablet_keys).await
+                    }
+                })
+                .await
+            },
+        ))
+        .await?;
+        Ok(results
+            .into_iter()
+            .map(|tablet_results| tablet_results.into_iter())
+            .flatten()
+            .collect())
     }
 
     async fn scan_page(
@@ -86,14 +103,7 @@ impl Obsidian for Gateway {
     }
 
     async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> anyhow::Result<Timestamp> {
-        let mut by_tablet = BTreeMap::new();
-        for (keyspace_id, key) in &keys {
-            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
-            by_tablet
-                .entry(tablet_id)
-                .or_insert_with(BTreeSet::new)
-                .insert((*keyspace_id, key.clone()));
-        }
+        let by_tablet = self.split_keys(keys)?;
         let mut futures = FuturesUnordered::new();
         for (tablet_id, keys) in by_tablet.into_iter() {
             // TODO: with a little more information, we could get away with at most *one* round of
@@ -241,6 +251,18 @@ impl Gateway {
             meta_synced,
             shards,
         }
+    }
+
+    fn split_keys(&self, keys: BTreeSet<Key>) -> anyhow::Result<BTreeMap<TabletId, BTreeSet<Key>>> {
+        let mut by_tablet = BTreeMap::new();
+        for (keyspace_id, key) in &keys {
+            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
+            by_tablet
+                .entry(tablet_id)
+                .or_insert_with(BTreeSet::new)
+                .insert((*keyspace_id, key.clone()));
+        }
+        Ok(by_tablet)
     }
 
     fn split_write(
@@ -511,9 +533,15 @@ impl Gateway {
 mod tests {
     use crate::test::obsidian_test_suite;
 
-    obsidian_test_suite!(
-        async |n_tablets: usize| -> anyhow::Result<crate::gateway::Gateway> {
-            Ok(crate::test::ObsidianForTest::new(n_tablets).await?.gateway)
+    obsidian_test_suite!({
+        use std::sync::Arc;
+
+        use crate::test::ObsidianForTest;
+        use crate::Obsidian;
+
+        async || {
+            let obs = ObsidianForTest::new(2 /*n_shards*/).await?;
+            Ok(Arc::new(obs.gateway) as Arc<dyn Obsidian>)
         }
-    );
+    });
 }

@@ -19,7 +19,18 @@ use crate::WriteError;
 
 #[async_trait]
 pub trait Obsidian: Send + Sync {
-    async fn get(&self, ts: Timestamp, key: &Key) -> anyhow::Result<Option<Record>>;
+    async fn get_multi(
+        &self,
+        ts: Timestamp,
+        keys: BTreeSet<Key>,
+    ) -> anyhow::Result<BTreeMap<Key, Record>>;
+
+    async fn get(&self, ts: Timestamp, key: &Key) -> anyhow::Result<Option<Record>> {
+        Ok(self
+            .get_multi(ts, BTreeSet::from([key.clone()]))
+            .await?
+            .remove(key))
+    }
 
     async fn scan_page(
         &self,

@@ -1,7 +1,11 @@
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fmt::Debug;
 
 use thiserror::Error;
 
+use crate::Key;
+use crate::Record;
 use crate::ShardId;
 use crate::TabletId;
 use crate::Txid;
@@ -26,6 +30,15 @@ pub(crate) enum InternalError {
     TabletNotWriteable(TabletId),
     #[error("tablet not currently hydrating")]
     TabletNotHydrating(TabletId),
+    /// Gets with multiple keys may produce results too large to return. Instead, PartialGet is
+    /// returned with some of the results, and the get can be repeated with the remaining keys.
+    #[error("partial get")]
+    PartialGet {
+        /// Results for the requested keys, except for the keys in `remaining`.
+        results: BTreeMap<Key, Record>,
+        /// Keys that were not read in the course of the get.
+        remaining: BTreeSet<Key>,
+    },
     #[error("node not currently leader for {0:?}")]
     NotLeader(ShardId),
     #[error(transparent)]
