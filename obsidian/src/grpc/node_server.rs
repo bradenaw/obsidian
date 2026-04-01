@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use crate::grpc::util::get_req_results;
 use crate::grpc::util::internal;
 use crate::grpc::util::invalid_argument;
+use crate::grpc::util::parse_scan_req;
+use crate::grpc::util::parse_write_req;
 use crate::grpc::util::required;
 use crate::node::Node;
 use crate::pb;
@@ -85,15 +87,8 @@ impl pb::internal::node_server::Node for NodeServer {
             .inner
             .ok_or_else(|| invalid_argument(anyhow!("missing inner")))?;
 
-        let snapshot_ts = Timestamp::from_micros(scan_req.snapshot_ts);
-        let keyspace_id: KeyspaceId = required("keyspace_id", scan_req.keyspace_id)?;
-        let range: Range<Vec<u8>> = required("range", scan_req.range)?;
-        let direction: Direction = pb::Direction::from_i32(scan_req.direction)
-            .ok_or_else(|| tonic::Status::invalid_argument("unknown direction"))?
-            .try_into()
-            .map_err(invalid_argument)?;
-        let limit = usize::try_from(scan_req.limit)
-            .map_err(|_| tonic::Status::invalid_argument("invalid limit"))?;
+        let (snapshot_ts, keyspace_id, range, direction, limit) =
+            parse_scan_req(scan_req).map_err(invalid_argument)?;
 
         let (records, maybe_continue_range) = tablet
             .scan_page(snapshot_ts, keyspace_id, range.borrow(), direction, limit)
@@ -110,6 +105,22 @@ impl pb::internal::node_server::Node for NodeServer {
         &self,
         req: tonic::Request<pb::internal::TabletWriteReq>,
     ) -> Result<tonic::Response<pb::WriteResp>, tonic::Status> {
-        todo!();
+        let req_inner = req.into_inner();
+        let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
+        let tablet = self.node.tablet(tablet_id).map_err(internal)?;
+        let write_req = req_inner
+            .inner
+            .ok_or_else(|| invalid_argument(anyhow!("missing inner")))?;
+
+        let (preconds, muts) = parse_write_req(write_req).map_err(invalid_argument)?;
+
+        let ts = tablet
+            .write(preconds, muts)
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        Ok(tonic::Response::new(pb::WriteResp {
+            write_ts: ts.as_micros(),
+        }))
     }
 }

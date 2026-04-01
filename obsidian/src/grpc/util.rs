@@ -1,14 +1,20 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::iter;
 use std::ops::Deref;
 use std::ops::DerefMut;
 
 use anyhow::anyhow;
 
 use crate::pb;
+use crate::Direction;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Mutation;
+use crate::Precondition;
+use crate::Range;
 use crate::Record;
+use crate::Timestamp;
 
 pub(super) fn get_req_results(
     keys_pb: Vec<pb::Key>,
@@ -60,6 +66,55 @@ impl GetResultsBuilder {
 
         Ok(results)
     }
+}
+
+pub(super) fn parse_scan_req(
+    req_pb: pb::ScanReq,
+) -> anyhow::Result<(Timestamp, KeyspaceId, Range<Vec<u8>>, Direction, usize)> {
+    let snapshot_ts = Timestamp::from_micros(req_pb.snapshot_ts);
+    let keyspace_id: KeyspaceId = required("keyspace_id", req_pb.keyspace_id)?;
+    let range: Range<Vec<u8>> = required("range", req_pb.range)?;
+    let direction: Direction = pb::Direction::from_i32(req_pb.direction)
+        .ok_or_else(|| anyhow!("unknown direction"))?
+        .try_into()
+        .map_err(invalid_argument)?;
+    let limit = usize::try_from(req_pb.limit).map_err(|_| anyhow!("invalid limit"))?;
+
+    Ok((snapshot_ts, keyspace_id, range, direction, limit))
+}
+
+pub(super) fn parse_write_req(
+    req_pb: pb::WriteReq,
+) -> anyhow::Result<(Vec<Precondition>, BTreeMap<Key, Mutation>)> {
+    let preconds = req_pb
+        .preconds
+        .into_iter()
+        .map(|x| x.try_into())
+        .collect::<Result<Vec<Precondition>, _>>()?;
+    let keys = req_pb
+        .keys
+        .into_iter()
+        .map(|x| x.try_into())
+        .collect::<Result<Vec<Key>, _>>()?;
+    let muts = req_pb
+        .muts
+        .into_iter()
+        .map(|x| x.try_into())
+        .collect::<Result<Vec<Mutation>, _>>()?;
+
+    let mut muts_map = BTreeMap::new();
+    if keys.len() != muts.len() {
+        return Err(anyhow!(
+            "keys and muts must have the same number of elements",
+        ));
+    }
+    for (key, m) in iter::zip(keys, muts) {
+        if muts_map.contains_key(&key) {
+            return Err(anyhow!("duplicate key {:?}", key));
+        }
+        muts_map.insert(key, m);
+    }
+    Ok((preconds, muts_map))
 }
 
 pub(super) fn required<T, U>(name: &'static str, v: Option<T>) -> Result<U, tonic::Status>

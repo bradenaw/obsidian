@@ -6,6 +6,8 @@ use async_trait::async_trait;
 use crate::grpc::util::get_req_results;
 use crate::grpc::util::internal;
 use crate::grpc::util::invalid_argument;
+use crate::grpc::util::parse_scan_req;
+use crate::grpc::util::parse_write_req;
 use crate::grpc::util::required;
 use crate::pb;
 use crate::Bound;
@@ -84,15 +86,8 @@ impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for GatewayServer<O> {
     ) -> Result<tonic::Response<pb::ScanResp>, tonic::Status> {
         let req_inner = req.into_inner();
 
-        let snapshot_ts = Timestamp::from_micros(req_inner.snapshot_ts);
-        let keyspace_id: KeyspaceId = required("keyspace_id", req_inner.keyspace_id)?;
-        let range: Range<Vec<u8>> = required("range", req_inner.range)?;
-        let direction: Direction = pb::Direction::from_i32(req_inner.direction)
-            .ok_or_else(|| tonic::Status::invalid_argument("unknown direction"))?
-            .try_into()
-            .map_err(invalid_argument)?;
-        let limit = usize::try_from(req_inner.limit)
-            .map_err(|_| tonic::Status::invalid_argument("invalid limit"))?;
+        let (snapshot_ts, keyspace_id, range, direction, limit) =
+            parse_scan_req(req_inner).map_err(invalid_argument)?;
 
         let (records, maybe_continue_range) = self
             .inner
@@ -112,44 +107,11 @@ impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for GatewayServer<O> {
     ) -> Result<tonic::Response<pb::WriteResp>, tonic::Status> {
         let req_inner = req.into_inner();
 
-        let preconds = req_inner
-            .preconds
-            .into_iter()
-            .map(|x| x.try_into())
-            .collect::<Result<Vec<Precondition>, _>>()
-            .map_err(invalid_argument)?;
-        let keys = req_inner
-            .keys
-            .into_iter()
-            .map(|x| x.try_into())
-            .collect::<Result<Vec<Key>, _>>()
-            .map_err(invalid_argument)?;
-        let muts = req_inner
-            .muts
-            .into_iter()
-            .map(|x| x.try_into())
-            .collect::<Result<Vec<Mutation>, _>>()
-            .map_err(invalid_argument)?;
-
-        let mut muts_map = BTreeMap::new();
-        if keys.len() != muts.len() {
-            return Err(tonic::Status::invalid_argument(
-                "keys and muts must have the same number of elements",
-            ));
-        }
-        for (key, m) in iter::zip(keys, muts) {
-            if muts_map.contains_key(&key) {
-                return Err(tonic::Status::invalid_argument(format!(
-                    "duplicate key {:?}",
-                    key
-                )));
-            }
-            muts_map.insert(key, m);
-        }
+        let (preconds, muts) = parse_write_req(req_inner).map_err(invalid_argument)?;
 
         let ts = self
             .inner
-            .write(preconds, muts_map)
+            .write(preconds, muts)
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
