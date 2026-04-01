@@ -511,9 +511,15 @@ impl Gateway {
 mod tests {
     use crate::test::obsidian_test_suite;
 
-    obsidian_test_suite!(
-        async |n_tablets: usize| -> anyhow::Result<crate::gateway::Gateway> {
-            Ok(crate::test::ObsidianForTest::new(n_tablets).await?.gateway)
+    obsidian_test_suite!({
+        use std::sync::Arc;
+
+        use crate::test::ObsidianForTest;
+        use crate::Obsidian;
+
+        async || {
+            let obs = ObsidianForTest::new(2 /*n_shards*/).await?;
+            Ok(Arc::new(obs.gateway) as Arc<dyn Obsidian>)
         }
-    );
+    });
 }

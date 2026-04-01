@@ -224,15 +224,18 @@ mod tests {
         Ok(())
     }
 
-    obsidian_test_suite!(async |n_tablets: usize| -> anyhow::Result<
-        crate::grpc::gateway_client::tests::ObsidianClientServer,
-    > {
+    obsidian_test_suite!({
+        use std::sync::Arc;
+
         use super::spawn_server;
         use crate::test::ObsidianForTest;
+        use crate::Obsidian;
 
-        let obs = ObsidianForTest::new(n_tablets).await?;
-        let client = spawn_server(obs.gateway).await?;
-        Ok(client)
+        async || {
+            let obs = ObsidianForTest::new(2 /*n_shards*/).await?;
+            let client = spawn_server(obs.gateway).await?;
+            Ok(Arc::new(client) as Arc<dyn Obsidian>)
+        }
     });
 
     async fn spawn_server<O: Obsidian + 'static>(obs: O) -> anyhow::Result<ObsidianClientServer> {
