@@ -33,33 +33,37 @@ impl GatewayClient {
 
 #[async_trait]
 impl Obsidian for GatewayClient {
-    async fn get(&self, ts: Timestamp, key: &Key) -> anyhow::Result<Option<Record>> {
+    async fn get_multi(
+        &self,
+        ts: Timestamp,
+        keys: BTreeSet<Key>,
+    ) -> anyhow::Result<BTreeMap<Key, Record>> {
         let resp = self
             .inner
             .acquire()
             .await
             .get(pb::GetReq {
                 snapshot_ts: ts.as_micros(),
-                keys: Vec::from([pb::Key::from(key.clone())]),
+                keys: keys.into_iter().map(pb::Key::from).collect(),
             })
             .await?
             .into_inner();
 
-        let mut results: Vec<Option<Record>> = resp
+        let results: BTreeMap<Key, Record> = resp
             .results
             .into_iter()
             .map(|result_pb| match result_pb.result_type {
                 Some(pb::get_result::ResultType::Record(record_pb)) => {
-                    Ok(Some(Record::try_from(record_pb)?))
+                    let record = Record::try_from(record_pb)?;
+                    Ok(Some((record.key.clone(), record)))
                 }
                 Some(pb::get_result::ResultType::NotFound(())) => Ok(None),
                 None => Err(anyhow!("invalid response: GetResult.result_type missing")),
             })
+            .filter_map(Result::transpose)
             .collect::<anyhow::Result<_>>()?;
 
-        Ok(results
-            .pop()
-            .ok_or_else(|| anyhow!("invalid response: missing GetResp.results"))?)
+        Ok(results)
     }
 
     async fn scan_page(
@@ -271,8 +275,12 @@ mod tests {
 
     #[async_trait]
     impl Obsidian for ObsidianClientServer {
-        async fn get(&self, ts: crate::Timestamp, key: &Key) -> anyhow::Result<Option<Record>> {
-            self.inner.get(ts, key).await
+        async fn get_multi(
+            &self,
+            ts: crate::Timestamp,
+            keys: BTreeSet<Key>,
+        ) -> anyhow::Result<BTreeMap<Key, Record>> {
+            self.inner.get_multi(ts, keys).await
         }
 
         async fn scan_page(
