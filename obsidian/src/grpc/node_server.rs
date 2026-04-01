@@ -1,10 +1,9 @@
 use anyhow::anyhow;
 use async_trait::async_trait;
 
+use crate::grpc::util::get_req_results;
 use crate::grpc::util::internal;
 use crate::grpc::util::invalid_argument;
-use crate::grpc::util::key_set_from_pb;
-use crate::grpc::util::options_to_get_results;
 use crate::grpc::util::required;
 use crate::node::Node;
 use crate::pb;
@@ -32,35 +31,45 @@ impl pb::internal::node_server::Node for NodeServer {
         req: tonic::Request<pb::internal::TabletGetReq>,
     ) -> Result<tonic::Response<pb::GetResp>, tonic::Status> {
         let req_inner = req.into_inner();
+
         let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
         let tablet = self.node.tablet(tablet_id).map_err(internal)?;
-        let req_inner_inner = req_inner
+
+        let get_req = req_inner
             .inner
             .ok_or_else(|| invalid_argument(anyhow!("missing inner")))?;
-        let (keys, key_idxs) = key_set_from_pb(req_inner_inner.keys).map_err(invalid_argument)?;
-        let ts = Timestamp::from_micros(req_inner_inner.snapshot_ts);
 
-        if keys.len() != 1 {
-            return Err(tonic::Status::invalid_argument(
-                "TODO: Get() only allows one key",
-            ));
-        }
+        let (keys, results_builder) = get_req_results(get_req.keys).map_err(invalid_argument)?;
+        let ts = Timestamp::from_micros(get_req.snapshot_ts);
 
-        let mut values = Vec::with_capacity(keys.len());
-        for _ in &keys {
-            values.push(None);
-        }
-        for key in keys {
-            let maybe_value = tablet
-                .get(ts, &key)
-                .await
-                .map_err(|e| tonic::Status::internal(e.to_string()))?;
-
-            values[key_idxs[&key]] = maybe_value;
-        }
+        let records = tablet
+            .get_multi(ts, keys)
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
         Ok(tonic::Response::new(pb::GetResp {
-            results: options_to_get_results(values),
+            results: results_builder.build(records).map_err(internal)?,
         }))
+    }
+
+    async fn tablet_get_latest(
+        &self,
+        req: tonic::Request<pb::internal::TabletGetLatestReq>,
+    ) -> Result<tonic::Response<pb::GetLatestResp>, tonic::Status> {
+        todo!();
+    }
+
+    async fn tablet_scan_page(
+        &self,
+        req: tonic::Request<pb::internal::TabletScanPageReq>,
+    ) -> Result<tonic::Response<pb::ScanResp>, tonic::Status> {
+        todo!();
+    }
+
+    async fn tablet_write(
+        &self,
+        req: tonic::Request<pb::internal::TabletWriteReq>,
+    ) -> Result<tonic::Response<pb::WriteResp>, tonic::Status> {
+        todo!();
     }
 }

@@ -10,23 +10,9 @@ use crate::Key;
 use crate::KeyspaceId;
 use crate::Record;
 
-pub(super) fn options_to_get_results(values: Vec<Option<Record>>) -> Vec<pb::GetResult> {
-    values
-        .into_iter()
-        .map(|maybe_record| match maybe_record {
-            Some(record) => pb::GetResult {
-                result_type: Some(pb::get_result::ResultType::Record(record.into())),
-            },
-            None => pb::GetResult {
-                result_type: Some(pb::get_result::ResultType::NotFound(())),
-            },
-        })
-        .collect()
-}
-
-pub(super) fn key_set_from_pb(
+pub(super) fn get_req_results(
     keys_pb: Vec<pb::Key>,
-) -> anyhow::Result<(BTreeSet<Key>, BTreeMap<Key, usize>)> {
+) -> anyhow::Result<(BTreeSet<Key>, GetResultsBuilder)> {
     let mut keys = BTreeSet::new();
     let mut key_idxs = BTreeMap::new();
     for (i, key_pb) in keys_pb.into_iter().enumerate() {
@@ -45,7 +31,35 @@ pub(super) fn key_set_from_pb(
         keys.insert(key.clone());
         key_idxs.insert(key, i);
     }
-    Ok((keys, key_idxs))
+
+    Ok((keys, GetResultsBuilder { key_idxs }))
+}
+
+pub(super) struct GetResultsBuilder {
+    key_idxs: BTreeMap<Key, usize>,
+}
+
+impl GetResultsBuilder {
+    pub fn build(self, records: BTreeMap<Key, Record>) -> anyhow::Result<Vec<pb::GetResult>> {
+        let mut results: Vec<pb::GetResult> = Vec::new();
+        for _ in 0..self.key_idxs.len() {
+            results.push(pb::GetResult {
+                result_type: Some(pb::get_result::ResultType::NotFound(())),
+            });
+        }
+
+        for (key, record) in records {
+            let idx = self
+                .key_idxs
+                .get(&key)
+                .ok_or_else(|| anyhow!("got response for not-requested key {:?}", key))?;
+            results[*idx] = pb::GetResult {
+                result_type: Some(pb::get_result::ResultType::Record(record.into())),
+            };
+        }
+
+        Ok(results)
+    }
 }
 
 pub(super) fn required<T, U>(name: &'static str, v: Option<T>) -> Result<U, tonic::Status>

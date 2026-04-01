@@ -3,10 +3,9 @@ use std::iter;
 
 use async_trait::async_trait;
 
+use crate::grpc::util::get_req_results;
 use crate::grpc::util::internal;
 use crate::grpc::util::invalid_argument;
-use crate::grpc::util::key_set_from_pb;
-use crate::grpc::util::options_to_get_results;
 use crate::grpc::util::required;
 use crate::pb;
 use crate::Bound;
@@ -38,13 +37,8 @@ impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for GatewayServer<O> {
     ) -> Result<tonic::Response<pb::GetResp>, tonic::Status> {
         let req_inner = req.into_inner();
 
-        let (keys, key_idxs) = key_set_from_pb(req_inner.keys).map_err(invalid_argument)?;
+        let (keys, results_builder) = get_req_results(req_inner.keys).map_err(invalid_argument)?;
         let ts = Timestamp::from_micros(req_inner.snapshot_ts);
-
-        let mut results = Vec::with_capacity(keys.len());
-        for _ in &keys {
-            results.push(None);
-        }
 
         let records = self
             .inner
@@ -52,12 +46,8 @@ impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for GatewayServer<O> {
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
-        for (key, record) in records {
-            results[key_idxs[&key]] = Some(record);
-        }
-
         Ok(tonic::Response::new(pb::GetResp {
-            results: options_to_get_results(results),
+            results: results_builder.build(records).map_err(internal)?,
         }))
     }
 
@@ -65,9 +55,10 @@ impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for GatewayServer<O> {
         &self,
         req: tonic::Request<pb::GetLatestReq>,
     ) -> Result<tonic::Response<pb::GetLatestResp>, tonic::Status> {
+        // TODO: Just call Obsidian::get_latest_multi.
         let req_inner = req.into_inner();
 
-        let (keys, key_idxs) = key_set_from_pb(req_inner.keys).map_err(invalid_argument)?;
+        let (keys, results_builder) = get_req_results(req_inner.keys).map_err(invalid_argument)?;
 
         let ts = self
             .inner
@@ -75,23 +66,15 @@ impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for GatewayServer<O> {
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
-        let mut values = Vec::with_capacity(keys.len());
-        for _ in &keys {
-            values.push(None);
-        }
-        for key in keys {
-            let maybe_value = self
-                .inner
-                .get(ts, &key)
-                .await
-                .map_err(|e| tonic::Status::internal(e.to_string()))?;
-
-            values[key_idxs[&key]] = maybe_value;
-        }
+        let records = self
+            .inner
+            .get_multi(ts, keys)
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
         Ok(tonic::Response::new(pb::GetLatestResp {
             snapshot_ts: ts.as_micros(),
-            results: options_to_get_results(values),
+            results: results_builder.build(records).map_err(internal)?,
         }))
     }
 
