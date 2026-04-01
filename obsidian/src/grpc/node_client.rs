@@ -38,7 +38,7 @@ use crate::Txid;
 
 pub(crate) struct NodeClient {
     node_id: NodeId,
-    inner: Arc<Pool<pb::internal::node_client::NodeClient<tonic::transport::Channel>>>,
+    client_pool: Arc<Pool<pb::internal::node_client::NodeClient<tonic::transport::Channel>>>,
 }
 
 impl runtime::Node for NodeClient {
@@ -47,7 +47,19 @@ impl runtime::Node for NodeClient {
     }
 
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn Shard>> {
-        todo!();
+        Ok(Arc::new(ShardProxy {
+            node_id: self.node_id,
+            shard_id,
+            client_pool: Arc::clone(&self.client_pool),
+        }))
+    }
+
+    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet>> {
+        Ok(Arc::new(TabletProxy {
+            node_id: self.node_id,
+            tablet_id,
+            client_pool: Arc::clone(&self.client_pool),
+        }))
     }
 
     fn meta(&self) -> anyhow::Result<Arc<dyn Meta>> {
@@ -66,10 +78,42 @@ impl runtime::Node for NodeClient {
     }
 }
 
+struct ShardProxy {
+    node_id: NodeId,
+    shard_id: ShardId,
+    client_pool: Arc<Pool<pb::internal::node_client::NodeClient<tonic::transport::Channel>>>,
+}
+
+#[async_trait]
+impl runtime::Shard for ShardProxy {
+    fn id(&self) -> ShardId {
+        self.shard_id
+    }
+
+    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn runtime::Tablet>> {
+        if tablet_id.0 != self.shard_id {
+            return Err(anyhow!(
+                "wrong shard {:?} for {:?}",
+                self.shard_id,
+                tablet_id
+            ));
+        }
+        Ok(Arc::new(TabletProxy {
+            node_id: self.node_id,
+            tablet_id,
+            client_pool: Arc::clone(&self.client_pool),
+        }))
+    }
+
+    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
+        todo!();
+    }
+}
+
 struct TabletProxy {
     node_id: NodeId,
     tablet_id: TabletId,
-    inner: Arc<Pool<pb::internal::node_client::NodeClient<tonic::transport::Channel>>>,
+    client_pool: Arc<Pool<pb::internal::node_client::NodeClient<tonic::transport::Channel>>>,
 }
 
 #[async_trait]
@@ -80,7 +124,7 @@ impl runtime::Tablet for TabletProxy {
         keys: BTreeSet<Key>,
     ) -> Result<BTreeMap<Key, Record>, InternalError> {
         let resp = self
-            .inner
+            .client_pool
             .acquire()
             .await
             .tablet_get(pb::internal::TabletGetReq {
@@ -117,7 +161,7 @@ impl runtime::Tablet for TabletProxy {
         keys: BTreeSet<Key>,
     ) -> Result<(Timestamp, BTreeMap<Key, Record>), InternalError> {
         let resp = self
-            .inner
+            .client_pool
             .acquire()
             .await
             .tablet_get_latest(pb::internal::TabletGetLatestReq {
@@ -163,7 +207,7 @@ impl runtime::Tablet for TabletProxy {
         limit: usize,
     ) -> Result<(Vec<Record>, Option<Range<Vec<u8>>>), InternalError> {
         let resp = self
-            .inner
+            .client_pool
             .acquire()
             .await
             .tablet_scan_page(pb::internal::TabletScanPageReq {
@@ -207,7 +251,7 @@ impl runtime::Tablet for TabletProxy {
         let (preconds_pb, keys_pb, muts_pb) = preconds_muts_to_proto(preconds, muts);
 
         let resp = self
-            .inner
+            .client_pool
             .acquire()
             .await
             .tablet_write(pb::internal::TabletWriteReq {
