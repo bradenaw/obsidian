@@ -19,16 +19,16 @@ use crate::Timestamp;
 macro_rules! obsidian_test_suite {
     ($make:expr) => {
         mod obsidian_test_suite {
-            use crate::test::suite;
+            use crate::test::obsidian_suite;
 
             #[tokio::test]
             async fn test_2pc() -> anyhow::Result<()> {
-                suite::test_2pc($make).await
+                obsidian_suite::test_2pc($make).await
             }
 
             #[tokio::test]
             async fn test_scan_page() -> anyhow::Result<()> {
-                suite::test_scan_page($make).await
+                obsidian_suite::test_scan_page($make).await
             }
         }
     };

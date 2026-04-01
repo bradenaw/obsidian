@@ -3,7 +3,7 @@ mod mem_file_writer;
 mod mem_journal;
 mod mem_journals;
 mod mem_storage;
-pub(crate) mod suite;
+pub(crate) mod obsidian_suite;
 mod test_nodes;
 
 use std::fmt::Debug;
@@ -27,7 +27,7 @@ pub(crate) use crate::test::mem_file_writer::MemFileWriter;
 pub(crate) use crate::test::mem_journal::MemJournal;
 pub(crate) use crate::test::mem_journals::MemJournals;
 pub(crate) use crate::test::mem_storage::MemStorage;
-pub(crate) use crate::test::suite::obsidian_test_suite;
+pub(crate) use crate::test::obsidian_suite::obsidian_test_suite;
 use crate::test::test_nodes::TestNodes;
 use crate::util::encode;
 use crate::util::Decode;
