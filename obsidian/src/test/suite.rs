@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -50,30 +51,49 @@ where
         .await?;
     obs.create_keyspace(keyspace_id).await?;
 
-    let key1 = vec![1];
-    let key2 = vec![2];
+    let key1 = (keyspace_id, vec![1]);
+    let key2 = (keyspace_id, vec![2]);
 
     let write_ts = obs
         .write(
             vec![],
             BTreeMap::from([
-                ((keyspace_id, key1.clone()), Mutation::Put(vec![1, 2, 3])),
-                ((keyspace_id, key2.clone()), Mutation::Put(vec![4, 5, 6])),
+                (key1.clone(), Mutation::Put(vec![1, 2, 3])),
+                (key2.clone(), Mutation::Put(vec![4, 5, 6])),
             ]),
         )
         .await?;
 
     assert_eq!(
-        obs.get(write_ts, &(keyspace_id, key1))
-            .await?
-            .map(|record| record.value),
+        obs.get(write_ts, &key1).await?.map(|record| record.value),
         Some(vec![1, 2, 3])
     );
     assert_eq!(
-        obs.get(write_ts, &(keyspace_id, key2))
-            .await?
-            .map(|record| record.value),
+        obs.get(write_ts, &key2).await?.map(|record| record.value),
         Some(vec![4, 5, 6])
+    );
+
+    assert_eq!(
+        obs.get_multi(write_ts, BTreeSet::from([key1.clone(), key2.clone()]))
+            .await?,
+        BTreeMap::from([
+            (
+                key1.clone(),
+                Record {
+                    key: key1.clone(),
+                    ts: write_ts,
+                    value: vec![1, 2, 3]
+                }
+            ),
+            (
+                key2.clone(),
+                Record {
+                    key: key2.clone(),
+                    ts: write_ts,
+                    value: vec![4, 5, 6]
+                }
+            )
+        ]),
     );
 
     Ok(())
