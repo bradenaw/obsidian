@@ -19,7 +19,7 @@ use crate::util::Watchable;
 use crate::JournalEntry;
 use crate::NodeId;
 
-pub(super) struct TestNodes {
+pub(crate) struct TestNodes {
     inner: Arc<TestNodesInner>,
     discovery: Arc<Discovery>,
 }
