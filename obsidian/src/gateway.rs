@@ -537,11 +537,10 @@ mod tests {
         use std::sync::Arc;
 
         use crate::test::ObsidianForTest;
-        use crate::Obsidian;
 
         async || {
             let obs = ObsidianForTest::new(2 /*n_shards*/).await?;
-            Ok(Arc::new(obs.gateway) as Arc<dyn Obsidian>)
+            Ok::<_, anyhow::Error>(Arc::clone(&obs.gateway))
         }
     });
 }

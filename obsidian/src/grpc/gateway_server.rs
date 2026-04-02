@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::iter;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
@@ -21,18 +22,18 @@ use crate::Precondition;
 use crate::Range;
 use crate::Timestamp;
 
-pub struct GatewayServer<O> {
-    inner: O,
+pub struct GatewayServer {
+    inner: Arc<dyn Obsidian>,
 }
 
-impl<O> GatewayServer<O> {
-    pub(crate) fn new(inner: O) -> Self {
+impl GatewayServer {
+    pub(crate) fn new(inner: Arc<dyn Obsidian>) -> Self {
         Self { inner }
     }
 }
 
 #[async_trait]
-impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for GatewayServer<O> {
+impl pb::obsidian_server::Obsidian for GatewayServer {
     async fn get(
         &self,
         req: tonic::Request<pb::GetReq>,

@@ -7,10 +7,48 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tonic::transport::server::TcpIncoming;
 
+use crate::grpc::GatewayClient;
+use crate::grpc::GatewayServer;
 use crate::grpc::NodeClient;
 use crate::grpc::NodeServer;
 use crate::pb;
 use crate::runtime::Node;
+use crate::Obsidian;
+
+pub(crate) async fn obsidian_grpc_bridge(
+    obs: Arc<dyn Obsidian>,
+) -> anyhow::Result<GrpcBridge<Arc<dyn Obsidian>>> {
+    let (shutdown, on_shutdown) = oneshot::channel::<()>();
+    let listener = TcpListener::bind("[::1]:0").await?;
+    let addr = listener.local_addr()?;
+
+    tokio::spawn(async {
+        let server = GatewayServer::new(obs);
+        let serve = tonic::transport::Server::builder()
+            .add_service(pb::obsidian_server::ObsidianServer::new(server))
+            .serve_with_incoming_shutdown(
+                TcpIncoming::from_listener(
+                    listener, true, /*nodelay*/
+                    None, /*keepalive*/
+                )
+                .map_err(|e| anyhow!("{}", e))
+                .unwrap(),
+                on_shutdown.map(|_| ()),
+            );
+
+        serve.await.unwrap()
+    });
+
+    let url = "http://".to_string() + &addr.to_string();
+
+    let inner_client = pb::obsidian_client::ObsidianClient::connect(url).await?;
+    let client = GatewayClient::new(&inner_client);
+
+    Ok(GrpcBridge {
+        client: Arc::new(client),
+        shutdown: Some(shutdown),
+    })
+}
 
 pub(crate) async fn node_grpc_bridge(
     node: Arc<dyn Node>,

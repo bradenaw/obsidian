@@ -760,7 +760,6 @@ mod tests {
     use crate::Bound;
     use crate::ColoGroupId;
     use crate::KeyspaceId;
-    use crate::Obsidian;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_workload_append() -> anyhow::Result<()> {
@@ -783,7 +782,7 @@ mod tests {
             .await?;
 
         let wl = WorkloadAppend::new(
-            Arc::new(obs.gateway),
+            Arc::clone(&obs.gateway),
             WorkloadAppendOptions {
                 duration: Duration::from_millis(5000),
                 concurrency: 32,

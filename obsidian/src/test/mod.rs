@@ -25,6 +25,8 @@ use crate::runtime::Storage;
 use crate::storage::CachedStorage;
 use crate::tablet::TabletJournalWriter;
 pub(crate) use crate::test::grpc_bridge::node_grpc_bridge;
+pub(crate) use crate::test::grpc_bridge::obsidian_grpc_bridge;
+pub(crate) use crate::test::grpc_bridge::GrpcBridge;
 pub(crate) use crate::test::mem_file_reader::MemFileReader;
 pub(crate) use crate::test::mem_file_writer::MemFileWriter;
 pub(crate) use crate::test::mem_journal::MemJournal;
@@ -39,11 +41,12 @@ use crate::util::Encode;
 use crate::util::Retry;
 use crate::Bound;
 use crate::JournalEntry;
+use crate::Obsidian;
 use crate::ShardId;
 use crate::TabletJournalEntry;
 
 pub(crate) struct ObsidianForTest {
-    pub gateway: Gateway,
+    pub gateway: Arc<dyn Obsidian>,
     pub meta: Arc<dyn runtime::Meta>,
     pub meta_synced: Arc<MetaSynced>,
     pub supervisor: Arc<dyn runtime::Supervisor>,
@@ -104,7 +107,7 @@ impl ObsidianForTest {
 
         let meta_synced = Arc::new(MetaSynced::new(nodes.discovery().meta()));
         Ok(Self {
-            gateway,
+            gateway: Arc::new(gateway),
             meta,
             meta_synced,
             supervisor: nodes.discovery().supervisor(),

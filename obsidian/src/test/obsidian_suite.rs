@@ -15,7 +15,7 @@ use crate::Timestamp;
 
 /// Provides a test suite for the Obsidian trait.
 ///
-/// The argument $make is expected to be AsyncFn() -> anyhow::Result<Arc<dyn Obsidian>>.
+/// The argument $make is expected to be AsyncFn() -> anyhow::Result<Deref<Target = Arc<dyn Obsidian>>>.
 macro_rules! obsidian_test_suite {
     ($make:expr) => {
         mod obsidian_test_suite {
@@ -23,12 +23,18 @@ macro_rules! obsidian_test_suite {
 
             #[tokio::test]
             async fn test_2pc() -> anyhow::Result<()> {
-                obsidian_suite::test_2pc($make).await
+                let _ = pretty_env_logger::try_init();
+
+                let obs = $make().await?;
+                obsidian_suite::test_2pc(&obs).await
             }
 
             #[tokio::test]
             async fn test_scan_page() -> anyhow::Result<()> {
-                obsidian_suite::test_scan_page($make).await
+                let _ = pretty_env_logger::try_init();
+
+                let obs = $make().await?;
+                obsidian_suite::test_scan_page(&obs).await
             }
         }
     };
@@ -37,16 +43,10 @@ macro_rules! obsidian_test_suite {
 pub(crate) use obsidian_test_suite;
 
 /// Intended to be used via the obsidian_test_suite macro.
-pub(crate) async fn test_2pc<F>(make: F) -> anyhow::Result<()>
-where
-    F: AsyncFn() -> anyhow::Result<Arc<dyn Obsidian>>,
-{
-    let _ = pretty_env_logger::try_init();
-
+pub(crate) async fn test_2pc(obs: &Arc<dyn Obsidian>) -> anyhow::Result<()> {
     let colo_group_id = ColoGroupId(1);
     let keyspace_id = KeyspaceId(colo_group_id, 1);
 
-    let obs = make().await?;
     obs.create_colo_group(colo_group_id, vec![Bound::Before(vec![2])])
         .await?;
     obs.create_keyspace(keyspace_id).await?;
@@ -100,16 +100,10 @@ where
 }
 
 /// Intended to be used via the obsidian_test_suite macro.
-pub(crate) async fn test_scan_page<F>(make: F) -> anyhow::Result<()>
-where
-    F: AsyncFn() -> anyhow::Result<Arc<dyn Obsidian>>,
-{
-    let _ = pretty_env_logger::try_init();
-
+pub(crate) async fn test_scan_page(obs: &Arc<dyn Obsidian>) -> anyhow::Result<()> {
     let colo_group_id = ColoGroupId(1);
     let keyspace_id = KeyspaceId(colo_group_id, 1);
 
-    let obs = make().await?;
     obs.create_colo_group(
         colo_group_id,
         vec![Bound::Before(vec![2]), Bound::Before(vec![3])],
