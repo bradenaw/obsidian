@@ -49,7 +49,7 @@ tablet_test_suite!({
 
         let node_client = node_grpc_bridge(node).await?;
 
-        // We need this TabletAndBridge wrapper here bcause without it, node_client would drop,
+        // We need this TabletAndBridge wrapper here because without it, node_client would drop,
         // which would close the server.
         Ok::<_, anyhow::Error>(TabletAndBridge(node_client.tablet(tablet_id)?, node_client))
     }

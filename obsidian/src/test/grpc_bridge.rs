@@ -15,37 +15,53 @@ use crate::pb;
 use crate::runtime::Node;
 use crate::Obsidian;
 
+// Annoying macro indirection because the type of the parameter to add_service is a mess of
+// generics.
+//
+// Spawns a tonic server on a random port and returns (url, shutdown). Dropping or sending to
+// shutdown will stop the server.
+macro_rules! spawn_server {
+    ($server:expr) => {
+        async {
+            let (shutdown, on_shutdown) = oneshot::channel::<()>();
+            let listener = TcpListener::bind("[::1]:0").await?;
+            let addr = listener.local_addr()?;
+
+            tokio::spawn(async {
+                let serve = tonic::transport::Server::builder()
+                    .add_service($server)
+                    .serve_with_incoming_shutdown(
+                        TcpIncoming::from_listener(
+                            listener, true, /*nodelay*/
+                            None, /*keepalive*/
+                        )
+                        .map_err(|e| anyhow!("{}", e))
+                        .unwrap(),
+                        on_shutdown.map(|_| ()),
+                    );
+
+                serve.await.unwrap()
+            });
+
+            let url = "http://".to_string() + &addr.to_string();
+
+            Ok::<_, anyhow::Error>((url, shutdown))
+        }
+    };
+}
+
 pub(crate) async fn obsidian_grpc_bridge(
     obs: Arc<dyn Obsidian>,
 ) -> anyhow::Result<GrpcBridge<Arc<dyn Obsidian>>> {
-    let (shutdown, on_shutdown) = oneshot::channel::<()>();
-    let listener = TcpListener::bind("[::1]:0").await?;
-    let addr = listener.local_addr()?;
-
-    tokio::spawn(async {
-        let server = GatewayServer::new(obs);
-        let serve = tonic::transport::Server::builder()
-            .add_service(pb::obsidian_server::ObsidianServer::new(server))
-            .serve_with_incoming_shutdown(
-                TcpIncoming::from_listener(
-                    listener, true, /*nodelay*/
-                    None, /*keepalive*/
-                )
-                .map_err(|e| anyhow!("{}", e))
-                .unwrap(),
-                on_shutdown.map(|_| ()),
-            );
-
-        serve.await.unwrap()
-    });
-
-    let url = "http://".to_string() + &addr.to_string();
-
-    let inner_client = pb::obsidian_client::ObsidianClient::connect(url).await?;
-    let client = GatewayClient::new(&inner_client);
+    let (url, shutdown) = spawn_server!(pb::obsidian_server::ObsidianServer::new(
+        GatewayServer::new(obs)
+    ))
+    .await?;
 
     Ok(GrpcBridge {
-        client: Arc::new(client),
+        client: Arc::new(GatewayClient::new(
+            &pb::obsidian_client::ObsidianClient::connect(url).await?,
+        )),
         shutdown: Some(shutdown),
     })
 }
@@ -54,30 +70,17 @@ pub(crate) async fn node_grpc_bridge(
     node: Arc<dyn Node>,
 ) -> anyhow::Result<GrpcBridge<Arc<dyn Node>>> {
     let node_id = node.id();
-    let (shutdown, on_shutdown) = oneshot::channel::<()>();
-    let listener = TcpListener::bind("[::1]:0").await?;
-    let addr = listener.local_addr()?;
-    let serve = tonic::transport::Server::builder()
-        .add_service(pb::internal::node_server::NodeServer::new(NodeServer::new(
-            node,
-        )))
-        .serve_with_incoming_shutdown(
-            TcpIncoming::from_listener(listener, true /*nodelay*/, None /*keepalive*/)
-                .map_err(|e| anyhow!("{}", e))?,
-            on_shutdown.map(|_| ()),
-        );
 
-    tokio::spawn(async { serve.await.unwrap() });
-
-    let url = "http://".to_string() + &addr.to_string();
-
-    let client = NodeClient::new(
-        node_id,
-        &pb::internal::node_client::NodeClient::connect(url).await?,
-    );
+    let (url, shutdown) = spawn_server!(pb::internal::node_server::NodeServer::new(
+        NodeServer::new(node),
+    ))
+    .await?;
 
     Ok(GrpcBridge {
-        client: Arc::new(client),
+        client: Arc::new(NodeClient::new(
+            node_id,
+            &pb::internal::node_client::NodeClient::connect(url).await?,
+        )),
         shutdown: Some(shutdown),
     })
 }
