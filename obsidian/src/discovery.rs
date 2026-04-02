@@ -91,6 +91,14 @@ impl Discovery {
     pub fn supervisor(&self) -> Arc<dyn runtime::Supervisor> {
         Arc::clone(&self.supervisor_proxy)
     }
+
+    #[cfg(test)]
+    // This is cfg(test) because callers should really prefer to use .shard(), which will give a
+    // proxy object whose methods all find the current leader on invocation. This gives direct
+    // access to the node, which may not continue to be the leader into the future.
+    pub fn current_leader(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn runtime::Node>> {
+        self.inner.current_leader(shard_id)
+    }
 }
 
 impl runtime::Shards for Discovery {

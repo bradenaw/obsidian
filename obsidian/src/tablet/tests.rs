@@ -8,7 +8,6 @@ mod tests {
         use crate::Bound;
         use crate::ColoGroupId;
         use crate::KeyspaceId;
-        use crate::Obsidian;
 
         async || {
             let obs = ObsidianForTest::new(1 /*n_shards*/).await?;
@@ -27,7 +26,7 @@ mod tests {
 
             let tablet = obs.nodes.discovery().tablet(tablet_id)?;
 
-            Ok(tablet)
+            Ok::<_, anyhow::Error>(tablet)
         }
     });
 }
