@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package obsidian_internal;
+
+import "google/protobuf/empty.proto";
+
+import "internal/internal.proto";
+
+message InternalError {
+    message Conflict {
+        Txid txid = 1;
+    }
+
+    message TabletIdError {
+        TabletId tablet_id = 1;
+    }
+
+    message ShardIdError {
+        uint32 shard_id = 1;
+    }
+
+    oneof error_type {
+        Conflict conflict = 1;
+        google.protobuf.Empty already_committed = 2;
+        google.protobuf.Empty already_aborted = 3;
+        google.protobuf.Empty precondition_failed = 4;
+        google.protobuf.Empty tx_outcome_missing = 5;
+        TabletIdError tablet_not_readable = 6;
+        TabletIdError tablet_not_writeable = 7;
+        TabletIdError tablet_not_hydrating = 8;
+        // PartialGet is not returned this way.
+        ShardIdError not_leader = 9;
+        string other = 10;
+    }
+}

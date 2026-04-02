@@ -6,6 +6,13 @@ import "google/protobuf/empty.proto";
 
 import "obsidian.proto";
 
+message Txid {
+    fixed64 ts = 1;
+    fixed64 rand0 = 2;
+    fixed64 rand1 = 3;
+    uint32 owner_shard_id = 4;
+}
+
 message TxOutcomeRecord {
     message Committed {
         fixed64 ts = 1;

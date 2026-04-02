@@ -27,31 +27,31 @@ service Node {
 }
 
 message TabletGetReq {
-  TabletId tablet_id = 1;
-  NodeId node_id = 2;
-  obsidian.GetReq inner = 3;
+    TabletId tablet_id = 1;
+    NodeId node_id = 2;
+    obsidian.GetReq inner = 3;
 }
 
 message TabletScanPageReq {
-  TabletId tablet_id = 1;
-  NodeId node_id = 2;
-  obsidian.ScanReq inner = 3;
+    TabletId tablet_id = 1;
+    NodeId node_id = 2;
+    obsidian.ScanReq inner = 3;
 }
 
 message TabletGetLatestReq {
-  TabletId tablet_id = 1;
-  NodeId node_id = 2;
-  obsidian.GetLatestReq inner = 3;
+    TabletId tablet_id = 1;
+    NodeId node_id = 2;
+    obsidian.GetLatestReq inner = 3;
 }
 
 //message TabletHistoryPageReq {
-//  TabletId tablet_id = 1;
-//  NodeId node_id = 2;
-//  obsidian.HistoryPageReq inner = 3;
+//    TabletId tablet_id = 1;
+//    NodeId node_id = 2;
+//    obsidian.HistoryPageReq inner = 3;
 //}
 
 message TabletWriteReq {
-  TabletId tablet_id = 1;
-  NodeId node_id = 2;
-  obsidian.WriteReq inner = 3;
+    TabletId tablet_id = 1;
+    NodeId node_id = 2;
+    obsidian.WriteReq inner = 3;
 }

@@ -4,6 +4,7 @@ use std::time::SystemTime;
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
 
+use crate::pb;
 use crate::util::hexlify;
 use crate::util::Decode;
 use crate::util::Encode;
@@ -83,5 +84,31 @@ impl Decode for Txid {
 impl Debug for Txid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "tx:{}/{}/{}", self.ts, hexlify(&self.rand), self.owner.0,)
+    }
+}
+
+impl TryFrom<pb::internal::Txid> for Txid {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::internal::Txid) -> Result<Self, Self::Error> {
+        let mut rand = [0u8; 16];
+        BigEndian::write_u64(&mut rand[..8], value.rand0);
+        BigEndian::write_u64(&mut rand[8..], value.rand1);
+        Ok(Txid {
+            ts: value.ts,
+            rand,
+            owner: ShardId(value.owner_shard_id),
+        })
+    }
+}
+
+impl From<Txid> for pb::internal::Txid {
+    fn from(value: Txid) -> Self {
+        pb::internal::Txid {
+            ts: value.ts,
+            rand0: BigEndian::read_u64(&value.rand[..8]),
+            rand1: BigEndian::read_u64(&value.rand[8..]),
+            owner_shard_id: value.owner.0,
+        }
     }
 }
