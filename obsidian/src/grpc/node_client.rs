@@ -41,6 +41,18 @@ pub(crate) struct NodeClient {
     client_pool: Arc<Pool<pb::internal::node_client::NodeClient<tonic::transport::Channel>>>,
 }
 
+impl NodeClient {
+    pub fn new(
+        node_id: NodeId,
+        inner: &pb::internal::node_client::NodeClient<tonic::transport::Channel>,
+    ) -> Self {
+        Self {
+            node_id,
+            client_pool: Arc::new(Pool::new(32, inner)),
+        }
+    }
+}
+
 impl runtime::Node for NodeClient {
     fn id(&self) -> NodeId {
         self.node_id

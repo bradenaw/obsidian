@@ -222,6 +222,9 @@ mod tests {
         use std::sync::Arc;
 
         use super::spawn_server;
+        use crate::grpc::GatewayClient;
+        use crate::grpc::GatewayServer;
+        use crate::pb;
         use crate::test::ObsidianForTest;
         use crate::Obsidian;
 

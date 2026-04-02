@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::anyhow;
 use async_trait::async_trait;
 
@@ -7,9 +9,8 @@ use crate::grpc::util::invalid_argument;
 use crate::grpc::util::parse_scan_req;
 use crate::grpc::util::parse_write_req;
 use crate::grpc::util::required;
-use crate::node::Node;
 use crate::pb;
-use crate::runtime::Node as _;
+use crate::runtime::Node;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -23,7 +24,13 @@ use crate::TabletId;
 use crate::Timestamp;
 
 pub(crate) struct NodeServer {
-    node: Node,
+    node: Arc<dyn Node>,
+}
+
+impl NodeServer {
+    pub fn new(node: Arc<dyn Node>) -> Self {
+        Self { node }
+    }
 }
 
 #[async_trait]

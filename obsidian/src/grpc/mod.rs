@@ -4,6 +4,8 @@ mod gateway_client;
 mod gateway_server;
 mod node_client;
 mod node_server;
+#[cfg(test)]
+mod node_tests;
 mod util;
 
 pub(crate) use crate::grpc::gateway_client::GatewayClient;

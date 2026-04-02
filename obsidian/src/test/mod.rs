@@ -1,3 +1,4 @@
+mod grpc_bridge;
 mod mem_file_reader;
 mod mem_file_writer;
 mod mem_journal;
@@ -23,6 +24,7 @@ use crate::runtime::Shards as _;
 use crate::runtime::Storage;
 use crate::storage::CachedStorage;
 use crate::tablet::TabletJournalWriter;
+pub(crate) use crate::test::grpc_bridge::node_grpc_bridge;
 pub(crate) use crate::test::mem_file_reader::MemFileReader;
 pub(crate) use crate::test::mem_file_writer::MemFileWriter;
 pub(crate) use crate::test::mem_journal::MemJournal;
