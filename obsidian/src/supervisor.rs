@@ -714,7 +714,6 @@ mod tests {
     use crate::ColoGroupId;
     use crate::KeyspaceId;
     use crate::Mutation;
-    use crate::Obsidian;
 
     #[tokio::test]
     async fn test_move() -> anyhow::Result<()> {

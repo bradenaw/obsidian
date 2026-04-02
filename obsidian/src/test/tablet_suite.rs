@@ -27,7 +27,6 @@ macro_rules! tablet_test_suite {
             #[tokio::test]
             async fn test_write() -> anyhow::Result<()> {
                 let _ = pretty_env_logger::try_init();
-
                 let tablet = $make().await?;
                 tablet_suite::test_write(&tablet).await
             }
@@ -35,7 +34,6 @@ macro_rules! tablet_test_suite {
             #[tokio::test]
             async fn test_scan_page() -> anyhow::Result<()> {
                 let _ = pretty_env_logger::try_init();
-
                 let tablet = $make().await?;
                 tablet_suite::test_scan_page(&tablet).await
             }

@@ -9,9 +9,9 @@ import "obsidian.proto";
 
 service Node {
     rpc TabletGet(TabletGetReq) returns (obsidian.GetResp);
-    rpc TabletGetLatest(TabletGetLatestReq) returns (obsidian.GetLatestResp);
-    //rpc TabletLatestSnapshot(TabletLatestSnapshotReq) returns (obsidian.LatestSnapshotResp);
     rpc TabletScanPage(TabletScanPageReq) returns (obsidian.ScanResp);
+    rpc TabletGetLatest(TabletGetLatestReq) returns (obsidian.GetLatestResp);
+    rpc TabletLatestSnapshot(TabletGetLatestReq) returns (obsidian.LatestSnapshotResp);
     //rpc TabletHistoryPage(TabletHistoryPageReq) returns (obsidian.HistoryPageResp);
     rpc TabletWrite(TabletWriteReq) returns (obsidian.WriteResp);
     //rpc TabletPrepare(TabletPrepareReq) returns (TabletPrepareResp);
@@ -32,22 +32,16 @@ message TabletGetReq {
   obsidian.GetReq inner = 3;
 }
 
-message TabletGetLatestReq {
-  TabletId tablet_id = 1;
-  NodeId node_id = 2;
-  obsidian.GetLatestReq inner = 3;
-}
-
-//message TabletLatestSnapshotReq {
-//  TabletId tablet_id = 1;
-//  NodeId node_id = 2;
-//  obsidian.LatestSnapshotReq inner = 3;
-//}
-
 message TabletScanPageReq {
   TabletId tablet_id = 1;
   NodeId node_id = 2;
   obsidian.ScanReq inner = 3;
+}
+
+message TabletGetLatestReq {
+  TabletId tablet_id = 1;
+  NodeId node_id = 2;
+  obsidian.GetLatestReq inner = 3;
 }
 
 //message TabletHistoryPageReq {

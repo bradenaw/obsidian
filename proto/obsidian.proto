@@ -5,30 +5,16 @@ package obsidian;
 import "google/protobuf/empty.proto";
 
 service Obsidian {
-    rpc GetLatest(GetLatestReq) returns (GetLatestResp);
-    rpc Scan(ScanReq) returns (ScanResp);
     rpc Get(GetReq) returns (GetResp);
-    //rpc LatestSnapshot(LatestSnapshotReq) returns (LatestSnapshotResp);
+    rpc Scan(ScanReq) returns (ScanResp);
+
+    rpc GetLatest(GetLatestReq) returns (GetLatestResp);
+    //rpc LatestSnapshot(GetLatestReq) returns (LatestSnapshotResp);
+
     rpc Write(WriteReq) returns (WriteResp);
 
     rpc CreateColoGroup(CreateColoGroupReq) returns (google.protobuf.Empty);
     rpc CreateKeyspace(CreateKeyspaceReq) returns (google.protobuf.Empty);
-}
-
-message GetLatestReq {
-    repeated Key keys = 1;
-}
-
-message GetResult {
-    oneof result_type {
-        Record record = 1;
-        google.protobuf.Empty not_found = 2;
-    }
-}
-
-message GetLatestResp {
-    fixed64 snapshot_ts = 1;
-    repeated GetResult results = 2;
 }
 
 message GetReq {
@@ -53,6 +39,20 @@ message ScanResp {
     Range remaining = 2;
 }
 
+message GetLatestReq {
+    repeated Key keys = 1;
+}
+
+message GetLatestResp {
+    fixed64 snapshot_ts = 1;
+    repeated GetResult results = 2;
+}
+
+message LatestSnapshotResp {
+    fixed64 snapshot_ts = 1;
+}
+
+
 message WriteReq {
     repeated Precondition preconds = 1;
     // TODO: put key into mutations
@@ -71,6 +71,13 @@ message CreateColoGroupReq {
 
 message CreateKeyspaceReq {
     KeyspaceId keyspace_id = 1;
+}
+
+message GetResult {
+    oneof result_type {
+        Record record = 1;
+        google.protobuf.Empty not_found = 2;
+    }
 }
 
 message Precondition {

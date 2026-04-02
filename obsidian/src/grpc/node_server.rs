@@ -59,6 +59,31 @@ impl pb::internal::node_server::Node for NodeServer {
         }))
     }
 
+    async fn tablet_scan_page(
+        &self,
+        req: tonic::Request<pb::internal::TabletScanPageReq>,
+    ) -> Result<tonic::Response<pb::ScanResp>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
+        let tablet = self.node.tablet(tablet_id).map_err(internal)?;
+        let scan_req = req_inner
+            .inner
+            .ok_or_else(|| invalid_argument(anyhow!("missing inner")))?;
+
+        let (snapshot_ts, keyspace_id, range, direction, limit) =
+            parse_scan_req(scan_req).map_err(invalid_argument)?;
+
+        let (records, maybe_continue_range) = tablet
+            .scan_page(snapshot_ts, keyspace_id, range.borrow(), direction, limit)
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        Ok(tonic::Response::new(pb::ScanResp {
+            records: records.into_iter().map(pb::Record::from).collect(),
+            remaining: maybe_continue_range.map(Range::into),
+        }))
+    }
+
     async fn tablet_get_latest(
         &self,
         req: tonic::Request<pb::internal::TabletGetLatestReq>,
@@ -83,28 +108,26 @@ impl pb::internal::node_server::Node for NodeServer {
         }))
     }
 
-    async fn tablet_scan_page(
+    async fn tablet_latest_snapshot(
         &self,
-        req: tonic::Request<pb::internal::TabletScanPageReq>,
-    ) -> Result<tonic::Response<pb::ScanResp>, tonic::Status> {
+        req: tonic::Request<pb::internal::TabletGetLatestReq>,
+    ) -> Result<tonic::Response<pb::LatestSnapshotResp>, tonic::Status> {
         let req_inner = req.into_inner();
         let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
         let tablet = self.node.tablet(tablet_id).map_err(internal)?;
-        let scan_req = req_inner
+        let get_req = req_inner
             .inner
             .ok_or_else(|| invalid_argument(anyhow!("missing inner")))?;
 
-        let (snapshot_ts, keyspace_id, range, direction, limit) =
-            parse_scan_req(scan_req).map_err(invalid_argument)?;
+        let (keys, _) = get_req_results(get_req.keys).map_err(invalid_argument)?;
 
-        let (records, maybe_continue_range) = tablet
-            .scan_page(snapshot_ts, keyspace_id, range.borrow(), direction, limit)
+        let snapshot_ts = tablet
+            .latest_snapshot(keys)
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
-        Ok(tonic::Response::new(pb::ScanResp {
-            records: records.into_iter().map(pb::Record::from).collect(),
-            remaining: maybe_continue_range.map(Range::into),
+        Ok(tonic::Response::new(pb::LatestSnapshotResp {
+            snapshot_ts: snapshot_ts.as_micros(),
         }))
     }
 

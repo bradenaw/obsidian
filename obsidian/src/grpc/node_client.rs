@@ -117,7 +117,7 @@ impl runtime::Shard for ShardProxy {
         }))
     }
 
-    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
+    async fn wait_meta_sync(&self, _ts: Timestamp) -> anyhow::Result<()> {
         todo!();
     }
 }
@@ -168,6 +168,41 @@ impl runtime::Tablet for TabletProxy {
         Ok(results)
     }
 
+    async fn scan_page(
+        &self,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        range: Range<&[u8]>,
+        direction: Direction,
+        limit: usize,
+    ) -> Result<(Vec<Record>, Option<Range<Vec<u8>>>), InternalError> {
+        let resp = self
+            .client_pool
+            .acquire()
+            .await
+            .tablet_scan_page(pb::internal::TabletScanPageReq {
+                node_id: Some(pb::internal::NodeId::from(self.node_id)),
+                tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
+                inner: Some(
+                    scan_req_to_proto(ts, keyspace_id, range, direction, limit)
+                        .map_err(|e| InternalError::Other(e.into()))?,
+                ),
+            })
+            .await
+            .map_err(|e| InternalError::Other(e.into()))?
+            .into_inner();
+
+        let results: Vec<Record> = resp
+            .records
+            .into_iter()
+            .map(Record::try_from)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let maybe_continue_range = resp.remaining.map(Range::try_from).transpose()?;
+
+        Ok((results, maybe_continue_range))
+    }
+
     async fn get_latest_multi(
         &self,
         keys: BTreeSet<Key>,
@@ -206,51 +241,32 @@ impl runtime::Tablet for TabletProxy {
     }
 
     async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError> {
-        // TODO: Use native impl.
-        Ok(self.get_latest_multi(keys).await?.0)
-    }
-
-    async fn scan_page(
-        &self,
-        ts: Timestamp,
-        keyspace_id: KeyspaceId,
-        range: Range<&[u8]>,
-        direction: Direction,
-        limit: usize,
-    ) -> Result<(Vec<Record>, Option<Range<Vec<u8>>>), InternalError> {
         let resp = self
             .client_pool
             .acquire()
             .await
-            .tablet_scan_page(pb::internal::TabletScanPageReq {
+            .tablet_latest_snapshot(pb::internal::TabletGetLatestReq {
                 node_id: Some(pb::internal::NodeId::from(self.node_id)),
                 tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
-                inner: Some(
-                    scan_req_to_proto(ts, keyspace_id, range, direction, limit)
-                        .map_err(|e| InternalError::Other(e.into()))?,
-                ),
+                inner: Some(pb::GetLatestReq {
+                    keys: keys.into_iter().map(pb::Key::from).collect(),
+                }),
             })
             .await
             .map_err(|e| InternalError::Other(e.into()))?
             .into_inner();
 
-        let results: Vec<Record> = resp
-            .records
-            .into_iter()
-            .map(Record::try_from)
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let snapshot_ts = Timestamp::from_micros(resp.snapshot_ts);
 
-        let maybe_continue_range = resp.remaining.map(Range::try_from).transpose()?;
-
-        Ok((results, maybe_continue_range))
+        Ok(snapshot_ts)
     }
 
     async fn history_page(
         &self,
-        key: Key,
-        range: HistoryRange,
-        direction: Direction,
-        limit: usize,
+        _key: Key,
+        _range: HistoryRange,
+        _direction: Direction,
+        _limit: usize,
     ) -> Result<(Vec<Revision>, Option<HistoryRange>), InternalError> {
         todo!()
     }
@@ -287,42 +303,42 @@ impl runtime::Tablet for TabletProxy {
 
     async fn prepare(
         &self,
-        txid: Txid,
-        preconds: Vec<Precondition>,
-        muts: BTreeMap<Key, Mutation>,
+        _txid: Txid,
+        _preconds: Vec<Precondition>,
+        _muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
         todo!()
     }
 
     async fn try_commit(
         &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<Key>,
-        mut_keys: BTreeSet<Key>,
+        _txid: Txid,
+        _ts: Timestamp,
+        _precond_keys: BTreeSet<Key>,
+        _mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<TxOutcome> {
         todo!()
     }
 
-    async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
+    async fn try_abort(&self, _txid: Txid) -> anyhow::Result<TxOutcome> {
         todo!()
     }
 
-    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
+    async fn wait(&self, _txid: Txid) -> Result<TxOutcome, InternalError> {
         todo!()
     }
 
     async fn cleanup_committed(
         &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<Key>,
-        mut_keys: BTreeSet<Key>,
+        _txid: Txid,
+        _ts: Timestamp,
+        _precond_keys: BTreeSet<Key>,
+        _mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()> {
         todo!()
     }
 
-    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
+    async fn wait_meta_sync(&self, _ts: Timestamp) -> anyhow::Result<()> {
         todo!()
     }
 
