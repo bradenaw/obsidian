@@ -120,12 +120,13 @@ impl Obsidian for GatewayClient {
     ) -> Result<Timestamp, WriteError> {
         let preconds_pb: Vec<_> = preconds.into_iter().map(pb::Precondition::from).collect();
 
-        let mut keys_pb = Vec::with_capacity(muts.len());
-        let mut muts_pb = Vec::with_capacity(muts.len());
-        for (key, m) in muts.into_iter() {
-            keys_pb.push(pb::Key::from(key));
-            muts_pb.push(pb::Mutation::from(m));
-        }
+        let key_muts_pb: Vec<_> = muts
+            .into_iter()
+            .map(|(key, mutation)| pb::KeyMutation {
+                key: Some(pb::Key::from(key)),
+                mutation: Some(pb::Mutation::from(mutation)),
+            })
+            .collect();
 
         let resp = self
             .inner
@@ -133,8 +134,7 @@ impl Obsidian for GatewayClient {
             .await
             .write(pb::WriteReq {
                 preconds: preconds_pb,
-                keys: keys_pb,
-                muts: muts_pb,
+                muts: key_muts_pb,
             })
             .await
             // TODO: make a proper WriteError.

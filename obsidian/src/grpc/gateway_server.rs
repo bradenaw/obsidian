@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::iter;
 
+use anyhow::anyhow;
 use async_trait::async_trait;
 
 use crate::grpc::util::internal;
@@ -135,26 +136,28 @@ impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for GatewayServer<O> {
             .map(|x| x.try_into())
             .collect::<Result<Vec<Precondition>, _>>()
             .map_err(invalid_argument)?;
-        let keys = req_inner
-            .keys
-            .into_iter()
-            .map(|x| x.try_into())
-            .collect::<Result<Vec<Key>, _>>()
-            .map_err(invalid_argument)?;
         let muts = req_inner
             .muts
             .into_iter()
-            .map(|x| x.try_into())
-            .collect::<Result<Vec<Mutation>, _>>()
+            .map(|key_mut_pb| {
+                Ok((
+                    Key::try_from(
+                        key_mut_pb
+                            .key
+                            .ok_or_else(|| anyhow!("KeyMutation.key missing"))?,
+                    )?,
+                    Mutation::try_from(
+                        key_mut_pb
+                            .mutation
+                            .ok_or_else(|| anyhow!("KeyMutation.mutation missing"))?,
+                    )?,
+                ))
+            })
+            .collect::<Result<Vec<(Key, Mutation)>, _>>()
             .map_err(invalid_argument)?;
 
         let mut muts_map = BTreeMap::new();
-        if keys.len() != muts.len() {
-            return Err(tonic::Status::invalid_argument(
-                "keys and muts must have the same number of elements",
-            ));
-        }
-        for (key, m) in iter::zip(keys, muts) {
+        for (key, m) in muts {
             if muts_map.contains_key(&key) {
                 return Err(tonic::Status::invalid_argument(format!(
                     "duplicate key {:?}",
