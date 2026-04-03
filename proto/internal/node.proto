@@ -19,11 +19,11 @@ service Node {
     rpc TabletTryAbort(TabletTxidReq) returns (TxOutcomeResp);
     rpc TabletWait(TabletTxidReq) returns (TxOutcomeResp);
     rpc TabletCleanupCommitted(TabletCleanupCommittedReq) returns (google.protobuf.Empty);
-    //rpc TabletWaitMetaSync(TabletWaitMetaSyncReq) returns (google.protobuf.Empty);
-    //rpc TabletManifest(google.protobuf.Empty) returns (TabletManifestResp);
-    //rpc TabletWaitMostlyHydrated(google.protobuf.Empty) returns (google.protobuf.Empty);
-    //rpc TabletCatchup(google.protobuf.Empty) returns (google.protobuf.Empty);
-    //rpc TabletFindSplit(google.protobuf.Empty) returns (TabletFindSplitResp);
+    rpc TabletWaitMetaSync(TabletWaitMetaSyncReq) returns (google.protobuf.Empty);
+    //rpc TabletManifest(TabletEmptyReq) returns (TabletManifestResp);
+    rpc TabletWaitMostlyHydrated(TabletEmptyReq) returns (google.protobuf.Empty);
+    rpc TabletCatchup(TabletEmptyReq) returns (google.protobuf.Empty);
+    rpc TabletFindSplit(TabletEmptyReq) returns (TabletFindSplitResp);
 }
 
 message TabletGetReq {
@@ -95,4 +95,19 @@ message TabletCleanupCommittedReq {
     fixed64 ts = 4;
     repeated obsidian.Key precond_keys = 5;
     repeated obsidian.Key mut_keys = 6;
+}
+
+message TabletEmptyReq {
+    TabletId tablet_id = 1;
+    NodeId node_id = 2;
+}
+
+message TabletWaitMetaSyncReq {
+    TabletId tablet_id = 1;
+    NodeId node_id = 2;
+    fixed64 ts = 3;
+}
+
+message TabletFindSplitResp {
+    obsidian.Bound bound = 1;
 }

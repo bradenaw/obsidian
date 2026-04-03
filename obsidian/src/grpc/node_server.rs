@@ -267,4 +267,72 @@ impl pb::internal::node_server::Node for NodeServer {
 
         Ok(tonic::Response::new(()))
     }
+
+    async fn tablet_wait_meta_sync(
+        &self,
+        req: tonic::Request<pb::internal::TabletWaitMetaSyncReq>,
+    ) -> Result<tonic::Response<()>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
+        let tablet = self.node.tablet(tablet_id).map_err(internal)?;
+
+        let ts = Timestamp::from_micros(req_inner.ts);
+
+        tablet
+            .wait_meta_sync(ts)
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        Ok(tonic::Response::new(()))
+    }
+
+    async fn tablet_wait_mostly_hydrated(
+        &self,
+        req: tonic::Request<pb::internal::TabletEmptyReq>,
+    ) -> Result<tonic::Response<()>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
+        let tablet = self.node.tablet(tablet_id).map_err(internal)?;
+
+        tablet
+            .wait_mostly_hydrated()
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        Ok(tonic::Response::new(()))
+    }
+
+    async fn tablet_catchup(
+        &self,
+        req: tonic::Request<pb::internal::TabletEmptyReq>,
+    ) -> Result<tonic::Response<()>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
+        let tablet = self.node.tablet(tablet_id).map_err(internal)?;
+
+        tablet
+            .catchup()
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        Ok(tonic::Response::new(()))
+    }
+
+    async fn tablet_find_split(
+        &self,
+        req: tonic::Request<pb::internal::TabletEmptyReq>,
+    ) -> Result<tonic::Response<pb::internal::TabletFindSplitResp>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
+        let tablet = self.node.tablet(tablet_id).map_err(internal)?;
+
+        let bound = tablet
+            .find_split()
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        Ok(tonic::Response::new(pb::internal::TabletFindSplitResp {
+            bound: Some(bound.into()),
+        }))
+    }
 }
