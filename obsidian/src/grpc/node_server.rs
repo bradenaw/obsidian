@@ -5,6 +5,8 @@ use async_trait::async_trait;
 
 use crate::grpc::util::get_req_results;
 use crate::grpc::util::internal;
+use crate::grpc::util::internal_err_from_status;
+use crate::grpc::util::internal_err_to_status;
 use crate::grpc::util::invalid_argument;
 use crate::grpc::util::parse_scan_req;
 use crate::grpc::util::parse_write_req;
@@ -14,6 +16,7 @@ use crate::runtime::Node;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
+use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
 use crate::Mutation;
@@ -52,7 +55,7 @@ impl pb::internal::node_server::Node for NodeServer {
         let records = tablet
             .get_multi(ts, keys)
             .await
-            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+            .map_err(internal_err_to_status)?;
 
         Ok(tonic::Response::new(pb::GetResp {
             results: results_builder.build(records).map_err(internal)?,
@@ -76,7 +79,7 @@ impl pb::internal::node_server::Node for NodeServer {
         let (records, maybe_continue_range) = tablet
             .scan_page(snapshot_ts, keyspace_id, range.borrow(), direction, limit)
             .await
-            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+            .map_err(internal_err_to_status)?;
 
         Ok(tonic::Response::new(pb::ScanResp {
             records: records.into_iter().map(pb::Record::from).collect(),
@@ -100,7 +103,7 @@ impl pb::internal::node_server::Node for NodeServer {
         let (snapshot_ts, records) = tablet
             .get_latest_multi(keys)
             .await
-            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+            .map_err(internal_err_to_status)?;
 
         Ok(tonic::Response::new(pb::GetLatestResp {
             snapshot_ts: snapshot_ts.as_micros(),
@@ -124,7 +127,7 @@ impl pb::internal::node_server::Node for NodeServer {
         let snapshot_ts = tablet
             .latest_snapshot(keys)
             .await
-            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+            .map_err(internal_err_to_status)?;
 
         Ok(tonic::Response::new(pb::LatestSnapshotResp {
             snapshot_ts: snapshot_ts.as_micros(),
@@ -147,7 +150,7 @@ impl pb::internal::node_server::Node for NodeServer {
         let ts = tablet
             .write(preconds, muts)
             .await
-            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+            .map_err(internal_err_to_status)?;
 
         Ok(tonic::Response::new(pb::WriteResp {
             write_ts: ts.as_micros(),

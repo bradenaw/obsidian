@@ -7,6 +7,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::Stream;
 
+use crate::grpc::util::internal_err_from_status;
 use crate::grpc::util::preconds_muts_to_proto;
 use crate::grpc::util::scan_req_to_proto;
 use crate::grpc::util::Pool;
@@ -148,7 +149,7 @@ impl runtime::Tablet for TabletProxy {
                 }),
             })
             .await
-            .map_err(|e| InternalError::Other(e.into()))?
+            .map_err(internal_err_from_status)?
             .into_inner();
 
         let results: BTreeMap<Key, Record> = resp
@@ -189,7 +190,7 @@ impl runtime::Tablet for TabletProxy {
                 ),
             })
             .await
-            .map_err(|e| InternalError::Other(e.into()))?
+            .map_err(internal_err_from_status)?
             .into_inner();
 
         let results: Vec<Record> = resp
@@ -219,7 +220,7 @@ impl runtime::Tablet for TabletProxy {
                 }),
             })
             .await
-            .map_err(|e| InternalError::Other(e.into()))?
+            .map_err(internal_err_from_status)?
             .into_inner();
 
         let snapshot_ts = Timestamp::from_micros(resp.snapshot_ts);
@@ -253,7 +254,7 @@ impl runtime::Tablet for TabletProxy {
                 }),
             })
             .await
-            .map_err(|e| InternalError::Other(e.into()))?
+            .map_err(internal_err_from_status)?
             .into_inner();
 
         let snapshot_ts = Timestamp::from_micros(resp.snapshot_ts);
@@ -292,8 +293,7 @@ impl runtime::Tablet for TabletProxy {
                 }),
             })
             .await
-            // TODO: make a proper WriteError.
-            .map_err(anyhow::Error::from)?
+            .map_err(internal_err_from_status)?
             .into_inner();
 
         let write_ts = Timestamp::from_micros(resp.write_ts);
