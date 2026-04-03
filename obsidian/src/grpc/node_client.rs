@@ -277,7 +277,7 @@ impl runtime::Tablet for TabletProxy {
         preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
-        let (preconds_pb, keys_pb, muts_pb) = preconds_muts_to_proto(preconds, muts);
+        let (preconds_pb, key_muts_pb) = preconds_muts_to_proto(preconds, muts);
 
         let resp = self
             .client_pool
@@ -288,8 +288,7 @@ impl runtime::Tablet for TabletProxy {
                 tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
                 inner: Some(pb::WriteReq {
                     preconds: preconds_pb,
-                    keys: keys_pb,
-                    muts: muts_pb,
+                    muts: key_muts_pb,
                 }),
             })
             .await

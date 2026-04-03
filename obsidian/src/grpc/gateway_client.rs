@@ -115,7 +115,7 @@ impl Obsidian for GatewayClient {
         preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, WriteError> {
-        let (preconds_pb, keys_pb, muts_pb) = preconds_muts_to_proto(preconds, muts);
+        let (preconds_pb, key_muts_pb) = preconds_muts_to_proto(preconds, muts);
 
         let resp = self
             .inner
@@ -123,8 +123,7 @@ impl Obsidian for GatewayClient {
             .await
             .write(pb::WriteReq {
                 preconds: preconds_pb,
-                keys: keys_pb,
-                muts: muts_pb,
+                muts: key_muts_pb,
             })
             .await
             // TODO: make a proper WriteError.

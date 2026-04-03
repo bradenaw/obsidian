@@ -94,29 +94,33 @@ pub(super) fn parse_write_req(
         .into_iter()
         .map(|x| x.try_into())
         .collect::<Result<Vec<Precondition>, _>>()?;
-    let keys = req_pb
-        .keys
-        .into_iter()
-        .map(|x| x.try_into())
-        .collect::<Result<Vec<Key>, _>>()?;
     let muts = req_pb
         .muts
         .into_iter()
-        .map(|x| x.try_into())
-        .collect::<Result<Vec<Mutation>, _>>()?;
+        .map(|key_mut_pb| -> anyhow::Result<(Key, Mutation)> {
+            Ok((
+                Key::try_from(
+                    key_mut_pb
+                        .key
+                        .ok_or_else(|| anyhow!("KeyMutation.key missing"))?,
+                )?,
+                Mutation::try_from(
+                    key_mut_pb
+                        .mutation
+                        .ok_or_else(|| anyhow!("KeyMutation.mutation missing"))?,
+                )?,
+            ))
+        })
+        .collect::<Result<Vec<(Key, Mutation)>, _>>()?;
 
     let mut muts_map = BTreeMap::new();
-    if keys.len() != muts.len() {
-        return Err(anyhow!(
-            "keys and muts must have the same number of elements",
-        ));
-    }
-    for (key, m) in iter::zip(keys, muts) {
+    for (key, m) in muts {
         if muts_map.contains_key(&key) {
             return Err(anyhow!("duplicate key {:?}", key));
         }
         muts_map.insert(key, m);
     }
+
     Ok((preconds, muts_map))
 }
 
@@ -139,15 +143,16 @@ pub(crate) fn scan_req_to_proto(
 pub(super) fn preconds_muts_to_proto(
     preconds: Vec<Precondition>,
     muts: BTreeMap<Key, Mutation>,
-) -> (Vec<pb::Precondition>, Vec<pb::Key>, Vec<pb::Mutation>) {
+) -> (Vec<pb::Precondition>, Vec<pb::KeyMutation>) {
     let preconds_pb: Vec<_> = preconds.into_iter().map(pb::Precondition::from).collect();
-    let mut keys_pb = Vec::with_capacity(muts.len());
-    let mut muts_pb = Vec::with_capacity(muts.len());
-    for (key, m) in muts.into_iter() {
-        keys_pb.push(pb::Key::from(key));
-        muts_pb.push(pb::Mutation::from(m));
-    }
-    (preconds_pb, keys_pb, muts_pb)
+    let key_muts_pb: Vec<_> = muts
+        .into_iter()
+        .map(|(key, mutation)| pb::KeyMutation {
+            key: Some(pb::Key::from(key)),
+            mutation: Some(pb::Mutation::from(mutation)),
+        })
+        .collect();
+    (preconds_pb, key_muts_pb)
 }
 
 pub(super) fn required<T, U>(name: &'static str, v: Option<T>) -> Result<U, tonic::Status>

@@ -55,9 +55,7 @@ message LatestSnapshotResp {
 
 message WriteReq {
     repeated Precondition preconds = 1;
-    // TODO: put key into mutations
-    repeated Key keys = 3;
-    repeated Mutation muts = 2;
+    repeated KeyMutation muts = 3;
 }
 
 message WriteResp {
@@ -96,6 +94,11 @@ message Mutation {
         bytes put = 2;
         google.protobuf.Empty delete = 3;
     }
+}
+
+message KeyMutation {
+    Key key = 1;
+    Mutation mutation = 2;
 }
 
 message Record {

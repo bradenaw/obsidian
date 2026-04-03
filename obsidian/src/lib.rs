@@ -48,6 +48,7 @@ mod pb {
     pub use crate::pb::obsidian::GetResp;
     pub use crate::pb::obsidian::GetResult;
     pub use crate::pb::obsidian::Key;
+    pub use crate::pb::obsidian::KeyMutation;
     pub use crate::pb::obsidian::KeyspaceId;
     pub use crate::pb::obsidian::LatestSnapshotResp;
     pub use crate::pb::obsidian::Mutation;
