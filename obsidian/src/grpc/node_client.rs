@@ -12,6 +12,8 @@ use crate::grpc::util::preconds_muts_to_proto;
 use crate::grpc::util::scan_req_to_proto;
 use crate::grpc::util::Pool;
 use crate::lsm::Manifest;
+use crate::meta::MetaKey;
+use crate::meta::MetaMutation;
 use crate::pb;
 use crate::runtime;
 use crate::runtime::Meta;
@@ -19,6 +21,7 @@ use crate::runtime::Shard;
 use crate::runtime::Supervisor;
 use crate::runtime::Tablet;
 use crate::Bound;
+use crate::ColoGroupId;
 use crate::Direction;
 use crate::HistoryRange;
 use crate::InternalError;
@@ -505,5 +508,74 @@ impl runtime::Tablet for TabletProxy {
         let bound = Bound::try_from(resp.bound.ok_or_else(|| anyhow!("missing bound"))?)?;
 
         Ok(bound)
+    }
+}
+
+struct MetaProxy {
+    client_pool: Arc<Pool<pb::internal::node_client::NodeClient<tonic::transport::Channel>>>,
+}
+
+#[async_trait]
+impl runtime::Meta for MetaProxy {
+    async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
+        self.client_pool
+            .acquire()
+            .await
+            .meta_add_shard(pb::internal::ShardIdReq {
+                shard_id: shard_id.0,
+            })
+            .await
+            .map_err(internal_err_from_status)?
+            .into_inner();
+
+        Ok(())
+    }
+
+    async fn add_node(&self, node_id: NodeId) -> anyhow::Result<()> {
+        todo!();
+    }
+
+    async fn create_colo_group(
+        &self,
+        colo_group_id: ColoGroupId,
+        initial_splits: Vec<Bound<Vec<u8>>>,
+    ) -> anyhow::Result<()> {
+        todo!();
+    }
+
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        todo!();
+    }
+
+    async fn latest_snapshot(&self) -> anyhow::Result<Timestamp> {
+        todo!();
+    }
+
+    async fn wait_for_newer(&self, ts: Timestamp) -> anyhow::Result<()> {
+        todo!();
+    }
+
+    async fn scan_page(
+        &self,
+        ts: Timestamp,
+        range: Range<Vec<u8>>,
+    ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
+        todo!();
+    }
+
+    async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Revision>, Timestamp)> {
+        todo!();
+    }
+
+    async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
+        todo!();
+    }
+
+    async fn write(
+        &self,
+        snapshot_ts: Timestamp,
+        muts: HashMap<MetaKey, MetaMutation>,
+    ) -> Result<Timestamp, InternalError> {
+        todo!();
     }
 }

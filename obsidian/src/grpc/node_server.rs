@@ -25,6 +25,7 @@ use crate::NodeId;
 use crate::Obsidian;
 use crate::Precondition;
 use crate::Range;
+use crate::ShardId;
 use crate::TabletId;
 use crate::Timestamp;
 use crate::Txid;
@@ -383,5 +384,22 @@ impl pb::internal::node_server::Node for NodeServer {
         Ok(tonic::Response::new(pb::internal::TabletFindSplitResp {
             bound: Some(bound.into()),
         }))
+    }
+
+    async fn meta_add_shard(
+        &self,
+        req: tonic::Request<pb::internal::ShardIdReq>,
+    ) -> Result<tonic::Response<()>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let shard_id = ShardId(req_inner.shard_id);
+
+        self.node
+            .meta()
+            .map_err(|e| tonic::Status::failed_precondition(e.to_string()))?
+            .add_shard(shard_id)
+            .await
+            .map_err(internal)?;
+
+        Ok(tonic::Response::new(()))
     }
 }

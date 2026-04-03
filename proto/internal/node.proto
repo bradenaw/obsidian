@@ -24,6 +24,17 @@ service Node {
     rpc TabletWaitMostlyHydrated(TabletEmptyReq) returns (google.protobuf.Empty);
     rpc TabletCatchup(TabletEmptyReq) returns (google.protobuf.Empty);
     rpc TabletFindSplit(TabletEmptyReq) returns (TabletFindSplitResp);
+
+    rpc MetaAddShard(ShardIdReq) returns (google.protobuf.Empty);
+    //rpc MetaAddNode(NodeIdReq) returns (google.protobuf.Empty);
+    //rpc MetaCreateColoGroup(obsidian.CreateColoGroupReq) returns (google.protobuf.Empty);
+    //rpc MetaCreateKeyspace(obsidian.CreateKeyspaceReq) returns (google.protobuf.Empty);
+    //rpc MetaLatestSnapshot(google.protobuf.Empty) returns (Timestamp);
+    //rpc MetaWaitForNewer(Timestamp) returns (google.protobuf.Empty);
+    //rpc MetaScanPage(MetaScanPageReq) returns (MetaScanPageResp);
+    //rpc MetaSync(Timestamp) returns (MetaSyncResp);
+    ////rpc MetaTabletIds(NodeTimestampReq) returns (MetaSyncResp);
+    //rpc MetaWrite(MetaWriteReq) returns (Timestamp);
 }
 
 message TabletGetReq {
@@ -114,4 +125,36 @@ message TabletManifestResp {
 
 message TabletFindSplitResp {
     obsidian.Bound bound = 1;
+}
+
+message NodeIdReq {
+    NodeId node_id = 1;
+}
+
+message ShardIdReq {
+    uint32 shard_id = 1;
+}
+
+message Timestamp {
+    fixed64 ts = 1;
+}
+
+message MetaScanPageReq {
+    fixed64 ts = 1;
+    obsidian.Range range = 2;
+}
+
+message MetaScanPageResp {
+    repeated obsidian.Record records = 1;
+    obsidian.Range remaining = 2;
+}
+
+message MetaWriteReq {
+    fixed64 snapshot_ts = 1;
+    repeated MetaKeyMutation mutations = 2;
+}
+
+message MetaKeyMutation {
+    bytes key = 1;
+    obsidian.Mutation mutation = 2;
 }
