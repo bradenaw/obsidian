@@ -21,6 +21,7 @@ use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
 use crate::Mutation;
+use crate::NodeId;
 use crate::Obsidian;
 use crate::Precondition;
 use crate::Range;
@@ -36,6 +37,22 @@ impl NodeServer {
     pub fn new(node: Arc<dyn Node>) -> Self {
         Self { node }
     }
+
+    fn check_node_id(
+        &self,
+        maybe_node_id_pb: Option<pb::internal::NodeId>,
+    ) -> Result<(), tonic::Status> {
+        let node_id: NodeId = required("node_id", maybe_node_id_pb)?;
+        if node_id != self.node.id() {
+            return Err(tonic::Status::not_found(format!(
+                "request for {:?} arrived at {:?}",
+                node_id,
+                self.node.id()
+            )));
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -44,8 +61,8 @@ impl pb::internal::node_server::Node for NodeServer {
         &self,
         req: tonic::Request<pb::internal::TabletGetReq>,
     ) -> Result<tonic::Response<pb::GetResp>, tonic::Status> {
-        // TODO: Check node_id.
         let req_inner = req.into_inner();
+        self.check_node_id(req_inner.node_id)?;
         let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
         let tablet = self.node.tablet(tablet_id).map_err(internal)?;
         let get_req = req_inner
@@ -70,6 +87,7 @@ impl pb::internal::node_server::Node for NodeServer {
         req: tonic::Request<pb::internal::TabletScanPageReq>,
     ) -> Result<tonic::Response<pb::ScanResp>, tonic::Status> {
         let req_inner = req.into_inner();
+        self.check_node_id(req_inner.node_id)?;
         let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
         let tablet = self.node.tablet(tablet_id).map_err(internal)?;
         let scan_req = req_inner
@@ -95,6 +113,7 @@ impl pb::internal::node_server::Node for NodeServer {
         req: tonic::Request<pb::internal::TabletGetLatestReq>,
     ) -> Result<tonic::Response<pb::GetLatestResp>, tonic::Status> {
         let req_inner = req.into_inner();
+        self.check_node_id(req_inner.node_id)?;
         let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
         let tablet = self.node.tablet(tablet_id).map_err(internal)?;
         let get_req = req_inner
@@ -119,6 +138,7 @@ impl pb::internal::node_server::Node for NodeServer {
         req: tonic::Request<pb::internal::TabletGetLatestReq>,
     ) -> Result<tonic::Response<pb::LatestSnapshotResp>, tonic::Status> {
         let req_inner = req.into_inner();
+        self.check_node_id(req_inner.node_id)?;
         let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
         let tablet = self.node.tablet(tablet_id).map_err(internal)?;
         let get_req = req_inner
@@ -142,6 +162,7 @@ impl pb::internal::node_server::Node for NodeServer {
         req: tonic::Request<pb::internal::TabletWriteReq>,
     ) -> Result<tonic::Response<pb::WriteResp>, tonic::Status> {
         let req_inner = req.into_inner();
+        self.check_node_id(req_inner.node_id)?;
         let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
         let tablet = self.node.tablet(tablet_id).map_err(internal)?;
         let write_req = req_inner
@@ -166,6 +187,7 @@ impl pb::internal::node_server::Node for NodeServer {
         req: tonic::Request<pb::internal::TabletPrepareReq>,
     ) -> Result<tonic::Response<pb::internal::TabletPrepareResp>, tonic::Status> {
         let req_inner = req.into_inner();
+        self.check_node_id(req_inner.node_id)?;
         let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
         let tablet = self.node.tablet(tablet_id).map_err(internal)?;
 
@@ -189,6 +211,7 @@ impl pb::internal::node_server::Node for NodeServer {
         req: tonic::Request<pb::internal::TabletTryCommitReq>,
     ) -> Result<tonic::Response<pb::internal::TxOutcomeResp>, tonic::Status> {
         let req_inner = req.into_inner();
+        self.check_node_id(req_inner.node_id)?;
         let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
         let tablet = self.node.tablet(tablet_id).map_err(internal)?;
 
@@ -212,6 +235,7 @@ impl pb::internal::node_server::Node for NodeServer {
         req: tonic::Request<pb::internal::TabletTxidReq>,
     ) -> Result<tonic::Response<pb::internal::TxOutcomeResp>, tonic::Status> {
         let req_inner = req.into_inner();
+        self.check_node_id(req_inner.node_id)?;
         let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
         let tablet = self.node.tablet(tablet_id).map_err(internal)?;
 
@@ -232,6 +256,7 @@ impl pb::internal::node_server::Node for NodeServer {
         req: tonic::Request<pb::internal::TabletTxidReq>,
     ) -> Result<tonic::Response<pb::internal::TxOutcomeResp>, tonic::Status> {
         let req_inner = req.into_inner();
+        self.check_node_id(req_inner.node_id)?;
         let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
         let tablet = self.node.tablet(tablet_id).map_err(internal)?;
 
@@ -252,6 +277,7 @@ impl pb::internal::node_server::Node for NodeServer {
         req: tonic::Request<pb::internal::TabletCleanupCommittedReq>,
     ) -> Result<tonic::Response<()>, tonic::Status> {
         let req_inner = req.into_inner();
+        self.check_node_id(req_inner.node_id)?;
         let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
         let tablet = self.node.tablet(tablet_id).map_err(internal)?;
 
@@ -273,6 +299,7 @@ impl pb::internal::node_server::Node for NodeServer {
         req: tonic::Request<pb::internal::TabletWaitMetaSyncReq>,
     ) -> Result<tonic::Response<()>, tonic::Status> {
         let req_inner = req.into_inner();
+        self.check_node_id(req_inner.node_id)?;
         let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
         let tablet = self.node.tablet(tablet_id).map_err(internal)?;
 
@@ -291,6 +318,7 @@ impl pb::internal::node_server::Node for NodeServer {
         req: tonic::Request<pb::internal::TabletEmptyReq>,
     ) -> Result<tonic::Response<()>, tonic::Status> {
         let req_inner = req.into_inner();
+        self.check_node_id(req_inner.node_id)?;
         let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
         let tablet = self.node.tablet(tablet_id).map_err(internal)?;
 
@@ -307,6 +335,7 @@ impl pb::internal::node_server::Node for NodeServer {
         req: tonic::Request<pb::internal::TabletEmptyReq>,
     ) -> Result<tonic::Response<()>, tonic::Status> {
         let req_inner = req.into_inner();
+        self.check_node_id(req_inner.node_id)?;
         let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
         let tablet = self.node.tablet(tablet_id).map_err(internal)?;
 
@@ -323,6 +352,7 @@ impl pb::internal::node_server::Node for NodeServer {
         req: tonic::Request<pb::internal::TabletEmptyReq>,
     ) -> Result<tonic::Response<pb::internal::TabletFindSplitResp>, tonic::Status> {
         let req_inner = req.into_inner();
+        self.check_node_id(req_inner.node_id)?;
         let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
         let tablet = self.node.tablet(tablet_id).map_err(internal)?;
 
