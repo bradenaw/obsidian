@@ -86,16 +86,15 @@ pub(super) fn parse_scan_req(
     Ok((snapshot_ts, keyspace_id, range, direction, limit))
 }
 
-pub(super) fn parse_write_req(
-    req_pb: pb::WriteReq,
+pub(super) fn parse_preconds_muts(
+    preconds_pb: Vec<pb::Precondition>,
+    muts_pb: Vec<pb::KeyMutation>,
 ) -> anyhow::Result<(Vec<Precondition>, BTreeMap<Key, Mutation>)> {
-    let preconds = req_pb
-        .preconds
+    let preconds = preconds_pb
         .into_iter()
         .map(|x| x.try_into())
         .collect::<Result<Vec<Precondition>, _>>()?;
-    let muts = req_pb
-        .muts
+    let muts = muts_pb
         .into_iter()
         .map(|key_mut_pb| -> anyhow::Result<(Key, Mutation)> {
             Ok((

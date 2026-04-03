@@ -302,11 +302,30 @@ impl runtime::Tablet for TabletProxy {
 
     async fn prepare(
         &self,
-        _txid: Txid,
-        _preconds: Vec<Precondition>,
-        _muts: BTreeMap<Key, Mutation>,
+        txid: Txid,
+        preconds: Vec<Precondition>,
+        muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
-        todo!()
+        let (preconds_pb, key_muts_pb) = preconds_muts_to_proto(preconds, muts);
+
+        let resp = self
+            .client_pool
+            .acquire()
+            .await
+            .tablet_prepare(pb::internal::TabletPrepareReq {
+                node_id: Some(pb::internal::NodeId::from(self.node_id)),
+                tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
+                txid: Some(pb::internal::Txid::from(txid)),
+                preconds: preconds_pb,
+                muts: key_muts_pb,
+            })
+            .await
+            .map_err(internal_err_from_status)?
+            .into_inner();
+
+        let prepare_ts = Timestamp::from_micros(resp.prepare_ts);
+
+        Ok(prepare_ts)
     }
 
     async fn try_commit(

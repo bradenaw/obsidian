@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use crate::grpc::util::get_req_results;
 use crate::grpc::util::internal;
 use crate::grpc::util::invalid_argument;
+use crate::grpc::util::parse_preconds_muts;
 use crate::grpc::util::parse_scan_req;
-use crate::grpc::util::parse_write_req;
 use crate::grpc::util::required;
 use crate::pb;
 use crate::Bound;
@@ -109,7 +109,8 @@ impl pb::obsidian_server::Obsidian for GatewayServer {
     ) -> Result<tonic::Response<pb::WriteResp>, tonic::Status> {
         let req_inner = req.into_inner();
 
-        let (preconds, muts) = parse_write_req(req_inner).map_err(invalid_argument)?;
+        let (preconds, muts) =
+            parse_preconds_muts(req_inner.preconds, req_inner.muts).map_err(invalid_argument)?;
 
         let ts = self
             .inner

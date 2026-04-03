@@ -8,8 +8,8 @@ use crate::grpc::util::internal;
 use crate::grpc::util::internal_err_from_status;
 use crate::grpc::util::internal_err_to_status;
 use crate::grpc::util::invalid_argument;
+use crate::grpc::util::parse_preconds_muts;
 use crate::grpc::util::parse_scan_req;
-use crate::grpc::util::parse_write_req;
 use crate::grpc::util::required;
 use crate::pb;
 use crate::runtime::Node;
@@ -25,6 +25,7 @@ use crate::Precondition;
 use crate::Range;
 use crate::TabletId;
 use crate::Timestamp;
+use crate::Txid;
 
 pub(crate) struct NodeServer {
     node: Arc<dyn Node>,
@@ -42,6 +43,7 @@ impl pb::internal::node_server::Node for NodeServer {
         &self,
         req: tonic::Request<pb::internal::TabletGetReq>,
     ) -> Result<tonic::Response<pb::GetResp>, tonic::Status> {
+        // TODO: Check node_id.
         let req_inner = req.into_inner();
         let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
         let tablet = self.node.tablet(tablet_id).map_err(internal)?;
@@ -145,7 +147,8 @@ impl pb::internal::node_server::Node for NodeServer {
             .inner
             .ok_or_else(|| invalid_argument(anyhow!("missing inner")))?;
 
-        let (preconds, muts) = parse_write_req(write_req).map_err(invalid_argument)?;
+        let (preconds, muts) =
+            parse_preconds_muts(write_req.preconds, write_req.muts).map_err(invalid_argument)?;
 
         let ts = tablet
             .write(preconds, muts)
@@ -154,6 +157,34 @@ impl pb::internal::node_server::Node for NodeServer {
 
         Ok(tonic::Response::new(pb::WriteResp {
             write_ts: ts.as_micros(),
+        }))
+    }
+
+    async fn tablet_prepare(
+        &self,
+        req: tonic::Request<pb::internal::TabletPrepareReq>,
+    ) -> Result<tonic::Response<pb::internal::TabletPrepareResp>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
+        let tablet = self.node.tablet(tablet_id).map_err(internal)?;
+
+        let txid = Txid::try_from(
+            req_inner
+                .txid
+                .ok_or_else(|| invalid_argument(anyhow!("TabletPrepareReq.txid missing")))?,
+        )
+        .map_err(invalid_argument)?;
+
+        let (preconds, muts) =
+            parse_preconds_muts(req_inner.preconds, req_inner.muts).map_err(invalid_argument)?;
+
+        let ts = tablet
+            .prepare(txid, preconds, muts)
+            .await
+            .map_err(internal_err_to_status)?;
+
+        Ok(tonic::Response::new(pb::internal::TabletPrepareResp {
+            prepare_ts: ts.as_micros(),
         }))
     }
 }

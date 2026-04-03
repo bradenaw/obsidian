@@ -14,7 +14,7 @@ service Node {
     rpc TabletLatestSnapshot(TabletGetLatestReq) returns (obsidian.LatestSnapshotResp);
     //rpc TabletHistoryPage(TabletHistoryPageReq) returns (obsidian.HistoryPageResp);
     rpc TabletWrite(TabletWriteReq) returns (obsidian.WriteResp);
-    //rpc TabletPrepare(TabletPrepareReq) returns (TabletPrepareResp);
+    rpc TabletPrepare(TabletPrepareReq) returns (TabletPrepareResp);
     //rpc TabletTryCommit(TabletTryCommitReq) returns (TabletTryCommitResp);
     //rpc TabletTryAbort(TabletTryAbortReq) returns (TabletTryAbortResp);
     //rpc TabletWait(TabletWaitReq) returns (TabletWaitResp);
@@ -54,4 +54,17 @@ message TabletWriteReq {
     TabletId tablet_id = 1;
     NodeId node_id = 2;
     obsidian.WriteReq inner = 3;
+}
+
+message TabletPrepareReq {
+    TabletId tablet_id = 1;
+    NodeId node_id = 2;
+
+    Txid txid = 3;
+    repeated obsidian.Precondition preconds = 4;
+    repeated obsidian.KeyMutation muts = 5;
+}
+
+message TabletPrepareResp {
+	fixed64 prepare_ts = 1;
 }
