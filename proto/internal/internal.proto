@@ -75,3 +75,21 @@ message Uuid {
     fixed64 high = 1;
     fixed64 low = 2;
 }
+
+message Manifest {
+    repeated obsidian.KeyspaceId keyspace_ids = 1;
+    repeated KeyspaceManifest keyspaces = 2;
+}
+
+message KeyspaceManifest {
+    repeated LevelManifest levels = 1;
+}
+
+message LevelManifest {
+    repeated RunManifest runs = 1;
+}
+
+message RunManifest {
+    Uuid run_id = 1;
+    obsidian.Range range = 2;
+}

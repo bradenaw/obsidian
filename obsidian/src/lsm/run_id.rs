@@ -3,6 +3,10 @@ use std::fmt::Display;
 
 use uuid::Uuid;
 
+use crate::pb;
+use crate::types::uuid_from_proto;
+use crate::types::uuid_to_proto;
+
 #[derive(Eq, PartialEq, Hash, Clone, Copy)]
 pub(crate) struct RunId(Uuid);
 
@@ -38,5 +42,17 @@ impl Debug for RunId {
 impl From<Uuid> for RunId {
     fn from(value: Uuid) -> Self {
         Self(value)
+    }
+}
+
+impl From<pb::internal::Uuid> for RunId {
+    fn from(value: pb::internal::Uuid) -> Self {
+        RunId(uuid_from_proto(value))
+    }
+}
+
+impl From<RunId> for pb::internal::Uuid {
+    fn from(value: RunId) -> Self {
+        uuid_to_proto(value.0)
     }
 }

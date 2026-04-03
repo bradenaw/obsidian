@@ -5,6 +5,9 @@ use std::iter;
 use anyhow::anyhow;
 
 use crate::lsm::RunId;
+use crate::pb;
+use crate::types::uuid_from_proto;
+use crate::types::uuid_to_proto;
 use crate::util::merge_sorted2;
 use crate::util::OrdEqByFirst;
 use crate::KeyspaceId;
@@ -84,6 +87,63 @@ impl Debug for Manifest {
     }
 }
 
+impl TryFrom<pb::internal::Manifest> for Manifest {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::internal::Manifest) -> Result<Self, Self::Error> {
+        let keyspace_ids = value
+            .keyspace_ids
+            .into_iter()
+            .map(KeyspaceId::try_from)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let keyspace_manifests = value
+            .keyspaces
+            .into_iter()
+            .map(KeyspaceManifest::try_from)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        if keyspace_ids.len() != keyspace_manifests.len() {
+            return Err(anyhow!(
+                "must have same number of keyspace_ids as keyspaces: {} != {}",
+                keyspace_ids.len(),
+                keyspace_manifests.len()
+            ));
+        }
+
+        let mut keyspaces_map = HashMap::new();
+        for (keyspace_id, keyspace_manifest) in
+            iter::zip(keyspace_ids.into_iter(), keyspace_manifests.into_iter())
+        {
+            if keyspaces_map.contains_key(&keyspace_id) {
+                return Err(anyhow!("duplicate {:?}", keyspace_id));
+            }
+
+            keyspaces_map.insert(keyspace_id, keyspace_manifest);
+        }
+
+        Ok(Manifest {
+            keyspaces: keyspaces_map,
+        })
+    }
+}
+
+impl From<Manifest> for pb::internal::Manifest {
+    fn from(value: Manifest) -> Self {
+        let mut keyspace_ids_pb = Vec::with_capacity(value.keyspaces.len());
+        let mut keyspaces_pb = Vec::with_capacity(value.keyspaces.len());
+
+        for (keyspace_id, keyspace) in value.keyspaces {
+            keyspace_ids_pb.push(keyspace_id.into());
+            keyspaces_pb.push(keyspace.into());
+        }
+
+        pb::internal::Manifest {
+            keyspace_ids: keyspace_ids_pb,
+            keyspaces: keyspaces_pb,
+        }
+    }
+}
+
 /// The manifest for a single keyspace. L0 is always empty because L0 is kept in-memory rather than
 /// in Runs, so there are no RunIds for it.
 #[derive(Clone, Eq, Debug, PartialEq)]
@@ -135,6 +195,28 @@ impl KeyspaceManifest {
     pub fn clip(&mut self, range: Range<&[u8]>) {
         for level in &mut self.levels {
             level.clip(range);
+        }
+    }
+}
+
+impl TryFrom<pb::internal::KeyspaceManifest> for KeyspaceManifest {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::internal::KeyspaceManifest) -> Result<Self, Self::Error> {
+        Ok(KeyspaceManifest {
+            levels: value
+                .levels
+                .into_iter()
+                .map(LevelManifest::try_from)
+                .collect::<anyhow::Result<Vec<_>>>()?,
+        })
+    }
+}
+
+impl From<KeyspaceManifest> for pb::internal::KeyspaceManifest {
+    fn from(value: KeyspaceManifest) -> Self {
+        pb::internal::KeyspaceManifest {
+            levels: value.levels.into_iter().map(|level| level.into()).collect(),
         }
     }
 }
@@ -210,10 +292,52 @@ impl LevelManifest {
     }
 }
 
+impl TryFrom<pb::internal::LevelManifest> for LevelManifest {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::internal::LevelManifest) -> Result<Self, Self::Error> {
+        Ok(LevelManifest {
+            runs: value
+                .runs
+                .into_iter()
+                .map(RunManifest::try_from)
+                .collect::<anyhow::Result<Vec<_>>>()?,
+        })
+    }
+}
+
+impl From<LevelManifest> for pb::internal::LevelManifest {
+    fn from(value: LevelManifest) -> Self {
+        pb::internal::LevelManifest {
+            runs: value.runs.into_iter().map(|run| run.into()).collect(),
+        }
+    }
+}
+
 #[derive(Clone, Eq, Debug, PartialEq)]
 pub(crate) struct RunManifest {
     pub(crate) run_id: RunId,
     pub(crate) range: Range<Vec<u8>>,
+}
+
+impl TryFrom<pb::internal::RunManifest> for RunManifest {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::internal::RunManifest) -> Result<Self, Self::Error> {
+        Ok(RunManifest {
+            run_id: RunId::from(value.run_id.ok_or_else(|| anyhow!("missing run_id"))?),
+            range: Range::try_from(value.range.ok_or_else(|| anyhow!("missing range"))?)?,
+        })
+    }
+}
+
+impl From<RunManifest> for pb::internal::RunManifest {
+    fn from(value: RunManifest) -> Self {
+        pb::internal::RunManifest {
+            run_id: Some(value.run_id.into()),
+            range: Some(value.range.into()),
+        }
+    }
 }
 
 // Like Iterator::zip, but rather than terminating when the first iterator terminates, terminates
