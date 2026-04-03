@@ -8,6 +8,7 @@ use crate::grpc::util::internal;
 use crate::grpc::util::internal_err_from_status;
 use crate::grpc::util::internal_err_to_status;
 use crate::grpc::util::invalid_argument;
+use crate::grpc::util::key_set;
 use crate::grpc::util::parse_preconds_muts;
 use crate::grpc::util::parse_scan_req;
 use crate::grpc::util::required;
@@ -168,12 +169,7 @@ impl pb::internal::node_server::Node for NodeServer {
         let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
         let tablet = self.node.tablet(tablet_id).map_err(internal)?;
 
-        let txid = Txid::try_from(
-            req_inner
-                .txid
-                .ok_or_else(|| invalid_argument(anyhow!("TabletPrepareReq.txid missing")))?,
-        )
-        .map_err(invalid_argument)?;
+        let txid: Txid = required("txid", req_inner.txid)?;
 
         let (preconds, muts) =
             parse_preconds_muts(req_inner.preconds, req_inner.muts).map_err(invalid_argument)?;
@@ -186,5 +182,89 @@ impl pb::internal::node_server::Node for NodeServer {
         Ok(tonic::Response::new(pb::internal::TabletPrepareResp {
             prepare_ts: ts.as_micros(),
         }))
+    }
+
+    async fn tablet_try_commit(
+        &self,
+        req: tonic::Request<pb::internal::TabletTryCommitReq>,
+    ) -> Result<tonic::Response<pb::internal::TxOutcomeResp>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
+        let tablet = self.node.tablet(tablet_id).map_err(internal)?;
+
+        let txid: Txid = required("txid", req_inner.txid)?;
+        let commit_ts = Timestamp::from_micros(req_inner.ts);
+        let precond_keys = key_set(req_inner.precond_keys)?;
+        let mut_keys = key_set(req_inner.mut_keys)?;
+
+        let tx_outcome = tablet
+            .try_commit(txid, commit_ts, precond_keys, mut_keys)
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        Ok(tonic::Response::new(pb::internal::TxOutcomeResp {
+            tx_outcome: Some(pb::internal::TxOutcome::from(tx_outcome)),
+        }))
+    }
+
+    async fn tablet_try_abort(
+        &self,
+        req: tonic::Request<pb::internal::TabletTxidReq>,
+    ) -> Result<tonic::Response<pb::internal::TxOutcomeResp>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
+        let tablet = self.node.tablet(tablet_id).map_err(internal)?;
+
+        let txid: Txid = required("txid", req_inner.txid)?;
+
+        let tx_outcome = tablet
+            .try_abort(txid)
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        Ok(tonic::Response::new(pb::internal::TxOutcomeResp {
+            tx_outcome: Some(pb::internal::TxOutcome::from(tx_outcome)),
+        }))
+    }
+
+    async fn tablet_wait(
+        &self,
+        req: tonic::Request<pb::internal::TabletTxidReq>,
+    ) -> Result<tonic::Response<pb::internal::TxOutcomeResp>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
+        let tablet = self.node.tablet(tablet_id).map_err(internal)?;
+
+        let txid: Txid = required("txid", req_inner.txid)?;
+
+        let tx_outcome = tablet
+            .wait(txid)
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        Ok(tonic::Response::new(pb::internal::TxOutcomeResp {
+            tx_outcome: Some(pb::internal::TxOutcome::from(tx_outcome)),
+        }))
+    }
+
+    async fn tablet_cleanup_committed(
+        &self,
+        req: tonic::Request<pb::internal::TabletCleanupCommittedReq>,
+    ) -> Result<tonic::Response<()>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
+        let tablet = self.node.tablet(tablet_id).map_err(internal)?;
+
+        let txid: Txid = required("txid", req_inner.txid)?;
+        let commit_ts = Timestamp::from_micros(req_inner.ts);
+        let precond_keys = key_set(req_inner.precond_keys)?;
+        let mut_keys = key_set(req_inner.mut_keys)?;
+
+        tablet
+            .cleanup_committed(txid, commit_ts, precond_keys, mut_keys)
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        Ok(tonic::Response::new(()))
     }
 }

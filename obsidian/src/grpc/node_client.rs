@@ -330,30 +330,101 @@ impl runtime::Tablet for TabletProxy {
 
     async fn try_commit(
         &self,
-        _txid: Txid,
-        _ts: Timestamp,
-        _precond_keys: BTreeSet<Key>,
-        _mut_keys: BTreeSet<Key>,
+        txid: Txid,
+        ts: Timestamp,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<TxOutcome> {
-        todo!()
+        let resp = self
+            .client_pool
+            .acquire()
+            .await
+            .tablet_try_commit(pb::internal::TabletTryCommitReq {
+                node_id: Some(pb::internal::NodeId::from(self.node_id)),
+                tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
+                txid: Some(pb::internal::Txid::from(txid)),
+                ts: ts.as_micros(),
+                precond_keys: precond_keys.into_iter().map(pb::Key::from).collect(),
+                mut_keys: mut_keys.into_iter().map(pb::Key::from).collect(),
+            })
+            .await
+            .map_err(internal_err_from_status)?
+            .into_inner();
+
+        let tx_outcome = TxOutcome::try_from(
+            resp.tx_outcome
+                .ok_or_else(|| anyhow!("missing tx_outcome"))?,
+        )?;
+
+        Ok(tx_outcome)
     }
 
-    async fn try_abort(&self, _txid: Txid) -> anyhow::Result<TxOutcome> {
-        todo!()
+    async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
+        let resp = self
+            .client_pool
+            .acquire()
+            .await
+            .tablet_try_abort(pb::internal::TabletTxidReq {
+                node_id: Some(pb::internal::NodeId::from(self.node_id)),
+                tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
+                txid: Some(pb::internal::Txid::from(txid)),
+            })
+            .await
+            .map_err(internal_err_from_status)?
+            .into_inner();
+
+        let tx_outcome = TxOutcome::try_from(
+            resp.tx_outcome
+                .ok_or_else(|| anyhow!("missing tx_outcome"))?,
+        )?;
+
+        Ok(tx_outcome)
     }
 
-    async fn wait(&self, _txid: Txid) -> Result<TxOutcome, InternalError> {
-        todo!()
+    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
+        let resp = self
+            .client_pool
+            .acquire()
+            .await
+            .tablet_wait(pb::internal::TabletTxidReq {
+                node_id: Some(pb::internal::NodeId::from(self.node_id)),
+                tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
+                txid: Some(pb::internal::Txid::from(txid)),
+            })
+            .await
+            .map_err(internal_err_from_status)?
+            .into_inner();
+
+        let tx_outcome = TxOutcome::try_from(
+            resp.tx_outcome
+                .ok_or_else(|| anyhow!("missing tx_outcome"))?,
+        )?;
+
+        Ok(tx_outcome)
     }
 
     async fn cleanup_committed(
         &self,
-        _txid: Txid,
-        _ts: Timestamp,
-        _precond_keys: BTreeSet<Key>,
-        _mut_keys: BTreeSet<Key>,
+        txid: Txid,
+        ts: Timestamp,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()> {
-        todo!()
+        self.client_pool
+            .acquire()
+            .await
+            .tablet_cleanup_committed(pb::internal::TabletCleanupCommittedReq {
+                node_id: Some(pb::internal::NodeId::from(self.node_id)),
+                tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
+                txid: Some(pb::internal::Txid::from(txid)),
+                ts: ts.as_micros(),
+                precond_keys: precond_keys.into_iter().map(pb::Key::from).collect(),
+                mut_keys: mut_keys.into_iter().map(pb::Key::from).collect(),
+            })
+            .await
+            .map_err(internal_err_from_status)?;
+
+        Ok(())
     }
 
     async fn wait_meta_sync(&self, _ts: Timestamp) -> anyhow::Result<()> {

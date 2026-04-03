@@ -13,6 +13,13 @@ message Txid {
     uint32 owner_shard_id = 4;
 }
 
+message TxOutcome {
+    oneof outcome {
+        fixed64 committed = 1;
+        google.protobuf.Empty aborted = 2;
+    }
+}
+
 message TxOutcomeRecord {
     message Committed {
         fixed64 ts = 1;

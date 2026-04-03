@@ -71,6 +71,27 @@ impl GetResultsBuilder {
     }
 }
 
+pub(super) fn key_set(keys_pb: Vec<pb::Key>) -> Result<BTreeSet<Key>, tonic::Status> {
+    let mut keys = BTreeSet::new();
+    for (i, key_pb) in keys_pb.into_iter().enumerate() {
+        let keyspace_id = KeyspaceId::try_from(
+            key_pb
+                .keyspace_id
+                .ok_or_else(|| invalid_argument(anyhow!("missing keyspace_id on key {}", i)))?,
+        )
+        .map_err(|e| invalid_argument(anyhow!("invalid keyspace_id on key {}: {}", i, e)))?;
+        let key = (keyspace_id, key_pb.bytes);
+
+        if keys.contains(&key) {
+            return Err(invalid_argument(anyhow!("duplicate key {:?}", key)));
+        }
+
+        keys.insert(key.clone());
+    }
+
+    Ok(keys)
+}
+
 pub(super) fn parse_scan_req(
     req_pb: pb::ScanReq,
 ) -> anyhow::Result<(Timestamp, KeyspaceId, Range<Vec<u8>>, Direction, usize)> {

@@ -15,10 +15,10 @@ service Node {
     //rpc TabletHistoryPage(TabletHistoryPageReq) returns (obsidian.HistoryPageResp);
     rpc TabletWrite(TabletWriteReq) returns (obsidian.WriteResp);
     rpc TabletPrepare(TabletPrepareReq) returns (TabletPrepareResp);
-    //rpc TabletTryCommit(TabletTryCommitReq) returns (TabletTryCommitResp);
-    //rpc TabletTryAbort(TabletTryAbortReq) returns (TabletTryAbortResp);
-    //rpc TabletWait(TabletWaitReq) returns (TabletWaitResp);
-    //rpc TabletCleanupCommitted(TabletCleanupCommittedReq) returns (TabletCleanupCommittedResp);
+    rpc TabletTryCommit(TabletTryCommitReq) returns (TxOutcomeResp);
+    rpc TabletTryAbort(TabletTxidReq) returns (TxOutcomeResp);
+    rpc TabletWait(TabletTxidReq) returns (TxOutcomeResp);
+    rpc TabletCleanupCommitted(TabletCleanupCommittedReq) returns (google.protobuf.Empty);
     //rpc TabletWaitMetaSync(TabletWaitMetaSyncReq) returns (google.protobuf.Empty);
     //rpc TabletManifest(google.protobuf.Empty) returns (TabletManifestResp);
     //rpc TabletWaitMostlyHydrated(google.protobuf.Empty) returns (google.protobuf.Empty);
@@ -66,5 +66,33 @@ message TabletPrepareReq {
 }
 
 message TabletPrepareResp {
-	fixed64 prepare_ts = 1;
+    fixed64 prepare_ts = 1;
+}
+
+message TabletTryCommitReq {
+    TabletId tablet_id = 1;
+    NodeId node_id = 2;
+    Txid txid = 3;
+    fixed64 ts = 4;
+    repeated obsidian.Key precond_keys = 5;
+    repeated obsidian.Key mut_keys = 6;
+}
+
+message TabletTxidReq {
+    TabletId tablet_id = 1;
+    NodeId node_id = 2;
+    Txid txid = 3;
+}
+
+message TxOutcomeResp {
+    TxOutcome tx_outcome = 1;
+}
+
+message TabletCleanupCommittedReq {
+    TabletId tablet_id = 1;
+    NodeId node_id = 2;
+    Txid txid = 3;
+    fixed64 ts = 4;
+    repeated obsidian.Key precond_keys = 5;
+    repeated obsidian.Key mut_keys = 6;
 }
