@@ -347,6 +347,25 @@ impl pb::internal::node_server::Node for NodeServer {
         Ok(tonic::Response::new(()))
     }
 
+    async fn tablet_manifest(
+        &self,
+        req: tonic::Request<pb::internal::TabletEmptyReq>,
+    ) -> Result<tonic::Response<pb::internal::TabletManifestResp>, tonic::Status> {
+        let req_inner = req.into_inner();
+        self.check_node_id(req_inner.node_id)?;
+        let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
+        let tablet = self.node.tablet(tablet_id).map_err(internal)?;
+
+        let manifest = tablet
+            .manifest()
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        Ok(tonic::Response::new(pb::internal::TabletManifestResp {
+            manifest: Some(manifest.into()),
+        }))
+    }
+
     async fn tablet_find_split(
         &self,
         req: tonic::Request<pb::internal::TabletEmptyReq>,

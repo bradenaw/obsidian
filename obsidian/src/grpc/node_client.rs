@@ -427,23 +427,83 @@ impl runtime::Tablet for TabletProxy {
         Ok(())
     }
 
-    async fn wait_meta_sync(&self, _ts: Timestamp) -> anyhow::Result<()> {
-        todo!()
+    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
+        self.client_pool
+            .acquire()
+            .await
+            .tablet_wait_meta_sync(pb::internal::TabletWaitMetaSyncReq {
+                node_id: Some(pb::internal::NodeId::from(self.node_id)),
+                tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
+                ts: ts.as_micros(),
+            })
+            .await
+            .map_err(internal_err_from_status)?;
+
+        Ok(())
     }
 
     async fn manifest(&self) -> anyhow::Result<Manifest> {
-        todo!()
+        let resp = self
+            .client_pool
+            .acquire()
+            .await
+            .tablet_manifest(pb::internal::TabletEmptyReq {
+                node_id: Some(pb::internal::NodeId::from(self.node_id)),
+                tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
+            })
+            .await
+            .map_err(internal_err_from_status)?
+            .into_inner();
+
+        let manifest =
+            Manifest::try_from(resp.manifest.ok_or_else(|| anyhow!("missing manifest"))?)?;
+
+        Ok(manifest)
     }
 
     async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
-        todo!()
+        self.client_pool
+            .acquire()
+            .await
+            .tablet_wait_mostly_hydrated(pb::internal::TabletEmptyReq {
+                node_id: Some(pb::internal::NodeId::from(self.node_id)),
+                tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
+            })
+            .await
+            .map_err(internal_err_from_status)?;
+
+        Ok(())
     }
 
     async fn catchup(&self) -> anyhow::Result<()> {
-        todo!()
+        self.client_pool
+            .acquire()
+            .await
+            .tablet_catchup(pb::internal::TabletEmptyReq {
+                node_id: Some(pb::internal::NodeId::from(self.node_id)),
+                tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
+            })
+            .await
+            .map_err(internal_err_from_status)?;
+
+        Ok(())
     }
 
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
-        todo!()
+        let resp = self
+            .client_pool
+            .acquire()
+            .await
+            .tablet_find_split(pb::internal::TabletEmptyReq {
+                node_id: Some(pb::internal::NodeId::from(self.node_id)),
+                tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
+            })
+            .await
+            .map_err(internal_err_from_status)?
+            .into_inner();
+
+        let bound = Bound::try_from(resp.bound.ok_or_else(|| anyhow!("missing bound"))?)?;
+
+        Ok(bound)
     }
 }

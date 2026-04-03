@@ -6,8 +6,6 @@ use anyhow::anyhow;
 
 use crate::lsm::RunId;
 use crate::pb;
-use crate::types::uuid_from_proto;
-use crate::types::uuid_to_proto;
 use crate::util::merge_sorted2;
 use crate::util::OrdEqByFirst;
 use crate::KeyspaceId;

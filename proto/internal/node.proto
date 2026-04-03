@@ -20,7 +20,7 @@ service Node {
     rpc TabletWait(TabletTxidReq) returns (TxOutcomeResp);
     rpc TabletCleanupCommitted(TabletCleanupCommittedReq) returns (google.protobuf.Empty);
     rpc TabletWaitMetaSync(TabletWaitMetaSyncReq) returns (google.protobuf.Empty);
-    //rpc TabletManifest(TabletEmptyReq) returns (TabletManifestResp);
+    rpc TabletManifest(TabletEmptyReq) returns (TabletManifestResp);
     rpc TabletWaitMostlyHydrated(TabletEmptyReq) returns (google.protobuf.Empty);
     rpc TabletCatchup(TabletEmptyReq) returns (google.protobuf.Empty);
     rpc TabletFindSplit(TabletEmptyReq) returns (TabletFindSplitResp);
@@ -106,6 +106,10 @@ message TabletWaitMetaSyncReq {
     TabletId tablet_id = 1;
     NodeId node_id = 2;
     fixed64 ts = 3;
+}
+
+message TabletManifestResp {
+    Manifest manifest = 1;
 }
 
 message TabletFindSplitResp {
