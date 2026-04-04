@@ -26,15 +26,15 @@ service Node {
     rpc TabletFindSplit(TabletEmptyReq) returns (TabletFindSplitResp);
 
     rpc MetaAddShard(ShardIdReq) returns (google.protobuf.Empty);
-    //rpc MetaAddNode(NodeIdReq) returns (google.protobuf.Empty);
-    //rpc MetaCreateColoGroup(obsidian.CreateColoGroupReq) returns (google.protobuf.Empty);
-    //rpc MetaCreateKeyspace(obsidian.CreateKeyspaceReq) returns (google.protobuf.Empty);
-    //rpc MetaLatestSnapshot(google.protobuf.Empty) returns (Timestamp);
-    //rpc MetaWaitForNewer(Timestamp) returns (google.protobuf.Empty);
-    //rpc MetaScanPage(MetaScanPageReq) returns (MetaScanPageResp);
-    //rpc MetaSync(Timestamp) returns (MetaSyncResp);
-    ////rpc MetaTabletIds(NodeTimestampReq) returns (MetaSyncResp);
-    //rpc MetaWrite(MetaWriteReq) returns (Timestamp);
+    rpc MetaAddNode(NodeIdReq) returns (google.protobuf.Empty);
+    rpc MetaCreateColoGroup(obsidian.CreateColoGroupReq) returns (google.protobuf.Empty);
+    rpc MetaCreateKeyspace(obsidian.CreateKeyspaceReq) returns (google.protobuf.Empty);
+    rpc MetaLatestSnapshot(google.protobuf.Empty) returns (Timestamp);
+    rpc MetaWaitForNewer(Timestamp) returns (google.protobuf.Empty);
+    rpc MetaScanPage(MetaScanPageReq) returns (MetaScanPageResp);
+    rpc MetaSync(Timestamp) returns (MetaSyncResp);
+    //rpc MetaTabletIds(NodeTimestampReq) returns (MetaSyncResp);
+    rpc MetaWrite(MetaWriteReq) returns (Timestamp);
 }
 
 message TabletGetReq {
@@ -147,6 +147,11 @@ message MetaScanPageReq {
 message MetaScanPageResp {
     repeated obsidian.Record records = 1;
     obsidian.Range remaining = 2;
+}
+
+message MetaSyncResp {
+    repeated obsidian.Revision revisions = 1;
+    fixed64 ts = 2;
 }
 
 message MetaWriteReq {

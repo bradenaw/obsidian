@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -12,8 +13,12 @@ use crate::grpc::util::key_set;
 use crate::grpc::util::parse_preconds_muts;
 use crate::grpc::util::parse_scan_req;
 use crate::grpc::util::required;
+use crate::meta::MetaKey;
+use crate::meta::MetaMutation;
+use crate::meta::MetaValue;
 use crate::pb;
 use crate::runtime::Node;
+use crate::util::hexlify;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -401,5 +406,183 @@ impl pb::internal::node_server::Node for NodeServer {
             .map_err(internal)?;
 
         Ok(tonic::Response::new(()))
+    }
+
+    async fn meta_add_node(
+        &self,
+        req: tonic::Request<pb::internal::NodeIdReq>,
+    ) -> Result<tonic::Response<()>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let node_id: NodeId = required("node_id", req_inner.node_id)?;
+
+        self.node
+            .meta()
+            .map_err(|e| tonic::Status::failed_precondition(e.to_string()))?
+            .add_node(node_id)
+            .await
+            .map_err(internal)?;
+
+        Ok(tonic::Response::new(()))
+    }
+
+    async fn meta_create_colo_group(
+        &self,
+        req: tonic::Request<pb::CreateColoGroupReq>,
+    ) -> Result<tonic::Response<()>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let colo_group_id = ColoGroupId(req_inner.colo_group_id);
+        let initial_splits = req_inner
+            .initial_splits
+            .into_iter()
+            .map(Bound::try_from)
+            .collect::<anyhow::Result<Vec<_>>>()
+            .map_err(invalid_argument)?;
+
+        self.node
+            .meta()
+            .map_err(|e| tonic::Status::failed_precondition(e.to_string()))?
+            .create_colo_group(colo_group_id, initial_splits)
+            .await
+            .map_err(internal)?;
+
+        Ok(tonic::Response::new(()))
+    }
+
+    async fn meta_create_keyspace(
+        &self,
+        req: tonic::Request<pb::CreateKeyspaceReq>,
+    ) -> Result<tonic::Response<()>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let keyspace_id: KeyspaceId = required("keyspace_id", req_inner.keyspace_id)?;
+
+        self.node
+            .meta()
+            .map_err(|e| tonic::Status::failed_precondition(e.to_string()))?
+            .create_keyspace(keyspace_id)
+            .await
+            .map_err(internal)?;
+
+        Ok(tonic::Response::new(()))
+    }
+
+    async fn meta_latest_snapshot(
+        &self,
+        _req: tonic::Request<()>,
+    ) -> Result<tonic::Response<pb::internal::Timestamp>, tonic::Status> {
+        let ts = self
+            .node
+            .meta()
+            .map_err(|e| tonic::Status::failed_precondition(e.to_string()))?
+            .latest_snapshot()
+            .await
+            .map_err(internal)?;
+
+        Ok(tonic::Response::new(pb::internal::Timestamp {
+            ts: ts.as_micros(),
+        }))
+    }
+
+    async fn meta_wait_for_newer(
+        &self,
+        req: tonic::Request<pb::internal::Timestamp>,
+    ) -> Result<tonic::Response<()>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let ts = Timestamp::from_micros(req_inner.ts);
+
+        self.node
+            .meta()
+            .map_err(|e| tonic::Status::failed_precondition(e.to_string()))?
+            .wait_for_newer(ts)
+            .await
+            .map_err(internal)?;
+
+        Ok(tonic::Response::new(()))
+    }
+
+    async fn meta_scan_page(
+        &self,
+        req: tonic::Request<pb::internal::MetaScanPageReq>,
+    ) -> Result<tonic::Response<pb::internal::MetaScanPageResp>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let ts = Timestamp::from_micros(req_inner.ts);
+        let range: Range<Vec<u8>> = required("range", req_inner.range)?;
+
+        let (page, maybe_remaining) = self
+            .node
+            .meta()
+            .map_err(|e| tonic::Status::failed_precondition(e.to_string()))?
+            .scan_page(ts, range)
+            .await
+            .map_err(internal)?;
+
+        Ok(tonic::Response::new(pb::internal::MetaScanPageResp {
+            records: page.into_iter().map(pb::Record::from).collect(),
+            remaining: maybe_remaining.map(|range| range.into()),
+        }))
+    }
+
+    async fn meta_sync(
+        &self,
+        req: tonic::Request<pb::internal::Timestamp>,
+    ) -> Result<tonic::Response<pb::internal::MetaSyncResp>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let ts = Timestamp::from_micros(req_inner.ts);
+
+        let (page, continue_ts) = self
+            .node
+            .meta()
+            .map_err(|e| tonic::Status::failed_precondition(e.to_string()))?
+            .sync(ts)
+            .await
+            .map_err(internal)?;
+
+        Ok(tonic::Response::new(pb::internal::MetaSyncResp {
+            revisions: page.into_iter().map(pb::Revision::from).collect(),
+            ts: continue_ts.as_micros(),
+        }))
+    }
+
+    async fn meta_write(
+        &self,
+        req: tonic::Request<pb::internal::MetaWriteReq>,
+    ) -> Result<tonic::Response<pb::internal::Timestamp>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let snapshot_ts = Timestamp::from_micros(req_inner.snapshot_ts);
+        let mut mutations = HashMap::new();
+        for meta_key_mut_pb in req_inner.mutations {
+            let raw_key = meta_key_mut_pb.key;
+            let key = MetaKey::decode(&raw_key).map_err(invalid_argument)?;
+            if mutations.contains_key(&key) {
+                return Err(tonic::Status::invalid_argument(format!(
+                    "duplicate key in meta write [{}]",
+                    hexlify(&raw_key)
+                )));
+            }
+
+            let mutation = Mutation::try_from(meta_key_mut_pb.mutation.ok_or_else(|| {
+                tonic::Status::invalid_argument(format!("missing mutation on MetaKeyMutation"))
+            })?)
+            .map_err(invalid_argument)?;
+            let meta_mutation = match mutation {
+                Mutation::Put(raw_value) => {
+                    MetaMutation::Put(MetaValue::decode(&raw_value[..]).map_err(invalid_argument)?)
+                }
+                Mutation::Delete => MetaMutation::Delete,
+            };
+
+            mutations.insert(key, meta_mutation);
+        }
+
+        let ts = self
+            .node
+            .meta()
+            .map_err(|e| tonic::Status::failed_precondition(e.to_string()))?
+            .write(snapshot_ts, mutations)
+            .await
+            .map_err(internal_err_to_status)?;
+
+        Ok(tonic::Response::new(pb::internal::Timestamp {
+            ts: ts.as_micros(),
+        }))
     }
 }

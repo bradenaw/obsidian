@@ -107,6 +107,19 @@ message Record {
     bytes value = 3;
 }
 
+message Revision {
+    Key key = 1;
+    fixed64 ts = 2;
+    RevisionValue value = 3;
+}
+
+message RevisionValue {
+    oneof value_type {
+        bytes regular = 1;
+        google.protobuf.Empty tombstone = 2;
+    }
+}
+
 message Key {
     KeyspaceId keyspace_id = 1;
     bytes bytes = 2;
