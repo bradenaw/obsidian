@@ -22,6 +22,10 @@ impl MetaValue {
     pub fn decode(buf: &[u8]) -> anyhow::Result<Self> {
         MetaValue::try_from(pb::internal::MetaValue::decode(buf)?)
     }
+
+    pub fn encode(self) -> Vec<u8> {
+        pb::internal::MetaValue::from(self).encode_to_vec()
+    }
 }
 
 impl From<MetaValue> for pb::internal::MetaValue {

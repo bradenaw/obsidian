@@ -532,7 +532,17 @@ impl runtime::Meta for MetaProxy {
     }
 
     async fn add_node(&self, node_id: NodeId) -> anyhow::Result<()> {
-        todo!();
+        self.client_pool
+            .acquire()
+            .await
+            .meta_add_node(pb::internal::NodeIdReq {
+                node_id: Some(node_id.into()),
+            })
+            .await
+            .map_err(internal_err_from_status)?
+            .into_inner();
+
+        Ok(())
     }
 
     async fn create_colo_group(
@@ -540,19 +550,62 @@ impl runtime::Meta for MetaProxy {
         colo_group_id: ColoGroupId,
         initial_splits: Vec<Bound<Vec<u8>>>,
     ) -> anyhow::Result<()> {
-        todo!();
+        self.client_pool
+            .acquire()
+            .await
+            .meta_create_colo_group(pb::CreateColoGroupReq {
+                colo_group_id: colo_group_id.0,
+                initial_splits: initial_splits
+                    .into_iter()
+                    .map(|bound| bound.into())
+                    .collect(),
+            })
+            .await
+            .map_err(internal_err_from_status)?
+            .into_inner();
+
+        Ok(())
     }
 
     async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
-        todo!();
+        self.client_pool
+            .acquire()
+            .await
+            .meta_create_keyspace(pb::CreateKeyspaceReq {
+                keyspace_id: Some(keyspace_id.into()),
+            })
+            .await
+            .map_err(internal_err_from_status)?
+            .into_inner();
+
+        Ok(())
     }
 
     async fn latest_snapshot(&self) -> anyhow::Result<Timestamp> {
-        todo!();
+        let resp = self
+            .client_pool
+            .acquire()
+            .await
+            .meta_latest_snapshot(())
+            .await
+            .map_err(internal_err_from_status)?
+            .into_inner();
+
+        let ts = Timestamp::from_micros(resp.ts);
+
+        Ok(ts)
     }
 
     async fn wait_for_newer(&self, ts: Timestamp) -> anyhow::Result<()> {
-        todo!();
+        self.client_pool
+            .acquire()
+            .await
+            .meta_wait_for_newer(pb::internal::Timestamp { ts: ts.as_micros() })
+            .await
+            .map_err(internal_err_from_status)?
+            .into_inner();
+
+        Ok(())
     }
 
     async fn scan_page(
@@ -560,14 +613,52 @@ impl runtime::Meta for MetaProxy {
         ts: Timestamp,
         range: Range<Vec<u8>>,
     ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
-        todo!();
+        let resp = self
+            .client_pool
+            .acquire()
+            .await
+            .meta_scan_page(pb::internal::MetaScanPageReq {
+                ts: ts.as_micros(),
+                range: Some(range.into()),
+            })
+            .await
+            .map_err(internal_err_from_status)?
+            .into_inner();
+
+        let records = resp
+            .records
+            .into_iter()
+            .map(Record::try_from)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let maybe_continue_range = resp
+            .remaining
+            .map(|range_pb| Range::try_from(range_pb))
+            .transpose()?;
+
+        Ok((records, maybe_continue_range))
     }
 
     async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Revision>, Timestamp)> {
-        todo!();
+        let resp = self
+            .client_pool
+            .acquire()
+            .await
+            .meta_sync(pb::internal::Timestamp { ts: ts.as_micros() })
+            .await
+            .map_err(internal_err_from_status)?
+            .into_inner();
+
+        let revisions = resp
+            .revisions
+            .into_iter()
+            .map(Revision::try_from)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let ts = Timestamp::from_micros(resp.ts);
+
+        Ok((revisions, ts))
     }
 
-    async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
+    async fn tablet_ids(&self, _ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
         todo!();
     }
 
@@ -576,6 +667,32 @@ impl runtime::Meta for MetaProxy {
         snapshot_ts: Timestamp,
         muts: HashMap<MetaKey, MetaMutation>,
     ) -> Result<Timestamp, InternalError> {
-        todo!();
+        let resp = self
+            .client_pool
+            .acquire()
+            .await
+            .meta_write(pb::internal::MetaWriteReq {
+                snapshot_ts: snapshot_ts.as_micros(),
+                mutations: muts
+                    .into_iter()
+                    .map(|(meta_key, meta_mut)| pb::internal::MetaKeyMutation {
+                        key: meta_key.encode(),
+                        mutation: Some(
+                            match meta_mut {
+                                MetaMutation::Put(meta_value) => Mutation::Put(meta_value.encode()),
+                                MetaMutation::Delete => Mutation::Delete,
+                            }
+                            .into(),
+                        ),
+                    })
+                    .collect(),
+            })
+            .await
+            .map_err(internal_err_from_status)?
+            .into_inner();
+
+        let ts = Timestamp::from_micros(resp.ts);
+
+        Ok(ts)
     }
 }
