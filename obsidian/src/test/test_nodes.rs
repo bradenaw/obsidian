@@ -65,18 +65,15 @@ impl TestNodes {
 
         routing.insert(
             node_id,
-            Arc::new(
-                crate::node::Node::new(
-                    node_id,
-                    Arc::clone(&self.inner) as Arc<dyn Nodes>,
-                    Arc::clone(&self.inner.storage),
-                    self.discovery.meta(),
-                    self.shards(),
-                    Arc::new(MetaSynced::new(self.discovery.meta())),
-                    Arc::clone(&self.inner.journals),
-                )
-                .await?,
-            ) as Arc<dyn Node>,
+            Arc::new(crate::node::Node::new(
+                node_id,
+                Arc::clone(&self.inner) as Arc<dyn Nodes>,
+                Arc::clone(&self.inner.storage),
+                self.discovery.meta(),
+                self.shards(),
+                Arc::new(MetaSynced::new(self.discovery.meta())),
+                Arc::clone(&self.inner.journals),
+            )) as Arc<dyn Node>,
         );
         let mut node_ids = self.inner.node_ids.get().0.clone();
         node_ids.insert(node_id);

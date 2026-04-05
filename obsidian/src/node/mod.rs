@@ -64,7 +64,7 @@ struct NodeInner {
 }
 
 impl Node {
-    pub async fn new(
+    pub fn new(
         node_id: NodeId,
         nodes: Arc<dyn Nodes>,
         storage: Arc<dyn Storage>,
@@ -72,7 +72,7 @@ impl Node {
         shards: Arc<dyn Shards>,
         meta_synced: Arc<MetaSynced>,
         journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
-    ) -> anyhow::Result<Self> {
+    ) -> Self {
         let inner = Arc::new(NodeInner {
             node_id,
             nodes,
@@ -117,7 +117,7 @@ impl Node {
             inner.background_spawn_meta().await;
         });
 
-        Ok(node)
+        node
     }
 }
 
