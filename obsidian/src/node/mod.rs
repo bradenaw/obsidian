@@ -24,6 +24,7 @@ use crate::replica::Replica;
 use crate::runtime;
 use crate::runtime::Journals;
 use crate::runtime::Nodes;
+use crate::runtime::ReplicaState;
 use crate::runtime::Shard as _;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
@@ -31,7 +32,6 @@ use crate::supervisor::Supervisor;
 use crate::util::Retry;
 use crate::util::WithBackground;
 use crate::JournalEntry;
-use crate::JournalSeq;
 use crate::NodeId;
 use crate::ShardId;
 use crate::TabletId;
@@ -154,21 +154,21 @@ impl runtime::Node for Node {
         Ok(Arc::clone(supervisor) as Arc<dyn runtime::Supervisor>)
     }
 
-    fn became_leader_at_subscribe(
+    fn shards_subscribe(
         &self,
-    ) -> Box<dyn Stream<Item = anyhow::Result<HashMap<ShardId, JournalSeq>>> + Send + Unpin + '_>
+    ) -> Box<dyn Stream<Item = anyhow::Result<HashMap<ShardId, ReplicaState>>> + Send + Unpin + '_>
     {
-        Box::new(self.0.became_leader_at_subscribe().map(|shards| Ok(shards)))
+        Box::new(self.0.shards_subscribe().map(|shards| Ok(shards)))
     }
 }
 
 impl NodeInner {
-    fn became_leader_at_subscribe(
+    fn shards_subscribe(
         &self,
-    ) -> Box<dyn Stream<Item = HashMap<ShardId, JournalSeq>> + Send + Unpin + '_> {
+    ) -> Box<dyn Stream<Item = HashMap<ShardId, ReplicaState>> + Send + Unpin + '_> {
         Box::new(Box::pin(stream! {
             loop {
-                let mut leader_shards = HashMap::new();
+                let mut shards = HashMap::new();
                 let mut futures = FuturesUnordered::new();
                 let replicas_changed = self.replicas_changed.notified();
                 futures.push(Either::Left(replicas_changed));
@@ -177,12 +177,14 @@ impl NodeInner {
                     for (_, replica) in replicas.iter() {
                         let (became_leader_at, changed) = replica.became_leader_at_subscribe();
                         if let Some(seq) = became_leader_at {
-                            leader_shards.insert(replica.id(), seq);
+                            shards.insert(replica.id(), ReplicaState::Leader(seq));
+                        } else {
+                            shards.insert(replica.id(), ReplicaState::Follower);
                         }
                         futures.push(Either::Right(changed));
                     }
                 }
-                yield leader_shards;
+                yield shards;
                 futures.next().await;
             }
         }))
@@ -235,11 +237,11 @@ impl NodeInner {
 
     // If this node is the leader for ShardId::META, then we want to run Meta and Supervisor here.
     async fn background_spawn_meta(&self) {
-        let mut stream = self.became_leader_at_subscribe();
+        let mut stream = self.shards_subscribe();
         while let Some(shards) = stream.next().await {
             let mut maybe_meta = self.maybe_meta.write().unwrap();
             let mut supervisor = self.supervisor.write().unwrap();
-            if shards.contains_key(&ShardId::META) {
+            if matches!(shards.get(&ShardId::META), Some(&ReplicaState::Leader(_))) {
                 if maybe_meta.is_none() {
                     let replicas = self.replicas.read().unwrap();
                     // If either of these fall through it implies that we aren't actually the

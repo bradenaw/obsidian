@@ -26,6 +26,7 @@ pub(crate) use journal::Journal;
 pub(crate) use journals::Journals;
 pub(crate) use meta::Meta;
 pub(crate) use node::Node;
+pub(crate) use node::ReplicaState;
 pub(crate) use nodes::Nodes;
 pub(crate) use shard::Shard;
 pub(crate) use shards::Shards;

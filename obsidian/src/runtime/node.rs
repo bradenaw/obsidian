@@ -25,7 +25,17 @@ pub(crate) trait Node: Send + Sync {
 
     fn supervisor(&self) -> anyhow::Result<Arc<dyn Supervisor>>;
 
-    fn became_leader_at_subscribe(
+    /// Subscribe to the shards held on this node.
+    ///
+    /// This stream will not necessarily receive every update, but will eventually receive the
+    /// latest state.
+    fn shards_subscribe(
         &self,
-    ) -> Box<dyn Stream<Item = anyhow::Result<HashMap<ShardId, JournalSeq>>> + Send + Unpin + '_>;
+    ) -> Box<dyn Stream<Item = anyhow::Result<HashMap<ShardId, ReplicaState>>> + Send + Unpin + '_>;
+}
+
+pub(crate) enum ReplicaState {
+    /// Contains the journal sequence number where the leader lease was acquired.
+    Leader(JournalSeq),
+    Follower,
 }

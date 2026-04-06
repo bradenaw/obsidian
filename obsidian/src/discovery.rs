@@ -14,6 +14,7 @@ use crate::meta::MetaKey;
 use crate::meta::MetaMutation;
 use crate::runtime;
 use crate::runtime::Nodes;
+use crate::runtime::ReplicaState;
 use crate::util::spawn_owned;
 use crate::util::OwnedJoinHandle;
 use crate::util::Retry;
@@ -134,18 +135,20 @@ impl DiscoveryInner {
                 .indefinitely(&async || {
                     let node = nodes.node(node_id)?;
 
-                    let mut stream = node.became_leader_at_subscribe();
+                    let mut stream = node.shards_subscribe();
                     while let Some(shards) = stream.try_next().await? {
                         let mut routing = routing_lock.write().unwrap();
-                        for (shard_id, seq) in shards {
-                            let shard_routing =
-                                routing.entry(shard_id).or_insert_with(ShardRouting::empty);
-                            if let Some((_, other_seq)) = shard_routing.leader {
-                                if seq > other_seq {
+                        for (shard_id, replica_state) in shards {
+                            if let ReplicaState::Leader(seq) = replica_state {
+                                let shard_routing =
+                                    routing.entry(shard_id).or_insert_with(ShardRouting::empty);
+                                if let Some((_, other_seq)) = shard_routing.leader {
+                                    if seq > other_seq {
+                                        shard_routing.leader = Some((node_id, seq));
+                                    }
+                                } else {
                                     shard_routing.leader = Some((node_id, seq));
                                 }
-                            } else {
-                                shard_routing.leader = Some((node_id, seq));
                             }
                         }
                     }
