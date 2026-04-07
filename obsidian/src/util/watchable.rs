@@ -25,9 +25,9 @@ where
     }
 
     pub fn get(&self) -> (T, impl Future<Output = ()>) {
-        let notify = Arc::clone(&self.changed);
+        let notified = Arc::clone(&self.changed).notified_owned();
         (self.value.read().unwrap().clone(), async move {
-            notify.notified().await;
+            notified.await;
         })
     }
 }
