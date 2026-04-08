@@ -1,32 +1,27 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::iter;
 use std::ops::Deref;
 use std::ops::DerefMut;
 
 use anyhow::anyhow;
+use prost::Message;
+use tonic::metadata::MetadataValue;
 
 use crate::pb;
+use crate::Direction;
+use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Mutation;
+use crate::Precondition;
+use crate::Range;
 use crate::Record;
+use crate::Timestamp;
 
-pub(super) fn options_to_get_results(values: Vec<Option<Record>>) -> Vec<pb::GetResult> {
-    values
-        .into_iter()
-        .map(|maybe_record| match maybe_record {
-            Some(record) => pb::GetResult {
-                result_type: Some(pb::get_result::ResultType::Record(record.into())),
-            },
-            None => pb::GetResult {
-                result_type: Some(pb::get_result::ResultType::NotFound(())),
-            },
-        })
-        .collect()
-}
-
-pub(super) fn key_set_from_pb(
+pub(super) fn get_req_results(
     keys_pb: Vec<pb::Key>,
-) -> anyhow::Result<(BTreeSet<Key>, BTreeMap<Key, usize>)> {
+) -> anyhow::Result<(BTreeSet<Key>, GetResultsBuilder)> {
     let mut keys = BTreeSet::new();
     let mut key_idxs = BTreeMap::new();
     for (i, key_pb) in keys_pb.into_iter().enumerate() {
@@ -45,7 +40,139 @@ pub(super) fn key_set_from_pb(
         keys.insert(key.clone());
         key_idxs.insert(key, i);
     }
-    Ok((keys, key_idxs))
+
+    Ok((keys, GetResultsBuilder { key_idxs }))
+}
+
+pub(super) struct GetResultsBuilder {
+    key_idxs: BTreeMap<Key, usize>,
+}
+
+impl GetResultsBuilder {
+    pub fn build(self, records: BTreeMap<Key, Record>) -> anyhow::Result<Vec<pb::GetResult>> {
+        let mut results: Vec<pb::GetResult> = Vec::new();
+        for _ in 0..self.key_idxs.len() {
+            results.push(pb::GetResult {
+                result_type: Some(pb::get_result::ResultType::NotFound(())),
+            });
+        }
+
+        for (key, record) in records {
+            let idx = self
+                .key_idxs
+                .get(&key)
+                .ok_or_else(|| anyhow!("got response for not-requested key {:?}", key))?;
+            results[*idx] = pb::GetResult {
+                result_type: Some(pb::get_result::ResultType::Record(record.into())),
+            };
+        }
+
+        Ok(results)
+    }
+}
+
+pub(super) fn key_set(keys_pb: Vec<pb::Key>) -> Result<BTreeSet<Key>, tonic::Status> {
+    let mut keys = BTreeSet::new();
+    for (i, key_pb) in keys_pb.into_iter().enumerate() {
+        let keyspace_id = KeyspaceId::try_from(
+            key_pb
+                .keyspace_id
+                .ok_or_else(|| invalid_argument(anyhow!("missing keyspace_id on key {}", i)))?,
+        )
+        .map_err(|e| invalid_argument(anyhow!("invalid keyspace_id on key {}: {}", i, e)))?;
+        let key = (keyspace_id, key_pb.bytes);
+
+        if keys.contains(&key) {
+            return Err(invalid_argument(anyhow!("duplicate key {:?}", key)));
+        }
+
+        keys.insert(key.clone());
+    }
+
+    Ok(keys)
+}
+
+pub(super) fn parse_scan_req(
+    req_pb: pb::ScanReq,
+) -> anyhow::Result<(Timestamp, KeyspaceId, Range<Vec<u8>>, Direction, usize)> {
+    let snapshot_ts = Timestamp::from_micros(req_pb.snapshot_ts);
+    let keyspace_id: KeyspaceId = required("keyspace_id", req_pb.keyspace_id)?;
+    let range: Range<Vec<u8>> = required("range", req_pb.range)?;
+    let direction: Direction = pb::Direction::from_i32(req_pb.direction)
+        .ok_or_else(|| anyhow!("unknown direction"))?
+        .try_into()
+        .map_err(invalid_argument)?;
+    let limit = usize::try_from(req_pb.limit).map_err(|_| anyhow!("invalid limit"))?;
+
+    Ok((snapshot_ts, keyspace_id, range, direction, limit))
+}
+
+pub(super) fn parse_preconds_muts(
+    preconds_pb: Vec<pb::Precondition>,
+    muts_pb: Vec<pb::KeyMutation>,
+) -> anyhow::Result<(Vec<Precondition>, BTreeMap<Key, Mutation>)> {
+    let preconds = preconds_pb
+        .into_iter()
+        .map(|x| x.try_into())
+        .collect::<Result<Vec<Precondition>, _>>()?;
+    let muts = muts_pb
+        .into_iter()
+        .map(|key_mut_pb| -> anyhow::Result<(Key, Mutation)> {
+            Ok((
+                Key::try_from(
+                    key_mut_pb
+                        .key
+                        .ok_or_else(|| anyhow!("KeyMutation.key missing"))?,
+                )?,
+                Mutation::try_from(
+                    key_mut_pb
+                        .mutation
+                        .ok_or_else(|| anyhow!("KeyMutation.mutation missing"))?,
+                )?,
+            ))
+        })
+        .collect::<Result<Vec<(Key, Mutation)>, _>>()?;
+
+    let mut muts_map = BTreeMap::new();
+    for (key, m) in muts {
+        if muts_map.contains_key(&key) {
+            return Err(anyhow!("duplicate key {:?}", key));
+        }
+        muts_map.insert(key, m);
+    }
+
+    Ok((preconds, muts_map))
+}
+
+pub(crate) fn scan_req_to_proto(
+    ts: Timestamp,
+    keyspace_id: KeyspaceId,
+    range: Range<&[u8]>,
+    direction: Direction,
+    limit: usize,
+) -> anyhow::Result<pb::ScanReq> {
+    Ok(pb::ScanReq {
+        snapshot_ts: ts.as_micros(),
+        keyspace_id: Some(keyspace_id.into()),
+        range: Some(range.to_vec().into()),
+        direction: pb::Direction::from(direction).into(),
+        limit: u64::try_from(limit)?,
+    })
+}
+
+pub(super) fn preconds_muts_to_proto(
+    preconds: Vec<Precondition>,
+    muts: BTreeMap<Key, Mutation>,
+) -> (Vec<pb::Precondition>, Vec<pb::KeyMutation>) {
+    let preconds_pb: Vec<_> = preconds.into_iter().map(pb::Precondition::from).collect();
+    let key_muts_pb: Vec<_> = muts
+        .into_iter()
+        .map(|(key, mutation)| pb::KeyMutation {
+            key: Some(pb::Key::from(key)),
+            mutation: Some(pb::Mutation::from(mutation)),
+        })
+        .collect();
+    (preconds_pb, key_muts_pb)
 }
 
 pub(super) fn required<T, U>(name: &'static str, v: Option<T>) -> Result<U, tonic::Status>
@@ -128,5 +255,145 @@ impl<T> Drop for PooledItem<T> {
         // have capacity based on the construction of the Pool. We can get an error here only if
         // the pool is already gone, and so we don't care.
         _ = self.ret.try_send(self.item.take().unwrap());
+    }
+}
+
+static INTERNAL_ERROR_METADATA_KEY: &str = "obsidian-internal-error-bin";
+
+pub(super) fn internal_err_to_status(err: InternalError) -> tonic::Status {
+    let msg = err.to_string();
+
+    let mut status = match err {
+        InternalError::Conflict(_) => tonic::Status::failed_precondition(msg),
+        InternalError::AlreadyCommitted => tonic::Status::already_exists(msg),
+        InternalError::AlreadyAborted => tonic::Status::already_exists(msg),
+        InternalError::PreconditionFailed => {
+            // This is a mismatch from immediate expectation but matches the criteria from
+            // https://grpc.io/docs/guides/status-codes/:
+            //
+            // - Use ABORTED if the client should retry at a higher level (e.g., when a
+            //   client-specified test-and-set fails, indicating the client should restart a
+            //   read-modify-write sequence).
+            //
+            // - Use FAILED_PRECONDITION if the client should not retry until the system state has
+            //   been explicitly fixed. E.g., if an “rmdir” fails because the directory is
+            //   non-empty, FAILED_PRECONDITION should be returned since the client should not
+            //   retry unless the files are deleted from the directory.
+            tonic::Status::aborted(msg)
+        }
+        InternalError::TxOutcomeMissing => tonic::Status::not_found(msg),
+        InternalError::TabletNotReadable(_) => tonic::Status::failed_precondition(msg),
+        InternalError::TabletNotWriteable(_) => tonic::Status::failed_precondition(msg),
+        InternalError::TabletNotHydrating(_) => tonic::Status::failed_precondition(msg),
+        // This is not supposed to be returned this way.
+        InternalError::PartialGet { .. } => tonic::Status::internal(msg),
+        InternalError::NotLeader(_) => tonic::Status::failed_precondition(msg),
+        InternalError::Other(_) => tonic::Status::internal(msg),
+    };
+
+    let err_pb = match pb::internal::InternalError::try_from(err) {
+        Ok(err_pb) => err_pb,
+        Err(_) => return status,
+    };
+
+    let err_bytes = err_pb.encode_to_vec();
+
+    status.metadata_mut().insert_bin(
+        INTERNAL_ERROR_METADATA_KEY,
+        MetadataValue::from_bytes(&err_bytes[..]),
+    );
+
+    status
+}
+
+pub(super) fn internal_err_from_status(status: tonic::Status) -> InternalError {
+    let value = match status.metadata().get_bin(INTERNAL_ERROR_METADATA_KEY) {
+        Some(value) => value,
+        None => return InternalError::Other(anyhow::Error::msg(status.message().to_string())),
+    };
+
+    let bytes = match value.to_bytes() {
+        Ok(bytes) => bytes,
+        Err(_) => return InternalError::Other(anyhow::Error::msg(status.message().to_string())),
+    };
+
+    let err_pb = match pb::internal::InternalError::decode(bytes) {
+        Ok(err_pb) => err_pb,
+        Err(_) => return InternalError::Other(anyhow::Error::msg(status.message().to_string())),
+    };
+
+    match InternalError::try_from(err_pb) {
+        Ok(err) => err,
+        Err(_) => return InternalError::Other(anyhow::Error::msg(status.message().to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches;
+
+    use crate::grpc::util::internal_err_from_status;
+    use crate::grpc::util::internal_err_to_status;
+    use crate::InternalError;
+    use crate::ShardId;
+    use crate::TabletId;
+    use crate::Txid;
+
+    #[test]
+    fn test_internal_error_roundtrip() {
+        let txid = Txid::new(ShardId(5));
+        let tablet_id = TabletId(ShardId(17), 1234);
+        let shard_id = ShardId(8151);
+
+        match internal_err_from_status(internal_err_to_status(InternalError::Conflict(txid))) {
+            InternalError::Conflict(other_txid) => assert_eq!(txid, other_txid),
+            e => panic!("{}", e),
+        }
+
+        assert_matches!(
+            internal_err_from_status(internal_err_to_status(InternalError::AlreadyCommitted)),
+            InternalError::AlreadyCommitted,
+        );
+        assert_matches!(
+            internal_err_from_status(internal_err_to_status(InternalError::AlreadyAborted)),
+            InternalError::AlreadyAborted,
+        );
+        assert_matches!(
+            internal_err_from_status(internal_err_to_status(InternalError::PreconditionFailed)),
+            InternalError::PreconditionFailed,
+        );
+        assert_matches!(
+            internal_err_from_status(internal_err_to_status(InternalError::TxOutcomeMissing)),
+            InternalError::TxOutcomeMissing,
+        );
+
+        match internal_err_from_status(internal_err_to_status(InternalError::TabletNotReadable(
+            tablet_id,
+        ))) {
+            InternalError::TabletNotReadable(other_tablet_id) => {
+                assert_eq!(tablet_id, other_tablet_id)
+            }
+            e => panic!("{}", e),
+        }
+        match internal_err_from_status(internal_err_to_status(InternalError::TabletNotWriteable(
+            tablet_id,
+        ))) {
+            InternalError::TabletNotWriteable(other_tablet_id) => {
+                assert_eq!(tablet_id, other_tablet_id)
+            }
+            e => panic!("{}", e),
+        }
+        match internal_err_from_status(internal_err_to_status(InternalError::TabletNotHydrating(
+            tablet_id,
+        ))) {
+            InternalError::TabletNotHydrating(other_tablet_id) => {
+                assert_eq!(tablet_id, other_tablet_id)
+            }
+            e => panic!("{}", e),
+        }
+        match internal_err_from_status(internal_err_to_status(InternalError::NotLeader(shard_id))) {
+            InternalError::NotLeader(other_shard_id) => assert_eq!(shard_id, other_shard_id),
+            e => panic!("{}", e),
+        }
     }
 }

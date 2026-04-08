@@ -1,3 +1,6 @@
+mod grpc_bridge;
+mod grpc_in_process_node_builder;
+mod in_process_node_builder;
 mod mem_file_reader;
 mod mem_file_writer;
 mod mem_journal;
@@ -5,6 +8,7 @@ mod mem_journals;
 mod mem_storage;
 pub(crate) mod obsidian_suite;
 pub(crate) mod tablet_suite;
+mod test_node_builder;
 mod test_nodes;
 
 use std::fmt::Debug;
@@ -20,9 +24,12 @@ use crate::meta::MetaSyncedSnapshot;
 use crate::runtime;
 use crate::runtime::Journals;
 use crate::runtime::Shards as _;
-use crate::runtime::Storage;
-use crate::storage::CachedStorage;
 use crate::tablet::TabletJournalWriter;
+pub(crate) use crate::test::grpc_bridge::node_grpc_bridge;
+pub(crate) use crate::test::grpc_bridge::obsidian_grpc_bridge;
+pub(crate) use crate::test::grpc_bridge::GrpcBridge;
+pub(crate) use crate::test::grpc_in_process_node_builder::GrpcInProcessNodeBuilder;
+pub(crate) use crate::test::in_process_node_builder::InProcessNodeBuilder;
 pub(crate) use crate::test::mem_file_reader::MemFileReader;
 pub(crate) use crate::test::mem_file_writer::MemFileWriter;
 pub(crate) use crate::test::mem_journal::MemJournal;
@@ -30,6 +37,7 @@ pub(crate) use crate::test::mem_journals::MemJournals;
 pub(crate) use crate::test::mem_storage::MemStorage;
 pub(crate) use crate::test::obsidian_suite::obsidian_test_suite;
 pub(crate) use crate::test::tablet_suite::tablet_test_suite;
+pub(crate) use crate::test::test_node_builder::TestNodeBuilder;
 pub(crate) use crate::test::test_nodes::TestNodes;
 use crate::util::encode;
 use crate::util::Decode;
@@ -37,51 +45,71 @@ use crate::util::Encode;
 use crate::util::Retry;
 use crate::Bound;
 use crate::JournalEntry;
+use crate::Obsidian;
 use crate::ShardId;
 use crate::TabletJournalEntry;
 
-pub(crate) struct ObsidianForTest {
-    pub gateway: Gateway,
-    pub meta: Arc<dyn runtime::Meta>,
-    pub meta_synced: Arc<MetaSynced>,
-    pub supervisor: Arc<dyn runtime::Supervisor>,
-    pub nodes: TestNodes,
+pub(crate) struct ObsidianForTestBuilder {
+    n_shards: usize,
+    node_builder: Option<Box<dyn TestNodeBuilder>>,
 }
 
-impl ObsidianForTest {
-    pub(crate) async fn new(n_shards: usize) -> anyhow::Result<Self> {
-        if n_shards < 1 {
-            return Err(anyhow!("need at least one shard to host the meta tablet"));
+impl ObsidianForTestBuilder {
+    pub fn new() -> ObsidianForTestBuilder {
+        ObsidianForTestBuilder {
+            n_shards: 1,
+            node_builder: None,
+        }
+    }
+
+    pub fn n_shards(mut self, n_shards: usize) -> Self {
+        self.n_shards = n_shards;
+        self
+    }
+
+    pub fn node_builder(mut self, node_builder: Box<dyn TestNodeBuilder>) -> Self {
+        self.node_builder = Some(node_builder);
+        self
+    }
+
+    pub async fn build(self) -> anyhow::Result<ObsidianForTest> {
+        if self.n_shards < 1 {
+            return Err(anyhow!("need at least one shard"));
         }
 
-        let storage = Arc::new(CachedStorage::new(
-            MemStorage::new(),
-            64, // page_size
-            4,  // stripe_size_pages
-            4,  // n_stripes
-        ));
+        let nodes = TestNodes::new(self.node_builder.unwrap_or_else(|| {
+            let storage = Arc::new(MemStorage::new());
+            let journals =
+                Arc::new(MemJournals::new()) as Arc<dyn Journals<Proposal<JournalEntry>>>;
+            Box::new(InProcessNodeBuilder::new(storage, journals))
+        }));
 
-        let journals = Arc::new(MemJournals::new()) as Arc<dyn Journals<Proposal<JournalEntry>>>;
+        log::info!("making nodes");
 
-        let nodes = TestNodes::new(Arc::clone(&storage) as Arc<dyn Storage>, journals);
-
-        for _ in 0..n_shards {
+        for _ in 0..self.n_shards {
             nodes.create_node().await?;
         }
 
+        log::info!("making nodes -> done");
+
         let meta = nodes.discovery().meta();
 
+        log::info!("waiting for meta election");
         // Wait for a meta to get elected.
         Retry::new()
             .indefinitely(&async || meta.latest_snapshot().await)
             .await;
+        log::info!("waiting for meta election -> done");
 
-        let shard_ids: Vec<_> = (0..n_shards).map(|i| ShardId((i + 1) as u32)).collect();
+        let shard_ids: Vec<_> = (0..self.n_shards)
+            .map(|i| ShardId((i + 1) as u32))
+            .collect();
 
         for shard_id in &shard_ids {
             meta.add_shard(*shard_id).await?;
         }
 
+        log::info!("waiting for shard assignment and leader election");
         // Wait for the supervisor to assign shards and for replicas to finish leader election.
         let meta_ts = meta.latest_snapshot().await?;
         for shard_id in &shard_ids {
@@ -93,6 +121,7 @@ impl ObsidianForTest {
                 })
                 .await;
         }
+        log::info!("waiting for shard assignment and leader election -> done");
 
         let gateway = Gateway::new(
             Arc::clone(&meta),
@@ -101,15 +130,25 @@ impl ObsidianForTest {
         );
 
         let meta_synced = Arc::new(MetaSynced::new(nodes.discovery().meta()));
-        Ok(Self {
-            gateway,
+        Ok(ObsidianForTest {
+            gateway: Arc::new(gateway),
             meta,
             meta_synced,
             supervisor: nodes.discovery().supervisor(),
             nodes,
         })
     }
+}
 
+pub(crate) struct ObsidianForTest {
+    pub gateway: Arc<dyn Obsidian>,
+    pub meta: Arc<dyn runtime::Meta>,
+    pub meta_synced: Arc<MetaSynced>,
+    pub supervisor: Arc<dyn runtime::Supervisor>,
+    pub nodes: TestNodes,
+}
+
+impl ObsidianForTest {
     pub async fn latest_meta_snapshot(&self) -> anyhow::Result<MetaSyncedSnapshot> {
         self.meta_synced
             .wait(self.meta.latest_snapshot().await?)

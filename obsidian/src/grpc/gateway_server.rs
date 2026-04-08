@@ -1,13 +1,15 @@
 use std::collections::BTreeMap;
 use std::iter;
+use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
 
+use crate::grpc::util::get_req_results;
 use crate::grpc::util::internal;
 use crate::grpc::util::invalid_argument;
-use crate::grpc::util::key_set_from_pb;
-use crate::grpc::util::options_to_get_results;
+use crate::grpc::util::parse_preconds_muts;
+use crate::grpc::util::parse_scan_req;
 use crate::grpc::util::required;
 use crate::pb;
 use crate::Bound;
@@ -21,31 +23,26 @@ use crate::Precondition;
 use crate::Range;
 use crate::Timestamp;
 
-pub struct GatewayServer<O> {
-    inner: O,
+pub struct GatewayServer {
+    inner: Arc<dyn Obsidian>,
 }
 
-impl<O> GatewayServer<O> {
-    pub(crate) fn new(inner: O) -> Self {
+impl GatewayServer {
+    pub(crate) fn new(inner: Arc<dyn Obsidian>) -> Self {
         Self { inner }
     }
 }
 
 #[async_trait]
-impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for GatewayServer<O> {
+impl pb::obsidian_server::Obsidian for GatewayServer {
     async fn get(
         &self,
         req: tonic::Request<pb::GetReq>,
     ) -> Result<tonic::Response<pb::GetResp>, tonic::Status> {
         let req_inner = req.into_inner();
 
-        let (keys, key_idxs) = key_set_from_pb(req_inner.keys).map_err(invalid_argument)?;
+        let (keys, results_builder) = get_req_results(req_inner.keys).map_err(invalid_argument)?;
         let ts = Timestamp::from_micros(req_inner.snapshot_ts);
-
-        let mut results = Vec::with_capacity(keys.len());
-        for _ in &keys {
-            results.push(None);
-        }
 
         let records = self
             .inner
@@ -53,12 +50,8 @@ impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for GatewayServer<O> {
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
-        for (key, record) in records {
-            results[key_idxs[&key]] = Some(record);
-        }
-
         Ok(tonic::Response::new(pb::GetResp {
-            results: options_to_get_results(results),
+            results: results_builder.build(records).map_err(internal)?,
         }))
     }
 
@@ -66,9 +59,10 @@ impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for GatewayServer<O> {
         &self,
         req: tonic::Request<pb::GetLatestReq>,
     ) -> Result<tonic::Response<pb::GetLatestResp>, tonic::Status> {
+        // TODO: Just call Obsidian::get_latest_multi.
         let req_inner = req.into_inner();
 
-        let (keys, key_idxs) = key_set_from_pb(req_inner.keys).map_err(invalid_argument)?;
+        let (keys, results_builder) = get_req_results(req_inner.keys).map_err(invalid_argument)?;
 
         let ts = self
             .inner
@@ -76,23 +70,15 @@ impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for GatewayServer<O> {
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
-        let mut values = Vec::with_capacity(keys.len());
-        for _ in &keys {
-            values.push(None);
-        }
-        for key in keys {
-            let maybe_value = self
-                .inner
-                .get(ts, &key)
-                .await
-                .map_err(|e| tonic::Status::internal(e.to_string()))?;
-
-            values[key_idxs[&key]] = maybe_value;
-        }
+        let records = self
+            .inner
+            .get_multi(ts, keys)
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
         Ok(tonic::Response::new(pb::GetLatestResp {
             snapshot_ts: ts.as_micros(),
-            results: options_to_get_results(values),
+            results: results_builder.build(records).map_err(internal)?,
         }))
     }
 
@@ -102,15 +88,8 @@ impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for GatewayServer<O> {
     ) -> Result<tonic::Response<pb::ScanResp>, tonic::Status> {
         let req_inner = req.into_inner();
 
-        let snapshot_ts = Timestamp::from_micros(req_inner.snapshot_ts);
-        let keyspace_id: KeyspaceId = required("keyspace_id", req_inner.keyspace_id)?;
-        let range: Range<Vec<u8>> = required("range", req_inner.range)?;
-        let direction: Direction = pb::Direction::from_i32(req_inner.direction)
-            .ok_or_else(|| tonic::Status::invalid_argument("unknown direction"))?
-            .try_into()
-            .map_err(invalid_argument)?;
-        let limit = usize::try_from(req_inner.limit)
-            .map_err(|_| tonic::Status::invalid_argument("invalid limit"))?;
+        let (snapshot_ts, keyspace_id, range, direction, limit) =
+            parse_scan_req(req_inner).map_err(invalid_argument)?;
 
         let (records, maybe_continue_range) = self
             .inner
@@ -130,46 +109,12 @@ impl<O: Obsidian + 'static> pb::obsidian_server::Obsidian for GatewayServer<O> {
     ) -> Result<tonic::Response<pb::WriteResp>, tonic::Status> {
         let req_inner = req.into_inner();
 
-        let preconds = req_inner
-            .preconds
-            .into_iter()
-            .map(|x| x.try_into())
-            .collect::<Result<Vec<Precondition>, _>>()
-            .map_err(invalid_argument)?;
-        let muts = req_inner
-            .muts
-            .into_iter()
-            .map(|key_mut_pb| {
-                Ok((
-                    Key::try_from(
-                        key_mut_pb
-                            .key
-                            .ok_or_else(|| anyhow!("KeyMutation.key missing"))?,
-                    )?,
-                    Mutation::try_from(
-                        key_mut_pb
-                            .mutation
-                            .ok_or_else(|| anyhow!("KeyMutation.mutation missing"))?,
-                    )?,
-                ))
-            })
-            .collect::<Result<Vec<(Key, Mutation)>, _>>()
-            .map_err(invalid_argument)?;
-
-        let mut muts_map = BTreeMap::new();
-        for (key, m) in muts {
-            if muts_map.contains_key(&key) {
-                return Err(tonic::Status::invalid_argument(format!(
-                    "duplicate key {:?}",
-                    key
-                )));
-            }
-            muts_map.insert(key, m);
-        }
+        let (preconds, muts) =
+            parse_preconds_muts(req_inner.preconds, req_inner.muts).map_err(invalid_argument)?;
 
         let ts = self
             .inner
-            .write(preconds, muts_map)
+            .write(preconds, muts)
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 

@@ -92,6 +92,14 @@ impl Discovery {
     pub fn supervisor(&self) -> Arc<dyn runtime::Supervisor> {
         Arc::clone(&self.supervisor_proxy)
     }
+
+    #[cfg(test)]
+    // This is cfg(test) because callers should really prefer to use .shard(), which will give a
+    // proxy object whose methods all find the current leader on invocation. This gives direct
+    // access to the node, which may not continue to be the leader into the future.
+    pub fn current_leader(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn runtime::Node>> {
+        self.inner.current_leader(shard_id)
+    }
 }
 
 impl runtime::Shards for Discovery {
@@ -113,10 +121,14 @@ impl DiscoveryInner {
             for diff_item in last_node_ids.diff(&node_ids) {
                 match diff_item {
                     im::ordset::DiffItem::Add(node_id) => {
-                        leader_subscriptions.insert(*node_id, self.subscribe_leader(*node_id));
+                        if !leader_subscriptions.contains_key(node_id) {
+                            log::debug!("discovery subscribing to {:?}", node_id);
+                            leader_subscriptions.insert(*node_id, self.subscribe_leader(*node_id));
+                        }
                     }
                     im::ordset::DiffItem::Update { .. } => {}
                     im::ordset::DiffItem::Remove(node_id) => {
+                        log::debug!("discovery unsubscribing from {:?}", node_id);
                         leader_subscriptions.remove(node_id);
                     }
                 }
@@ -124,6 +136,7 @@ impl DiscoveryInner {
 
             last_node_ids = node_ids;
             nodes_changed.await;
+            log::debug!("discovery: nodes changed");
         }
     }
 
@@ -140,6 +153,12 @@ impl DiscoveryInner {
                         let mut routing = routing_lock.write().unwrap();
                         for (shard_id, replica_state) in shards {
                             if let ReplicaState::Leader(seq) = replica_state {
+                                log::debug!(
+                                    "discovery learned {:?} became leader for {:?} at {:?}",
+                                    node_id,
+                                    shard_id,
+                                    seq
+                                );
                                 let shard_routing =
                                     routing.entry(shard_id).or_insert_with(ShardRouting::empty);
                                 if let Some((_, other_seq)) = shard_routing.leader {

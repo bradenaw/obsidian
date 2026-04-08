@@ -15,7 +15,8 @@ use crate::Timestamp;
 
 /// Provides a test suite for the Tablet trait.
 ///
-/// The argument $make is expected to be AsyncFn() -> anyhow::Result<Arc<dyn Tablet>>.
+/// The argument $make is expected to be
+///   AsyncFn() -> anyhow::Result<Deref<Target = Arc<dyn Tablet>>>.
 ///
 /// The tablet must have ksp:1/1 available and own Range::prefix(vec![0x00]).
 macro_rules! tablet_test_suite {
@@ -25,12 +26,16 @@ macro_rules! tablet_test_suite {
 
             #[tokio::test]
             async fn test_write() -> anyhow::Result<()> {
-                tablet_suite::test_write($make).await
+                let _ = pretty_env_logger::try_init();
+                let tablet = $make().await?;
+                tablet_suite::test_write(&tablet).await
             }
 
             #[tokio::test]
             async fn test_scan_page() -> anyhow::Result<()> {
-                tablet_suite::test_scan_page($make).await
+                let _ = pretty_env_logger::try_init();
+                let tablet = $make().await?;
+                tablet_suite::test_scan_page(&tablet).await
             }
         }
     };
@@ -39,16 +44,9 @@ macro_rules! tablet_test_suite {
 pub(crate) use tablet_test_suite;
 
 /// Intended to be used via the tablet_test_suite macro.
-pub(crate) async fn test_write<F>(make: F) -> anyhow::Result<()>
-where
-    F: AsyncFn() -> anyhow::Result<Arc<dyn Tablet>>,
-{
-    let _ = pretty_env_logger::try_init();
-
+pub(crate) async fn test_write(tablet: &Arc<dyn Tablet>) -> anyhow::Result<()> {
     let colo_group_id = ColoGroupId(1);
     let keyspace_id = KeyspaceId(colo_group_id, 1);
-
-    let tablet = make().await?;
 
     let key1 = (keyspace_id, vec![0, 1]);
     let key2 = (keyspace_id, vec![0, 2]);
@@ -106,13 +104,7 @@ where
 }
 
 /// Intended to be used via the tablet_test_suite macro.
-pub(crate) async fn test_scan_page<F>(make: F) -> anyhow::Result<()>
-where
-    F: AsyncFn() -> anyhow::Result<Arc<dyn Tablet>>,
-{
-    let _ = pretty_env_logger::try_init();
-
-    let tablet = make().await?;
+pub(crate) async fn test_scan_page(tablet: &Arc<dyn Tablet>) -> anyhow::Result<()> {
     let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
 
     let writes: [(Vec<u8>, _); 12] = [

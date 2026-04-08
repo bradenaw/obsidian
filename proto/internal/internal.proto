@@ -6,6 +6,20 @@ import "google/protobuf/empty.proto";
 
 import "obsidian.proto";
 
+message Txid {
+    fixed64 ts = 1;
+    fixed64 rand0 = 2;
+    fixed64 rand1 = 3;
+    uint32 owner_shard_id = 4;
+}
+
+message TxOutcome {
+    oneof outcome {
+        fixed64 committed = 1;
+        google.protobuf.Empty aborted = 2;
+    }
+}
+
 message TxOutcomeRecord {
     message Committed {
         fixed64 ts = 1;
@@ -25,4 +39,57 @@ message CompressedKeySet {
     repeated uint32 key_shared_prefixes = 3;
     repeated uint32 key_keyspaces_counts = 4;
     repeated uint32 key_keyspaces_refs = 5;
+}
+
+message TabletId {
+    uint32 shard_id = 1;
+    uint64 id = 2;
+}
+
+message NodeId {
+    IpAddr addr = 1;
+    uint32 port = 2;
+    Uuid uuid = 3;
+}
+
+message IpAddr {
+    oneof addr_type {
+        Ipv4Addr v4 = 1;
+        Ipv6Addr v6 = 2;
+    }
+}
+
+message Ipv4Addr {
+    // Big-endian.
+    fixed32 bits = 1;
+}
+
+message Ipv6Addr {
+    // Big-endian.
+    fixed64 a = 1;
+    fixed64 b = 2;
+}
+
+message Uuid {
+    // Both in big-endian order.
+    fixed64 high = 1;
+    fixed64 low = 2;
+}
+
+message Manifest {
+    repeated obsidian.KeyspaceId keyspace_ids = 1;
+    repeated KeyspaceManifest keyspaces = 2;
+}
+
+message KeyspaceManifest {
+    repeated LevelManifest levels = 1;
+}
+
+message LevelManifest {
+    repeated RunManifest runs = 1;
+}
+
+message RunManifest {
+    Uuid run_id = 1;
+    obsidian.Range range = 2;
 }

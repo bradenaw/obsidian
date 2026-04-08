@@ -43,7 +43,18 @@ impl TryFrom<pb::Precondition> for Precondition {
     }
 }
 impl From<Precondition> for pb::Precondition {
-    fn from(_: Precondition) -> Self {
-        todo!()
+    fn from(value: Precondition) -> Self {
+        pb::Precondition {
+            precond_type: Some(match value {
+                Precondition::NotChangedSince(keyspace_id, key, ts) => {
+                    pb::precondition::PrecondType::NotChangedSince(
+                        pb::precondition::NotChangedSince {
+                            key: Some((keyspace_id, key).into()),
+                            ts: ts.as_micros(),
+                        },
+                    )
+                }
+            }),
+        }
     }
 }

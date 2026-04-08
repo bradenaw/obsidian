@@ -4,14 +4,13 @@ mod tests {
 
     tablet_test_suite!({
         use crate::runtime::Shards as _;
-        use crate::test::ObsidianForTest;
+        use crate::test::ObsidianForTestBuilder;
         use crate::Bound;
         use crate::ColoGroupId;
         use crate::KeyspaceId;
-        use crate::Obsidian;
 
         async || {
-            let obs = ObsidianForTest::new(1 /*n_shards*/).await?;
+            let obs = ObsidianForTestBuilder::new().n_shards(1).build().await?;
 
             obs.gateway
                 .create_colo_group(
@@ -27,7 +26,7 @@ mod tests {
 
             let tablet = obs.nodes.discovery().tablet(tablet_id)?;
 
-            Ok(tablet)
+            Ok::<_, anyhow::Error>(tablet)
         }
     });
 }

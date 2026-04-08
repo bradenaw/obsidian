@@ -1,0 +1,179 @@
+syntax = "proto3";
+
+package obsidian_internal;
+
+import "google/protobuf/empty.proto";
+
+import "internal/internal.proto";
+import "obsidian.proto";
+
+service Node {
+    rpc TabletGet(TabletGetReq) returns (obsidian.GetResp);
+    rpc TabletScanPage(TabletScanPageReq) returns (obsidian.ScanResp);
+    rpc TabletGetLatest(TabletGetLatestReq) returns (obsidian.GetLatestResp);
+    rpc TabletLatestSnapshot(TabletGetLatestReq) returns (obsidian.LatestSnapshotResp);
+    //rpc TabletHistoryPage(TabletHistoryPageReq) returns (obsidian.HistoryPageResp);
+    rpc TabletWrite(TabletWriteReq) returns (obsidian.WriteResp);
+    rpc TabletPrepare(TabletPrepareReq) returns (TabletPrepareResp);
+    rpc TabletTryCommit(TabletTryCommitReq) returns (TxOutcomeResp);
+    rpc TabletTryAbort(TabletTxidReq) returns (TxOutcomeResp);
+    rpc TabletWait(TabletTxidReq) returns (TxOutcomeResp);
+    rpc TabletCleanupCommitted(TabletCleanupCommittedReq) returns (google.protobuf.Empty);
+    rpc TabletWaitMetaSync(TabletWaitMetaSyncReq) returns (google.protobuf.Empty);
+    rpc TabletManifest(TabletEmptyReq) returns (TabletManifestResp);
+    rpc TabletWaitMostlyHydrated(TabletEmptyReq) returns (google.protobuf.Empty);
+    rpc TabletCatchup(TabletEmptyReq) returns (google.protobuf.Empty);
+    rpc TabletFindSplit(TabletEmptyReq) returns (TabletFindSplitResp);
+
+    rpc ShardWaitMetaSync(ShardWaitMetaSyncReq) returns (google.protobuf.Empty);
+
+    rpc MetaAddShard(ShardIdReq) returns (google.protobuf.Empty);
+    rpc MetaAddNode(NodeIdReq) returns (google.protobuf.Empty);
+    rpc MetaCreateColoGroup(obsidian.CreateColoGroupReq) returns (google.protobuf.Empty);
+    rpc MetaCreateKeyspace(obsidian.CreateKeyspaceReq) returns (google.protobuf.Empty);
+    rpc MetaLatestSnapshot(google.protobuf.Empty) returns (Timestamp);
+    rpc MetaWaitForNewer(Timestamp) returns (google.protobuf.Empty);
+    rpc MetaScanPage(MetaScanPageReq) returns (MetaScanPageResp);
+    rpc MetaSync(Timestamp) returns (MetaSyncResp);
+    //rpc MetaTabletIds(NodeTimestampReq) returns (MetaSyncResp);
+    rpc MetaWrite(MetaWriteReq) returns (Timestamp);
+
+    rpc ShardsSubscribe(google.protobuf.Empty) returns (stream ShardsSubscribeResp);
+}
+
+message TabletGetReq {
+    TabletId tablet_id = 1;
+    obsidian.GetReq inner = 2;
+}
+
+message TabletScanPageReq {
+    TabletId tablet_id = 1;
+    obsidian.ScanReq inner = 2;
+}
+
+message TabletGetLatestReq {
+    TabletId tablet_id = 1;
+    obsidian.GetLatestReq inner = 2;
+}
+
+//message TabletHistoryPageReq {
+//    TabletId tablet_id = 1;
+//    obsidian.HistoryPageReq inner = 2;
+//}
+
+message TabletWriteReq {
+    TabletId tablet_id = 1;
+    obsidian.WriteReq inner = 2;
+}
+
+message TabletPrepareReq {
+    TabletId tablet_id = 1;
+
+    Txid txid = 3;
+    repeated obsidian.Precondition preconds = 4;
+    repeated obsidian.KeyMutation muts = 5;
+}
+
+message TabletPrepareResp {
+    fixed64 prepare_ts = 1;
+}
+
+message TabletTryCommitReq {
+    TabletId tablet_id = 1;
+    Txid txid = 3;
+    fixed64 ts = 4;
+    repeated obsidian.Key precond_keys = 5;
+    repeated obsidian.Key mut_keys = 6;
+}
+
+message TabletTxidReq {
+    TabletId tablet_id = 1;
+    Txid txid = 3;
+}
+
+message TxOutcomeResp {
+    TxOutcome tx_outcome = 1;
+}
+
+message TabletCleanupCommittedReq {
+    TabletId tablet_id = 1;
+    Txid txid = 3;
+    fixed64 ts = 4;
+    repeated obsidian.Key precond_keys = 5;
+    repeated obsidian.Key mut_keys = 6;
+}
+
+message TabletEmptyReq {
+    TabletId tablet_id = 1;
+}
+
+message TabletWaitMetaSyncReq {
+    TabletId tablet_id = 1;
+    fixed64 ts = 3;
+}
+
+message TabletManifestResp {
+    Manifest manifest = 1;
+}
+
+message TabletFindSplitResp {
+    obsidian.Bound bound = 1;
+}
+
+message ShardWaitMetaSyncReq {
+    uint32 shard_id = 1;
+    fixed64 ts = 2;
+}
+
+message NodeIdReq {
+    NodeId node_id = 1;
+}
+
+message ShardIdReq {
+    uint32 shard_id = 1;
+}
+
+message Timestamp {
+    fixed64 ts = 1;
+}
+
+message MetaScanPageReq {
+    fixed64 ts = 1;
+    obsidian.Range range = 2;
+}
+
+message MetaScanPageResp {
+    repeated obsidian.Record records = 1;
+    obsidian.Range remaining = 2;
+}
+
+message MetaSyncResp {
+    repeated obsidian.Revision revisions = 1;
+    fixed64 ts = 2;
+}
+
+message MetaWriteReq {
+    fixed64 snapshot_ts = 1;
+    repeated MetaKeyMutation mutations = 2;
+}
+
+message MetaKeyMutation {
+    bytes key = 1;
+    obsidian.Mutation mutation = 2;
+}
+
+message ShardsSubscribeResp {
+    repeated ShardReplicaState shards = 1;
+}
+
+message ShardReplicaState {
+    uint32 shard_id = 1;
+    ReplicaState replica_state = 2;
+}
+
+message ReplicaState {
+    oneof replica_state {
+        uint64 leader = 1;
+        google.protobuf.Empty follower = 2;
+    }
+}

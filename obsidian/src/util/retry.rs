@@ -3,6 +3,9 @@ use std::future::Future;
 use std::ops::Deref;
 use std::time::Duration;
 
+use async_stream::stream;
+use futures::Stream;
+use futures::StreamExt;
 use rand::Rng;
 
 pub(crate) fn delay_for_retry(i: usize, min_delay: Duration, max_delay: Duration) -> Duration {
@@ -137,6 +140,39 @@ impl Retry {
             return Err(e.into());
         }
         anyhow::bail!("no attempts")
+    }
+
+    pub fn retry_stream_indefinitely<'a, F, S, Item>(
+        self,
+        mut f: F,
+    ) -> impl Stream<Item = Item> + Send + Unpin + 'a
+    where
+        F: FnMut() -> S + Send + Sync + 'a,
+        S: Stream<Item = anyhow::Result<Item>> + Send + Unpin,
+        Item: Send + 'static,
+    {
+        Box::pin(stream! {
+            let mut retry_delay = RetryDelay::new(self.min_delay, self.max_delay);
+            loop {
+                let mut s = f();
+                loop {
+                    match s.next().await {
+                        Some(Ok(item)) => {
+                            yield item;
+                        },
+                        Some(Err(e)) => {
+                            let delay = retry_delay.next();
+                            log::warn!("error in stream, retrying in {:?}: {:?}", delay, e);
+                            tokio::time::sleep(delay).await;
+                            break;
+                        },
+                        None => {
+                            return;
+                        }
+                    }
+                }
+            }
+        })
     }
 }
 

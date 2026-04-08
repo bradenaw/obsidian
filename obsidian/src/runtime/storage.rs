@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -23,4 +24,19 @@ pub(crate) trait FileReader: Sync + Send + 'static {
     async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()>;
     /// Returns the length of the file in bytes.
     fn len(&self) -> u64;
+}
+
+#[async_trait]
+impl Storage for Arc<dyn Storage> {
+    async fn put(&self, name: &str) -> anyhow::Result<Box<dyn FileWriter>> {
+        self.deref().put(name).await
+    }
+
+    async fn delete(&self, name: &str) -> anyhow::Result<()> {
+        self.deref().delete(name).await
+    }
+
+    async fn get(&self, name: &str) -> anyhow::Result<Arc<dyn FileReader>> {
+        self.deref().get(name).await
+    }
 }

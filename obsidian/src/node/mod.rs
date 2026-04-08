@@ -291,7 +291,7 @@ impl NodeInner {
         }
 
         let replica = Replica::new(
-            format!("{} {}", self.node_id, shard_id), // name, for logging
+            format!("{:?} {:?}", self.node_id, shard_id), // name, for logging
             shard_id,
             self.lsm_options.clone(),
             Arc::clone(&self.storage),

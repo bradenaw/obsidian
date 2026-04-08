@@ -709,18 +709,17 @@ mod tests {
     use rand::RngCore;
 
     use crate::meta::MetaReader;
-    use crate::test::ObsidianForTest;
+    use crate::test::ObsidianForTestBuilder;
     use crate::Bound;
     use crate::ColoGroupId;
     use crate::KeyspaceId;
     use crate::Mutation;
-    use crate::Obsidian;
 
     #[tokio::test]
     async fn test_move() -> anyhow::Result<()> {
         let _ = pretty_env_logger::try_init();
 
-        let obs = ObsidianForTest::new(2 /*n_shards*/).await?;
+        let obs = ObsidianForTestBuilder::new().n_shards(2).build().await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
 
         obs.gateway
@@ -790,7 +789,7 @@ mod tests {
     async fn test_merge() -> anyhow::Result<()> {
         let _ = pretty_env_logger::try_init();
 
-        let obs = ObsidianForTest::new(3 /*n_shards*/).await?;
+        let obs = ObsidianForTestBuilder::new().n_shards(3).build().await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
 
         obs.gateway
@@ -859,7 +858,7 @@ mod tests {
     async fn test_split() -> anyhow::Result<()> {
         let _ = pretty_env_logger::try_init();
 
-        let obs = ObsidianForTest::new(3 /*n_shards*/).await?;
+        let obs = ObsidianForTestBuilder::new().n_shards(3).build().await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
 
         obs.gateway

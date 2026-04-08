@@ -1,6 +1,9 @@
 use std::cmp::Ordering;
 use std::fmt::Debug;
 
+use anyhow::anyhow;
+
+use crate::pb;
 use crate::util::hexlify;
 use crate::Key;
 use crate::Timestamp;
@@ -41,6 +44,28 @@ impl Debug for Revision {
     }
 }
 
+impl TryFrom<pb::Revision> for Revision {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::Revision) -> Result<Self, Self::Error> {
+        Ok(Revision {
+            key: Key::try_from(value.key.ok_or_else(|| anyhow!("missing key"))?)?,
+            ts: Timestamp::from_micros(value.ts),
+            value: RevisionValue::try_from(value.value.ok_or_else(|| anyhow!("missing value"))?)?,
+        })
+    }
+}
+
+impl From<Revision> for pb::Revision {
+    fn from(value: Revision) -> Self {
+        pb::Revision {
+            key: Some(value.key.into()),
+            ts: value.ts.as_micros(),
+            value: Some(value.value.into()),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum RevisionValue {
     Regular(Vec<u8>),
@@ -61,6 +86,33 @@ impl Debug for RevisionValue {
         match self {
             RevisionValue::Regular(v) => write!(f, "[{}]", hexlify(v)),
             RevisionValue::Tombstone => write!(f, "<TOMBSTONE>"),
+        }
+    }
+}
+
+impl TryFrom<pb::RevisionValue> for RevisionValue {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::RevisionValue) -> Result<Self, Self::Error> {
+        Ok(
+            match value
+                .value_type
+                .ok_or_else(|| anyhow!("missing value_type"))?
+            {
+                pb::revision_value::ValueType::Regular(bytes) => RevisionValue::Regular(bytes),
+                pb::revision_value::ValueType::Tombstone(_) => RevisionValue::Tombstone,
+            },
+        )
+    }
+}
+
+impl From<RevisionValue> for pb::RevisionValue {
+    fn from(value: RevisionValue) -> Self {
+        pb::RevisionValue {
+            value_type: Some(match value {
+                RevisionValue::Regular(bytes) => pb::revision_value::ValueType::Regular(bytes),
+                RevisionValue::Tombstone => pb::revision_value::ValueType::Tombstone(()),
+            }),
         }
     }
 }

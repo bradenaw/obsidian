@@ -1,22 +1,16 @@
 use std::collections::HashMap;
 use std::future::Future;
-use std::net::IpAddr;
-use std::net::Ipv6Addr;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use im::OrdSet;
 
 use crate::discovery::Discovery;
-use crate::election::Proposal;
-use crate::meta::MetaSynced;
-use crate::runtime::Journals;
 use crate::runtime::Node;
 use crate::runtime::Nodes;
 use crate::runtime::Shards;
-use crate::runtime::Storage;
+use crate::test::TestNodeBuilder;
 use crate::util::Watchable;
-use crate::JournalEntry;
 use crate::NodeId;
 
 pub(crate) struct TestNodes {
@@ -25,21 +19,15 @@ pub(crate) struct TestNodes {
 }
 
 struct TestNodesInner {
-    storage: Arc<dyn Storage>,
-    journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
-
+    node_builder: Box<dyn TestNodeBuilder>,
     routing: Mutex<HashMap<NodeId, Arc<dyn Node>>>,
     node_ids: Watchable<OrdSet<NodeId>>,
 }
 
 impl TestNodes {
-    pub fn new(
-        storage: Arc<dyn Storage>,
-        journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
-    ) -> Self {
+    pub fn new(node_builder: Box<dyn TestNodeBuilder>) -> Self {
         let inner = Arc::new(TestNodesInner {
-            storage,
-            journals,
+            node_builder,
             routing: Mutex::new(HashMap::new()),
             node_ids: Watchable::new(OrdSet::new()),
         });
@@ -61,22 +49,22 @@ impl TestNodes {
     pub async fn create_node(&self) -> anyhow::Result<NodeId> {
         let mut routing = self.inner.routing.lock().unwrap();
 
-        let node_id = NodeId::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 1);
-
-        routing.insert(
-            node_id,
-            Arc::new(crate::node::Node::new(
-                node_id,
+        let node = self
+            .inner
+            .node_builder
+            .build(
                 Arc::clone(&self.inner) as Arc<dyn Nodes>,
-                Arc::clone(&self.inner.storage),
                 self.discovery.meta(),
                 self.shards(),
-                Arc::new(MetaSynced::new(self.discovery.meta())),
-                Arc::clone(&self.inner.journals),
-            )) as Arc<dyn Node>,
-        );
+            )
+            .await?;
+        let node_id = node.id();
+
+        routing.insert(node_id, node);
         let mut node_ids = self.inner.node_ids.get().0.clone();
         node_ids.insert(node_id);
+        log::info!("{:?} created", node_id);
+        log::info!("new set of nodes {:?}", node_ids);
         self.inner.node_ids.set(node_ids);
 
         Ok(node_id)

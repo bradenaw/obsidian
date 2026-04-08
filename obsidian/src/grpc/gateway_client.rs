@@ -4,6 +4,8 @@ use std::collections::BTreeSet;
 use anyhow::anyhow;
 use async_trait::async_trait;
 
+use crate::grpc::util::preconds_muts_to_proto;
+use crate::grpc::util::scan_req_to_proto;
 use crate::grpc::util::Pool;
 use crate::pb;
 use crate::Bound;
@@ -24,7 +26,7 @@ pub struct GatewayClient {
 }
 
 impl GatewayClient {
-    fn new(inner: &pb::obsidian_client::ObsidianClient<tonic::transport::Channel>) -> Self {
+    pub fn new(inner: &pb::obsidian_client::ObsidianClient<tonic::transport::Channel>) -> Self {
         Self {
             inner: Pool::new(32, inner),
         }
@@ -78,13 +80,7 @@ impl Obsidian for GatewayClient {
             .inner
             .acquire()
             .await
-            .scan(pb::ScanReq {
-                snapshot_ts: ts.as_micros(),
-                keyspace_id: Some(keyspace_id.into()),
-                range: Some(range.to_vec().into()),
-                direction: pb::Direction::from(direction).into(),
-                limit: u64::try_from(limit)?,
-            })
+            .scan(scan_req_to_proto(ts, keyspace_id, range, direction, limit)?)
             .await?
             .into_inner();
 
@@ -100,6 +96,7 @@ impl Obsidian for GatewayClient {
     }
 
     async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> anyhow::Result<Timestamp> {
+        // TODO: Use the native one.
         let resp = self
             .inner
             .acquire()
@@ -118,15 +115,7 @@ impl Obsidian for GatewayClient {
         preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, WriteError> {
-        let preconds_pb: Vec<_> = preconds.into_iter().map(pb::Precondition::from).collect();
-
-        let key_muts_pb: Vec<_> = muts
-            .into_iter()
-            .map(|(key, mutation)| pb::KeyMutation {
-                key: Some(pb::Key::from(key)),
-                mutation: Some(pb::Mutation::from(mutation)),
-            })
-            .collect();
+        let (preconds_pb, key_muts_pb) = preconds_muts_to_proto(preconds, muts);
 
         let resp = self
             .inner
@@ -186,14 +175,13 @@ mod tests {
     use anyhow::anyhow;
     use async_trait::async_trait;
     use futures::FutureExt;
-    use tokio::net::TcpListener;
     use tokio::sync::oneshot;
-    use tonic::transport::server::TcpIncoming;
 
     use crate::grpc::GatewayServer;
     use crate::pb;
+    use crate::test::obsidian_grpc_bridge;
     use crate::test::obsidian_test_suite;
-    use crate::test::ObsidianForTest;
+    use crate::test::ObsidianForTestBuilder;
     use crate::ColoGroupId;
     use crate::Key;
     use crate::KeyspaceId;
@@ -203,14 +191,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_write() -> anyhow::Result<()> {
-        let obs = ObsidianForTest::new(1).await?;
+        let obs = ObsidianForTestBuilder::new().n_shards(1).build().await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
         obs.gateway
             .create_colo_group(keyspace_id.0, vec![] /*splits*/)
             .await?;
         obs.gateway.create_keyspace(keyspace_id).await?;
 
-        let client = spawn_server(obs.gateway).await?;
+        let client = obsidian_grpc_bridge(obs.gateway).await?;
 
         let key = (keyspace_id, b"abc".to_vec());
 
@@ -231,108 +219,18 @@ mod tests {
     obsidian_test_suite!({
         use std::sync::Arc;
 
-        use super::spawn_server;
-        use crate::test::ObsidianForTest;
+        use crate::grpc::GatewayClient;
+        use crate::grpc::GatewayServer;
+        use crate::pb;
+        use crate::test::obsidian_grpc_bridge;
+        use crate::test::GrpcBridge;
+        use crate::test::ObsidianForTestBuilder;
         use crate::Obsidian;
 
         async || {
-            let obs = ObsidianForTest::new(2 /*n_shards*/).await?;
-            let client = spawn_server(obs.gateway).await?;
-            Ok(Arc::new(client) as Arc<dyn Obsidian>)
+            let obs = ObsidianForTestBuilder::new().n_shards(2).build().await?;
+            let client = obsidian_grpc_bridge(obs.gateway).await?;
+            Ok::<GrpcBridge<Arc<dyn Obsidian>>, anyhow::Error>(client)
         }
     });
-
-    async fn spawn_server<O: Obsidian + 'static>(obs: O) -> anyhow::Result<ObsidianClientServer> {
-        let (shutdown, on_shutdown) = oneshot::channel::<()>();
-        let listener = TcpListener::bind("[::1]:0").await?;
-        let addr = listener.local_addr()?;
-        let server = GatewayServer::new(obs);
-        let serve = tonic::transport::Server::builder()
-            .add_service(pb::obsidian_server::ObsidianServer::new(server))
-            .serve_with_incoming_shutdown(
-                TcpIncoming::from_listener(
-                    listener, true, /*nodelay*/
-                    None, /*keepalive*/
-                )
-                .map_err(|e| anyhow!("{}", e))?,
-                on_shutdown.map(|_| ()),
-            );
-
-        tokio::spawn(async { serve.await.unwrap() });
-
-        let url = "http://".to_string() + &addr.to_string();
-
-        let client =
-            super::GatewayClient::new(&pb::obsidian_client::ObsidianClient::connect(url).await?);
-
-        Ok(ObsidianClientServer {
-            inner: client,
-            shutdown: Some(shutdown),
-        })
-    }
-
-    struct ObsidianClientServer {
-        inner: super::GatewayClient,
-        shutdown: Option<oneshot::Sender<()>>,
-    }
-
-    #[async_trait]
-    impl Obsidian for ObsidianClientServer {
-        async fn get_multi(
-            &self,
-            ts: crate::Timestamp,
-            keys: BTreeSet<Key>,
-        ) -> anyhow::Result<BTreeMap<Key, Record>> {
-            self.inner.get_multi(ts, keys).await
-        }
-
-        async fn scan_page(
-            &self,
-            ts: crate::Timestamp,
-            keyspace_id: KeyspaceId,
-            range: crate::Range<&[u8]>,
-            direction: crate::Direction,
-            limit: usize,
-        ) -> anyhow::Result<(Vec<Record>, Option<crate::Range<Vec<u8>>>)> {
-            self.inner
-                .scan_page(ts, keyspace_id, range, direction, limit)
-                .await
-        }
-
-        async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> anyhow::Result<crate::Timestamp> {
-            self.inner.latest_snapshot(keys).await
-        }
-
-        async fn write(
-            &self,
-            preconds: Vec<crate::Precondition>,
-            muts: BTreeMap<Key, crate::Mutation>,
-        ) -> Result<crate::Timestamp, crate::WriteError> {
-            self.inner.write(preconds, muts).await
-        }
-
-        async fn create_colo_group(
-            &self,
-            colo_group_id: ColoGroupId,
-            initial_splits: Vec<crate::Bound<Vec<u8>>>,
-        ) -> anyhow::Result<()> {
-            self.inner
-                .create_colo_group(colo_group_id, initial_splits)
-                .await
-        }
-
-        async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
-            self.inner.create_keyspace(keyspace_id).await
-        }
-    }
-
-    impl Drop for ObsidianClientServer {
-        fn drop(&mut self) {
-            // TODO: Not clear if there's a way to find out that the serve actually stopped and
-            // unbound the port. The `serve` future appears not to end.
-            if let Some(shutdown) = self.shutdown.take() {
-                let _ = shutdown.send(());
-            }
-        }
-    }
 }

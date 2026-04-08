@@ -757,17 +757,39 @@ mod tests {
     use super::WorkloadAppend;
     use crate::rtest::graph::Graph;
     use crate::rtest::workload_append::WorkloadAppendOptions;
+    use crate::test::GrpcInProcessNodeBuilder;
+    use crate::test::InProcessNodeBuilder;
+    use crate::test::MemJournals;
+    use crate::test::MemStorage;
+    use crate::test::ObsidianForTest;
+    use crate::test::ObsidianForTestBuilder;
     use crate::Bound;
     use crate::ColoGroupId;
     use crate::KeyspaceId;
-    use crate::Obsidian;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_workload_append() -> anyhow::Result<()> {
+    async fn test_workload_append_in_process() -> anyhow::Result<()> {
         let _ = pretty_env_logger::try_init();
+        let obs = ObsidianForTestBuilder::new().n_shards(2).build().await?;
+        test_workload_append(obs).await
+    }
 
-        let obs = crate::test::ObsidianForTest::new(2).await?;
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_workload_append_grpc_in_process() -> anyhow::Result<()> {
+        let _ = pretty_env_logger::try_init();
+        let storage = Arc::new(MemStorage::new());
+        let journals = Arc::new(MemJournals::new());
+        let obs = ObsidianForTestBuilder::new()
+            .n_shards(2)
+            .node_builder(Box::new(GrpcInProcessNodeBuilder::new(
+                InProcessNodeBuilder::new(storage, journals),
+            )))
+            .build()
+            .await?;
+        test_workload_append(obs).await
+    }
 
+    async fn test_workload_append(obs: ObsidianForTest) -> anyhow::Result<()> {
         obs.gateway
             .create_colo_group(
                 ColoGroupId(1),
@@ -783,7 +805,7 @@ mod tests {
             .await?;
 
         let wl = WorkloadAppend::new(
-            Arc::new(obs.gateway),
+            Arc::clone(&obs.gateway),
             WorkloadAppendOptions {
                 duration: Duration::from_millis(5000),
                 concurrency: 32,

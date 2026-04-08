@@ -536,12 +536,11 @@ mod tests {
     obsidian_test_suite!({
         use std::sync::Arc;
 
-        use crate::test::ObsidianForTest;
-        use crate::Obsidian;
+        use crate::test::ObsidianForTestBuilder;
 
         async || {
-            let obs = ObsidianForTest::new(2 /*n_shards*/).await?;
-            Ok(Arc::new(obs.gateway) as Arc<dyn Obsidian>)
+            let obs = ObsidianForTestBuilder::new().n_shards(2).build().await?;
+            Ok::<_, anyhow::Error>(Arc::clone(&obs.gateway))
         }
     });
 }
