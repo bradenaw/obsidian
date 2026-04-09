@@ -11,6 +11,7 @@ use crate::lsm::memtable::Memtable;
 use crate::lsm::Manifest;
 use crate::lsm::Run;
 use crate::lsm::RunId;
+use crate::runtime::FileName;
 use crate::runtime::Storage;
 use crate::util::spawn_owned;
 use crate::util::OwnedJoinHandle;
@@ -63,7 +64,7 @@ impl Preloader {
                     let semaphore = Arc::clone(&self.semaphore);
                     async move {
                         let _permit = semaphore.acquire().await;
-                        let file = storage.get(&run_id.to_string()).await?;
+                        let file = storage.get(FileName::Run(run_id)).await?;
                         let run = Run::open(file).await;
                         log::debug!("{:?} finished preload", run_id);
                         run
@@ -125,7 +126,7 @@ impl Preloader {
     }
 
     async fn fetch(storage: Arc<dyn Storage>, run_id: RunId) -> anyhow::Result<Run> {
-        let file = storage.get(&run_id.to_string()).await?;
+        let file = storage.get(FileName::Run(run_id)).await?;
         Ok(Run::open(file).await?)
     }
 }

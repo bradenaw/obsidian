@@ -30,6 +30,7 @@ pub(crate) use node::ReplicaState;
 pub(crate) use nodes::Nodes;
 pub(crate) use shard::Shard;
 pub(crate) use shards::Shards;
+pub(crate) use storage::FileName;
 pub(crate) use storage::FileReader;
 pub(crate) use storage::FileWriter;
 pub(crate) use storage::Storage;

@@ -14,6 +14,7 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 
+use crate::runtime::FileName;
 use crate::runtime::FileReader;
 use crate::runtime::FileWriter;
 use crate::runtime::Storage;
@@ -28,7 +29,7 @@ pub(crate) struct CachedStorage<S: Storage> {
     // Pages are cached by the name of their file and the offset of the start of the page.
     //
     // Values are at most `page_size`, but might be shorter at the end of a file.
-    cache: Arc<Cache<(Arc<String>, u64), Arc<Vec<u8>>>>,
+    cache: Arc<Cache<(FileName, u64), Arc<Vec<u8>>>>,
 }
 
 impl<S: Storage> CachedStorage<S> {
@@ -63,30 +64,30 @@ impl<S: Storage> Storage for CachedStorage<S> {
     //
     // Then it's perfectly safe to not actually make any changes to the cache from put/delete.
 
-    async fn put(&self, name: &str) -> anyhow::Result<Box<dyn FileWriter>> {
+    async fn put(&self, name: FileName) -> anyhow::Result<Box<dyn FileWriter>> {
         Ok(Box::new(PutCacher {
-            inner: Box::pin(self.inner.put(name).await?),
+            inner: Box::pin(self.inner.put(name.clone()).await?),
             cache: self.cache.clone(),
-            name: Arc::new(name.to_string()),
+            name,
             buf: Vec::with_capacity(self.page_size),
             buf_offset: 0,
             page_size: self.page_size as usize,
         }))
     }
 
-    async fn get(&self, name: &str) -> anyhow::Result<Arc<dyn FileReader>> {
-        let f = self.inner.get(name).await?;
+    async fn get(&self, name: FileName) -> anyhow::Result<Arc<dyn FileReader>> {
+        let f = self.inner.get(name.clone()).await?;
         let len = f.len();
         Ok(Arc::new(GetCacher {
             inner: f,
             len: len,
             page_size: self.page_size,
-            name: Arc::new(name.to_string()),
+            name: name,
             cache: self.cache.clone(),
         }) as Arc<dyn FileReader>)
     }
 
-    async fn delete(&self, name: &str) -> anyhow::Result<()> {
+    async fn delete(&self, name: FileName) -> anyhow::Result<()> {
         self.inner.delete(name).await
     }
 }
@@ -99,10 +100,10 @@ where
     W: AsyncWrite,
 {
     inner: W,
-    // The name of the file being read.
-    name: Arc<String>,
+    // The name of the file being written.
+    name: FileName,
     // A reference to the cache from the CachedStorage this PutCacher was made from.
-    cache: Arc<Cache<(Arc<String>, u64), Arc<Vec<u8>>>>,
+    cache: Arc<Cache<(FileName, u64), Arc<Vec<u8>>>>,
     // Must have `buf.capacity() == page_size`.
     buf: Vec<u8>,
     // The offset of the bytes contained in `buf` from the start of the file.
@@ -191,9 +192,9 @@ pub(crate) struct GetCacher {
     inner: Arc<dyn FileReader>,
     page_size: usize,
     len: u64,
-    name: Arc<String>,
+    name: FileName,
     // A reference to the cache from the CachedStorage this GetCacher was made from.
-    cache: Arc<Cache<(Arc<String>, u64), Arc<Vec<u8>>>>,
+    cache: Arc<Cache<(FileName, u64), Arc<Vec<u8>>>>,
 }
 
 #[async_trait]
@@ -677,11 +678,10 @@ impl<T> std::ops::IndexMut<usize> for TreeList<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::HashMap;
     use std::hash::BuildHasher;
     use std::hash::Hash;
     use std::hash::RandomState;
-    use std::sync::Arc;
 
     use tokio::io::AsyncWriteExt;
 
@@ -693,6 +693,8 @@ mod tests {
     use super::TreeList;
     use super::HASH_TRIE_LEAF_MAX;
     use super::TREE_LIST_NODE_SIZE;
+    use crate::lsm::RunId;
+    use crate::runtime::FileName;
     use crate::test::MemStorage;
 
     #[tokio::test]
@@ -717,14 +719,17 @@ mod tests {
             content
         }
 
-        let test_files = BTreeMap::from([
-            ("foo", make_test_file(55)),
-            ("bar", make_test_file(127)),
-            ("baz", make_test_file(74)),
+        let name0 = FileName::Run(RunId::new());
+        let name1 = FileName::Run(RunId::new());
+        let name2 = FileName::Run(RunId::new());
+        let test_files = HashMap::from([
+            (name0.clone(), make_test_file(55)),
+            (name1.clone(), make_test_file(127)),
+            (name2.clone(), make_test_file(74)),
         ]);
 
         for (name, content) in &test_files {
-            let mut writer = storage.put(name).await?;
+            let mut writer = storage.put(name.clone()).await?;
             writer.write_all(&content[..]).await?;
             writer.shutdown().await?;
         }
@@ -739,9 +744,8 @@ mod tests {
 
         let mut pages_cached = 0;
         for (name, content) in &test_files {
-            let name_arc = Arc::new(name.to_string());
             for page_offset in (0..content.len()).step_by(PAGE_SIZE) {
-                let key = (name_arc.clone(), page_offset as u64);
+                let key = (name.clone(), page_offset as u64);
                 if let Some(_) = storage.cache.get(&key) {
                     println!("{:?} is in cache", key);
                     pages_cached += 1;
@@ -763,7 +767,7 @@ mod tests {
         assert!(storage.cache.evictions() >= n_pages - CAPACITY_PAGES);
 
         let check = async |name, offset, size| -> anyhow::Result<()> {
-            let expected = &test_files[name][offset..offset + size];
+            let expected = &test_files[&name][offset..offset + size];
             let mut actual = vec![0u8; size];
             storage
                 .get(name)
@@ -776,62 +780,72 @@ mod tests {
             Ok(())
         };
 
-        check("foo", 0, 16).await?;
-        check("bar", 16, 5).await?;
-        check("bar", 125, 2).await?;
-        check("bar", 0, 16).await?;
-        check("bar", 5, 2).await?;
-        check("foo", 54, 1).await?;
-        check("foo", 0, 32).await?;
-        check("foo", 4, 15).await?;
-        check("bar", 100, 11).await?;
-        check("bar", 59, 55).await?;
+        check(name0.clone(), 0, 16).await?;
+        check(name1.clone(), 16, 5).await?;
+        check(name1.clone(), 125, 2).await?;
+        check(name1.clone(), 0, 16).await?;
+        check(name1.clone(), 5, 2).await?;
+        check(name0.clone(), 54, 1).await?;
+        check(name0.clone(), 0, 32).await?;
+        check(name0.clone(), 4, 15).await?;
+        check(name1.clone(), 100, 11).await?;
+        check(name1.clone(), 59, 55).await?;
 
         Ok(())
     }
 
     #[test]
     fn test_cache_insert_remove() {
-        let c: Cache<&str, usize> = Cache::new(10 /*capacity*/, 1 /*n_stripes*/);
+        let c: Cache<FileName, usize> = Cache::new(10 /*capacity*/, 1 /*n_stripes*/);
 
-        c.insert("hello", 5);
-        assert_eq!(c.get(&"hello"), Some(5));
-        c.remove(&"hello");
-        assert_eq!(c.get(&"hello"), None);
+        let key = FileName::Run(RunId::new());
+
+        c.insert(key.clone(), 5);
+        assert_eq!(c.get(&key), Some(5));
+        c.remove(&key);
+        assert_eq!(c.get(&key), None);
     }
 
     #[test]
     fn test_cache_put_put() {
-        let c: Cache<&str, usize> = Cache::new(10 /*capacity*/, 1 /*n_stripes*/);
+        let c: Cache<FileName, usize> = Cache::new(10 /*capacity*/, 1 /*n_stripes*/);
 
-        c.insert("hello", 5);
-        assert_eq!(c.get(&"hello"), Some(5));
-        c.insert("hello", 6);
-        assert_eq!(c.get(&"hello"), Some(6));
+        let key = FileName::Run(RunId::new());
+
+        c.insert(key.clone(), 5);
+        assert_eq!(c.get(&key), Some(5));
+        c.insert(key.clone(), 6);
+        assert_eq!(c.get(&key), Some(6));
     }
 
     #[test]
     fn test_cache_evict() {
-        let c: Cache<&str, usize> = Cache::new(4 /*capacity*/, 1 /*n_stripes*/);
+        let c: Cache<FileName, usize> = Cache::new(4 /*capacity*/, 1 /*n_stripes*/);
 
-        c.insert("foo", 1);
-        c.insert("bar", 2);
-        c.insert("baz", 3);
-        c.insert("qux", 4);
+        let key1 = FileName::Run(RunId::new());
+        c.insert(key1.clone(), 1);
+        let key2 = FileName::Run(RunId::new());
+        c.insert(key2.clone(), 2);
+        let key3 = FileName::Run(RunId::new());
+        c.insert(key3.clone(), 3);
+        let key4 = FileName::Run(RunId::new());
+        c.insert(key4.clone(), 4);
 
-        c.insert("quux", 5);
-        // "foo" got evicted because it's the oldest.
-        assert_eq!(c.get(&"foo"), None);
-        assert_eq!(c.get(&"bar"), Some(2));
+        let key5 = FileName::Run(RunId::new());
+        c.insert(key5.clone(), 5);
+        // key1 got evicted because it's the oldest.
+        assert_eq!(c.get(&key1), None);
+        assert_eq!(c.get(&key2), Some(2));
         // Deliberately leaving this one out so that it stays touched=false.
-        // assert_eq!(c.get(&"baz"), Some(3));
-        assert_eq!(c.get(&"qux"), Some(4));
-        assert_eq!(c.get(&"quux"), Some(5));
+        // assert_eq!(c.get(&key3), Some(3));
+        assert_eq!(c.get(&key4), Some(4));
+        assert_eq!(c.get(&key5), Some(5));
 
-        c.insert("garply", 6);
-        // baz was the only one we didn't get() above.
-        assert_eq!(c.get(&"baz"), None);
-        assert_eq!(c.get(&"garply"), Some(6));
+        let key6 = FileName::Run(RunId::new());
+        c.insert(key6.clone(), 6);
+        // key3 was the only one we didn't get() above.
+        assert_eq!(c.get(&key3), None);
+        assert_eq!(c.get(&key6), Some(6));
     }
 
     #[test]

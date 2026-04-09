@@ -11,6 +11,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 
+use crate::runtime::FileName;
 use crate::runtime::FileReader;
 use crate::runtime::FileWriter;
 use crate::runtime::Storage;
@@ -23,8 +24,8 @@ pub(crate) struct MemStorage {
 }
 
 struct MemStorageInner {
-    files: HashMap<String, Arc<MemFileReader>>,
-    names: HashSet<String>,
+    files: HashMap<FileName, Arc<MemFileReader>>,
+    names: HashSet<FileName>,
 }
 
 impl MemStorage {
@@ -40,26 +41,26 @@ impl MemStorage {
 
 #[async_trait]
 impl Storage for MemStorage {
-    async fn put(&self, name: &str) -> anyhow::Result<Box<dyn FileWriter>> {
+    async fn put(&self, name: FileName) -> anyhow::Result<Box<dyn FileWriter>> {
         let mut inner = self.inner.lock().unwrap();
-        if inner.names.contains(name) {
+        if inner.names.contains(&name) {
             return Err(anyhow!("file {:?} already exists", name));
         }
-        inner.names.insert(name.to_string());
+        inner.names.insert(name.clone());
 
         Ok(Box::new(MemStorageFileWriter {
             parent: Arc::clone(&self.inner),
-            name: name.to_string(),
+            name,
             inner: Some(MemFileWriter::new()),
         }))
     }
 
-    async fn get(&self, name: &str) -> anyhow::Result<Arc<dyn FileReader>> {
+    async fn get(&self, name: FileName) -> anyhow::Result<Arc<dyn FileReader>> {
         let inner = self.inner.lock().unwrap();
         let file_content = inner
             .files
-            .get(name)
-            .ok_or_else(|| anyhow::anyhow!("{} not found", name))?;
+            .get(&name)
+            .ok_or_else(|| anyhow::anyhow!("{:?} not found", name))?;
 
         Ok(Arc::new(MemStorageFileReader {
             inner: Arc::downgrade(file_content),
@@ -67,8 +68,8 @@ impl Storage for MemStorage {
         }))
     }
 
-    async fn delete(&self, name: &str) -> anyhow::Result<()> {
-        self.inner.lock().unwrap().files.remove(name);
+    async fn delete(&self, name: FileName) -> anyhow::Result<()> {
+        self.inner.lock().unwrap().files.remove(&name);
         // Are names allowed to be reused?
         Ok(())
     }
@@ -98,7 +99,7 @@ impl FileReader for MemStorageFileReader {
 }
 
 struct MemStorageFileWriter {
-    name: String,
+    name: FileName,
     parent: Arc<Mutex<MemStorageInner>>,
 
     inner: Option<MemFileWriter>,

@@ -23,6 +23,7 @@ use crate::lsm::run::RunBuilder;
 use crate::lsm::LsmRevision;
 use crate::lsm::Run;
 use crate::lsm::RunId;
+use crate::runtime::FileName;
 use crate::runtime::Storage;
 use crate::util::merge_sorted_streams;
 use crate::util::spawn_owned;
@@ -653,7 +654,7 @@ impl CompactorInner {
             }
 
             let id = RunId::new();
-            let mut writer = Box::pin(self.storage.put(&id.to_string()).await?);
+            let mut writer = Box::pin(self.storage.put(FileName::Run(id)).await?);
             let mut run = RunBuilder::new(&mut writer, id, keyspace_id, self.block_size_target);
 
             while let Some((key, mut revs)) = Pin::new(&mut revs_by_key).next().await.transpose()? {
@@ -690,7 +691,7 @@ impl CompactorInner {
 
             run.finish().await?;
             writer.shutdown().await?;
-            runs.push(Run::open(self.storage.get(&id.to_string()).await?).await?);
+            runs.push(Run::open(self.storage.get(FileName::Run(id)).await?).await?);
         }
         Ok(runs)
     }

@@ -4,13 +4,20 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 
+use crate::lsm::RunId;
+
 #[async_trait]
 pub(crate) trait Storage: Sync + Send + 'static {
-    async fn put(&self, name: &str) -> anyhow::Result<Box<dyn FileWriter>>;
+    async fn put(&self, name: FileName) -> anyhow::Result<Box<dyn FileWriter>>;
 
-    async fn delete(&self, name: &str) -> anyhow::Result<()>;
+    async fn delete(&self, name: FileName) -> anyhow::Result<()>;
 
-    async fn get(&self, name: &str) -> anyhow::Result<Arc<dyn FileReader>>;
+    async fn get(&self, name: FileName) -> anyhow::Result<Arc<dyn FileReader>>;
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum FileName {
+    Run(RunId),
 }
 
 pub(crate) trait FileWriter: AsyncWrite + Send + Unpin + 'static {}
@@ -28,15 +35,15 @@ pub(crate) trait FileReader: Sync + Send + 'static {
 
 #[async_trait]
 impl Storage for Arc<dyn Storage> {
-    async fn put(&self, name: &str) -> anyhow::Result<Box<dyn FileWriter>> {
+    async fn put(&self, name: FileName) -> anyhow::Result<Box<dyn FileWriter>> {
         self.deref().put(name).await
     }
 
-    async fn delete(&self, name: &str) -> anyhow::Result<()> {
+    async fn delete(&self, name: FileName) -> anyhow::Result<()> {
         self.deref().delete(name).await
     }
 
-    async fn get(&self, name: &str) -> anyhow::Result<Arc<dyn FileReader>> {
+    async fn get(&self, name: FileName) -> anyhow::Result<Arc<dyn FileReader>> {
         self.deref().get(name).await
     }
 }
