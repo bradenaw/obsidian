@@ -90,6 +90,14 @@ impl TabletInner {
 
         let lsm_read = self.lsm.read()?;
 
+        // This lock is only necessary to protect against cleanups doing upgrades (pending->real),
+        // because they're non-transactional. For everything else, the wait_for_safe_read above is
+        // sufficient.
+        let _guard = self
+            .lock_mgr
+            .read_lock_all(keys.iter().map(|(_, key_bytes)| &key_bytes[..]))
+            .await;
+
         let mut results = BTreeMap::new();
         for key in keys {
             let keyspace_id = key.0;
