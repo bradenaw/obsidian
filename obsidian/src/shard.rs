@@ -150,21 +150,6 @@ impl crate::runtime::Shard for Shard {
     }
 }
 
-#[async_trait]
-impl crate::runtime::Shard for Arc<Shard> {
-    fn id(&self) -> ShardId {
-        Shard::id(self)
-    }
-
-    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet>> {
-        Shard::tablet(self, tablet_id)
-    }
-
-    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
-        Shard::wait_meta_sync(self, ts).await
-    }
-}
-
 struct ShardInner {
     id: ShardId,
     storage: Arc<dyn Storage>,
