@@ -103,5 +103,3 @@ pub(crate) trait Tablet: Send + Sync {
 
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>>;
 }
-
-trait TabletExt {}
