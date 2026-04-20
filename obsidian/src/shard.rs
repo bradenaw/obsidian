@@ -51,6 +51,21 @@ impl Shard {
         // (2) requires meta to be available to promote anything, which isn't great.
         let meta_synced = Arc::new(MetaSynced::new(Arc::clone(&meta)));
 
+        let shard_meta_lsm = match lsms.remove(&TabletId::shard_meta(shard_id)) {
+            Some(shard_meta_lsm) => shard_meta_lsm,
+            None => Lsm::empty(lsm_options.clone(), Arc::clone(&storage)).await?,
+        };
+        let shard_meta_tablet = ShardMetaTablet::new(
+            shard_id,
+            shard_meta_lsm,
+            Arc::new(ShardTabletJournalWriter::new(
+                TabletId::shard_meta(shard_id),
+                Arc::clone(&journal),
+            )),
+            meta_synced.clone(),
+            shards.clone(),
+        );
+
         let init_tablets: HashMap<TabletId, Arc<dyn Tablet + 'static>> = {
             let mut init_tablets = HashMap::new();
 
@@ -68,25 +83,6 @@ impl Shard {
                 );
                 init_tablets.insert(TabletId::META, Arc::new(meta_tablet) as Arc<dyn Tablet>);
             }
-
-            let shard_meta_lsm = match lsms.remove(&TabletId::shard_meta(shard_id)) {
-                Some(shard_meta_lsm) => shard_meta_lsm,
-                None => Lsm::empty(lsm_options.clone(), Arc::clone(&storage)).await?,
-            };
-            let shard_meta_tablet = ShardMetaTablet::new(
-                shard_id,
-                shard_meta_lsm,
-                Arc::new(ShardTabletJournalWriter::new(
-                    TabletId::shard_meta(shard_id),
-                    Arc::clone(&journal),
-                )),
-                meta_synced.clone(),
-                shards.clone(),
-            );
-            init_tablets.insert(
-                TabletId::shard_meta(shard_id),
-                Arc::new(shard_meta_tablet) as Arc<dyn Tablet>,
-            );
 
             for (tablet_id, lsm) in lsms.into_iter() {
                 // TODO: Move to shard_meta_tablet.
@@ -118,6 +114,7 @@ impl Shard {
             meta,
             meta_synced: meta_synced.clone(),
             shards,
+            shard_meta_tablet: Arc::new(shard_meta_tablet),
             tablets: ShardedLock::new(init_tablets),
             lsm_options,
             journal,
@@ -136,6 +133,10 @@ impl crate::runtime::Shard for Shard {
     }
 
     fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet>> {
+        if tablet_id == TabletId::shard_meta(self.0.id) {
+            return Ok(Arc::clone(&self.0.shard_meta_tablet) as Arc<dyn Tablet>);
+        }
+
         let tablets = self.0.tablets.read().unwrap();
         Ok(tablets
             .get(&tablet_id)
@@ -159,6 +160,7 @@ struct ShardInner {
     journal: Arc<dyn ShardJournalWriter>,
     lsm_options: LsmOptions,
 
+    shard_meta_tablet: Arc<ShardMetaTablet>,
     tablets: ShardedLock<HashMap<TabletId, Arc<dyn Tablet + 'static>>>,
 }
 
@@ -174,6 +176,12 @@ impl ShardInner {
                 "can't create {:?}: wrong shard {:?}",
                 tablet_id,
                 self.id
+            ));
+        }
+        if tablet_id == TabletId::shard_meta(self.id) {
+            return Err(anyhow!(
+                "can't create {:?}: shard meta always exists",
+                tablet_id
             ));
         }
 
