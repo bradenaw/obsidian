@@ -210,21 +210,21 @@ impl pb::internal::node_server::Node for NodeServer {
         }))
     }
 
-    async fn tablet_try_commit(
+    async fn shard_tx_try_commit(
         &self,
-        req: tonic::Request<pb::internal::TabletTryCommitReq>,
+        req: tonic::Request<pb::internal::ShardTxTryCommitReq>,
     ) -> Result<tonic::Response<pb::internal::TxOutcomeResp>, tonic::Status> {
         let req_inner = req.into_inner();
-        let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
-        let tablet = self.node.tablet(tablet_id).map_err(internal)?;
+        let shard_id = ShardId(req_inner.shard_id);
+        let shard = self.node.shard(shard_id).map_err(internal)?;
 
         let txid: Txid = required("txid", req_inner.txid)?;
         let commit_ts = Timestamp::from_micros(req_inner.ts);
         let precond_keys = key_set(req_inner.precond_keys)?;
         let mut_keys = key_set(req_inner.mut_keys)?;
 
-        let tx_outcome = tablet
-            .try_commit(txid, commit_ts, precond_keys, mut_keys)
+        let tx_outcome = shard
+            .tx_try_commit(txid, commit_ts, precond_keys, mut_keys)
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
@@ -233,18 +233,18 @@ impl pb::internal::node_server::Node for NodeServer {
         }))
     }
 
-    async fn tablet_try_abort(
+    async fn shard_tx_try_abort(
         &self,
-        req: tonic::Request<pb::internal::TabletTxidReq>,
+        req: tonic::Request<pb::internal::ShardTxidReq>,
     ) -> Result<tonic::Response<pb::internal::TxOutcomeResp>, tonic::Status> {
         let req_inner = req.into_inner();
-        let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
-        let tablet = self.node.tablet(tablet_id).map_err(internal)?;
+        let shard_id = ShardId(req_inner.shard_id);
+        let shard = self.node.shard(shard_id).map_err(internal)?;
 
         let txid: Txid = required("txid", req_inner.txid)?;
 
-        let tx_outcome = tablet
-            .try_abort(txid)
+        let tx_outcome = shard
+            .tx_try_abort(txid)
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
@@ -253,18 +253,18 @@ impl pb::internal::node_server::Node for NodeServer {
         }))
     }
 
-    async fn tablet_wait(
+    async fn shard_tx_wait(
         &self,
-        req: tonic::Request<pb::internal::TabletTxidReq>,
+        req: tonic::Request<pb::internal::ShardTxidReq>,
     ) -> Result<tonic::Response<pb::internal::TxOutcomeResp>, tonic::Status> {
         let req_inner = req.into_inner();
-        let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
-        let tablet = self.node.tablet(tablet_id).map_err(internal)?;
+        let shard_id = ShardId(req_inner.shard_id);
+        let shard = self.node.shard(shard_id).map_err(internal)?;
 
         let txid: Txid = required("txid", req_inner.txid)?;
 
-        let tx_outcome = tablet
-            .wait(txid)
+        let tx_outcome = shard
+            .tx_wait(txid)
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 

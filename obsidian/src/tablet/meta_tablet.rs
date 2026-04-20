@@ -26,7 +26,6 @@ use crate::Record;
 use crate::Revision;
 use crate::TabletId;
 use crate::Timestamp;
-use crate::TxOutcome;
 use crate::Txid;
 
 /// MetaTablets are special from LsmTablets in two necessary ways:
@@ -117,24 +116,6 @@ impl Tablet for MetaTablet {
         _muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
         Err(anyhow!("MetaTablet::prepare not allowed").into())
-    }
-
-    async fn try_commit(
-        &self,
-        _txid: Txid,
-        _ts: Timestamp,
-        _precond_keys: BTreeSet<Key>,
-        _mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<TxOutcome> {
-        Err(anyhow!("MetaTablet::try_commit not allowed").into())
-    }
-
-    async fn try_abort(&self, _txid: Txid) -> anyhow::Result<TxOutcome> {
-        Err(anyhow!("MetaTablet::try_abort not allowed").into())
-    }
-
-    async fn wait(&self, _txid: Txid) -> Result<TxOutcome, InternalError> {
-        Err(anyhow!("MetaTablet::wait not allowed").into())
     }
 
     async fn cleanup_committed(

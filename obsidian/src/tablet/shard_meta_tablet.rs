@@ -110,6 +110,68 @@ impl ShardMetaTablet {
 
         tablet
     }
+
+    pub async fn tx_try_commit(
+        &self,
+        txid: Txid,
+        ts: Timestamp,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
+    ) -> anyhow::Result<TxOutcome> {
+        self.0
+            .try_write_tx_outcome(
+                txid,
+                TxOutcomeRecord::Committed {
+                    ts,
+                    precond_keys,
+                    mut_keys,
+                },
+            )
+            .await
+    }
+
+    pub async fn tx_try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
+        self.0.try_abort(txid).await
+    }
+
+    pub async fn tx_wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
+        let tx_outcome_key = txid.encode_fixed();
+        self.0
+            .inner
+            .check_key(KeyspaceId::TX_OUTCOMES.0, &tx_outcome_key[..])?;
+        loop {
+            let wait = {
+                let lsm_read = self.0.inner.lsm.read()?;
+                let _guard = self.0.inner.lock_mgr.read_lock(&tx_outcome_key[..]).await;
+
+                match TabletInner::unsafe_get_latest_record(
+                    &lsm_read,
+                    KeyspaceId::TX_OUTCOMES,
+                    &tx_outcome_key[..],
+                )
+                .await?
+                {
+                    Some((_, RevisionValue::Regular(tx_outcome_bytes))) => {
+                        let tx_outcome_record: TxOutcomeRecord =
+                            pb::internal::TxOutcomeRecord::decode(&tx_outcome_bytes[..])
+                                .map_err(|e| InternalError::Other(e.into()))?
+                                .try_into()?;
+                        return Ok(tx_outcome_record.tx_outcome());
+                    }
+                    // Must be done with _guard still active.
+                    None => self.0.waiters.wait(txid),
+                    _ => {
+                        // TODO: This should only happen when the pending records have already been
+                        // cleaned up, so we should return a specific error to tell the caller to
+                        // just retry whatever they were trying to do.
+                        return Err(InternalError::TxOutcomeMissing);
+                    }
+                }
+            };
+
+            wait.await;
+        }
+    }
 }
 
 #[async_trait]
@@ -175,68 +237,6 @@ impl Tablet for ShardMetaTablet {
         _muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
         Err(anyhow!("ShardMetaTablet::prepare not allowed").into())
-    }
-
-    async fn try_commit(
-        &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<Key>,
-        mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<TxOutcome> {
-        self.0
-            .try_write_tx_outcome(
-                txid,
-                TxOutcomeRecord::Committed {
-                    ts,
-                    precond_keys,
-                    mut_keys,
-                },
-            )
-            .await
-    }
-
-    async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
-        self.0.try_abort(txid).await
-    }
-
-    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
-        let tx_outcome_key = txid.encode_fixed();
-        self.0
-            .inner
-            .check_key(KeyspaceId::TX_OUTCOMES.0, &tx_outcome_key[..])?;
-        loop {
-            let wait = {
-                let lsm_read = self.0.inner.lsm.read()?;
-                let _guard = self.0.inner.lock_mgr.read_lock(&tx_outcome_key[..]).await;
-
-                match TabletInner::unsafe_get_latest_record(
-                    &lsm_read,
-                    KeyspaceId::TX_OUTCOMES,
-                    &tx_outcome_key[..],
-                )
-                .await?
-                {
-                    Some((_, RevisionValue::Regular(tx_outcome_bytes))) => {
-                        let tx_outcome_record: TxOutcomeRecord =
-                            pb::internal::TxOutcomeRecord::decode(&tx_outcome_bytes[..])
-                                .map_err(|e| InternalError::Other(e.into()))?
-                                .try_into()?;
-                        return Ok(tx_outcome_record.tx_outcome());
-                    }
-                    // Must be done with _guard still active.
-                    None => self.0.waiters.wait(txid),
-                    _ => {
-                        // TODO: This should only happen when the pending records have already been
-                        // cleaned up, so we should return a specific error to tell the caller to
-                        // just retry whatever they were trying to do.
-                        return Err(InternalError::TxOutcomeMissing);
-                    }
-                }
-            };
-
-            wait.await;
-        }
     }
 
     async fn cleanup_committed(

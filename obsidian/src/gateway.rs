@@ -191,10 +191,8 @@ impl Obsidian for Gateway {
                     if any_prepare_succeeded {
                         // Don't return any errors from doing this because we want to surface `e`,
                         // the actual cause.
-                        if let Ok(owner_tablet) =
-                            self.shards.tablet(TabletId::shard_meta(txid.owner))
-                        {
-                            let _ = owner_tablet.try_abort(txid).await;
+                        if let Ok(owner) = self.shards.shard(txid.owner) {
+                            let _ = owner.tx_try_abort(txid).await;
                         }
                     }
                     return Err(e);
@@ -320,21 +318,20 @@ impl Gateway {
                             return RetryResult::Retry(InternalError::Conflict(other_txid));
                         }
 
-                        let other_txid_owner_tablet =
-                            match self.shards.tablet(TabletId::shard_meta(other_txid.owner)) {
-                                Ok(tablet_id) => tablet_id,
-                                Err(e) => {
-                                    return RetryResult::Err(InternalError::Other(e));
-                                }
-                            };
+                        let other_txid_owner_shard = match self.shards.shard(other_txid.owner) {
+                            Ok(shard) => shard,
+                            Err(e) => {
+                                return RetryResult::Err(InternalError::Other(e));
+                            }
+                        };
                         if txid.can_preempt(&other_txid) {
                             log::debug!("{:?} preempting {:?}", txid, other_txid);
-                            if let Err(e) = other_txid_owner_tablet.try_abort(other_txid).await {
+                            if let Err(e) = other_txid_owner_shard.tx_try_abort(other_txid).await {
                                 return RetryResult::Err(InternalError::Other(e));
                             }
                         } else {
                             log::debug!("{:?} waiting for {:?}", txid, other_txid);
-                            match other_txid_owner_tablet.wait(other_txid).await {
+                            match other_txid_owner_shard.tx_wait(other_txid).await {
                                 // TxOutcomeMissing happens if we raced with the cleanup that
                                 // removed it, but that means the pending/preconds are gone so
                                 // retrying will work.
@@ -360,8 +357,8 @@ impl Gateway {
         let mut futures = FuturesUnordered::new();
         for txid in txids {
             futures.push(async move {
-                let tablet = self.shards.tablet(TabletId::shard_meta(txid.owner))?;
-                tablet.wait(*txid).await
+                let shard = self.shards.shard(txid.owner)?;
+                shard.tx_wait(*txid).await
             });
         }
         while let Some(result) = futures.next().await {
@@ -453,8 +450,8 @@ impl Gateway {
             if !preempt_conflicts.is_empty() {
                 future::try_join_all(preempt_conflicts.iter().cloned().map(
                     |other_txid| async move {
-                        let tablet = self.shards.tablet(TabletId::shard_meta(other_txid.owner))?;
-                        tablet.try_abort(other_txid).await
+                        let shard = self.shards.shard(other_txid.owner)?;
+                        shard.tx_try_abort(other_txid).await
                     },
                 ))
                 .await
@@ -489,10 +486,10 @@ impl Gateway {
             .cloned()
             .collect();
 
-        Ok(tablets
-            .get(&TabletId::shard_meta(txid.owner))
-            .unwrap()
-            .try_commit(txid, commit_ts, precond_keys, mut_keys)
+        Ok(self
+            .shards
+            .shard(txid.owner)?
+            .tx_try_commit(txid, commit_ts, precond_keys, mut_keys)
             .await?)
     }
 

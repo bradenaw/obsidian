@@ -236,24 +236,6 @@ impl Tablet for DataTablet {
         Ok(*ts)
     }
 
-    async fn try_commit(
-        &self,
-        _txid: Txid,
-        _ts: Timestamp,
-        _precond_keys: BTreeSet<Key>,
-        _mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<TxOutcome> {
-        Err(anyhow!("DataTablet::try_commit not allowed").into())
-    }
-
-    async fn try_abort(&self, _txid: Txid) -> anyhow::Result<TxOutcome> {
-        Err(anyhow!("DataTablet::try_abort not allowed").into())
-    }
-
-    async fn wait(&self, _txid: Txid) -> Result<TxOutcome, InternalError> {
-        Err(anyhow!("DataTablet::wait not allowed").into())
-    }
-
     async fn cleanup_committed(
         &self,
         txid: Txid,
@@ -499,8 +481,8 @@ impl DataTabletInner {
         key: Vec<u8>,
         prepare_type: PrepareType,
     ) -> anyhow::Result<()> {
-        let owner_tablet = self.shards.tablet(TabletId::shard_meta(txid.owner()))?;
-        let tx_outcome = match owner_tablet.wait(txid).await {
+        let owner_tablet = self.shards.shard(txid.owner())?;
+        let tx_outcome = match owner_tablet.tx_wait(txid).await {
             Ok(tx_outcome) => tx_outcome,
             // This implies that the other side already successfully cleaned this up by calling
             // cleanup_committed on us, so we don't need to do anything.

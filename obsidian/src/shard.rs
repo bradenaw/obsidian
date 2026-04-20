@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -24,12 +25,16 @@ use crate::tablet::TabletJournalWriter;
 use crate::util::Retry;
 use crate::util::WithBackground;
 use crate::ColoGroupId;
+use crate::InternalError;
 use crate::JournalEntry;
+use crate::Key;
 use crate::Range;
 use crate::ShardId;
 use crate::TabletId;
 use crate::TabletJournalEntry;
 use crate::Timestamp;
+use crate::TxOutcome;
+use crate::Txid;
 
 pub(crate) struct Shard(WithBackground<ShardInner>);
 
@@ -148,6 +153,27 @@ impl crate::runtime::Shard for Shard {
         self.0.meta_synced.wait(ts).await?;
 
         Ok(())
+    }
+
+    async fn tx_try_commit(
+        &self,
+        txid: Txid,
+        ts: Timestamp,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
+    ) -> anyhow::Result<TxOutcome> {
+        self.0
+            .shard_meta_tablet
+            .tx_try_commit(txid, ts, precond_keys, mut_keys)
+            .await
+    }
+
+    async fn tx_try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
+        self.0.shard_meta_tablet.tx_try_abort(txid).await
+    }
+
+    async fn tx_wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
+        self.0.shard_meta_tablet.tx_wait(txid).await
     }
 }
 

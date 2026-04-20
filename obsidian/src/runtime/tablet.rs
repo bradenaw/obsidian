@@ -16,7 +16,6 @@ use crate::Range;
 use crate::Record;
 use crate::Revision;
 use crate::Timestamp;
-use crate::TxOutcome;
 use crate::Txid;
 
 #[async_trait]
@@ -76,15 +75,6 @@ pub(crate) trait Tablet: Send + Sync {
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError>;
 
-    async fn try_commit(
-        &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<Key>,
-        mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<TxOutcome>;
-    async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome>;
-    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError>;
     async fn cleanup_committed(
         &self,
         txid: Txid,

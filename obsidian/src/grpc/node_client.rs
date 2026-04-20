@@ -181,6 +181,75 @@ impl runtime::Shard for ShardProxy {
 
         Ok(())
     }
+
+    async fn tx_try_commit(
+        &self,
+        txid: Txid,
+        ts: Timestamp,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
+    ) -> anyhow::Result<TxOutcome> {
+        let resp = self
+            .grpc_client
+            .clone()
+            .shard_tx_try_commit(pb::internal::ShardTxTryCommitReq {
+                shard_id: self.shard_id.0,
+                txid: Some(pb::internal::Txid::from(txid)),
+                ts: ts.as_micros(),
+                precond_keys: precond_keys.into_iter().map(pb::Key::from).collect(),
+                mut_keys: mut_keys.into_iter().map(pb::Key::from).collect(),
+            })
+            .await
+            .map_err(internal_err_from_status)?
+            .into_inner();
+
+        let tx_outcome = TxOutcome::try_from(
+            resp.tx_outcome
+                .ok_or_else(|| anyhow!("missing tx_outcome"))?,
+        )?;
+
+        Ok(tx_outcome)
+    }
+
+    async fn tx_try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
+        let resp = self
+            .grpc_client
+            .clone()
+            .shard_tx_try_abort(pb::internal::ShardTxidReq {
+                shard_id: self.shard_id.0,
+                txid: Some(pb::internal::Txid::from(txid)),
+            })
+            .await
+            .map_err(internal_err_from_status)?
+            .into_inner();
+
+        let tx_outcome = TxOutcome::try_from(
+            resp.tx_outcome
+                .ok_or_else(|| anyhow!("missing tx_outcome"))?,
+        )?;
+
+        Ok(tx_outcome)
+    }
+
+    async fn tx_wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
+        let resp = self
+            .grpc_client
+            .clone()
+            .shard_tx_wait(pb::internal::ShardTxidReq {
+                shard_id: self.shard_id.0,
+                txid: Some(pb::internal::Txid::from(txid)),
+            })
+            .await
+            .map_err(internal_err_from_status)?
+            .into_inner();
+
+        let tx_outcome = TxOutcome::try_from(
+            resp.tx_outcome
+                .ok_or_else(|| anyhow!("missing tx_outcome"))?,
+        )?;
+
+        Ok(tx_outcome)
+    }
 }
 
 struct TabletProxy {
@@ -374,75 +443,6 @@ impl runtime::Tablet for TabletProxy {
         let prepare_ts = Timestamp::from_micros(resp.prepare_ts);
 
         Ok(prepare_ts)
-    }
-
-    async fn try_commit(
-        &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<Key>,
-        mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<TxOutcome> {
-        let resp = self
-            .grpc_client
-            .clone()
-            .tablet_try_commit(pb::internal::TabletTryCommitReq {
-                tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
-                txid: Some(pb::internal::Txid::from(txid)),
-                ts: ts.as_micros(),
-                precond_keys: precond_keys.into_iter().map(pb::Key::from).collect(),
-                mut_keys: mut_keys.into_iter().map(pb::Key::from).collect(),
-            })
-            .await
-            .map_err(internal_err_from_status)?
-            .into_inner();
-
-        let tx_outcome = TxOutcome::try_from(
-            resp.tx_outcome
-                .ok_or_else(|| anyhow!("missing tx_outcome"))?,
-        )?;
-
-        Ok(tx_outcome)
-    }
-
-    async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
-        let resp = self
-            .grpc_client
-            .clone()
-            .tablet_try_abort(pb::internal::TabletTxidReq {
-                tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
-                txid: Some(pb::internal::Txid::from(txid)),
-            })
-            .await
-            .map_err(internal_err_from_status)?
-            .into_inner();
-
-        let tx_outcome = TxOutcome::try_from(
-            resp.tx_outcome
-                .ok_or_else(|| anyhow!("missing tx_outcome"))?,
-        )?;
-
-        Ok(tx_outcome)
-    }
-
-    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
-        let resp = self
-            .grpc_client
-            .clone()
-            .tablet_wait(pb::internal::TabletTxidReq {
-                tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
-                txid: Some(pb::internal::Txid::from(txid)),
-            })
-            .await
-            .map_err(internal_err_from_status)?
-            .into_inner();
-
-        let tx_outcome = TxOutcome::try_from(
-            resp.tx_outcome
-                .ok_or_else(|| anyhow!("missing tx_outcome"))?,
-        )?;
-
-        Ok(tx_outcome)
     }
 
     async fn cleanup_committed(

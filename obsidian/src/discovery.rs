@@ -240,6 +240,36 @@ impl runtime::Shard for ShardProxy {
             .wait_meta_sync(ts)
             .await
     }
+
+    async fn tx_try_commit(
+        &self,
+        txid: Txid,
+        ts: Timestamp,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
+    ) -> anyhow::Result<TxOutcome> {
+        self.parent
+            .current_leader(self.shard_id)?
+            .shard(self.shard_id)?
+            .tx_try_commit(txid, ts, precond_keys, mut_keys)
+            .await
+    }
+
+    async fn tx_try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
+        self.parent
+            .current_leader(self.shard_id)?
+            .shard(self.shard_id)?
+            .tx_try_abort(txid)
+            .await
+    }
+
+    async fn tx_wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
+        self.parent
+            .current_leader(self.shard_id)?
+            .shard(self.shard_id)?
+            .tx_wait(txid)
+            .await
+    }
 }
 
 // The leader for a tablet can change but we want to hand out an object that can be used
@@ -318,26 +348,6 @@ impl runtime::Tablet for TabletProxy {
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
         self.get_tablet()?.prepare(txid, preconds, muts).await
-    }
-
-    async fn try_commit(
-        &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<Key>,
-        mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<TxOutcome> {
-        self.get_tablet()?
-            .try_commit(txid, ts, precond_keys, mut_keys)
-            .await
-    }
-
-    async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
-        self.get_tablet()?.try_abort(txid).await
-    }
-
-    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
-        self.get_tablet()?.wait(txid).await
     }
 
     async fn cleanup_committed(

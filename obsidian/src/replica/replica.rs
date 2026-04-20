@@ -219,6 +219,48 @@ impl runtime::Shard for Replica {
             })
             .await
     }
+
+    async fn tx_try_commit(
+        &self,
+        txid: Txid,
+        ts: Timestamp,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
+    ) -> anyhow::Result<TxOutcome> {
+        self.participant
+            .with_state(async move |participant_state| {
+                if let ParticipantState::Leader(leader) = participant_state {
+                    return leader
+                        .shard
+                        .tx_try_commit(txid, ts, precond_keys, mut_keys)
+                        .await;
+                }
+                Err(InternalError::NotLeader(self.shard_id).into())
+            })
+            .await
+    }
+
+    async fn tx_try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
+        self.participant
+            .with_state(async move |participant_state| {
+                if let ParticipantState::Leader(leader) = participant_state {
+                    return leader.shard.tx_try_abort(txid).await;
+                }
+                Err(InternalError::NotLeader(self.shard_id).into())
+            })
+            .await
+    }
+
+    async fn tx_wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
+        self.participant
+            .with_state(async move |participant_state| {
+                if let ParticipantState::Leader(leader) = participant_state {
+                    return leader.shard.tx_wait(txid).await;
+                }
+                Err(InternalError::NotLeader(self.shard_id).into())
+            })
+            .await
+    }
 }
 
 struct ReplicaTablet {
@@ -384,52 +426,6 @@ impl runtime::Tablet for ReplicaTablet {
                         .await;
                 }
                 Err(InternalError::NotLeader(tablet_id.0))
-            })
-            .await
-    }
-
-    async fn try_commit(
-        &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<Key>,
-        mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<TxOutcome> {
-        let tablet_id = self.tablet_id;
-        self.participant
-            .with_state(async move |participant_state| {
-                if let ParticipantState::Leader(leader) = participant_state {
-                    return leader
-                        .shard
-                        .tablet(tablet_id)?
-                        .try_commit(txid, ts, precond_keys, mut_keys)
-                        .await;
-                }
-                Err(InternalError::NotLeader(tablet_id.0).into())
-            })
-            .await
-    }
-
-    async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
-        let tablet_id = self.tablet_id;
-        self.participant
-            .with_state(async move |participant_state| {
-                if let ParticipantState::Leader(leader) = participant_state {
-                    return leader.shard.tablet(tablet_id)?.try_abort(txid).await;
-                }
-                Err(InternalError::NotLeader(tablet_id.0).into())
-            })
-            .await
-    }
-
-    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
-        let tablet_id = self.tablet_id;
-        self.participant
-            .with_state(async move |participant_state| {
-                if let ParticipantState::Leader(leader) = participant_state {
-                    return leader.shard.tablet(tablet_id)?.wait(txid).await;
-                }
-                Err(InternalError::NotLeader(tablet_id.0).into())
             })
             .await
     }
