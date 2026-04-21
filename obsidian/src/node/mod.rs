@@ -61,6 +61,7 @@ struct NodeInner {
     journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
 
     supervisor: RwLock<Option<OwnedSupervisor>>,
+    // TODO: OwnedMeta equivalent to OwnedSupervisor
     maybe_meta: RwLock<Option<Arc<Meta>>>,
     replicas: RwLock<HashMap<ShardId, Arc<Replica>>>,
     replicas_changed: Notify,
