@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::ops::Deref as _;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::sync::Weak;
 
 use anyhow::anyhow;
 use async_stream::stream;
@@ -9,7 +11,9 @@ use futures::future::Either;
 use futures::stream::FuturesUnordered;
 use futures::Stream;
 use futures::StreamExt;
+use tokio::select;
 use tokio::sync::Notify;
+use tokio::sync::SetOnce;
 
 use crate::election::Proposal;
 use crate::lsm::LsmOptions;
@@ -35,6 +39,7 @@ use crate::JournalEntry;
 use crate::NodeId;
 use crate::ShardId;
 use crate::TabletId;
+use crate::TransferId;
 
 /// Node represents one of the processes of Obsidian running in a system. All nodes serve the
 /// gateway service as well as being available to having shards assigned to them.
@@ -55,9 +60,7 @@ struct NodeInner {
     meta_synced: Arc<MetaSynced>,
     journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
 
-    // TODO: We want to be able to stop these just by setting them to None, but handing
-    // out an Arc from meta()/supervisor() means any caller can keep it alive indefinitely.
-    supervisor: RwLock<Option<Arc<Supervisor>>>,
+    supervisor: RwLock<Option<OwnedSupervisor>>,
     maybe_meta: RwLock<Option<Arc<Meta>>>,
     replicas: RwLock<HashMap<ShardId, Arc<Replica>>>,
     replicas_changed: Notify,
@@ -151,7 +154,7 @@ impl runtime::Node for Node {
                 self.0.node_id
             )
         })?;
-        Ok(Arc::clone(supervisor) as Arc<dyn runtime::Supervisor>)
+        Ok(supervisor.weak())
     }
 
     fn shards_subscribe(
@@ -249,7 +252,7 @@ impl NodeInner {
                     if let Some(meta_shard) = replicas.get(&ShardId::META) {
                         if let Ok(meta_tablet) = meta_shard.tablet(TabletId::META) {
                             let meta = Arc::new(Meta::new(meta_tablet));
-                            *supervisor = Some(Arc::new(Supervisor::new(
+                            *supervisor = Some(OwnedSupervisor::new(Supervisor::new(
                                 Arc::clone(&meta) as Arc<dyn runtime::Meta>,
                                 Arc::clone(&self.meta_synced),
                                 Arc::clone(&self.shards),
@@ -323,5 +326,94 @@ impl MetaSubscriber for NodeInner {
                 self.try_sync_meta(&sync_type, &snapshot).await
             })
             .await;
+    }
+}
+
+/// We want to be able to hand out Arc<dyn runtime::Supervisor>s, but we also want to be able to
+/// destroy a Supervisor by dropping it. Directly handing out an arc that contains the real
+/// supervisor keeps us from doing that. Instead, WeakSupervisor causes all of the methods to error
+/// out.
+struct OwnedSupervisor {
+    inner: Arc<Supervisor>,
+    closed: Arc<SetOnce<()>>,
+    weak: Arc<dyn runtime::Supervisor>,
+}
+
+impl OwnedSupervisor {
+    fn new(inner: Supervisor) -> Self {
+        let arc = Arc::new(inner);
+        let closed = Arc::new(SetOnce::new());
+        let weak = WeakSupervisor {
+            inner: Arc::downgrade(&arc),
+            closed: Arc::clone(&closed),
+        };
+        Self {
+            inner: arc,
+            closed,
+            weak: Arc::new(weak),
+        }
+    }
+
+    fn weak(&self) -> Arc<dyn runtime::Supervisor> {
+        Arc::clone(&self.weak)
+    }
+}
+
+impl Drop for OwnedSupervisor {
+    fn drop(&mut self) {
+        _ = self.closed.set(());
+    }
+}
+
+struct WeakSupervisor {
+    inner: Weak<Supervisor>,
+    closed: Arc<SetOnce<()>>,
+}
+
+impl WeakSupervisor {
+    fn inner(&self) -> anyhow::Result<Arc<Supervisor>> {
+        self.inner
+            .upgrade()
+            .ok_or_else(|| anyhow!("Supervisor closed"))
+    }
+
+    async fn or_closed<F, T>(&self, f: F) -> anyhow::Result<T>
+    where
+        F: AsyncFnOnce(&Supervisor) -> anyhow::Result<T>,
+    {
+        let inner = self.inner()?;
+        select! {
+            out = f(inner.deref()) => {
+                return out;
+            },
+            _ = self.closed.wait() => {
+                return Err(anyhow!("Supervisor closed"));
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl runtime::Supervisor for WeakSupervisor {
+    async fn start_move(&self, src: TabletId, dst: ShardId) -> anyhow::Result<TransferId> {
+        self.inner()?.start_move(src, dst).await
+    }
+
+    async fn start_split(
+        &self,
+        src: TabletId,
+        dst_a: ShardId,
+        dst_b: ShardId,
+    ) -> anyhow::Result<TransferId> {
+        self.inner()?.start_split(src, dst_a, dst_b).await
+    }
+
+    async fn start_merge(&self, srcs: Vec<TabletId>, dst: ShardId) -> anyhow::Result<TransferId> {
+        self.inner()?.start_merge(srcs, dst).await
+    }
+
+    async fn wait_transfer(&self, transfer_id: TransferId) -> anyhow::Result<()> {
+        self.or_closed(async |inner| inner.wait_transfer(transfer_id).await)
+            .await
     }
 }
