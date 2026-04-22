@@ -86,6 +86,12 @@ impl FileReader for S3FileReader {
     }
 }
 
+struct S3FileWriter {
+    client: aws_sdk_s3::Client,
+    bucket: String,
+    name: FileName,
+}
+
 fn file_name_to_key(file_name: FileName) -> String {
     match file_name {
         FileName::Run(run_id) => format!("/run/{}", run_id),
