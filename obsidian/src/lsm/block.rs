@@ -37,118 +37,6 @@ pub(super) struct Block<'a> {
 const BLOCK_TRAILER_SIZE: usize = 20;
 
 impl<'a> Block<'a> {
-    /// Assumes that kvs values are in reverse order by timestamp.
-    ///
-    /// Returns the encoded block and the offset of the trailer within the block.
-    pub(super) fn encode(
-        kvs: &BTreeMap<Vec<u8>, Vec<(Timestamp, RevisionValue)>>,
-    ) -> anyhow::Result<Vec<u8>> {
-        if kvs.is_empty() {
-            return Err(anyhow!("empty block"));
-        }
-        // For this example block:
-        //
-        // key       ts   value
-        // ====================
-        // abcdef    5    "bar"
-        //           2    "foo"
-        // abcghi    4    "baz"
-        //           3    <TOMBSTONE>
-        //           1    "hello"
-        //
-        //
-        // First, we smash all of the values together in order and remember the offset of the start
-        // of each:
-        //           1
-        // 01234567890123
-        // barfoobazhello
-        // ^  ^  ^  ^
-        //
-        // And we store a list of (timestamp, tombstone, value_offset) in LsmRevision order.
-        // [
-        //   (5, false, 0),
-        //   (2, false, 3),
-        //   (4, false, 6),
-        //   (3, true, 6),
-        //   (1, false, 9),
-        // ]
-        //
-        // Since timestamps in a block together will not differ by much from each other (usually
-        // they're written around the same time) and tombstone is only one bit, we actually store
-        // each 3-tuple as
-        //   ts-block_min_ts, value_offset<<1 | tombstone
-        //
-        // We compute up-front how many bytes we actually need to fit the largest of the first
-        // values in the block, and encode all of them using only that many. That means they're
-        // fixed-size within a block and easy to search, but also do not take up much space.
-        //
-        //   block_max_ts - block_min_ts       bytes needed for timestamp
-        //   =========================================================================
-        //   256us                             1
-        //   ~66ms                             2
-        //   ~4 hours                          3
-        //   ~48 days                          4
-        //   ~34 years                         5
-        //
-        // Thus, very new blocks (which contain revisions written at similar times) will use 3-4
-        // bytes and old blocks (which contain revisions from many different times compacted
-        // together) will use 4-5.
-        //
-        //
-        // Then we prefix compress the keys using a similar technique. We store the longest-shared
-        // prefix and then all of the suffixes smashed together just like the values above, and
-        // then store a list of fixed-sized (key_offset, versions_offset).
-        //
-        //   abc
-        //   defghi
-        //   key_offset  versions_offset
-        //   0           0
-        //   3           2
-
-        let mut key_index: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
-        let mut block = vec![];
-
-        let mut version_index = Vec::new();
-        for (key, key_versions) in kvs {
-            key_index.insert(key.clone(), version_index.len() as u64);
-            for (ts, value) in key_versions {
-                let value_offset = block.len();
-
-                let is_tombstone = match value {
-                    RevisionValue::Regular(value) => {
-                        block.extend_from_slice(&value[..]);
-                        false
-                    }
-                    RevisionValue::Tombstone => true,
-                };
-
-                version_index.push((*ts, is_tombstone, value_offset as u32));
-            }
-        }
-
-        let values_len = block.len();
-        let key_index_offset_in_block = block.len();
-        PrefixCompressedKV::<()>::write(&mut block, &key_index);
-        let key_index_len = block.len() - key_index_offset_in_block;
-
-        let version_index_offset_in_block = block.len();
-        BlockVersionIndex::<()>::write(&mut block, &version_index, values_len as u32);
-        let version_index_len = block.len() - version_index_offset_in_block;
-
-        let trailer = BlockTrailer {
-            key_index_offset_in_block: key_index_offset_in_block as u32,
-            key_index_len: key_index_len as u32,
-            version_index_offset_in_block: version_index_offset_in_block as u32,
-            version_index_len: version_index_len as u32,
-            block_size: (block.len() + BlockTrailer::ENCODED_LEN) as u32,
-        };
-        trailer.write(&mut block);
-
-        Ok(block)
-    }
-}
-
-impl<'a> Block<'a> {
     pub(super) async fn open(
         reader: &'a dyn FileReader,
         block_end_offset: u64,
@@ -506,7 +394,108 @@ impl BlockBuilder {
     }
 
     pub(super) fn encode(&self) -> anyhow::Result<Vec<u8>> {
-        Block::encode(&self.buffer)
+        if self.buffer.is_empty() {
+            return Err(anyhow!("empty block"));
+        }
+        // For this example block:
+        //
+        // key       ts   value
+        // ====================
+        // abcdef    5    "bar"
+        //           2    "foo"
+        // abcghi    4    "baz"
+        //           3    <TOMBSTONE>
+        //           1    "hello"
+        //
+        //
+        // First, we smash all of the values together in order and remember the offset of the start
+        // of each:
+        //           1
+        // 01234567890123
+        // barfoobazhello
+        // ^  ^  ^  ^
+        //
+        // And we store a list of (timestamp, tombstone, value_offset) in LsmRevision order.
+        // [
+        //   (5, false, 0),
+        //   (2, false, 3),
+        //   (4, false, 6),
+        //   (3, true, 6),
+        //   (1, false, 9),
+        // ]
+        //
+        // Since timestamps in a block together will not differ by much from each other (usually
+        // they're written around the same time) and tombstone is only one bit, we actually store
+        // each 3-tuple as
+        //   ts-block_min_ts, value_offset<<1 | tombstone
+        //
+        // We compute up-front how many bytes we actually need to fit the largest of the first
+        // values in the block, and encode all of them using only that many. That means they're
+        // fixed-size within a block and easy to search, but also do not take up much space.
+        //
+        //   block_max_ts - block_min_ts       bytes needed for timestamp
+        //   =========================================================================
+        //   256us                             1
+        //   ~66ms                             2
+        //   ~4 hours                          3
+        //   ~48 days                          4
+        //   ~34 years                         5
+        //
+        // Thus, very new blocks (which contain revisions written at similar times) will use 3-4
+        // bytes and old blocks (which contain revisions from many different times compacted
+        // together) will use 4-5.
+        //
+        //
+        // Then we prefix compress the keys using a similar technique. We store the longest-shared
+        // prefix and then all of the suffixes smashed together just like the values above, and
+        // then store a list of fixed-sized (key_offset, versions_offset).
+        //
+        //   abc
+        //   defghi
+        //   key_offset  versions_offset
+        //   0           0
+        //   3           2
+
+        let mut key_index: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+        let mut block = vec![];
+
+        let mut version_index = Vec::new();
+        for (key, key_versions) in &self.buffer {
+            key_index.insert(key.clone(), version_index.len() as u64);
+            for (ts, value) in key_versions {
+                let value_offset = block.len();
+
+                let is_tombstone = match value {
+                    RevisionValue::Regular(value) => {
+                        block.extend_from_slice(&value[..]);
+                        false
+                    }
+                    RevisionValue::Tombstone => true,
+                };
+
+                version_index.push((*ts, is_tombstone, value_offset as u32));
+            }
+        }
+
+        let values_len = block.len();
+        let key_index_offset_in_block = block.len();
+        PrefixCompressedKV::<()>::write(&mut block, &key_index);
+        let key_index_len = block.len() - key_index_offset_in_block;
+
+        let version_index_offset_in_block = block.len();
+        BlockVersionIndex::<()>::write(&mut block, &version_index, values_len as u32);
+        let version_index_len = block.len() - version_index_offset_in_block;
+
+        let trailer = BlockTrailer {
+            key_index_offset_in_block: key_index_offset_in_block as u32,
+            key_index_len: key_index_len as u32,
+            version_index_offset_in_block: version_index_offset_in_block as u32,
+            version_index_len: version_index_len as u32,
+            block_size: (block.len() + BlockTrailer::ENCODED_LEN) as u32,
+        };
+        trailer.write(&mut block);
+
+        Ok(block)
     }
 }
 
@@ -720,6 +709,7 @@ mod tests {
     use futures::TryStreamExt;
 
     use super::Block;
+    use crate::lsm::block::BlockBuilder;
     use crate::lsm::LsmRevision;
     use crate::test::MemFileReader;
     use crate::Bound;
@@ -728,6 +718,22 @@ mod tests {
     use crate::Range;
     use crate::RevisionValue;
     use crate::Timestamp;
+
+    fn encode(
+        buffer: &BTreeMap<Vec<u8>, Vec<(Timestamp, RevisionValue)>>,
+    ) -> anyhow::Result<Vec<u8>> {
+        let mut builder = BlockBuilder::new();
+        for (key, values) in buffer {
+            for (ts, value) in values {
+                builder.push(LsmRevision {
+                    key: key.clone(),
+                    ts: *ts,
+                    value: value.clone(),
+                })?;
+            }
+        }
+        builder.encode()
+    }
 
     #[tokio::test]
     async fn test_get() -> anyhow::Result<()> {
@@ -758,7 +764,7 @@ mod tests {
             );
             kvs
         };
-        let encoded = Block::encode(&kvs)?;
+        let encoded = encode(&kvs)?;
         let end_offset = encoded.len() as u64;
         let f = MemFileReader::new(encoded);
         let block = Block::open(&f, end_offset).await?;
@@ -854,7 +860,7 @@ mod tests {
             kvs.insert(key_str.into(), versions);
         }
 
-        let encoded = Block::encode(&kvs)?;
+        let encoded = encode(&kvs)?;
         let end_offset = encoded.len() as u64;
         let f = MemFileReader::new(encoded);
         let block = Block::open(&f, end_offset).await?;
@@ -962,7 +968,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let encoded = Block::encode(&kvs)?;
+        let encoded = encode(&kvs)?;
         let end_offset = encoded.len() as u64;
         let f = MemFileReader::new(encoded);
         let block = Block::open(&f, end_offset).await?;
