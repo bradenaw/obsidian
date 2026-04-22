@@ -1,8 +1,8 @@
-use std::pin::Pin;
-use std::task::Poll;
+use std::io;
 
-use tokio::io::AsyncWrite;
+use async_trait::async_trait;
 
+use crate::runtime::FileWriter;
 use crate::test::MemFileReader;
 
 pub(crate) struct MemFileWriter {
@@ -19,28 +19,14 @@ impl MemFileWriter {
     }
 }
 
-impl AsyncWrite for MemFileWriter {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> Poll<Result<usize, std::io::Error>> {
-        let self_ = Pin::get_mut(self);
-        self_.inner.extend_from_slice(buf);
-        Poll::Ready(Ok(buf.len()))
+#[async_trait]
+impl FileWriter for MemFileWriter {
+    async fn write_all(&mut self, src: &[u8]) -> io::Result<()> {
+        self.inner.extend_from_slice(src);
+        Ok(())
     }
 
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        Poll::Ready(Ok(()))
+    async fn shutdown(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }

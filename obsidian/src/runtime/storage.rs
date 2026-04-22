@@ -1,8 +1,8 @@
+use std::io;
 use std::ops::Deref;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::io::AsyncWrite;
 
 use crate::lsm::RunId;
 
@@ -20,9 +20,11 @@ pub(crate) enum FileName {
     Run(RunId),
 }
 
-pub(crate) trait FileWriter: AsyncWrite + Send + Unpin + 'static {}
-
-impl<T> FileWriter for T where T: AsyncWrite + Send + Unpin + 'static {}
+#[async_trait]
+pub(crate) trait FileWriter: Send + Sync + 'static {
+    async fn write_all(&mut self, src: &[u8]) -> io::Result<()>;
+    async fn shutdown(&mut self) -> io::Result<()>;
+}
 
 #[async_trait]
 pub(crate) trait FileReader: Sync + Send + 'static {

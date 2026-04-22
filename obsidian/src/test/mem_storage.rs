@@ -1,15 +1,12 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::pin::pin;
-use std::pin::Pin;
+use std::io;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
-use std::task::Poll;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
-use tokio::io::AsyncWrite;
 
 use crate::runtime::FileName;
 use crate::runtime::FileReader;
@@ -105,61 +102,24 @@ struct MemStorageFileWriter {
     inner: Option<MemFileWriter>,
 }
 
-impl AsyncWrite for MemStorageFileWriter {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> Poll<Result<usize, std::io::Error>> {
-        let maybe_inner = &mut self.inner;
-        match maybe_inner {
-            Some(inner) => pin!(inner).poll_write(cx, buf),
-            None => {
-                return Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    anyhow!("writer already shutdown"),
-                )));
-            }
-        }
+#[async_trait]
+impl FileWriter for MemStorageFileWriter {
+    async fn write_all(&mut self, src: &[u8]) -> io::Result<()> {
+        self.inner
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, anyhow!("writer already closed")))?
+            .write_all(src)
+            .await
     }
 
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        let maybe_inner = &mut self.inner;
-        match maybe_inner {
-            Some(inner) => pin!(inner).poll_flush(cx),
-            None => {
-                return Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    anyhow!("writer already shutdown"),
-                )));
-            }
-        }
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        match self.inner.take() {
-            Some(mut inner) => match pin!(&mut inner).poll_flush(cx) {
-                Poll::Ready(Ok(())) => {
-                    let mut parent = self.parent.lock().unwrap();
-                    parent
-                        .files
-                        .insert(self.name.clone(), Arc::new(inner.into_reader()));
-                    Poll::Ready(Ok(()))
-                }
-                x => return x,
-            },
-            None => {
-                return Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    anyhow!("writer already shutdown"),
-                )));
-            }
-        }
+    async fn shutdown(&mut self) -> io::Result<()> {
+        let inner = self.inner.take().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, anyhow!("writer already closed"))
+        })?;
+        let mut parent = self.parent.lock().unwrap();
+        parent
+            .files
+            .insert(self.name.clone(), Arc::new(inner.into_reader()));
+        Ok(())
     }
 }

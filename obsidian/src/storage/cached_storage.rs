@@ -4,15 +4,13 @@ use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::hash::Hash;
 use std::hash::RandomState;
-use std::pin::pin;
-use std::pin::Pin;
+use std::io;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
-use tokio::io::AsyncWrite;
 
 use crate::runtime::FileName;
 use crate::runtime::FileReader;
@@ -66,7 +64,7 @@ impl<S: Storage> Storage for CachedStorage<S> {
 
     async fn put(&self, name: FileName) -> anyhow::Result<Box<dyn FileWriter>> {
         Ok(Box::new(PutCacher {
-            inner: Box::pin(self.inner.put(name.clone()).await?),
+            inner: self.inner.put(name.clone()).await?,
             cache: self.cache.clone(),
             name,
             buf: Vec::with_capacity(self.page_size),
@@ -95,11 +93,8 @@ impl<S: Storage> Storage for CachedStorage<S> {
 // Caches pages while a file is being put.
 //
 // put() takes in a stream of bytes, so we have to wrap the reader of that stream.
-pub(crate) struct PutCacher<W>
-where
-    W: AsyncWrite,
-{
-    inner: W,
+pub(crate) struct PutCacher {
+    inner: Box<dyn FileWriter>,
     // The name of the file being written.
     name: FileName,
     // A reference to the cache from the CachedStorage this PutCacher was made from.
@@ -111,10 +106,7 @@ where
     page_size: usize,
 }
 
-impl<W> PutCacher<W>
-where
-    W: AsyncWrite + Unpin,
-{
+impl PutCacher {
     fn put(&mut self, buf: &[u8]) {
         let mut remaining = buf;
         while remaining.len() > 0 {
@@ -134,55 +126,19 @@ where
             .insert((self.name.clone(), self.buf_offset), Arc::new(page));
         self.buf_offset += self.page_size as u64;
     }
-
-    fn poll_write_inner(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        let inner = pin!(&mut self.inner);
-        match inner.poll_write(cx, &buf[..]) {
-            std::task::Poll::Ready(Ok(n)) => {
-                self.put(&buf[..n]);
-                return std::task::Poll::Ready(Ok(n));
-            }
-            x => return x,
-        }
-    }
 }
 
-impl<W> AsyncWrite for PutCacher<W>
-where
-    W: FileWriter + Unpin,
-{
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        let self_ = Pin::get_mut(self);
-        self_.poll_write_inner(cx, buf)
+#[async_trait]
+impl FileWriter for PutCacher {
+    async fn write_all(&mut self, src: &[u8]) -> io::Result<()> {
+        self.inner.write_all(src).await?;
+        self.put(src);
+        Ok(())
     }
 
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), std::io::Error>> {
-        let self_ = Pin::get_mut(self);
-        let inner = pin!(&mut self_.inner);
-        inner.poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), std::io::Error>> {
-        let self_ = Pin::get_mut(self);
-        if self_.buf.len() > 0 {
-            self_.flush();
-        }
-        let inner = pin!(&mut self_.inner);
-        inner.poll_shutdown(cx)
+    async fn shutdown(&mut self) -> io::Result<()> {
+        self.flush();
+        self.inner.shutdown().await
     }
 }
 
@@ -682,8 +638,6 @@ mod tests {
     use std::hash::BuildHasher;
     use std::hash::Hash;
     use std::hash::RandomState;
-
-    use tokio::io::AsyncWriteExt;
 
     use super::Cache;
     use super::CachedStorage;

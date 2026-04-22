@@ -10,8 +10,6 @@ use byteorder::LittleEndian;
 use futures::pin_mut;
 use futures::Stream;
 use futures::TryStreamExt;
-use tokio::io::AsyncWrite;
-use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use crate::lsm::block::dump_block;
@@ -21,6 +19,7 @@ use crate::lsm::util::PrefixCompressedKV;
 use crate::lsm::LsmRevision;
 use crate::lsm::RunId;
 use crate::runtime::FileReader;
+use crate::runtime::FileWriter;
 use crate::util::binary_search_by_idx;
 use crate::util::hexlify;
 use crate::util::IteratorEither;
@@ -218,8 +217,8 @@ impl Run {
     }
 }
 
-pub(crate) struct RunBuilder<W> {
-    w: W,
+pub(crate) struct RunBuilder<'a> {
+    w: &'a mut dyn FileWriter,
     id: RunId,
     keyspace_id: KeyspaceId,
     block_size_target: u64,
@@ -232,8 +231,13 @@ pub(crate) struct RunBuilder<W> {
     max_ts: Timestamp,
 }
 
-impl<W: AsyncWrite + Unpin> RunBuilder<W> {
-    pub fn new(w: W, id: RunId, keyspace_id: KeyspaceId, block_size_target: u64) -> Self {
+impl<'a> RunBuilder<'a> {
+    pub fn new(
+        w: &'a mut dyn FileWriter,
+        id: RunId,
+        keyspace_id: KeyspaceId,
+        block_size_target: u64,
+    ) -> Self {
         Self {
             w,
             id,
@@ -334,7 +338,7 @@ impl<W: AsyncWrite + Unpin> RunBuilder<W> {
             index_offset: index_offset as u64,
             index_len: encoded_index.len() as u64,
         };
-        trailer.write(&mut self.w, trailer_offset as u64).await?;
+        trailer.write(self.w, trailer_offset as u64).await?;
 
         Ok(())
     }
@@ -395,11 +399,7 @@ impl RunTrailer {
         })
     }
 
-    async fn write<W: AsyncWrite + Unpin>(
-        &self,
-        mut w: W,
-        trailer_offset: u64,
-    ) -> anyhow::Result<()> {
+    async fn write(&self, w: &mut dyn FileWriter, trailer_offset: u64) -> anyhow::Result<()> {
         let mut trailer = [0u8; Self::ENCODED_LEN];
 
         trailer[0..16].copy_from_slice(&self.id.encode_fixed()[..]);
@@ -460,7 +460,7 @@ mod tests {
     use super::RunBuilder;
     use crate::lsm::LsmRevision;
     use crate::lsm::RunId;
-    use crate::test::MemFileReader;
+    use crate::test::MemFileWriter;
     use crate::Bound;
     use crate::ColoGroupId;
     use crate::Direction;
@@ -503,15 +503,19 @@ mod tests {
                 value: RevisionValue::Regular(rand_bytes(10_000)),
             },
         ];
-        let mut v = vec![];
-        let mut run_builder =
-            RunBuilder::new(&mut v, RunId::new(), KeyspaceId(ColoGroupId(1), 1), 32768);
+        let mut file_writer = MemFileWriter::new();
+        let mut run_builder = RunBuilder::new(
+            &mut file_writer,
+            RunId::new(),
+            KeyspaceId(ColoGroupId(1), 1),
+            32768,
+        );
         for revision in &revisions {
             run_builder.push(revision.clone()).await?;
         }
         run_builder.finish().await?;
 
-        let run = Run::open(Arc::new(MemFileReader::new(v))).await?;
+        let run = Run::open(Arc::new(file_writer.into_reader())).await?;
 
         assert_eq!(run.min_ts, Timestamp(10230));
         assert_eq!(run.max_ts, Timestamp(21925));
@@ -552,9 +556,9 @@ mod tests {
             ],
         ];
 
-        let mut v = vec![];
+        let mut file_writer = MemFileWriter::new();
         let mut b = RunBuilder::new(
-            &mut v,
+            &mut file_writer,
             RunId::new(),
             KeyspaceId(ColoGroupId(1), 1),
             u64::MAX,
@@ -581,7 +585,7 @@ mod tests {
         }
         b.finish().await?;
 
-        let run = Run::open(Arc::new(MemFileReader::new(v))).await?;
+        let run = Run::open(Arc::new(file_writer.into_reader())).await?;
 
         async fn check(
             run: &Run,
@@ -714,9 +718,9 @@ mod tests {
                 }).collect::<Vec<LsmRevision>>();
                 revisions.sort_by_key(|revision| (revision.key.clone(), Reverse(revision.ts)));
 
-                let mut v = vec![];
+                let mut file_writer = MemFileWriter::new();
                 let mut run_builder = RunBuilder::new(
-                    &mut v,
+                    &mut file_writer,
                     RunId::new(),
                     KeyspaceId(ColoGroupId(1), 1),
                     1024,
@@ -728,7 +732,7 @@ mod tests {
                 run_builder.finish().await.unwrap();
 
 
-                let run = Run::open(Arc::new(MemFileReader::new(v))).await.unwrap();
+                let run = Run::open(Arc::new(file_writer.into_reader())).await.unwrap();
 
                 dump_run(&run).await.unwrap();
 

@@ -18,7 +18,7 @@ use crate::lsm::Lsm;
 use crate::lsm::LsmOptions;
 use crate::lsm::LsmRevision;
 use crate::lsm::RunId;
-use crate::test::MemFileReader;
+use crate::test::MemFileWriter;
 use crate::test::MemStorage;
 use crate::util::binary_search_by_idx;
 use crate::Bound;
@@ -811,9 +811,9 @@ async fn keyspace_from_diagram(diagram: Vec<(&str, &[u8])>) -> anyhow::Result<Ke
                     keyspace.l0_sealed[0].insert(revision.key, revision.ts, revision.value);
                 }
             } else {
-                let mut v = vec![];
+                let mut file_writer = MemFileWriter::new();
                 let mut run_builder = RunBuilder::new(
-                    &mut v,
+                    &mut file_writer,
                     RunId::new(),
                     KeyspaceId(ColoGroupId(1), 1),
                     1024, // block_size_target
@@ -822,7 +822,7 @@ async fn keyspace_from_diagram(diagram: Vec<(&str, &[u8])>) -> anyhow::Result<Ke
                     run_builder.push(revision).await?;
                 }
                 run_builder.finish().await?;
-                let run = Run::open(Arc::new(MemFileReader::new(v))).await?;
+                let run = Run::open(Arc::new(file_writer.into_reader())).await?;
                 level.runs.push(Arc::new(run));
             }
         }

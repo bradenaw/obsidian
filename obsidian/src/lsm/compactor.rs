@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::future::Future;
 use std::iter;
+use std::ops::DerefMut;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -13,7 +14,6 @@ use futures::FutureExt;
 use futures::Stream;
 use futures::StreamExt;
 use rand::Rng;
-use tokio::io::AsyncWriteExt;
 
 use crate::lsm::index::Index;
 use crate::lsm::index::IndexSnapshot;
@@ -654,8 +654,9 @@ impl CompactorInner {
             }
 
             let id = RunId::new();
-            let mut writer = Box::pin(self.storage.put(FileName::Run(id)).await?);
-            let mut run = RunBuilder::new(&mut writer, id, keyspace_id, self.block_size_target);
+            let mut writer = self.storage.put(FileName::Run(id)).await?;
+            let mut run =
+                RunBuilder::new(writer.deref_mut(), id, keyspace_id, self.block_size_target);
 
             while let Some((key, mut revs)) = Pin::new(&mut revs_by_key).next().await.transpose()? {
                 while split_idx < splits.len() && splits[split_idx].cmp_key(&key) == Ordering::Less
