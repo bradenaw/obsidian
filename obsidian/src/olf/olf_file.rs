@@ -463,7 +463,7 @@ pub(crate) async fn dump_olf_file(olf: &OlfFile) -> anyhow::Result<()> {
         );
     }
     println!("    blocks");
-    for i in 0..ololf.index.len() {
+    for i in 0..olf.index.len() {
         println!("    == block {} ======", i);
         println!("    first key: [{}]", hexlify(&olf.index.get_key(i)),);
         println!("    block_end_offset: {}", olf.index.get_value(i));
