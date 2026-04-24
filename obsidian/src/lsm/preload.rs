@@ -8,9 +8,10 @@ use crate::lsm::index::IndexSnapshot;
 use crate::lsm::index::Keyspace;
 use crate::lsm::index::Level;
 use crate::lsm::memtable::Memtable;
+use crate::lsm::run::Run;
 use crate::lsm::Manifest;
-use crate::lsm::Run;
 use crate::lsm::RunId;
+use crate::olf::OlfFile;
 use crate::runtime::FileName;
 use crate::runtime::Storage;
 use crate::util::spawn_owned;
@@ -65,9 +66,9 @@ impl Preloader {
                     async move {
                         let _permit = semaphore.acquire().await;
                         let file = storage.get(FileName::Run(run_id)).await?;
-                        let run = Run::open(file).await;
+                        let run = Run::new(OlfFile::open(file).await?);
                         log::debug!("{:?} finished preload", run_id);
-                        run
+                        Ok(run)
                     }
                 })),
             );
@@ -97,7 +98,7 @@ impl Preloader {
 
         for (keyspace_id, keyspace_manifest) in &self.manifest.keyspaces {
             let mut keyspace = Keyspace {
-                l0_active: Arc::new(Memtable::new()),
+                l0_active: Arc::new(Memtable::new(*keyspace_id)),
                 l0_sealed: Vec::new(),
                 levels: vec![],
             };
@@ -123,11 +124,6 @@ impl Preloader {
         }
 
         Ok(Preloaded { snapshot })
-    }
-
-    async fn fetch(storage: Arc<dyn Storage>, run_id: RunId) -> anyhow::Result<Run> {
-        let file = storage.get(FileName::Run(run_id)).await?;
-        Ok(Run::open(file).await?)
     }
 }
 

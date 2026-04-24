@@ -5,7 +5,7 @@ use std::ops::Deref;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 
-use crate::lsm::util::PackedVec2;
+use crate::olf::util::PackedVec2;
 use crate::util::binary_search_by_idx;
 use crate::util::longest_shared_prefix;
 

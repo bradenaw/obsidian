@@ -14,15 +14,16 @@ use futures::FutureExt;
 use futures::Stream;
 use futures::StreamExt;
 use rand::Rng;
+use uuid::Uuid;
 
 use crate::lsm::index::Index;
 use crate::lsm::index::IndexSnapshot;
 use crate::lsm::index::Keyspace;
 use crate::lsm::memtable::Memtable;
-use crate::lsm::run::RunBuilder;
-use crate::lsm::LsmRevision;
-use crate::lsm::Run;
+use crate::lsm::run::Run;
 use crate::lsm::RunId;
+use crate::olf::OlfFile;
+use crate::olf::OlfFileBuilder;
 use crate::runtime::FileName;
 use crate::runtime::Storage;
 use crate::util::merge_sorted_streams;
@@ -32,6 +33,7 @@ use crate::util::WithBackground;
 use crate::Bound;
 use crate::KeyspaceId;
 use crate::Range;
+use crate::Revision;
 use crate::RevisionValue;
 use crate::Timestamp;
 
@@ -324,10 +326,10 @@ impl CompactorInner {
         Compaction,
         impl Future<Output = anyhow::Result<CompactionResult>>,
     )> {
-        if in_flight_from.contains(&run.id()) {
+        if in_flight_from.contains(&run.run_id()) {
             return None;
         }
-        if in_flight_into.contains(&run.id()) {
+        if in_flight_into.contains(&run.run_id()) {
             return None;
         }
 
@@ -336,7 +338,7 @@ impl CompactorInner {
             // next level down.
             let intersecting_runs = keyspace.levels[level_idx + 1].range(run.range());
 
-            let into: HashSet<_> = intersecting_runs.iter().map(|run| run.id()).collect();
+            let into: HashSet<_> = intersecting_runs.iter().map(|run| run.run_id()).collect();
             let conflict = into
                 .iter()
                 .any(|run_id| in_flight_from.contains(&run_id) || in_flight_into.contains(&run_id));
@@ -349,7 +351,7 @@ impl CompactorInner {
                 Compaction {
                     keyspace_id,
                     from_level: level_idx,
-                    from: HashSet::from([run.id()]),
+                    from: HashSet::from([run.run_id()]),
                     into,
                 },
                 Either::Left(self.compact_from(
@@ -364,7 +366,7 @@ impl CompactorInner {
             let run_idx = keyspace.levels[level_idx]
                 .runs
                 .iter()
-                .position(|other_run| other_run.id() == run.id())?;
+                .position(|other_run| other_run.run_id() == run.run_id())?;
 
             // If we're compacting the lowest level, then there's nothing to compact "into". We
             // compact the run along with its two neighbors since compaction can shrink a run via
@@ -373,7 +375,7 @@ impl CompactorInner {
                 ..cmp::min(run_idx + 1, keyspace.levels[level_idx].runs.len())];
 
             let conflict = siblings.iter().any(|run| {
-                in_flight_from.contains(&run.id()) || in_flight_into.contains(&run.id())
+                in_flight_from.contains(&run.run_id()) || in_flight_into.contains(&run.run_id())
             });
 
             if conflict {
@@ -384,7 +386,7 @@ impl CompactorInner {
                 Compaction {
                     keyspace_id,
                     from_level: level_idx,
-                    from: siblings.iter().map(|run| run.id()).collect(),
+                    from: siblings.iter().map(|run| run.run_id()).collect(),
                     into: HashSet::new(),
                 },
                 Either::Right(self.compact_max(keyspace_id, splits, siblings)),
@@ -407,7 +409,8 @@ impl CompactorInner {
             .l0_sealed
             .iter()
             .filter(|memtable| {
-                !in_flight_from.contains(&memtable.id()) && !in_flight_into.contains(&memtable.id())
+                !in_flight_from.contains(&memtable.run_id())
+                    && !in_flight_into.contains(&memtable.run_id())
             })
             .cloned()
             .collect();
@@ -426,7 +429,7 @@ impl CompactorInner {
             keyspace
                 .l0_sealed
                 .iter()
-                .filter(|memtable| in_flight_from.contains(&memtable.id()))
+                .filter(|memtable| in_flight_from.contains(&memtable.run_id()))
                 .map(|memtable| memtable.range()),
         );
 
@@ -439,8 +442,11 @@ impl CompactorInner {
         {
             let intersecting_runs = keyspace.levels[1].range(l0_available_range);
 
-            let from: HashSet<_> = l0_available.iter().map(|memtable| memtable.id()).collect();
-            let into: HashSet<_> = intersecting_runs.iter().map(|run| run.id()).collect();
+            let from: HashSet<_> = l0_available
+                .iter()
+                .map(|memtable| memtable.run_id())
+                .collect();
+            let into: HashSet<_> = intersecting_runs.iter().map(|run| run.run_id()).collect();
 
             let conflict = Iterator::chain(from.iter(), into.iter())
                 .any(|run_id| in_flight_from.contains(run_id) || in_flight_into.contains(run_id));
@@ -468,17 +474,17 @@ impl CompactorInner {
         into: &[Arc<Run>],
     ) -> impl Future<Output = anyhow::Result<CompactionResult>> {
         let remove: HashSet<_> = Iterator::chain(
-            from.iter().map(|memtable| memtable.id()),
-            into.iter().map(|run| run.id()),
+            from.iter().map(|memtable| memtable.run_id()),
+            into.iter().map(|run| run.run_id()),
         )
         .collect();
 
         log::trace!(
             "compacting l0 {:?} into {:?}",
             from.iter()
-                .map(|memtable| memtable.id())
+                .map(|memtable| memtable.run_id())
                 .collect::<Vec<_>>(),
-            into.iter().map(|run| run.id()).collect::<Vec<_>>(),
+            into.iter().map(|run| run.run_id()).collect::<Vec<_>>(),
         );
 
         spawn_owned({
@@ -492,10 +498,10 @@ impl CompactorInner {
                 log::trace!(
                     "compacted l0 {:?} + {:?}, producing {:?}",
                     from.iter()
-                        .map(|memtable| memtable.id())
+                        .map(|memtable| memtable.run_id())
                         .collect::<Vec<_>>(),
-                    into.iter().map(|run| run.id()).collect::<Vec<_>>(),
-                    add.iter().map(|run| run.id()).collect::<Vec<_>>(),
+                    into.iter().map(|run| run.run_id()).collect::<Vec<_>>(),
+                    add.iter().map(|run| run.run_id()).collect::<Vec<_>>(),
                 );
 
                 Ok(CompactionResult {
@@ -545,12 +551,15 @@ impl CompactorInner {
         log::trace!(
             "compacting l{} {:?} into {:?}",
             from_level,
-            from.id(),
-            into.iter().map(|run| run.id()).collect::<Vec<_>>(),
+            from.run_id(),
+            into.iter().map(|run| run.run_id()).collect::<Vec<_>>(),
         );
 
-        let remove =
-            Iterator::chain(iter::once(from.id()), into.iter().map(|run| run.id())).collect();
+        let remove = Iterator::chain(
+            iter::once(from.run_id()),
+            into.iter().map(|run| run.run_id()),
+        )
+        .collect();
 
         spawn_owned({
             let from = Arc::clone(from);
@@ -562,9 +571,9 @@ impl CompactorInner {
                 log::trace!(
                     "compacted l{} {:?} + {:?}, producing {:?}",
                     from_level,
-                    from.id(),
-                    into.iter().map(|run| run.id()).collect::<Vec<_>>(),
-                    add.iter().map(|run| run.id()).collect::<Vec<_>>(),
+                    from.run_id(),
+                    into.iter().map(|run| run.run_id()).collect::<Vec<_>>(),
+                    add.iter().map(|run| run.run_id()).collect::<Vec<_>>(),
                 );
                 Ok(CompactionResult {
                     keyspace_id,
@@ -603,10 +612,10 @@ impl CompactorInner {
     ) -> impl Future<Output = anyhow::Result<CompactionResult>> {
         log::trace!(
             "compacting lmax {:?}",
-            runs.iter().map(|run| run.id()).collect::<Vec<_>>(),
+            runs.iter().map(|run| run.run_id()).collect::<Vec<_>>(),
         );
 
-        let remove = runs.iter().map(|run| run.id()).collect();
+        let remove = runs.iter().map(|run| run.run_id()).collect();
 
         spawn_owned({
             let self_ = Arc::clone(self);
@@ -624,8 +633,8 @@ impl CompactorInner {
                     .await?;
                 log::trace!(
                     "compacted lmax {:?}, producing {:?}",
-                    runs.iter().map(|run| run.id()).collect::<Vec<_>>(),
-                    add.iter().map(|run| run.id()).collect::<Vec<_>>(),
+                    runs.iter().map(|run| run.run_id()).collect::<Vec<_>>(),
+                    add.iter().map(|run| run.run_id()).collect::<Vec<_>>(),
                 );
                 Ok(CompactionResult {
                     keyspace_id,
@@ -640,7 +649,7 @@ impl CompactorInner {
         &self,
         keyspace_id: KeyspaceId,
         splits: &[Bound<Vec<u8>>],
-        entries: impl Stream<Item = anyhow::Result<LsmRevision>> + Send,
+        entries: impl Stream<Item = anyhow::Result<Revision>> + Send,
     ) -> anyhow::Result<Vec<Run>> {
         let mut revs_by_key = group_by_key(entries.boxed()).boxed().peekable();
         let mut runs = Vec::new();
@@ -653,10 +662,15 @@ impl CompactorInner {
                 break;
             }
 
-            let id = RunId::new();
-            let mut writer = self.storage.put(FileName::Run(id)).await?;
-            let mut run =
-                RunBuilder::new(writer.deref_mut(), id, keyspace_id, self.block_size_target);
+            let uuid = Uuid::new_v4();
+            let file_name = FileName::Run(RunId::from(uuid));
+            let mut writer = self.storage.put(file_name.clone()).await?;
+            let mut builder = OlfFileBuilder::new(
+                writer.deref_mut(),
+                uuid,
+                keyspace_id,
+                self.block_size_target,
+            );
 
             while let Some((key, mut revs)) = Pin::new(&mut revs_by_key).next().await.transpose()? {
                 while split_idx < splits.len() && splits[split_idx].cmp_key(&key) == Ordering::Less
@@ -665,12 +679,13 @@ impl CompactorInner {
                 }
 
                 for (ts, value) in revs.drain(..) {
-                    run.push(LsmRevision {
-                        key: key.clone(),
-                        ts,
-                        value,
-                    })
-                    .await?;
+                    builder
+                        .push(Revision {
+                            key: (keyspace_id, key.clone()),
+                            ts,
+                            value,
+                        })
+                        .await?;
                 }
 
                 if let Some(Ok((key, revs))) =
@@ -679,7 +694,7 @@ impl CompactorInner {
                     let next_size_estimate = (key.len()
                         + revs.iter().map(|(_, value)| 8 + value.len()).sum::<usize>())
                         as u64;
-                    if run.size_estimate() + next_size_estimate > self.run_size_target {
+                    if builder.size_estimate() + next_size_estimate > self.run_size_target {
                         break;
                     }
 
@@ -690,9 +705,11 @@ impl CompactorInner {
                 }
             }
 
-            run.finish().await?;
+            builder.finish().await?;
             writer.shutdown().await?;
-            runs.push(Run::open(self.storage.get(FileName::Run(id)).await?).await?);
+            runs.push(Run::new(
+                OlfFile::open(self.storage.get(file_name).await?).await?,
+            ));
         }
         Ok(runs)
     }
@@ -703,18 +720,18 @@ impl CompactorInner {
 }
 
 fn group_by_key(
-    mut entries: impl Stream<Item = anyhow::Result<LsmRevision>> + Send + Unpin,
+    mut entries: impl Stream<Item = anyhow::Result<Revision>> + Send + Unpin,
 ) -> impl Stream<Item = anyhow::Result<(Vec<u8>, Vec<(Timestamp, RevisionValue)>)>> {
     try_stream! {
         let mut maybe_key: Option<Vec<u8>> = None;
         let mut revs = Vec::new();
 
         while let Some(rev) = entries.next().await.transpose()? {
-            if let Some(prev_key) = maybe_key.take_if(|key| *key != rev.key) {
+            if let Some(prev_key) = maybe_key.take_if(|key| *key != rev.key.1) {
                 yield (prev_key, std::mem::take(&mut revs));
             }
             if maybe_key.is_none() {
-                maybe_key = Some(rev.key);
+                maybe_key = Some(rev.key.1);
             }
             revs.push((rev.ts, rev.value));
         }
@@ -761,7 +778,7 @@ fn level_size_estimates(keyspace: &Keyspace, in_flight_from: &HashSet<RunId>) ->
 
     for i in 1..keyspace.levels.len() - 1 {
         for run in &keyspace.levels[i].runs {
-            if in_flight_from.contains(&run.id()) {
+            if in_flight_from.contains(&run.run_id()) {
                 result[i] -= run.size() as u64;
                 result[i + 1] += run.size() as u64;
             }

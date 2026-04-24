@@ -10,12 +10,13 @@ use anyhow::anyhow;
 use tokio::sync::Notify;
 
 use crate::lsm::memtable::Memtable;
+use crate::lsm::run::Run;
 use crate::lsm::KeyspaceManifest;
 use crate::lsm::LevelManifest;
 use crate::lsm::Manifest;
-use crate::lsm::Run;
 use crate::lsm::RunId;
 use crate::lsm::RunManifest;
+use crate::olf::OlfFile;
 use crate::runtime::FileName;
 use crate::runtime::Storage;
 use crate::util::binary_search_by_idx;
@@ -118,7 +119,7 @@ impl Index {
             }
 
             keyspace.l0_sealed.push(Arc::clone(&keyspace.l0_active));
-            keyspace.l0_active = Arc::new(Memtable::new());
+            keyspace.l0_active = Arc::new(Memtable::new(keyspace_id));
 
             Ok(())
         })
@@ -130,7 +131,7 @@ impl Index {
                 return Ok(());
             }
             let keyspace = Keyspace {
-                l0_active: Arc::new(Memtable::new()),
+                l0_active: Arc::new(Memtable::new(keyspace_id)),
                 l0_sealed: Vec::new(),
                 levels: vec![Level::new(), Level::new()],
             };
@@ -234,7 +235,7 @@ impl IndexSnapshot {
     async fn from_manifest(storage: &dyn Storage, manifest: Manifest) -> anyhow::Result<Self> {
         let mut keyspaces = HashMap::new();
         for (keyspace_id, keyspace_manifest) in manifest.keyspaces {
-            let keyspace = Keyspace::from_manifest(storage, keyspace_manifest).await?;
+            let keyspace = Keyspace::from_manifest(storage, keyspace_id, keyspace_manifest).await?;
             keyspaces.insert(keyspace_id, keyspace);
         }
 
@@ -268,6 +269,7 @@ pub(super) struct Keyspace {
 impl Keyspace {
     async fn from_manifest(
         storage: &dyn Storage,
+        keyspace_id: KeyspaceId,
         manifest: KeyspaceManifest,
     ) -> anyhow::Result<Self> {
         let mut levels = Vec::with_capacity(manifest.levels().len());
@@ -276,7 +278,9 @@ impl Keyspace {
             let mut runs = Vec::with_capacity(level_manifest.runs().len());
 
             for run_manifest in level_manifest.runs() {
-                let run = Run::open(storage.get(FileName::Run(run_manifest.run_id)).await?).await?;
+                let run = Run::new(
+                    OlfFile::open(storage.get(FileName::Run(run_manifest.run_id)).await?).await?,
+                );
                 runs.push(Arc::new(run));
             }
 
@@ -284,7 +288,7 @@ impl Keyspace {
         }
 
         Ok(Self {
-            l0_active: Arc::new(Memtable::new()),
+            l0_active: Arc::new(Memtable::new(keyspace_id)),
             l0_sealed: Vec::new(),
             levels,
         })
@@ -298,7 +302,7 @@ impl Keyspace {
 
             for run in &level.runs {
                 run_manifests.push(RunManifest {
-                    run_id: run.id(),
+                    run_id: run.run_id(),
                     range: run.range(),
                 });
             }
@@ -324,8 +328,8 @@ impl Keyspace {
 
         let mut l0_sealed = Vec::with_capacity(self.l0_sealed.len());
         for memtable in &self.l0_sealed {
-            if remove.contains(&memtable.id()) {
-                removed.insert(memtable.id());
+            if remove.contains(&memtable.run_id()) {
+                removed.insert(memtable.run_id());
                 continue;
             }
 
@@ -338,8 +342,8 @@ impl Keyspace {
         for (i, level) in self.levels.iter().enumerate() {
             let mut level_map = RangeMap::new();
             for run in &level.runs {
-                if remove.contains(&run.id()) {
-                    removed.insert(run.id());
+                if remove.contains(&run.run_id()) {
+                    removed.insert(run.run_id());
                     min_level = i;
                     continue;
                 }
@@ -354,7 +358,7 @@ impl Keyspace {
         min_level = min(min_level, self.levels.len() - 1);
 
         for run in add.into_iter() {
-            let run_id = run.id();
+            let run_id = run.run_id();
             let run_range = run.range();
 
             if levels_maps[min_level]

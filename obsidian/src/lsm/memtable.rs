@@ -2,25 +2,21 @@ use std::sync::RwLock;
 
 use crossbeam_skiplist::SkipMap;
 
-use crate::lsm::LsmRevision;
 use crate::lsm::RunId;
 use crate::util::hexlify;
 use crate::util::IteratorEither;
 use crate::Bound;
 use crate::Direction;
 use crate::HistoryRange;
+use crate::KeyspaceId;
 use crate::Range;
+use crate::Revision;
 use crate::RevisionValue;
 use crate::Timestamp;
 
-impl Default for Memtable {
-    fn default() -> Self {
-        Memtable::new()
-    }
-}
-
 pub(crate) struct Memtable {
-    id: RunId,
+    run_id: RunId,
+    keyspace_id: KeyspaceId,
     kvs: SkipMap<Vec<u8>, SkipMap<Timestamp, RevisionValue>>,
     stats: RwLock<MemtableStats>,
 }
@@ -31,9 +27,10 @@ struct MemtableStats {
 }
 
 impl Memtable {
-    pub fn new() -> Self {
+    pub fn new(keyspace_id: KeyspaceId) -> Self {
         Self {
-            id: RunId::new(),
+            run_id: RunId::new(),
+            keyspace_id,
             kvs: SkipMap::new(),
             stats: RwLock::new(MemtableStats {
                 size: 0,
@@ -42,8 +39,8 @@ impl Memtable {
         }
     }
 
-    pub fn id(&self) -> RunId {
-        self.id
+    pub fn run_id(&self) -> RunId {
+        self.run_id
     }
 
     pub fn size(&self) -> u64 {
@@ -63,7 +60,12 @@ impl Memtable {
     }
 
     pub fn insert(&self, k: Vec<u8>, ts: Timestamp, v: RevisionValue) -> u64 {
-        log::trace!("memtable {}: insert {}@{}", self.id, hexlify(&k[..]), ts);
+        log::trace!(
+            "memtable {}: insert {}@{}",
+            self.run_id,
+            hexlify(&k[..]),
+            ts
+        );
 
         let mut stats = self.stats.write().unwrap();
 
@@ -98,7 +100,7 @@ impl Memtable {
         ts: Timestamp,
         range: Range<&[u8]>,
         direction: Direction,
-    ) -> impl Iterator<Item = LsmRevision> + Send + '_ {
+    ) -> impl Iterator<Item = Revision> + Send + '_ {
         // TODO: Atomic this so we don't need to lock.
         let max_key_len = self.stats.read().unwrap().max_key_len;
         match range.to_std_ops_bounds(max_key_len) {
@@ -111,8 +113,8 @@ impl Memtable {
                             .value()
                             .range(Timestamp::ZERO..=ts)
                             .next_back()?;
-                        Some(LsmRevision {
-                            key: revisions_entry.key().clone(),
+                        Some(Revision {
+                            key: (self.keyspace_id, revisions_entry.key().clone()),
                             ts: *revision_entry.key(),
                             value: revision_entry.value().clone(),
                         })
@@ -154,15 +156,16 @@ impl Memtable {
         };
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = LsmRevision> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = Revision> + '_ {
+        let keyspace_id = self.keyspace_id;
         self.kvs
             .iter()
-            .map(|entry| {
+            .map(move |entry| {
                 let key = entry.key().clone();
 
                 self.history(&key, HistoryRange::All, Direction::Desc)
-                    .map(move |(ts, value)| LsmRevision {
-                        key: key.clone(),
+                    .map(move |(ts, value)| Revision {
+                        key: (keyspace_id, key.clone()),
                         ts,
                         value,
                     })

@@ -10,7 +10,6 @@ use crate::lsm::index::Index;
 use crate::lsm::index::IndexSnapshot;
 use crate::lsm::index::Keyspace;
 use crate::lsm::preload::Preloaded;
-use crate::lsm::LsmRevision;
 use crate::lsm::Manifest;
 use crate::runtime::Storage;
 use crate::util::hexlify;
@@ -119,14 +118,7 @@ impl Lsm {
             .scan_page(ts, range, direction, limit)
             .await?;
 
-        let page = page
-            .into_iter()
-            .map(|lsm_revision| Revision {
-                key: (keyspace_id, lsm_revision.key),
-                ts: lsm_revision.ts,
-                value: lsm_revision.value,
-            })
-            .collect();
+        let page = page.into_iter().collect();
 
         Ok((page, continue_cursor))
     }
@@ -222,7 +214,7 @@ impl Lsm {
         for (_, keyspace) in &index_snapshot.keyspaces {
             for level in &keyspace.levels {
                 for run in &level.runs {
-                    runs.push((&run.min_key, run.size()));
+                    runs.push((run.min_key(), run.size()));
                 }
             }
         }
@@ -337,7 +329,7 @@ impl<'a> KeyspaceReader<'a> {
         range: Range<&[u8]>,
         direction: Direction,
         limit: usize,
-    ) -> anyhow::Result<(Vec<LsmRevision>, Option<Range<Vec<u8>>>)> {
+    ) -> anyhow::Result<(Vec<Revision>, Option<Range<Vec<u8>>>)> {
         if range.is_empty() {
             return Ok((vec![], None));
         }
@@ -410,11 +402,7 @@ impl<'a> KeyspaceReader<'a> {
             )
             .map(|result| {
                 result.map(
-                    |OrdEqByFirst((Reverse(key), Reverse(ts)), value)| LsmRevision {
-                        key,
-                        ts,
-                        value,
-                    },
+                    |OrdEqByFirst((Reverse(key), Reverse(ts)), value)| Revision { key, ts, value },
                 )
             })
             .peekable()
@@ -423,7 +411,7 @@ impl<'a> KeyspaceReader<'a> {
 
         let mut page = vec![];
         while let Some(revision) = merged.next().await.transpose()? {
-            if let Some(LsmRevision {
+            if let Some(Revision {
                 key: last_key,
                 ts: last_ts,
                 ..
@@ -433,7 +421,7 @@ impl<'a> KeyspaceReader<'a> {
                     assert!(
                         *last_ts > revision.ts,
                         "revisions for {} not in reverse timestamp order: got {} followed by {}",
-                        hexlify(last_key),
+                        hexlify(&last_key.1[..]),
                         *last_ts,
                         revision.ts
                     );
@@ -447,14 +435,14 @@ impl<'a> KeyspaceReader<'a> {
         }
 
         let continue_cursor = match page.last() {
-            Some(LsmRevision { key: last_key, .. }) => Some(match direction {
+            Some(Revision { key: last_key, .. }) => Some(match direction {
                 Direction::Asc => Range {
-                    lower: Bound::After(last_key.clone()),
+                    lower: Bound::After(last_key.1.clone()),
                     upper: range.upper.clone().map(Vec::from),
                 },
                 Direction::Desc => Range {
                     lower: range.lower.clone().map(Vec::from),
-                    upper: Bound::Before(last_key.clone()),
+                    upper: Bound::Before(last_key.1.clone()),
                 },
             }),
             None => None,

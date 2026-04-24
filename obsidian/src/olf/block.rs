@@ -9,9 +9,9 @@ use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use futures::Stream;
 
-use crate::lsm::util::PackedVec2;
-use crate::lsm::util::PrefixCompressedKV;
-use crate::lsm::LsmRevision;
+use crate::olf::block_revision::BlockRevision;
+use crate::olf::util::PackedVec2;
+use crate::olf::util::PrefixCompressedKV;
 use crate::runtime::FileReader;
 use crate::util::binary_search_by_idx;
 use crate::util::byte_width;
@@ -99,7 +99,7 @@ impl<'a> Block<'a> {
         ts: Timestamp,
         range: Range<Vec<u8>>,
         direction: Direction,
-    ) -> impl Stream<Item = anyhow::Result<LsmRevision>> + '_ {
+    ) -> impl Stream<Item = anyhow::Result<BlockRevision>> + '_ {
         try_stream! {
             let key_idxs = match direction {
                 Direction::Asc => {
@@ -142,7 +142,7 @@ impl<'a> Block<'a> {
                 let ts = versions.ts(version_idx);
                 let value = self.value(&versions, version_idx).await?;
 
-                yield LsmRevision { key, ts, value };
+                yield BlockRevision { key, ts, value };
             }
         }
     }
@@ -151,7 +151,7 @@ impl<'a> Block<'a> {
         &self,
         ts: Timestamp,
         range: Range<Vec<u8>>,
-    ) -> impl Stream<Item = anyhow::Result<LsmRevision>> + '_ {
+    ) -> impl Stream<Item = anyhow::Result<BlockRevision>> + '_ {
         try_stream! {
             let upper_key_idx = binary_search_by_idx(
                     self.key_index.len(),
@@ -178,7 +178,7 @@ impl<'a> Block<'a> {
                 let ts = versions.ts(version_idx);
                 let value = self.value(&versions, version_idx).await?;
 
-                yield LsmRevision { key, ts, value };
+                yield BlockRevision { key, ts, value };
             }
         }
     }
@@ -231,9 +231,9 @@ impl<'a> Block<'a> {
         }
     }
 
-    /// Produces all revisions contained in this block in LsmRevision's natural ordering: (key,
+    /// Produces all revisions contained in this block in BlockRevision's natural ordering: (key,
     /// Reverse(ts)).
-    pub(super) fn stream(&self) -> impl Stream<Item = anyhow::Result<LsmRevision>> + '_ {
+    pub(super) fn stream(&self) -> impl Stream<Item = anyhow::Result<BlockRevision>> + '_ {
         try_stream! {
             for j in 0..self.key_index.len() {
                 let key = self.key_index.get_key(j);
@@ -241,7 +241,7 @@ impl<'a> Block<'a> {
                 for k in 0..versions.len() {
                     let ts = versions.ts(k);
                     let value = self.value(&versions, k).await?;
-                    yield LsmRevision{key: key.clone(), ts, value};
+                    yield BlockRevision{key: key.clone(), ts, value};
                 }
             }
         }
@@ -301,7 +301,7 @@ impl BlockBuilder {
         }
     }
 
-    pub(super) fn push(&mut self, revision: LsmRevision) -> anyhow::Result<()> {
+    pub(super) fn push(&mut self, revision: BlockRevision) -> anyhow::Result<()> {
         let key_len = if self.buffer.contains_key(&revision.key) {
             0
         } else if let Some((last_key, _)) = self.buffer.last_key_value() {
@@ -415,7 +415,7 @@ impl BlockBuilder {
         // barfoobazhello
         // ^  ^  ^  ^
         //
-        // And we store a list of (timestamp, tombstone, value_offset) in LsmRevision order.
+        // And we store a list of (timestamp, tombstone, value_offset) in BlockRevision order.
         // [
         //   (5, false, 0),
         //   (2, false, 3),
@@ -709,8 +709,8 @@ mod tests {
     use futures::TryStreamExt;
 
     use super::Block;
-    use crate::lsm::block::BlockBuilder;
-    use crate::lsm::LsmRevision;
+    use super::BlockBuilder;
+    use crate::olf::block_revision::BlockRevision;
     use crate::test::MemFileReader;
     use crate::Bound;
     use crate::Direction;
@@ -725,7 +725,7 @@ mod tests {
         let mut builder = BlockBuilder::new();
         for (key, values) in buffer {
             for (ts, value) in values {
-                builder.push(LsmRevision {
+                builder.push(BlockRevision {
                     key: key.clone(),
                     ts: *ts,
                     value: value.clone(),
@@ -886,7 +886,7 @@ mod tests {
                     expected
                         .clone()
                         .into_iter()
-                        .map(|(key, ts, tombstone)| LsmRevision {
+                        .map(|(key, ts, tombstone)| BlockRevision {
                             key: (key).into(),
                             ts: Timestamp(ts as u64),
                             value: match tombstone {
@@ -894,7 +894,7 @@ mod tests {
                                 true => RevisionValue::Tombstone,
                             },
                         })
-                        .collect::<Vec<LsmRevision>>(),
+                        .collect::<Vec<BlockRevision>>(),
                     "direction={:?}",
                     direction,
                 );

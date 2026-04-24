@@ -6,18 +6,18 @@ use byteorder::BigEndian;
 use byteorder::ByteOrder;
 use futures::TryStreamExt;
 use proptest::prelude::*;
+use uuid::Uuid;
 
 use crate::lsm::index::Keyspace;
 use crate::lsm::index::Level;
 use crate::lsm::memtable::Memtable;
-use crate::lsm::run::dump_run;
 use crate::lsm::run::Run;
-use crate::lsm::run::RunBuilder;
 use crate::lsm::KeyspaceReader;
 use crate::lsm::Lsm;
 use crate::lsm::LsmOptions;
-use crate::lsm::LsmRevision;
-use crate::lsm::RunId;
+use crate::olf::dump_olf_file;
+use crate::olf::OlfFile;
+use crate::olf::OlfFileBuilder;
 use crate::test::MemFileWriter;
 use crate::test::MemStorage;
 use crate::util::binary_search_by_idx;
@@ -348,9 +348,11 @@ async fn test_history_page() -> anyhow::Result<()> {
         ("d", b"     o|o o|x o| |o  "),
     ];
 
-    let keyspace = keyspace_from_diagram(diagram).await?;
+    let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
+    let keyspace = keyspace_from_diagram(keyspace_id, diagram).await?;
 
     async fn check(
+        keyspace_id: KeyspaceId,
         keyspace: &Keyspace,
         key: &[u8],
         range: HistoryRange,
@@ -389,7 +391,8 @@ async fn test_history_page() -> anyhow::Result<()> {
                     expected
                         .into_iter()
                         .map(|(ts, is_tombstone)| {
-                            let revision = lsm_diagram_revision(key, *ts, *is_tombstone);
+                            let revision =
+                                lsm_diagram_revision(keyspace_id, key, *ts, *is_tombstone);
                             (revision.ts, revision.value)
                         })
                         .collect::<Vec<_>>(),
@@ -414,9 +417,17 @@ async fn test_history_page() -> anyhow::Result<()> {
         (9, false),
     ];
 
-    check(&keyspace, b"b", HistoryRange::All, &all_b_versions).await?;
+    check(
+        keyspace_id,
+        &keyspace,
+        b"b",
+        HistoryRange::All,
+        &all_b_versions,
+    )
+    .await?;
 
     check(
+        keyspace_id,
         &keyspace,
         b"b",
         HistoryRange::Between(Timestamp(1), Timestamp(9)),
@@ -425,6 +436,7 @@ async fn test_history_page() -> anyhow::Result<()> {
     .await?;
 
     check(
+        keyspace_id,
         &keyspace,
         b"b",
         HistoryRange::Until(Timestamp(9)),
@@ -433,6 +445,7 @@ async fn test_history_page() -> anyhow::Result<()> {
     .await?;
 
     check(
+        keyspace_id,
         &keyspace,
         b"b",
         HistoryRange::Since(Timestamp(1)),
@@ -563,7 +576,7 @@ async fn dump_keyspace(keyspace: &Keyspace) -> anyhow::Result<()> {
         let memtable = &keyspace.l0_active;
         println!(
             "  {} ({} bytes) {:?}",
-            memtable.id(),
+            memtable.run_id(),
             memtable.size(),
             memtable.range(),
         );
@@ -572,7 +585,7 @@ async fn dump_keyspace(keyspace: &Keyspace) -> anyhow::Result<()> {
     for memtable in &keyspace.l0_sealed {
         println!(
             "  {} ({} bytes) {:?}",
-            memtable.id(),
+            memtable.run_id(),
             memtable.size(),
             memtable.range(),
         );
@@ -584,7 +597,12 @@ async fn dump_keyspace(keyspace: &Keyspace) -> anyhow::Result<()> {
     {
         println!("l{} ({} bytes)", i, level.size());
         for run in &level.runs {
-            println!("  {} ({} bytes) {:?}", run.id(), run.size(), run.range());
+            println!(
+                "  {} ({} bytes) {:?}",
+                run.run_id(),
+                run.size(),
+                run.range()
+            );
         }
     }
     println!("============");
@@ -595,7 +613,7 @@ async fn dump_keyspace(keyspace: &Keyspace) -> anyhow::Result<()> {
         let memtable = &keyspace.l0_active;
         println!(
             "  {} ({} bytes) {:?}",
-            memtable.id(),
+            memtable.run_id(),
             memtable.size(),
             memtable.range(),
         );
@@ -605,7 +623,7 @@ async fn dump_keyspace(keyspace: &Keyspace) -> anyhow::Result<()> {
     for memtable in &keyspace.l0_sealed {
         println!(
             "  {} ({} bytes) {:?}",
-            memtable.id(),
+            memtable.run_id(),
             memtable.size(),
             memtable.range(),
         );
@@ -618,8 +636,13 @@ async fn dump_keyspace(keyspace: &Keyspace) -> anyhow::Result<()> {
     {
         println!("l{} ({} bytes)", i, level.size());
         for run in &level.runs {
-            println!("  {} ({} bytes) {:?}", run.id(), run.size(), run.range());
-            dump_run(&run).await?;
+            println!(
+                "  {} ({} bytes) {:?}",
+                run.run_id(),
+                run.size(),
+                run.range()
+            );
+            dump_olf_file(&run).await?;
         }
     }
     println!("============");
@@ -628,6 +651,7 @@ async fn dump_keyspace(keyspace: &Keyspace) -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_keyspace_from_diagram() -> anyhow::Result<()> {
+    let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
     let diagram = vec![
         //                         1
         //   ts= 1 2 3 4 5 6 7 8 9 0
@@ -640,7 +664,7 @@ async fn test_keyspace_from_diagram() -> anyhow::Result<()> {
         ("d", b"     o|o o|x o| |o  "),
     ];
 
-    let keyspace = keyspace_from_diagram(diagram).await?;
+    let keyspace = keyspace_from_diagram(keyspace_id, diagram).await?;
 
     let a = "a";
     let b = "b";
@@ -650,18 +674,18 @@ async fn test_keyspace_from_diagram() -> anyhow::Result<()> {
     assert_eq!(
         keyspace.l0_active.iter().collect::<Vec<_>>(),
         vec![
-            lsm_diagram_revision(b.as_bytes(), 9, false),
-            lsm_diagram_revision(d.as_bytes(), 9, false),
+            lsm_diagram_revision(keyspace_id, b.as_bytes(), 9, false),
+            lsm_diagram_revision(keyspace_id, d.as_bytes(), 9, false),
         ],
     );
     assert_eq!(
         keyspace.l0_sealed[0].iter().collect::<Vec<_>>(),
         vec![
-            lsm_diagram_revision(a.as_bytes(), 9, false),
-            lsm_diagram_revision(a.as_bytes(), 8, false),
-            lsm_diagram_revision(b.as_bytes(), 8, true),
-            lsm_diagram_revision(c.as_bytes(), 9, true),
-            lsm_diagram_revision(c.as_bytes(), 8, false),
+            lsm_diagram_revision(keyspace_id, a.as_bytes(), 9, false),
+            lsm_diagram_revision(keyspace_id, a.as_bytes(), 8, false),
+            lsm_diagram_revision(keyspace_id, b.as_bytes(), 8, true),
+            lsm_diagram_revision(keyspace_id, c.as_bytes(), 9, true),
+            lsm_diagram_revision(keyspace_id, c.as_bytes(), 8, false),
         ],
     );
 
@@ -705,9 +729,9 @@ async fn test_keyspace_from_diagram() -> anyhow::Result<()> {
                 .map(|run| {
                     run.into_iter()
                         .map(|(key, ts, is_tombstone)| {
-                            lsm_diagram_revision(key.as_bytes(), ts, is_tombstone)
+                            lsm_diagram_revision(keyspace_id, key.as_bytes(), ts, is_tombstone)
                         })
-                        .collect::<Vec<LsmRevision>>()
+                        .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>()
         })
@@ -721,9 +745,14 @@ fn lsm_diagram_value(key: &[u8], ts: usize) -> RevisionValue {
     RevisionValue::Regular(format!("{:?} {}", key, ts).into())
 }
 
-fn lsm_diagram_revision(key: &[u8], ts: usize, is_tombstone: bool) -> LsmRevision {
-    LsmRevision {
-        key: key.into(),
+fn lsm_diagram_revision(
+    keyspace_id: KeyspaceId,
+    key: &[u8],
+    ts: usize,
+    is_tombstone: bool,
+) -> Revision {
+    Revision {
+        key: (keyspace_id, key.into()),
         ts: Timestamp(ts as u64),
         value: match is_tombstone {
             false => lsm_diagram_value(key, ts),
@@ -732,19 +761,24 @@ fn lsm_diagram_revision(key: &[u8], ts: usize, is_tombstone: bool) -> LsmRevisio
     }
 }
 
-async fn keyspace_from_diagram(diagram: Vec<(&str, &[u8])>) -> anyhow::Result<Keyspace> {
+async fn keyspace_from_diagram(
+    keyspace_id: KeyspaceId,
+    diagram: Vec<(&str, &[u8])>,
+) -> anyhow::Result<Keyspace> {
     fn find_touching(
+        keyspace_id: KeyspaceId,
         diagram: &[(&str, &[u8])],
         visited: &mut HashSet<(usize, usize)>,
         x: usize,
         y: usize,
-    ) -> Vec<LsmRevision> {
+    ) -> Vec<Revision> {
         fn find_touching_inner(
+            keyspace_id: KeyspaceId,
             diagram: &[(&str, &[u8])],
             visited: &mut HashSet<(usize, usize)>,
             x: usize,
             y: usize,
-            out: &mut Vec<LsmRevision>,
+            out: &mut Vec<Revision>,
         ) {
             if visited.contains(&(x, y)) {
                 return;
@@ -752,16 +786,20 @@ async fn keyspace_from_diagram(diagram: Vec<(&str, &[u8])>) -> anyhow::Result<Ke
             visited.insert((x, y));
 
             let key_str = diagram[y].0;
-            let key = key_str.as_bytes().to_vec();
+            let key_bytes = key_str.as_bytes().to_vec();
             let ts = Timestamp((x / 2 + 1) as u64);
 
             if let Some(value) = match diagram[y].1[x] {
-                b'o' => Some(lsm_diagram_value(&key, ts.0 as usize)),
+                b'o' => Some(lsm_diagram_value(&key_bytes, ts.0 as usize)),
                 b'x' => Some(RevisionValue::Tombstone),
                 b' ' => None,
                 _ => return,
             } {
-                out.push(LsmRevision { key, ts, value });
+                out.push(Revision {
+                    key: (keyspace_id, key_bytes),
+                    ts,
+                    value,
+                });
             }
 
             for (dx, dy) in [(0isize, -1isize), (1, 0), (0, 1), (-1, 0)] {
@@ -776,45 +814,52 @@ async fn keyspace_from_diagram(diagram: Vec<(&str, &[u8])>) -> anyhow::Result<Ke
                     continue;
                 }
 
-                find_touching_inner(diagram, visited, next_x as usize, next_y as usize, out);
+                find_touching_inner(
+                    keyspace_id,
+                    diagram,
+                    visited,
+                    next_x as usize,
+                    next_y as usize,
+                    out,
+                );
             }
         }
 
         let mut out = vec![];
-        find_touching_inner(diagram, visited, x, y, &mut out);
+        find_touching_inner(keyspace_id, diagram, visited, x, y, &mut out);
         out
     }
 
     let mut visited = HashSet::new();
 
     let x_max = diagram[0].1.len() - 1;
-    let l0_active_revisions = find_touching(&diagram[..], &mut visited, x_max, 0);
-    let l0_active = Memtable::new();
+    let l0_active_revisions = find_touching(keyspace_id, &diagram[..], &mut visited, x_max, 0);
+    let l0_active = Memtable::new(keyspace_id);
     for revision in l0_active_revisions {
-        l0_active.insert(revision.key, revision.ts, revision.value);
+        l0_active.insert(revision.key.1, revision.ts, revision.value);
     }
     let mut keyspace = Keyspace {
         l0_active: Arc::new(l0_active),
-        l0_sealed: vec![Arc::new(Memtable::new())],
+        l0_sealed: vec![Arc::new(Memtable::new(keyspace_id))],
         levels: vec![Level { runs: Vec::new() }],
     };
     for x in (0..=x_max).rev().filter(|x| x % 2 == 1) {
         let mut level = Level { runs: Vec::new() };
         for y in (0..diagram.len()).filter(|y| y % 2 == 0) {
-            let revisions = find_touching(&diagram[..], &mut visited, x, y);
+            let revisions = find_touching(keyspace_id, &diagram[..], &mut visited, x, y);
             if revisions.is_empty() {
                 continue;
             }
 
             if keyspace.l0_sealed[0].is_empty() {
                 for revision in revisions {
-                    keyspace.l0_sealed[0].insert(revision.key, revision.ts, revision.value);
+                    keyspace.l0_sealed[0].insert(revision.key.1, revision.ts, revision.value);
                 }
             } else {
                 let mut file_writer = MemFileWriter::new();
-                let mut run_builder = RunBuilder::new(
+                let mut run_builder = OlfFileBuilder::new(
                     &mut file_writer,
-                    RunId::new(),
+                    Uuid::new_v4(),
                     KeyspaceId(ColoGroupId(1), 1),
                     1024, // block_size_target
                 );
@@ -822,7 +867,7 @@ async fn keyspace_from_diagram(diagram: Vec<(&str, &[u8])>) -> anyhow::Result<Ke
                     run_builder.push(revision).await?;
                 }
                 run_builder.finish().await?;
-                let run = Run::open(Arc::new(file_writer.into_reader())).await?;
+                let run = Run::new(OlfFile::open(Arc::new(file_writer.into_reader())).await?);
                 level.runs.push(Arc::new(run));
             }
         }

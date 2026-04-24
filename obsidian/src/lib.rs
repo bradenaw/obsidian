@@ -11,6 +11,7 @@ mod lsm;
 mod meta;
 mod node;
 mod obsidian;
+mod olf;
 mod replica;
 mod router;
 mod rtest;
