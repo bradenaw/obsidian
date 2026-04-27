@@ -10,20 +10,26 @@ use crate::lsm::Lsm;
 use crate::lsm::LsmOptions;
 use crate::meta::MetaKey;
 use crate::meta::MetaReader;
+use crate::meta::MetaState;
 use crate::meta::MetaSubscriber;
 use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::meta::SyncType;
+use crate::meta::TabletState;
 use crate::runtime::Meta;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
 use crate::runtime::Tablet;
 use crate::tablet::DataTablet;
+use crate::tablet::DataTablet2;
+use crate::tablet::HydratingTablet;
 use crate::tablet::MetaTablet;
 use crate::tablet::ShardMetaTablet;
 use crate::tablet::TabletJournalWriter;
+use crate::types::ranges_to_splits;
 use crate::util::Retry;
 use crate::util::WithBackground;
+use crate::Bound;
 use crate::ColoGroupId;
 use crate::InternalError;
 use crate::JournalEntry;
@@ -71,23 +77,24 @@ impl Shard {
             shards.clone(),
         );
 
-        let init_tablets: HashMap<TabletId, Arc<dyn Tablet + 'static>> = {
-            let mut init_tablets = HashMap::new();
+        let meta_tablet = if shard_id == TabletId::META.0 {
+            let meta_lsm = match lsms.remove(&TabletId::META) {
+                Some(meta_lsm) => meta_lsm,
+                None => Lsm::empty(lsm_options.clone(), Arc::clone(&storage)).await?,
+            };
+            Some(MetaTablet::new(
+                meta_lsm,
+                Arc::new(ShardTabletJournalWriter::new(
+                    TabletId::META,
+                    Arc::clone(&journal),
+                )),
+            ))
+        } else {
+            None
+        };
 
-            if shard_id == TabletId::META.0 {
-                let meta_lsm = match lsms.remove(&TabletId::META) {
-                    Some(meta_lsm) => meta_lsm,
-                    None => Lsm::empty(lsm_options.clone(), Arc::clone(&storage)).await?,
-                };
-                let meta_tablet = MetaTablet::new(
-                    meta_lsm,
-                    Arc::new(ShardTabletJournalWriter::new(
-                        TabletId::META,
-                        Arc::clone(&journal),
-                    )),
-                );
-                init_tablets.insert(TabletId::META, Arc::new(meta_tablet) as Arc<dyn Tablet>);
-            }
+        let init_tablets: HashMap<TabletId, Arc<DataTablet2>> = {
+            let mut init_tablets = HashMap::new();
 
             for (tablet_id, lsm) in lsms.into_iter() {
                 // TODO: Move to shard_meta_tablet.
@@ -187,7 +194,8 @@ struct ShardInner {
     lsm_options: LsmOptions,
 
     shard_meta_tablet: Arc<ShardMetaTablet>,
-    tablets: ShardedLock<HashMap<TabletId, Arc<dyn Tablet + 'static>>>,
+    meta_tablet: Option<MetaTablet>, // Present only if id==ShardId::META.
+    tablets: ShardedLock<HashMap<TabletId, Arc<DataTablet2>>>,
 }
 
 impl ShardInner {
@@ -286,6 +294,145 @@ impl ShardInner {
         }
         Ok(())
     }
+
+    fn new_data_tablet(
+        &self,
+        tablet_id: TabletId,
+        tablet_metadata: ShardTabletMetadata,
+        lsm: Lsm,
+    ) -> anyhow::Result<DataTablet2> {
+        Ok(match tablet_metadata.state {
+            TabletState::Active => DataTablet2::new_active(DataTablet::new(
+                tablet_id,
+                tablet_metadata.colo_group_id,
+                tablet_metadata.range,
+                lsm,
+                Arc::new(ShardTabletJournalWriter::new(
+                    tablet_id,
+                    Arc::clone(&self.journal),
+                )),
+                Arc::clone(&self.meta_synced),
+                Arc::clone(&self.storage),
+                Arc::clone(&self.shards),
+            )),
+            TabletState::Hydrating => {
+                let srcs = if let Some(TabletTransfer::Dst { srcs }) = tablet_metadata.transfer {
+                    srcs
+                } else {
+                    return Err(anyhow!(
+                        "{:?} is in state {:?} but does not have any sources",
+                        tablet_id,
+                        TabletState::Hydrating
+                    ));
+                };
+
+                DataTablet2::new_hydrating(HydratingTablet::new(
+                    tablet_id,
+                    tablet_metadata.colo_group_id,
+                    tablet_metadata.range,
+                    self.lsm_options.clone(),
+                    Arc::clone(&self.storage),
+                    Arc::clone(&self.shards),
+                    Arc::new(ShardTabletJournalWriter::new(
+                        tablet_id,
+                        Arc::clone(&self.journal),
+                    )),
+                    srcs,
+                ))
+            }
+            _ => {
+                todo!()
+            }
+        })
+    }
+
+    async fn empty_or_transition_tablet(
+        &self,
+        tablet_id: TabletId,
+        tablet_metadata: ShardTabletMetadata,
+    ) -> anyhow::Result<()> {
+        let mut tablets = self.tablets.write().unwrap();
+        if let Some(tablet) = tablets.get(&tablet_id) {
+            match tablet_metadata.state {
+                TabletState::Defunct => {
+                    tablet.transition_defunct().await?;
+                }
+                TabletState::Hydrating => {
+                    if !tablet.is_hydrating().await {
+                        return Err(anyhow!(
+                            "{:?}'s state is intended to be {:?}, but cannot transition to it",
+                            tablet_id,
+                            TabletState::Hydrating
+                        ));
+                    }
+                }
+                TabletState::Active => {
+                    tablet.transition_active().await?;
+                }
+                TabletState::Frozen => {
+                    tablet.transition_active().await?;
+                }
+            }
+            return Ok(());
+        }
+
+        tablets.insert(
+            tablet_id,
+            Arc::new(self.new_data_tablet(
+                tablet_id,
+                tablet_metadata,
+                Lsm::empty(self.lsm_options.clone(), Arc::clone(&self.storage)).await?,
+            )?),
+        );
+
+        Ok(())
+    }
+
+    async fn shard_tablet_metadata(
+        tablet_id: TabletId,
+        snapshot: MetaSyncedSnapshot,
+    ) -> anyhow::Result<ShardTabletMetadata> {
+        let tablet_metadata = snapshot.tablet_metadata(tablet_id).await?;
+
+        let apparent_tablet_state = match tablet_metadata.state {
+            MetaState::Stable(state) => state,
+            MetaState::Transitioning(_, next_state) => next_state,
+        };
+
+        let tablet_transfer = if let Some(transfer_id) = tablet_metadata.transfer_id {
+            let transfer_metadata = snapshot.transfer_metadata(transfer_id).await?;
+
+            Some(if transfer_metadata.dsts.contains(&tablet_id) {
+                TabletTransfer::Dst {
+                    srcs: transfer_metadata.srcs.clone(),
+                }
+            } else if transfer_metadata.srcs.contains(&tablet_id) {
+                let mut dst_ranges = vec![];
+                for dst_tablet_id in transfer_metadata.dsts {
+                    let dst_tablet_metadata = snapshot.tablet_metadata(dst_tablet_id).await?;
+                    dst_ranges.push(dst_tablet_metadata.range);
+                }
+
+                let splits = ranges_to_splits(dst_ranges)?;
+                TabletTransfer::Src { splits }
+            } else {
+                return Err(anyhow!(
+                    "{:?} is marked with {:?} but is neither src nor dst",
+                    tablet_id,
+                    transfer_id
+                ));
+            })
+        } else {
+            None
+        };
+
+        Ok(ShardTabletMetadata {
+            colo_group_id: tablet_metadata.colo_group_id,
+            range: tablet_metadata.range.clone(),
+            state: apparent_tablet_state,
+            transfer: tablet_transfer,
+        })
+    }
 }
 
 #[async_trait]
@@ -325,4 +472,16 @@ impl TabletJournalWriter for ShardTabletJournalWriter {
             })
             .await
     }
+}
+
+struct ShardTabletMetadata {
+    colo_group_id: ColoGroupId,
+    range: Range<Vec<u8>>,
+    state: TabletState,
+    transfer: Option<TabletTransfer>,
+}
+
+enum TabletTransfer {
+    Src { splits: Vec<Bound<Vec<u8>>> },
+    Dst { srcs: Vec<TabletId> },
 }

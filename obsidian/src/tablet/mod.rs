@@ -1,4 +1,6 @@
 mod data_tablet;
+mod data_tablet2;
+mod hydrating_tablet;
 mod lock_mgr;
 mod meta_tablet;
 mod protected;
@@ -11,6 +13,10 @@ mod tests;
 
 #[allow(unused_imports)]
 pub(crate) use data_tablet::DataTablet;
+#[allow(unused_imports)]
+pub(crate) use data_tablet2::DataTablet2;
+#[allow(unused_imports)]
+pub(crate) use hydrating_tablet::HydratingTablet;
 #[allow(unused_imports)]
 pub(crate) use meta_tablet::MetaTablet;
 #[allow(unused_imports)]

@@ -36,7 +36,6 @@ use crate::tablet::tablet_journal_writer::TabletJournalWriter;
 use crate::util::encode;
 use crate::util::spawn_owned;
 use crate::util::Decode;
-use crate::util::OwnedJoinHandle;
 use crate::util::Retry;
 use crate::util::WithBackground;
 use crate::Bound;
@@ -67,28 +66,6 @@ struct DataTabletInner {
     storage: Arc<dyn Storage>,
     shards: Arc<dyn Shards>,
     prepare_sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
-
-    // Only Some when the TabletState::Hydrating.
-    hydration: Mutex<Option<Hydration>>,
-}
-
-struct Hydration {
-    task: OwnedJoinHandle<()>,
-    set_state: tokio::sync::watch::Sender<HydrationState>,
-    state: tokio::sync::watch::Receiver<HydrationState>,
-}
-
-#[derive(Clone, Debug)]
-enum HydrationState {
-    // Hydration has been started but we might still have no data.
-    Started,
-    // We have most of the data, but the source(s) are still receiving writes, so even if we have
-    // everything we know about it might not be everything.
-    Mostly,
-    // Source(s) are frozen, one more cycle will have everything.
-    Catchup,
-    // Cycle after 'catchup' finished.
-    Done,
 }
 
 #[async_trait]
@@ -339,7 +316,6 @@ impl DataTablet {
             storage: storage,
             shards: shards,
             prepare_sender: prepare_sender.clone(),
-            hydration: Mutex::new(None),
         }))));
 
         tablet.0.spawn(async |inner| {
@@ -360,6 +336,25 @@ impl DataTablet {
         meta_synced.subscribe(&tablet.0);
 
         tablet
+    }
+
+    pub fn tablet_id(&self) -> TabletId {
+        self.0.inner.tablet_id
+    }
+
+    pub fn set_splits(&self, splits: Vec<Bound<Vec<u8>>>) {
+        self.0.inner.lsm.set_splits(splits);
+    }
+
+    pub fn set_state(&self, tablet_state: TabletState) -> anyhow::Result<()> {
+        match tablet_state {
+            TabletState::Active | TabletState::Frozen => {}
+            _ => {
+                return Err(anyhow!("cannot set tablet state to {:?}", tablet_state));
+            }
+        }
+        self.0.inner.lsm.set_state(tablet_state);
+        Ok(())
     }
 }
 
@@ -633,126 +628,6 @@ impl DataTabletInner {
         Ok(())
     }
 
-    async fn hydrate(&self, srcs: &[TabletId]) -> anyhow::Result<()> {
-        // We need the run IDs of the source and destination to match, if we compact we'll
-        // diverge.
-        self.inner.lsm.pause_compaction().await;
-
-        let mut preloader = Preloader::new(Arc::clone(&self.storage));
-
-        let mut rounds_with_completed = 0;
-
-        let mut src_manifests = Vec::with_capacity(srcs.len());
-        for _ in 0..srcs.len() {
-            src_manifests.push(Manifest::empty());
-        }
-
-        loop {
-            // True if there aren't partially-overlapping runs, so that once we do preloader.load()
-            // we have all of the data we were aware of.
-            let mut complete = true;
-
-            let done_after_round = matches!(
-                *self
-                    .hydration
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("hydration cancelled"))?
-                    .state
-                    .borrow(),
-                HydrationState::Catchup,
-            );
-
-            let mut any_changed = false;
-            for (i, src_id) in srcs.iter().enumerate() {
-                let src = self.shards.tablet(*src_id)?;
-                let manifest = src.manifest().await?;
-
-                for (_, _, run_manifest) in manifest.runs() {
-                    if !self.inner.range.contains_range(&run_manifest.range) {
-                        // If the run partially overlaps, compaction at the source will
-                        // eventually make it not.
-                        if self.inner.range.intersects(&run_manifest.range) {
-                            log::debug!(
-                                "{:?} hydration not complete because {:?} partially overlaps",
-                                self.inner.tablet_id,
-                                run_manifest.run_id,
-                            );
-                            complete = false;
-                        }
-                        continue;
-                    }
-                }
-
-                if src_manifests[i] != manifest {
-                    src_manifests[i] = manifest;
-                    any_changed = true;
-                }
-            }
-
-            if any_changed {
-                let merged_manifest = {
-                    let mut merged_manifest = Manifest::empty();
-                    for src_manifest in &src_manifests {
-                        let mut manifest = src_manifest.clone();
-                        manifest.clip(self.inner.range.borrow());
-                        merged_manifest = merged_manifest.merge(manifest)?;
-                    }
-                    merged_manifest
-                };
-                preloader.set_manifest(merged_manifest);
-            }
-
-            if done_after_round && complete {
-                break;
-            }
-
-            preloader.wait().await?;
-
-            if complete {
-                rounds_with_completed += 1;
-                if rounds_with_completed == 3 {
-                    log::debug!(
-                        "{:?} hydration transitioning to {:?}",
-                        self.inner.tablet_id,
-                        HydrationState::Mostly
-                    );
-                    self.hydration
-                        .lock()
-                        .unwrap()
-                        .as_mut()
-                        .ok_or_else(|| anyhow!("hydration cancelled"))?
-                        .set_state
-                        .send_modify(|value| {
-                            if matches!(value, HydrationState::Started) {
-                                *value = HydrationState::Mostly;
-                            }
-                        });
-                }
-            }
-
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-
-        self.inner.lsm.load()?.load(preloader.load().await?)?;
-        // We need to flush here otherwise after a crash and restart we'd lose track of the runs,
-        // and could erroneously transition to Active with no data.
-        self.inner.lsm.flush().await?;
-        self.inner.lsm.unpause_compaction();
-
-        let _ = self
-            .hydration
-            .lock()
-            .unwrap()
-            .as_ref()
-            .ok_or_else(|| anyhow!("hydration cancelled"))?
-            .set_state
-            .send(HydrationState::Done);
-
-        Ok(())
-    }
-
     async fn try_sync_meta(
         self: &Arc<Self>,
         sync_type: &SyncType,
@@ -894,25 +769,6 @@ impl MetaSubscriber for Arc<DataTabletInner> {
             })
             .await;
     }
-}
-
-fn ranges_to_splits(mut ranges: Vec<Range<Vec<u8>>>) -> anyhow::Result<Vec<Bound<Vec<u8>>>> {
-    ranges.sort_unstable_by(|a, b| Ord::cmp(&a.lower, &b.lower));
-    let mut out = Vec::with_capacity(ranges.len() - 1);
-    let ranges_len = ranges.len();
-    for (i, range) in ranges.into_iter().enumerate() {
-        if out.len() > 0 && out[out.len() - 1] != range.lower {
-            return Err(anyhow!(
-                "can't range_to_splits, ranges not contiguous: gap at {:?} {:?}",
-                out[out.len() - 1],
-                range.lower
-            ));
-        }
-        if i < ranges_len - 1 {
-            out.push(range.upper);
-        }
-    }
-    Ok(out)
 }
 
 #[derive(Clone, Copy)]
