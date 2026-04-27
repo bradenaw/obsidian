@@ -118,7 +118,7 @@ impl TabletRecovery {
     async fn wait(self) -> anyhow::Result<Lsm> {
         let preloaded = self.preloader.load().await?;
 
-        let lsm = Lsm::open(self.lsm_options, self.storage, preloaded).await?;
+        let lsm = Lsm::open(self.lsm_options, self.storage, preloaded);
 
         for (_, ts, kvs) in self.writes {
             for (keyspace_id, key, value) in kvs {

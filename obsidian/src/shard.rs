@@ -64,7 +64,7 @@ impl Shard {
 
         let shard_meta_lsm = match lsms.remove(&TabletId::shard_meta(shard_id)) {
             Some(shard_meta_lsm) => shard_meta_lsm,
-            None => Lsm::empty(lsm_options.clone(), Arc::clone(&storage)).await?,
+            None => Lsm::empty(lsm_options.clone(), Arc::clone(&storage)),
         };
         let shard_meta_tablet = ShardMetaTablet::new(
             shard_id,
@@ -80,7 +80,7 @@ impl Shard {
         let meta_tablet = if shard_id == TabletId::META.0 {
             let meta_lsm = match lsms.remove(&TabletId::META) {
                 Some(meta_lsm) => meta_lsm,
-                None => Lsm::empty(lsm_options.clone(), Arc::clone(&storage)).await?,
+                None => Lsm::empty(lsm_options.clone(), Arc::clone(&storage)),
             };
             Some(MetaTablet::new(
                 meta_lsm,
@@ -93,44 +93,26 @@ impl Shard {
             None
         };
 
-        let init_tablets: HashMap<TabletId, Arc<DataTablet2>> = {
-            let mut init_tablets = HashMap::new();
-
-            for (tablet_id, lsm) in lsms.into_iter() {
-                // TODO: Move to shard_meta_tablet.
-                let tablet_metadata = meta_synced.snapshot().tablet_metadata(tablet_id).await?;
-
-                let data_tablet = DataTablet::new(
-                    tablet_id,
-                    tablet_metadata.colo_group_id,
-                    tablet_metadata.range,
-                    lsm,
-                    Arc::new(ShardTabletJournalWriter::new(
-                        tablet_id,
-                        Arc::clone(&journal),
-                    )),
-                    Arc::clone(&meta_synced),
-                    Arc::clone(&storage),
-                    Arc::clone(&shards),
-                );
-
-                init_tablets.insert(tablet_id, Arc::new(data_tablet));
-            }
-
-            init_tablets
-        };
-
-        let shard = Shard(WithBackground::new(Arc::new(ShardInner {
+        let inner = ShardInner {
             id: shard_id,
             storage,
             meta,
+            meta_tablet,
             meta_synced: meta_synced.clone(),
             shards,
             shard_meta_tablet: Arc::new(shard_meta_tablet),
-            tablets: ShardedLock::new(init_tablets),
+            tablets: ShardedLock::new(HashMap::new()),
             lsm_options,
             journal,
-        })));
+        };
+
+        let snapshot = meta_synced.snapshot();
+        for (tablet_id, lsm) in lsms.into_iter() {
+            let tablet_metadata = ShardInner::shard_tablet_metadata(tablet_id, &snapshot).await?;
+            inner.add_data_tablet(tablet_id, tablet_metadata, lsm);
+        }
+
+        let shard = Shard(WithBackground::new(Arc::new(inner)));
 
         meta_synced.subscribe(&shard.0);
 
@@ -202,8 +184,7 @@ impl ShardInner {
     async fn ensure_tablet(
         &self,
         tablet_id: TabletId,
-        colo_group_id: ColoGroupId,
-        range: Range<Vec<u8>>,
+        tablet_metadata: ShardTabletMetadata,
     ) -> anyhow::Result<()> {
         if tablet_id.0 != self.id {
             return Err(anyhow!(
@@ -219,39 +200,8 @@ impl ShardInner {
             ));
         }
 
-        {
-            let tablets = self.tablets.read().unwrap();
-            if tablets.contains_key(&tablet_id) {
-                return Ok(());
-            }
-        }
-
-        log::info!(
-            "creating {:?} for {:?}/{:?}",
-            tablet_id,
-            colo_group_id,
-            range
-        );
-
-        let tablet = DataTablet::new(
-            tablet_id,
-            colo_group_id,
-            range,
-            Lsm::empty(self.lsm_options.clone(), Arc::clone(&self.storage)).await?,
-            Arc::new(ShardTabletJournalWriter::new(
-                tablet_id,
-                Arc::clone(&self.journal),
-            )),
-            Arc::clone(&self.meta_synced),
-            Arc::clone(&self.storage),
-            Arc::clone(&self.shards),
-        );
-
-        let mut tablets = self.tablets.write().unwrap();
-        if tablets.contains_key(&tablet_id) {
-            return Ok(());
-        }
-        tablets.insert(tablet_id, Arc::new(tablet));
+        self.add_empty_or_transition_tablet(tablet_id, tablet_metadata)
+            .await?;
 
         Ok(())
     }
@@ -265,13 +215,8 @@ impl ShardInner {
             SyncType::Initial => {
                 let owned_tablet_ids = snapshot.shard_tablet_ids(self.id).await?;
                 for tablet_id in owned_tablet_ids {
-                    let tablet_metadata = snapshot.tablet_metadata(tablet_id).await?;
-                    self.ensure_tablet(
-                        tablet_id,
-                        tablet_metadata.colo_group_id,
-                        tablet_metadata.range,
-                    )
-                    .await?;
+                    let tablet_metadata = Self::shard_tablet_metadata(tablet_id, snapshot).await?;
+                    self.ensure_tablet(tablet_id, tablet_metadata).await?;
                 }
             }
             SyncType::Tx(meta_keys) => {
@@ -281,17 +226,27 @@ impl ShardInner {
                             continue;
                         }
 
-                        let tablet_metadata = snapshot.tablet_metadata(*tablet_id).await?;
-                        self.ensure_tablet(
-                            *tablet_id,
-                            tablet_metadata.colo_group_id,
-                            tablet_metadata.range,
-                        )
-                        .await?;
+                        let tablet_metadata =
+                            Self::shard_tablet_metadata(*tablet_id, snapshot).await?;
+                        self.ensure_tablet(*tablet_id, tablet_metadata).await?;
                     }
                 }
             }
         }
+        Ok(())
+    }
+
+    fn add_data_tablet(
+        &self,
+        tablet_id: TabletId,
+        tablet_metadata: ShardTabletMetadata,
+        lsm: Lsm,
+    ) -> anyhow::Result<()> {
+        let mut tablets = self.tablets.write().unwrap();
+        tablets.insert(
+            tablet_id,
+            Arc::new(self.new_data_tablet(tablet_id, tablet_metadata, lsm)?),
+        );
         Ok(())
     }
 
@@ -346,13 +301,19 @@ impl ShardInner {
         })
     }
 
-    async fn empty_or_transition_tablet(
+    async fn add_empty_or_transition_tablet(
         &self,
         tablet_id: TabletId,
         tablet_metadata: ShardTabletMetadata,
     ) -> anyhow::Result<()> {
         let mut tablets = self.tablets.write().unwrap();
         if let Some(tablet) = tablets.get(&tablet_id) {
+            log::info!(
+                "{:?} possibly transitioning {:?} to {:?}",
+                self.id,
+                tablet_id,
+                tablet_metadata.state,
+            );
             match tablet_metadata.state {
                 TabletState::Defunct => {
                     tablet.transition_defunct().await?;
@@ -376,12 +337,18 @@ impl ShardInner {
             return Ok(());
         }
 
+        log::info!(
+            "creating empty {:?} for {:?}/{:?}",
+            tablet_id,
+            tablet_metadata.colo_group_id,
+            tablet_metadata.range
+        );
         tablets.insert(
             tablet_id,
             Arc::new(self.new_data_tablet(
                 tablet_id,
                 tablet_metadata,
-                Lsm::empty(self.lsm_options.clone(), Arc::clone(&self.storage)).await?,
+                Lsm::empty(self.lsm_options.clone(), Arc::clone(&self.storage)),
             )?),
         );
 
@@ -390,7 +357,7 @@ impl ShardInner {
 
     async fn shard_tablet_metadata(
         tablet_id: TabletId,
-        snapshot: MetaSyncedSnapshot,
+        snapshot: &MetaSyncedSnapshot,
     ) -> anyhow::Result<ShardTabletMetadata> {
         let tablet_metadata = snapshot.tablet_metadata(tablet_id).await?;
 

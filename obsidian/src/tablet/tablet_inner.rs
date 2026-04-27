@@ -711,7 +711,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_preconds() -> anyhow::Result<()> {
-        let lsm = Lsm::empty(LsmOptions::default(), Arc::new(MemStorage::new())).await?;
+        let lsm = Lsm::empty(LsmOptions::default(), Arc::new(MemStorage::new()));
 
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
         let ka = b"a";
@@ -827,7 +827,7 @@ mod tests {
     #[tokio::test]
     async fn test_scan_conflict() -> anyhow::Result<()> {
         let _ = pretty_env_logger::try_init();
-        let lsm = Lsm::empty(LsmOptions::default(), Arc::new(MemStorage::new())).await?;
+        let lsm = Lsm::empty(LsmOptions::default(), Arc::new(MemStorage::new()));
 
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
 
