@@ -109,7 +109,7 @@ impl Shard {
         let snapshot = meta_synced.snapshot();
         for (tablet_id, lsm) in lsms.into_iter() {
             let tablet_metadata = ShardInner::shard_tablet_metadata(tablet_id, &snapshot).await?;
-            inner.add_data_tablet(tablet_id, tablet_metadata, lsm);
+            inner.add_data_tablet(tablet_id, tablet_metadata, lsm)?;
         }
 
         let shard = Shard(WithBackground::new(Arc::new(inner)));
@@ -266,7 +266,6 @@ impl ShardInner {
                     tablet_id,
                     Arc::clone(&self.journal),
                 )),
-                Arc::clone(&self.meta_synced),
                 Arc::clone(&self.storage),
                 Arc::clone(&self.shards),
             )),
@@ -306,8 +305,10 @@ impl ShardInner {
         tablet_id: TabletId,
         tablet_metadata: ShardTabletMetadata,
     ) -> anyhow::Result<()> {
-        let mut tablets = self.tablets.write().unwrap();
-        if let Some(tablet) = tablets.get(&tablet_id) {
+        if let Some(tablet) = {
+            let tablets = self.tablets.read().unwrap();
+            tablets.get(&tablet_id).map(Arc::clone)
+        } {
             log::info!(
                 "{:?} possibly transitioning {:?} to {:?}",
                 self.id,
@@ -331,8 +332,14 @@ impl ShardInner {
                     tablet.transition_active().await?;
                 }
                 TabletState::Frozen => {
-                    tablet.transition_active().await?;
+                    // TODO: flush!
+                    tablet.transition_frozen().await?;
                 }
+            }
+            if let Some(TabletTransfer::Src { splits }) = tablet_metadata.transfer {
+                tablet.set_splits(splits).await;
+            } else {
+                tablet.set_splits(vec![]).await;
             }
             return Ok(());
         }
@@ -343,6 +350,7 @@ impl ShardInner {
             tablet_metadata.colo_group_id,
             tablet_metadata.range
         );
+        let mut tablets = self.tablets.write().unwrap();
         tablets.insert(
             tablet_id,
             Arc::new(self.new_data_tablet(

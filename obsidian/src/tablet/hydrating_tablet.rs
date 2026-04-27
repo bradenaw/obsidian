@@ -110,17 +110,15 @@ impl HydratingTablet {
             self.lsm_options,
             Arc::clone(&self.inner.storage),
             preloader.load().await?,
-        )
-        .await?;
+        );
         Ok(DataTablet::new(
             self.inner.tablet_id,
             self.inner.colo_group_id,
-            self.inner.range,
+            self.inner.range.clone(),
             lsm,
-            self.inner.journal,
-            todo!(), // meta_synced
-            self.inner.storage,
-            self.inner.shards,
+            Arc::clone(&self.inner.journal),
+            Arc::clone(&self.inner.storage),
+            Arc::clone(&self.inner.shards),
         ))
     }
 }

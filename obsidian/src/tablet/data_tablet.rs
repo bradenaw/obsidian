@@ -1,9 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::ops::Deref;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::time::Duration;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -14,14 +11,6 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::lsm::Lsm;
 use crate::lsm::Manifest;
-use crate::lsm::Preloader;
-use crate::meta::MetaKey;
-use crate::meta::MetaReader;
-use crate::meta::MetaState;
-use crate::meta::MetaSubscriber;
-use crate::meta::MetaSynced;
-use crate::meta::MetaSyncedSnapshot;
-use crate::meta::SyncType;
 use crate::meta::TabletState;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
@@ -34,7 +23,6 @@ use crate::tablet::tablet_inner::PrecondLocks;
 use crate::tablet::tablet_inner::TabletInner;
 use crate::tablet::tablet_journal_writer::TabletJournalWriter;
 use crate::util::encode;
-use crate::util::spawn_owned;
 use crate::util::Decode;
 use crate::util::Retry;
 use crate::util::WithBackground;
@@ -62,7 +50,6 @@ pub(crate) struct DataTablet(WithBackground<Arc<DataTabletInner>>);
 
 struct DataTabletInner {
     inner: TabletInner,
-    meta_synced: Arc<MetaSynced>,
     storage: Arc<dyn Storage>,
     shards: Arc<dyn Shards>,
     prepare_sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
@@ -226,7 +213,7 @@ impl Tablet for DataTablet {
     }
 
     async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
-        self.0.meta_synced.wait(ts).await
+        todo!();
     }
 
     async fn manifest(&self) -> anyhow::Result<Manifest> {
@@ -234,54 +221,11 @@ impl Tablet for DataTablet {
     }
 
     async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
-        let mut state = {
-            self.0
-                .hydration
-                .lock()
-                .unwrap()
-                .as_ref()
-                .ok_or_else(|| anyhow!("hydration not in progress"))?
-                .state
-                .clone()
-        };
-        loop {
-            {
-                let value = state.borrow_and_update();
-                match value.deref() {
-                    HydrationState::Started => {}
-                    HydrationState::Mostly => return Ok(()),
-                    other => return Err(anyhow!("hydration in unexpected state {:?}", other)),
-                }
-            }
-            state.changed().await?;
-        }
+        Err(anyhow!("DataTablet::wait_mostly_hydrated not allowed").into())
     }
 
     async fn catchup(&self) -> anyhow::Result<()> {
-        let mut state = {
-            let hydration_lock = self.0.hydration.lock().unwrap();
-            let hydration = hydration_lock
-                .as_ref()
-                .ok_or_else(|| anyhow!("hydration not in progress"))?;
-
-            hydration.set_state.send_modify(|value| {
-                if matches!(value, HydrationState::Mostly) {
-                    *value = HydrationState::Catchup;
-                }
-            });
-            hydration.state.clone()
-        };
-        loop {
-            {
-                let value = state.borrow_and_update();
-                match value.deref() {
-                    HydrationState::Catchup => {}
-                    HydrationState::Done => return Ok(()),
-                    other => return Err(anyhow!("hydration in unexpected state {:?}", other)),
-                }
-            }
-            state.changed().await?;
-        }
+        Err(anyhow!("DataTablet::catchup not allowed").into())
     }
 
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
@@ -296,7 +240,6 @@ impl DataTablet {
         range: Range<Vec<u8>>,
         lsm: Lsm,
         journal: Arc<dyn TabletJournalWriter>,
-        meta_synced: Arc<MetaSynced>,
         storage: Arc<dyn Storage>,
         shards: Arc<dyn Shards>,
     ) -> Self {
@@ -309,10 +252,11 @@ impl DataTablet {
                 range,
                 // Start out in Defunct because it has no permissions to do anything and we don't
                 // actually know what we should be allowed to do until the meta sync finishes.
-                ProtectedLsm::new(tablet_id, lsm, TabletState::Defunct),
+                //
+                // TODO: remove indirect
+                ProtectedLsm::new(tablet_id, lsm, TabletState::Active),
                 journal,
             ),
-            meta_synced: Arc::clone(&meta_synced),
             storage: storage,
             shards: shards,
             prepare_sender: prepare_sender.clone(),
@@ -333,8 +277,6 @@ impl DataTablet {
             inner.scan_for_precond_locks(prepare_sender).await;
         });
 
-        meta_synced.subscribe(&tablet.0);
-
         tablet
     }
 
@@ -344,17 +286,6 @@ impl DataTablet {
 
     pub fn set_splits(&self, splits: Vec<Bound<Vec<u8>>>) {
         self.0.inner.lsm.set_splits(splits);
-    }
-
-    pub fn set_state(&self, tablet_state: TabletState) -> anyhow::Result<()> {
-        match tablet_state {
-            TabletState::Active | TabletState::Frozen => {}
-            _ => {
-                return Err(anyhow!("cannot set tablet state to {:?}", tablet_state));
-            }
-        }
-        self.0.inner.lsm.set_state(tablet_state);
-        Ok(())
     }
 }
 
@@ -626,148 +557,6 @@ impl DataTabletInner {
         muts.insert((precond_keyspace_id, key.clone()), m);
         lsm_rw.write(overwrite_ts, muts);
         Ok(())
-    }
-
-    async fn try_sync_meta(
-        self: &Arc<Self>,
-        sync_type: &SyncType,
-        snapshot: &MetaSyncedSnapshot,
-    ) -> anyhow::Result<()> {
-        match sync_type {
-            SyncType::Initial => {
-                self.refresh_metadata(&snapshot).await?;
-
-                let tablet_metadata = snapshot.tablet_metadata(self.inner.tablet_id).await?;
-                if matches!(
-                    tablet_metadata.state,
-                    MetaState::Stable(TabletState::Active),
-                ) {
-                    for keyspace_id in snapshot.keyspace_ids().await? {
-                        if keyspace_id.0 != self.inner.colo_group_id {
-                            continue;
-                        }
-                        self.inner.create_keyspace(keyspace_id).await?;
-                    }
-                }
-            }
-            SyncType::Tx(meta_keys) => {
-                for meta_key in meta_keys {
-                    match meta_key {
-                        MetaKey::Keyspace(keyspace_id) => {
-                            if keyspace_id.0 != self.inner.colo_group_id {
-                                continue;
-                            }
-
-                            let tablet_metadata =
-                                snapshot.tablet_metadata(self.inner.tablet_id).await?;
-
-                            // TODO: There's a race here where we might drop a keyspace
-                            // creation on the floor if it's done during a transition. We
-                            // could make this graceful, but it'd be a lot easier to just
-                            // make keyspace creation wait until there's an active tablet
-                            // for every range.
-                            if matches!(
-                                tablet_metadata.state,
-                                MetaState::Stable(TabletState::Active),
-                            ) {
-                                self.inner.create_keyspace(*keyspace_id).await?;
-                            }
-                        }
-                        MetaKey::Tablet(tablet_id) => {
-                            if *tablet_id == self.inner.tablet_id {
-                                self.refresh_metadata(&snapshot).await?;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn refresh_metadata(
-        self: &Arc<Self>,
-        snapshot: &MetaSyncedSnapshot,
-    ) -> anyhow::Result<()> {
-        let tablet_metadata = snapshot.tablet_metadata(self.inner.tablet_id).await?;
-
-        let apparent_tablet_state = match tablet_metadata.state {
-            MetaState::Stable(state) => state,
-            MetaState::Transitioning(_, next_state) => next_state,
-        };
-        self.inner.lsm.set_state(apparent_tablet_state).await;
-
-        let mut has_splits = false;
-
-        if let Some(transfer_id) = tablet_metadata.transfer_id {
-            let transfer_metadata = snapshot.transfer_metadata(transfer_id).await?;
-            if matches!(apparent_tablet_state, TabletState::Hydrating) {
-                let mut maybe_hydration = self.hydration.lock().unwrap();
-                if matches!(maybe_hydration.deref(), None) {
-                    log::info!(
-                        "{:?} starting hydration for {:?}",
-                        self.inner.tablet_id,
-                        transfer_id
-                    );
-                    let (tx, rx) = tokio::sync::watch::channel(HydrationState::Started);
-                    *maybe_hydration = Some(Hydration {
-                        task: spawn_owned({
-                            let self_ = Arc::clone(self);
-                            let srcs = transfer_metadata.srcs.clone();
-                            async move {
-                                Retry::new()
-                                    .indefinitely(&async || -> anyhow::Result<()> {
-                                        self_.hydrate(&srcs[..]).await?;
-                                        Ok(())
-                                    })
-                                    .await;
-                            }
-                        }),
-                        set_state: tx,
-                        state: rx,
-                    });
-                }
-            }
-
-            if transfer_metadata.srcs.contains(&self.inner.tablet_id)
-                && transfer_metadata.dsts.len() > 1
-            {
-                let mut dst_ranges = vec![];
-                for dst_tablet_id in transfer_metadata.dsts {
-                    let dst_tablet_metadata = snapshot.tablet_metadata(dst_tablet_id).await?;
-                    dst_ranges.push(dst_tablet_metadata.range);
-                }
-
-                has_splits = true;
-                let splits = ranges_to_splits(dst_ranges)?;
-                self.inner.lsm.set_splits(splits);
-            }
-        } else {
-            let mut maybe_hydration = self.hydration.lock().unwrap();
-            *maybe_hydration = None;
-        }
-
-        if !has_splits {
-            self.inner.lsm.set_splits(vec![]);
-        }
-
-        if let TabletState::Frozen = apparent_tablet_state {
-            self.inner.lsm.flush().await?;
-        }
-
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl MetaSubscriber for Arc<DataTabletInner> {
-    async fn sync_meta(&self, sync_type: SyncType, snapshot: MetaSyncedSnapshot) {
-        Retry::new()
-            .indefinitely(&async || -> anyhow::Result<()> {
-                self.try_sync_meta(&sync_type, &snapshot).await
-            })
-            .await;
     }
 }
 
