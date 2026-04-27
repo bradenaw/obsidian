@@ -34,7 +34,7 @@ use crate::Timestamp;
 
 #[tokio::test]
 async fn test_put_get() -> anyhow::Result<()> {
-    let lsm = Lsm::empty(LsmOptions::default(), Arc::new(MemStorage::new())).await?;
+    let lsm = Lsm::empty(LsmOptions::default(), Arc::new(MemStorage::new()));
     let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
     let k = b"abc";
     let not_k = b"def";
@@ -72,8 +72,7 @@ async fn test_compact_l0() -> anyhow::Result<()> {
             run_size_target: 512,
         },
         Arc::new(MemStorage::new()),
-    )
-    .await?;
+    );
     let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
     let mut map = BTreeMap::new();
     let mut last_ts = Timestamp::ZERO;
@@ -128,8 +127,7 @@ async fn test_compact_l1() -> anyhow::Result<()> {
             run_size_target: 512,
         },
         Arc::new(MemStorage::new()),
-    )
-    .await?;
+    );
     let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
     let mut map = BTreeMap::new();
     let mut last_ts = Timestamp::ZERO;
@@ -196,8 +194,7 @@ async fn test_scan_page() -> anyhow::Result<()> {
             run_size_target: 96,
         },
         Arc::new(MemStorage::new()),
-    )
-    .await?;
+    );
     let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
 
     let writes = [
@@ -498,9 +495,7 @@ proptest! {
                     run_size_target: 512,
                 },
                 Arc::new(MemStorage::new()),
-            )
-            .await
-            .unwrap();
+            );
             let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
 
             let mut write_ts = 5;

@@ -58,7 +58,7 @@ impl Shard {
 
         let shard_meta_lsm = match lsms.remove(&TabletId::shard_meta(shard_id)) {
             Some(shard_meta_lsm) => shard_meta_lsm,
-            None => Lsm::empty(lsm_options.clone(), Arc::clone(&storage)).await?,
+            None => Lsm::empty(lsm_options.clone(), Arc::clone(&storage)),
         };
         let shard_meta_tablet = ShardMetaTablet::new(
             shard_id,
@@ -77,7 +77,7 @@ impl Shard {
             if shard_id == TabletId::META.0 {
                 let meta_lsm = match lsms.remove(&TabletId::META) {
                     Some(meta_lsm) => meta_lsm,
-                    None => Lsm::empty(lsm_options.clone(), Arc::clone(&storage)).await?,
+                    None => Lsm::empty(lsm_options.clone(), Arc::clone(&storage)),
                 };
                 let meta_tablet = MetaTablet::new(
                     meta_lsm,
@@ -229,7 +229,7 @@ impl ShardInner {
             tablet_id,
             colo_group_id,
             range,
-            Lsm::empty(self.lsm_options.clone(), Arc::clone(&self.storage)).await?,
+            Lsm::empty(self.lsm_options.clone(), Arc::clone(&self.storage)),
             Arc::new(ShardTabletJournalWriter::new(
                 tablet_id,
                 Arc::clone(&self.journal),

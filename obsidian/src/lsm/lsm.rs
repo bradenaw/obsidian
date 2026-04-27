@@ -56,23 +56,19 @@ pub(crate) struct Lsm {
 }
 
 impl Lsm {
-    pub async fn empty(options: LsmOptions, storage: Arc<dyn Storage>) -> anyhow::Result<Self> {
-        Self::new_from_index(options, storage, IndexSnapshot::empty()).await
+    pub fn empty(options: LsmOptions, storage: Arc<dyn Storage>) -> Self {
+        Self::new_from_index(options, storage, IndexSnapshot::empty())
     }
 
-    pub async fn open(
-        options: LsmOptions,
-        storage: Arc<dyn Storage>,
-        preloaded: Preloaded,
-    ) -> anyhow::Result<Self> {
-        Self::new_from_index(options, storage, preloaded.snapshot).await
+    pub fn open(options: LsmOptions, storage: Arc<dyn Storage>, preloaded: Preloaded) -> Self {
+        Self::new_from_index(options, storage, preloaded.snapshot)
     }
 
-    async fn new_from_index(
+    fn new_from_index(
         options: LsmOptions,
         storage: Arc<dyn Storage>,
         index_snapshot: IndexSnapshot,
-    ) -> anyhow::Result<Self> {
+    ) -> Self {
         let index_arc = Arc::new(Index::from_snapshot(index_snapshot));
 
         let compactor = Compactor::new(
@@ -84,13 +80,13 @@ impl Lsm {
             options.block_size_target,
         );
 
-        Ok(Self {
+        Self {
             options,
 
             compactor,
             index: index_arc,
             storage,
-        })
+        }
     }
 
     pub async fn get(
