@@ -111,6 +111,18 @@ impl DataTablet2 {
         let state = self.state.read().await;
         matches!(state.deref(), TabletState::Hydrating(_))
     }
+
+    pub async fn flush(&self) -> anyhow::Result<()> {
+        let state = self.state.read().await;
+        if let TabletState::Active(tablet) | TabletState::Frozen(tablet) = state.deref() {
+            tablet.flush().await?;
+        }
+        return Err(anyhow!(
+            "{} in wrong state for flush {}",
+            self.tablet_id,
+            state.name()
+        ));
+    }
 }
 
 #[async_trait]

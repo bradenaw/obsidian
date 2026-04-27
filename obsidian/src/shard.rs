@@ -82,13 +82,13 @@ impl Shard {
                 Some(meta_lsm) => meta_lsm,
                 None => Lsm::empty(lsm_options.clone(), Arc::clone(&storage)),
             };
-            Some(MetaTablet::new(
+            Some(Arc::new(MetaTablet::new(
                 meta_lsm,
                 Arc::new(ShardTabletJournalWriter::new(
                     TabletId::META,
                     Arc::clone(&journal),
                 )),
-            ))
+            )))
         } else {
             None
         };
@@ -127,6 +127,14 @@ impl crate::runtime::Shard for Shard {
     }
 
     fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet>> {
+        if tablet_id == TabletId::META {
+            let meta_tablet = self
+                .0
+                .meta_tablet
+                .as_ref()
+                .ok_or_else(|| anyhow!("{:?} not a member of {:?}", tablet_id, self.0.id))?;
+            return Ok(Arc::clone(meta_tablet) as Arc<dyn Tablet>);
+        }
         if tablet_id == TabletId::shard_meta(self.0.id) {
             return Ok(Arc::clone(&self.0.shard_meta_tablet) as Arc<dyn Tablet>);
         }
@@ -176,7 +184,7 @@ struct ShardInner {
     lsm_options: LsmOptions,
 
     shard_meta_tablet: Arc<ShardMetaTablet>,
-    meta_tablet: Option<MetaTablet>, // Present only if id==ShardId::META.
+    meta_tablet: Option<Arc<MetaTablet>>, // Present only if id==ShardId::META.
     tablets: ShardedLock<HashMap<TabletId, Arc<DataTablet2>>>,
 }
 
@@ -332,8 +340,8 @@ impl ShardInner {
                     tablet.transition_active().await?;
                 }
                 TabletState::Frozen => {
-                    // TODO: flush!
                     tablet.transition_frozen().await?;
+                    tablet.flush().await?;
                 }
             }
             if let Some(TabletTransfer::Src { splits }) = tablet_metadata.transfer {
