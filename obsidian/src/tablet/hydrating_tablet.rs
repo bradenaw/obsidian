@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::ops::Deref as _;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -38,6 +39,11 @@ use crate::Txid;
 pub(crate) struct HydratingTablet {
     inner: Arc<HydratingTabletInner>,
     lsm_options: LsmOptions,
+    // Holds keyspace_ids that were created during hydration. Most of these will already have been
+    // created on the source side and replicated to us during hydration, but if any are made
+    // between when we finish hydrating (and no longer ask the sources for anything) and when we
+    // transition to active, we need to make sure they exist.
+    extra_keyspaces: Mutex<HashSet<KeyspaceId>>,
     task: OwnedJoinHandle<anyhow::Result<Preloader>>,
 }
 
@@ -95,6 +101,7 @@ impl HydratingTablet {
                 let inner = Arc::clone(&inner);
                 async move { inner.hydrate(&srcs[..]).await }
             }),
+            extra_keyspaces: Mutex::new(HashSet::new()),
             lsm_options,
             inner,
         }
@@ -104,6 +111,23 @@ impl HydratingTablet {
         self.inner.tablet_id
     }
 
+    pub fn colo_group_id(&self) -> ColoGroupId {
+        self.inner.colo_group_id
+    }
+
+    pub(super) fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        if keyspace_id.0 != self.inner.colo_group_id {
+            return Err(anyhow!(
+                "cannot create {:?} in tablet for {:?}",
+                keyspace_id,
+                self.inner.colo_group_id
+            ));
+        }
+        let mut extra_keyspaces = self.extra_keyspaces.lock().unwrap();
+        extra_keyspaces.insert(keyspace_id);
+        Ok(())
+    }
+
     pub async fn finish(self) -> anyhow::Result<DataTablet> {
         let preloader = self.task.await?;
         let lsm = Lsm::open(
@@ -111,7 +135,7 @@ impl HydratingTablet {
             Arc::clone(&self.inner.storage),
             preloader.load().await?,
         );
-        Ok(DataTablet::new(
+        let data_tablet = DataTablet::new(
             self.inner.tablet_id,
             self.inner.colo_group_id,
             self.inner.range.clone(),
@@ -119,7 +143,12 @@ impl HydratingTablet {
             Arc::clone(&self.inner.journal),
             Arc::clone(&self.inner.storage),
             Arc::clone(&self.inner.shards),
-        ))
+        );
+        let extra_keyspaces = self.extra_keyspaces.lock().unwrap();
+        for keyspace_id in extra_keyspaces.iter() {
+            data_tablet.create_keyspace(*keyspace_id)?;
+        }
+        Ok(data_tablet)
     }
 }
 
@@ -190,10 +219,6 @@ impl runtime::Tablet for HydratingTablet {
         _mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()> {
         Err(anyhow!("HydratingTablet::cleanup_committed not allowed").into())
-    }
-
-    async fn wait_meta_sync(&self, _ts: Timestamp) -> anyhow::Result<()> {
-        Err(anyhow!("HydratingTablet::wait_meta_sync not allowed").into())
     }
 
     async fn manifest(&self) -> anyhow::Result<Manifest> {

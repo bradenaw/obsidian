@@ -83,8 +83,6 @@ pub(crate) trait Tablet: Send + Sync {
         mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()>;
 
-    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()>;
-
     async fn manifest(&self) -> anyhow::Result<Manifest>;
 
     async fn wait_mostly_hydrated(&self) -> anyhow::Result<()>;

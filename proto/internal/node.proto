@@ -16,7 +16,6 @@ service Node {
     rpc TabletWrite(TabletWriteReq) returns (obsidian.WriteResp);
     rpc TabletPrepare(TabletPrepareReq) returns (TabletPrepareResp);
     rpc TabletCleanupCommitted(TabletCleanupCommittedReq) returns (google.protobuf.Empty);
-    rpc TabletWaitMetaSync(TabletWaitMetaSyncReq) returns (google.protobuf.Empty);
     rpc TabletManifest(TabletEmptyReq) returns (TabletManifestResp);
     rpc TabletWaitMostlyHydrated(TabletEmptyReq) returns (google.protobuf.Empty);
     rpc TabletCatchup(TabletEmptyReq) returns (google.protobuf.Empty);
@@ -105,11 +104,6 @@ message TabletCleanupCommittedReq {
 
 message TabletEmptyReq {
     TabletId tablet_id = 1;
-}
-
-message TabletWaitMetaSyncReq {
-    TabletId tablet_id = 1;
-    fixed64 ts = 3;
 }
 
 message TabletManifestResp {

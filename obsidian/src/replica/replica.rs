@@ -452,18 +452,6 @@ impl runtime::Tablet for ReplicaTablet {
             .await
     }
 
-    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
-        let tablet_id = self.tablet_id;
-        self.participant
-            .with_state(async move |participant_state| {
-                if let ParticipantState::Leader(leader) = participant_state {
-                    return leader.shard.tablet(tablet_id)?.wait_meta_sync(ts).await;
-                }
-                Err(InternalError::NotLeader(tablet_id.0).into())
-            })
-            .await
-    }
-
     async fn manifest(&self) -> anyhow::Result<Manifest> {
         let tablet_id = self.tablet_id;
         self.participant

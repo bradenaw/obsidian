@@ -545,7 +545,14 @@ impl TabletInner {
         Ok(())
     }
 
-    pub(super) async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+    pub(super) fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        if keyspace_id.0 != self.colo_group_id {
+            return Err(anyhow!(
+                "cannot create {:?} in tablet for {:?}",
+                keyspace_id,
+                self.colo_group_id
+            ));
+        }
         let lsm_rw = self.lsm.read_write()?;
         lsm_rw.create_keyspace(keyspace_id);
         if let Some(pending_keyspace_id) = keyspace_id.pending() {

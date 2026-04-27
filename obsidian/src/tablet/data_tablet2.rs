@@ -11,6 +11,7 @@ use crate::runtime;
 use crate::tablet::hydrating_tablet::HydratingTablet;
 use crate::tablet::DataTablet;
 use crate::Bound;
+use crate::ColoGroupId;
 use crate::Direction;
 use crate::HistoryRange;
 use crate::InternalError;
@@ -27,6 +28,7 @@ use crate::Txid;
 
 pub(crate) struct DataTablet2 {
     tablet_id: TabletId,
+    colo_group_id: ColoGroupId,
     state: AsyncRwLock<TabletState>,
 }
 
@@ -34,6 +36,7 @@ impl DataTablet2 {
     pub fn new_hydrating(tablet: HydratingTablet) -> Self {
         Self {
             tablet_id: tablet.tablet_id(),
+            colo_group_id: tablet.colo_group_id(),
             state: AsyncRwLock::new(TabletState::Hydrating(tablet)),
         }
     }
@@ -41,6 +44,7 @@ impl DataTablet2 {
     pub fn new_active(tablet: DataTablet) -> Self {
         Self {
             tablet_id: tablet.tablet_id(),
+            colo_group_id: tablet.colo_group_id(),
             state: AsyncRwLock::new(TabletState::Active(tablet)),
         }
     }
@@ -48,8 +52,13 @@ impl DataTablet2 {
     pub fn new_frozen(tablet: DataTablet) -> Self {
         Self {
             tablet_id: tablet.tablet_id(),
+            colo_group_id: tablet.colo_group_id(),
             state: AsyncRwLock::new(TabletState::Frozen(tablet)),
         }
+    }
+
+    pub fn colo_group_id(&self) -> ColoGroupId {
+        self.colo_group_id
     }
 
     pub async fn set_splits(&self, splits: Vec<Bound<Vec<u8>>>) {
@@ -115,13 +124,32 @@ impl DataTablet2 {
     pub async fn flush(&self) -> anyhow::Result<()> {
         let state = self.state.read().await;
         if let TabletState::Active(tablet) | TabletState::Frozen(tablet) = state.deref() {
-            tablet.flush().await?;
+            return tablet.flush().await;
         }
         return Err(anyhow!(
-            "{} in wrong state for flush {}",
+            "{:?} in wrong state for flush {}",
             self.tablet_id,
             state.name()
         ));
+    }
+
+    pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        let state = self.state.read().await;
+        match state.deref() {
+            // Tablets can't ever go from Defunct to anything else so we can safely ignore this.
+            TabletState::Defunct => {}
+            TabletState::Hydrating(hydrating_tablet) => {
+                hydrating_tablet.create_keyspace(keyspace_id)?;
+            }
+            TabletState::Active(data_tablet) => {
+                data_tablet.create_keyspace(keyspace_id)?;
+            }
+            TabletState::Frozen(data_tablet) => {
+                data_tablet.create_keyspace(keyspace_id)?;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -137,7 +165,7 @@ impl runtime::Tablet for DataTablet2 {
             return tablet.get_multi(ts, keys).await;
         }
         Err(InternalError::Other(anyhow!(
-            "{} in wrong state for get_multi {}",
+            "{:?} in wrong state for get_multi {}",
             self.tablet_id,
             state.name(),
         )))
@@ -152,7 +180,7 @@ impl runtime::Tablet for DataTablet2 {
             return tablet.get_latest_multi(keys).await;
         }
         Err(InternalError::Other(anyhow!(
-            "{} in wrong state for get_latest_multi {}",
+            "{:?} in wrong state for get_latest_multi {}",
             self.tablet_id,
             state.name(),
         )))
@@ -164,7 +192,7 @@ impl runtime::Tablet for DataTablet2 {
             return tablet.latest_snapshot(keys).await;
         }
         Err(InternalError::Other(anyhow!(
-            "{} in wrong state for latest_snapshot {}",
+            "{:?} in wrong state for latest_snapshot {}",
             self.tablet_id,
             state.name(),
         )))
@@ -185,7 +213,7 @@ impl runtime::Tablet for DataTablet2 {
                 .await;
         }
         Err(InternalError::Other(anyhow!(
-            "{} in wrong state for scan_page {}",
+            "{:?} in wrong state for scan_page {}",
             self.tablet_id,
             state.name(),
         )))
@@ -203,7 +231,7 @@ impl runtime::Tablet for DataTablet2 {
             return tablet.history_page(key, range, direction, limit).await;
         }
         Err(InternalError::Other(anyhow!(
-            "{} in wrong state for history_page {}",
+            "{:?} in wrong state for history_page {}",
             self.tablet_id,
             state.name(),
         )))
@@ -219,7 +247,7 @@ impl runtime::Tablet for DataTablet2 {
             return tablet.write(preconds, muts).await;
         }
         Err(InternalError::Other(anyhow!(
-            "{} in wrong state for write {}",
+            "{:?} in wrong state for write {}",
             self.tablet_id,
             state.name(),
         )))
@@ -236,7 +264,7 @@ impl runtime::Tablet for DataTablet2 {
             return tablet.prepare(txid, preconds, muts).await;
         }
         Err(InternalError::Other(anyhow!(
-            "{} in wrong state for prepare {}",
+            "{:?} in wrong state for prepare {}",
             self.tablet_id,
             state.name(),
         )))
@@ -256,26 +284,27 @@ impl runtime::Tablet for DataTablet2 {
                 .await;
         }
         Err(anyhow!(
-            "{} in wrong state for cleanup_committed {}",
+            "{:?} in wrong state for cleanup_committed {}",
             self.tablet_id,
             state.name(),
         ))
-    }
-
-    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
-        todo!()
     }
 
     async fn manifest(&self) -> anyhow::Result<Manifest> {
         let state = self.state.read().await;
-        if let TabletState::Active(tablet) | TabletState::Frozen(tablet) = state.deref() {
-            return tablet.manifest().await;
+        match state.deref() {
+            TabletState::Hydrating(hydrating_tablet) => hydrating_tablet.manifest().await,
+            TabletState::Active(data_tablet) | TabletState::Frozen(data_tablet) => {
+                data_tablet.manifest().await
+            }
+            _ => {
+                return Err(anyhow!(
+                    "{:?} in wrong state for manifest {}",
+                    self.tablet_id,
+                    state.name(),
+                ))
+            }
         }
-        Err(anyhow!(
-            "{} in wrong state for manifest {}",
-            self.tablet_id,
-            state.name(),
-        ))
     }
 
     async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
@@ -285,7 +314,7 @@ impl runtime::Tablet for DataTablet2 {
             return tablet.wait_mostly_hydrated().await;
         }
         Err(anyhow!(
-            "{} in wrong state for wait_mostly_hydrated {}",
+            "{:?} in wrong state for wait_mostly_hydrated {}",
             self.tablet_id,
             state.name(),
         ))
@@ -297,7 +326,7 @@ impl runtime::Tablet for DataTablet2 {
             return tablet.wait_mostly_hydrated().await;
         }
         Err(anyhow!(
-            "{} in wrong state for catchup {}",
+            "{:?} in wrong state for catchup {}",
             self.tablet_id,
             state.name(),
         ))
@@ -309,7 +338,7 @@ impl runtime::Tablet for DataTablet2 {
             return tablet.find_split().await;
         }
         Err(anyhow!(
-            "{} in wrong state for find_split {}",
+            "{:?} in wrong state for find_split {}",
             self.tablet_id,
             state.name(),
         ))

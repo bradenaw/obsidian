@@ -212,10 +212,6 @@ impl Tablet for DataTablet {
             .await
     }
 
-    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
-        todo!();
-    }
-
     async fn manifest(&self) -> anyhow::Result<Manifest> {
         Ok(self.0.inner.manifest())
     }
@@ -284,12 +280,20 @@ impl DataTablet {
         self.0.inner.tablet_id
     }
 
+    pub fn colo_group_id(&self) -> ColoGroupId {
+        self.0.inner.colo_group_id
+    }
+
     pub fn set_splits(&self, splits: Vec<Bound<Vec<u8>>>) {
         self.0.inner.lsm.set_splits(splits);
     }
 
     pub async fn flush(&self) -> anyhow::Result<()> {
         self.0.inner.lsm.flush().await
+    }
+
+    pub fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        self.0.inner.create_keyspace(keyspace_id)
     }
 }
 

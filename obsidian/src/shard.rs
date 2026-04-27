@@ -34,6 +34,7 @@ use crate::ColoGroupId;
 use crate::InternalError;
 use crate::JournalEntry;
 use crate::Key;
+use crate::KeyspaceId;
 use crate::Range;
 use crate::ShardId;
 use crate::TabletId;
@@ -214,6 +215,19 @@ impl ShardInner {
         Ok(())
     }
 
+    async fn ensure_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        let tablets = {
+            let tablets = self.tablets.read().unwrap();
+            tablets.values().cloned().collect::<Vec<_>>()
+        };
+        for tablet in tablets {
+            if tablet.colo_group_id() == keyspace_id.0 {
+                tablet.create_keyspace(keyspace_id).await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn try_sync_meta(
         &self,
         sync_type: &SyncType,
@@ -226,17 +240,27 @@ impl ShardInner {
                     let tablet_metadata = Self::shard_tablet_metadata(tablet_id, snapshot).await?;
                     self.ensure_tablet(tablet_id, tablet_metadata).await?;
                 }
+                let keyspace_ids = snapshot.keyspace_ids().await?;
+                for keyspace_id in keyspace_ids {
+                    self.ensure_keyspace(keyspace_id).await?;
+                }
             }
             SyncType::Tx(meta_keys) => {
                 for meta_key in meta_keys {
-                    if let MetaKey::Tablet(tablet_id) = meta_key {
-                        if tablet_id.0 != self.id {
-                            continue;
-                        }
+                    match meta_key {
+                        MetaKey::Tablet(tablet_id) => {
+                            if tablet_id.0 != self.id {
+                                continue;
+                            }
 
-                        let tablet_metadata =
-                            Self::shard_tablet_metadata(*tablet_id, snapshot).await?;
-                        self.ensure_tablet(*tablet_id, tablet_metadata).await?;
+                            let tablet_metadata =
+                                Self::shard_tablet_metadata(*tablet_id, snapshot).await?;
+                            self.ensure_tablet(*tablet_id, tablet_metadata).await?;
+                        }
+                        MetaKey::Keyspace(keyspace_id) => {
+                            self.ensure_keyspace(*keyspace_id).await?;
+                        }
+                        _ => {}
                     }
                 }
             }

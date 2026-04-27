@@ -362,10 +362,6 @@ impl runtime::Tablet for TabletProxy {
             .await
     }
 
-    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
-        self.get_tablet()?.wait_meta_sync(ts).await
-    }
-
     async fn manifest(&self) -> anyhow::Result<Manifest> {
         self.get_tablet()?.manifest().await
     }

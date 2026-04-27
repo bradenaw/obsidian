@@ -249,10 +249,6 @@ impl Tablet for ShardMetaTablet {
         Err(anyhow!("ShardMetaTablet::cleanup_committed not allowed").into())
     }
 
-    async fn wait_meta_sync(&self, _ts: Timestamp) -> anyhow::Result<()> {
-        Err(anyhow!("ShardMetaTablet::wait_meta_sync not allowed").into())
-    }
-
     async fn manifest(&self) -> anyhow::Result<Manifest> {
         Ok(self.0.inner.manifest())
     }

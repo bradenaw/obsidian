@@ -467,19 +467,6 @@ impl runtime::Tablet for TabletProxy {
         Ok(())
     }
 
-    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
-        self.grpc_client
-            .clone()
-            .tablet_wait_meta_sync(pb::internal::TabletWaitMetaSyncReq {
-                tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
-                ts: ts.as_micros(),
-            })
-            .await
-            .map_err(internal_err_from_status)?;
-
-        Ok(())
-    }
-
     async fn manifest(&self) -> anyhow::Result<Manifest> {
         let resp = self
             .grpc_client

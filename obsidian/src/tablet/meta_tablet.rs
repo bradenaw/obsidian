@@ -128,10 +128,6 @@ impl Tablet for MetaTablet {
         Err(anyhow!("MetaTablet::cleanup_committed not allowed").into())
     }
 
-    async fn wait_meta_sync(&self, _ts: Timestamp) -> anyhow::Result<()> {
-        Err(anyhow!("MetaTablet::wait_meta_sync not allowed").into())
-    }
-
     async fn manifest(&self) -> anyhow::Result<Manifest> {
         Ok(self.inner.manifest())
     }
