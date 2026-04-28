@@ -323,7 +323,7 @@ impl runtime::Tablet for DataTablet2 {
     async fn catchup(&self) -> anyhow::Result<()> {
         let state = self.state.read().await;
         if let TabletState::Hydrating(tablet) = state.deref() {
-            return tablet.wait_mostly_hydrated().await;
+            return tablet.catchup().await;
         }
         Err(anyhow!(
             "{:?} in wrong state for catchup {}",

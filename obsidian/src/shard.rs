@@ -190,31 +190,6 @@ struct ShardInner {
 }
 
 impl ShardInner {
-    async fn ensure_tablet(
-        &self,
-        tablet_id: TabletId,
-        tablet_metadata: ShardTabletMetadata,
-    ) -> anyhow::Result<()> {
-        if tablet_id.0 != self.id {
-            return Err(anyhow!(
-                "can't create {:?}: wrong shard {:?}",
-                tablet_id,
-                self.id
-            ));
-        }
-        if tablet_id == TabletId::shard_meta(self.id) {
-            return Err(anyhow!(
-                "can't create {:?}: shard meta always exists",
-                tablet_id
-            ));
-        }
-
-        self.add_empty_or_transition_tablet(tablet_id, tablet_metadata)
-            .await?;
-
-        Ok(())
-    }
-
     async fn ensure_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
         let tablets = {
             let tablets = self.tablets.read().unwrap();
@@ -238,7 +213,8 @@ impl ShardInner {
                 let owned_tablet_ids = snapshot.shard_tablet_ids(self.id).await?;
                 for tablet_id in owned_tablet_ids {
                     let tablet_metadata = Self::shard_tablet_metadata(tablet_id, snapshot).await?;
-                    self.ensure_tablet(tablet_id, tablet_metadata).await?;
+                    self.create_or_transition_tablet(tablet_id, tablet_metadata)
+                        .await?;
                 }
                 let keyspace_ids = snapshot.keyspace_ids().await?;
                 for keyspace_id in keyspace_ids {
@@ -255,7 +231,8 @@ impl ShardInner {
 
                             let tablet_metadata =
                                 Self::shard_tablet_metadata(*tablet_id, snapshot).await?;
-                            self.ensure_tablet(*tablet_id, tablet_metadata).await?;
+                            self.create_or_transition_tablet(*tablet_id, tablet_metadata)
+                                .await?;
                         }
                         MetaKey::Keyspace(keyspace_id) => {
                             self.ensure_keyspace(*keyspace_id).await?;
@@ -332,11 +309,26 @@ impl ShardInner {
         })
     }
 
-    async fn add_empty_or_transition_tablet(
+    async fn create_or_transition_tablet(
         &self,
         tablet_id: TabletId,
         tablet_metadata: ShardTabletMetadata,
     ) -> anyhow::Result<()> {
+        if tablet_id.0 != self.id {
+            return Err(anyhow!(
+                "can't create/transition {:?}: wrong shard {:?}",
+                tablet_id,
+                self.id
+            ));
+        }
+
+        if tablet_id == TabletId::shard_meta(self.id) {
+            return Err(anyhow!(
+                "can't create/transition {:?}: shard meta always exists and never transitions",
+                tablet_id
+            ));
+        }
+
         if let Some(tablet) = {
             let tablets = self.tablets.read().unwrap();
             tablets.get(&tablet_id).map(Arc::clone)
@@ -365,6 +357,9 @@ impl ShardInner {
                 }
                 TabletState::Frozen => {
                     tablet.transition_frozen().await?;
+                    // Important: once we reach frozen, and before we respond from wait_meta_sync
+                    // (so, once sync_meta returns), we need to guarantee that the manifest
+                    // actually contains all of the writes.
                     tablet.flush().await?;
                 }
             }
