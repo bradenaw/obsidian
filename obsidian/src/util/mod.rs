@@ -10,6 +10,7 @@ mod ord_eq_by_first;
 mod owned;
 mod pause;
 mod retry;
+mod state_machine;
 mod waitable_ord;
 mod waitable_timestamp;
 mod watchable;
@@ -43,6 +44,7 @@ pub(crate) use pause::Pause;
 pub(crate) use retry::sleep_for_retry;
 pub(crate) use retry::Retry;
 pub(crate) use retry::RetryResult;
+pub(crate) use state_machine::StateMachine;
 #[allow(unused_imports)]
 pub(crate) use waitable_ord::WaitableOrd;
 pub(crate) use waitable_timestamp::WaitableTimestamp;
