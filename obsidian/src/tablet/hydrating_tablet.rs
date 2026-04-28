@@ -115,7 +115,7 @@ impl HydratingTablet {
         self.inner.colo_group_id
     }
 
-    pub(super) fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+    pub fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
         if keyspace_id.0 != self.inner.colo_group_id {
             return Err(anyhow!(
                 "cannot create {:?} in tablet for {:?}",

@@ -20,8 +20,8 @@ use crate::runtime::Meta;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
 use crate::runtime::Tablet;
+use crate::shard::shard_data_tablet::ShardDataTablet;
 use crate::tablet::DataTablet;
-use crate::tablet::DataTablet2;
 use crate::tablet::HydratingTablet;
 use crate::tablet::MetaTablet;
 use crate::tablet::ShardMetaTablet;
@@ -186,7 +186,7 @@ struct ShardInner {
 
     shard_meta_tablet: Arc<ShardMetaTablet>,
     meta_tablet: Option<Arc<MetaTablet>>, // Present only if id==ShardId::META.
-    tablets: ShardedLock<HashMap<TabletId, Arc<DataTablet2>>>,
+    tablets: ShardedLock<HashMap<TabletId, Arc<ShardDataTablet>>>,
 }
 
 impl ShardInner {
@@ -264,9 +264,9 @@ impl ShardInner {
         tablet_id: TabletId,
         tablet_metadata: ShardTabletMetadata,
         lsm: Lsm,
-    ) -> anyhow::Result<DataTablet2> {
+    ) -> anyhow::Result<ShardDataTablet> {
         Ok(match tablet_metadata.state {
-            TabletState::Active => DataTablet2::new_active(DataTablet::new(
+            TabletState::Active => ShardDataTablet::new_active(DataTablet::new(
                 tablet_id,
                 tablet_metadata.colo_group_id,
                 tablet_metadata.range,
@@ -289,7 +289,7 @@ impl ShardInner {
                     ));
                 };
 
-                DataTablet2::new_hydrating(HydratingTablet::new(
+                ShardDataTablet::new_hydrating(HydratingTablet::new(
                     tablet_id,
                     tablet_metadata.colo_group_id,
                     tablet_metadata.range,

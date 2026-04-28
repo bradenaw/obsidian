@@ -6,8 +6,8 @@ use async_trait::async_trait;
 
 use crate::lsm::Manifest;
 use crate::runtime;
-use crate::tablet::hydrating_tablet::HydratingTablet;
 use crate::tablet::DataTablet;
+use crate::tablet::HydratingTablet;
 use crate::util::StateMachine;
 use crate::Bound;
 use crate::ColoGroupId;
@@ -25,13 +25,13 @@ use crate::TabletId;
 use crate::Timestamp;
 use crate::Txid;
 
-pub(crate) struct DataTablet2 {
+pub(super) struct ShardDataTablet {
     tablet_id: TabletId,
     colo_group_id: ColoGroupId,
     state_machine: StateMachine<TabletState>,
 }
 
-impl DataTablet2 {
+impl ShardDataTablet {
     pub fn new_hydrating(tablet: HydratingTablet) -> Self {
         Self {
             tablet_id: tablet.tablet_id(),
@@ -185,7 +185,7 @@ impl DataTablet2 {
 }
 
 #[async_trait]
-impl runtime::Tablet for DataTablet2 {
+impl runtime::Tablet for ShardDataTablet {
     async fn get_multi(
         &self,
         ts: Timestamp,
