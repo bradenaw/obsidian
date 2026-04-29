@@ -146,18 +146,7 @@ impl ShardDataTablet {
     }
 
     pub async fn flush(&self) -> anyhow::Result<()> {
-        self.state_machine
-            .with_state(async |state| {
-                if let TabletState::Active(tablet) | TabletState::Frozen(tablet) = state {
-                    return tablet.flush().await;
-                }
-                return Err(anyhow!(
-                    "{:?} in wrong state for flush {}",
-                    self.tablet_id,
-                    state.name()
-                ));
-            })
-            .await
+        self.if_readable(async |tablet| tablet.flush().await).await
     }
 
     pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
@@ -182,6 +171,41 @@ impl ShardDataTablet {
             })
             .await
     }
+
+    async fn if_readable<F, T, E>(&self, f: F) -> Result<T, E>
+    where
+        F: AsyncFnOnce(&DataTablet) -> Result<T, E>,
+        E: From<anyhow::Error> + Send + 'static,
+    {
+        self.state_machine
+            .with_state(async |state| {
+                if let TabletState::Active(tablet) | TabletState::Frozen(tablet) = state {
+                    return f(tablet).await;
+                }
+                Err(anyhow!(
+                    "{:?} in wrong state for read {}",
+                    self.tablet_id,
+                    state.name(),
+                )
+                .into())
+            })
+            .await
+    }
+
+    async fn if_active<F, T, E>(&self, f: F) -> Result<T, E>
+    where
+        F: AsyncFnOnce(&DataTablet) -> Result<T, E>,
+        E: From<anyhow::Error> + Send + 'static,
+    {
+        self.state_machine
+            .with_state(async |state| {
+                if let TabletState::Active(tablet) = state {
+                    return f(tablet).await;
+                }
+                Err(anyhow!("{:?} in wrong state {}", self.tablet_id, state.name(),).into())
+            })
+            .await
+    }
 }
 
 #[async_trait]
@@ -191,17 +215,7 @@ impl runtime::Tablet for ShardDataTablet {
         ts: Timestamp,
         keys: BTreeSet<Key>,
     ) -> Result<BTreeMap<Key, Record>, InternalError> {
-        self.state_machine
-            .with_state(async |state| {
-                if let TabletState::Active(tablet) | TabletState::Frozen(tablet) = state {
-                    return tablet.get_multi(ts, keys).await;
-                }
-                Err(InternalError::Other(anyhow!(
-                    "{:?} in wrong state for get_multi {}",
-                    self.tablet_id,
-                    state.name(),
-                )))
-            })
+        self.if_readable(async |tablet| tablet.get_multi(ts, keys).await)
             .await
     }
 
@@ -209,32 +223,12 @@ impl runtime::Tablet for ShardDataTablet {
         &self,
         keys: BTreeSet<Key>,
     ) -> Result<(Timestamp, BTreeMap<Key, Record>), InternalError> {
-        self.state_machine
-            .with_state(async |state| {
-                if let TabletState::Active(tablet) | TabletState::Frozen(tablet) = state {
-                    return tablet.get_latest_multi(keys).await;
-                }
-                Err(InternalError::Other(anyhow!(
-                    "{:?} in wrong state for get_latest_multi {}",
-                    self.tablet_id,
-                    state.name(),
-                )))
-            })
+        self.if_readable(async |tablet| tablet.get_latest_multi(keys).await)
             .await
     }
 
     async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError> {
-        self.state_machine
-            .with_state(async |state| {
-                if let TabletState::Active(tablet) | TabletState::Frozen(tablet) = state {
-                    return tablet.latest_snapshot(keys).await;
-                }
-                Err(InternalError::Other(anyhow!(
-                    "{:?} in wrong state for latest_snapshot {}",
-                    self.tablet_id,
-                    state.name(),
-                )))
-            })
+        self.if_readable(async |tablet| tablet.latest_snapshot(keys).await)
             .await
     }
 
@@ -246,20 +240,12 @@ impl runtime::Tablet for ShardDataTablet {
         direction: Direction,
         limit: usize,
     ) -> Result<(Vec<Record>, Option<Range<Vec<u8>>>), InternalError> {
-        self.state_machine
-            .with_state(async |state| {
-                if let TabletState::Active(tablet) | TabletState::Frozen(tablet) = state {
-                    return tablet
-                        .scan_page(ts, keyspace_id, range, direction, limit)
-                        .await;
-                }
-                Err(InternalError::Other(anyhow!(
-                    "{:?} in wrong state for scan_page {}",
-                    self.tablet_id,
-                    state.name(),
-                )))
-            })
-            .await
+        self.if_readable(async |tablet| {
+            tablet
+                .scan_page(ts, keyspace_id, range, direction, limit)
+                .await
+        })
+        .await
     }
 
     async fn history_page(
@@ -269,17 +255,7 @@ impl runtime::Tablet for ShardDataTablet {
         direction: Direction,
         limit: usize,
     ) -> Result<(Vec<Revision>, Option<HistoryRange>), InternalError> {
-        self.state_machine
-            .with_state(async |state| {
-                if let TabletState::Active(tablet) | TabletState::Frozen(tablet) = state {
-                    return tablet.history_page(key, range, direction, limit).await;
-                }
-                Err(InternalError::Other(anyhow!(
-                    "{:?} in wrong state for history_page {}",
-                    self.tablet_id,
-                    state.name(),
-                )))
-            })
+        self.if_readable(async |tablet| tablet.history_page(key, range, direction, limit).await)
             .await
     }
 
@@ -288,17 +264,7 @@ impl runtime::Tablet for ShardDataTablet {
         preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
-        self.state_machine
-            .with_state(async |state| {
-                if let TabletState::Active(tablet) = state {
-                    return tablet.write(preconds, muts).await;
-                }
-                Err(InternalError::Other(anyhow!(
-                    "{:?} in wrong state for write {}",
-                    self.tablet_id,
-                    state.name(),
-                )))
-            })
+        self.if_active(async |tablet| tablet.write(preconds, muts).await)
             .await
     }
 
@@ -308,17 +274,7 @@ impl runtime::Tablet for ShardDataTablet {
         preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
-        self.state_machine
-            .with_state(async |state| {
-                if let TabletState::Active(tablet) = state {
-                    return tablet.prepare(txid, preconds, muts).await;
-                }
-                Err(InternalError::Other(anyhow!(
-                    "{:?} in wrong state for prepare {}",
-                    self.tablet_id,
-                    state.name(),
-                )))
-            })
+        self.if_active(async |tablet| tablet.prepare(txid, preconds, muts).await)
             .await
     }
 
@@ -329,20 +285,12 @@ impl runtime::Tablet for ShardDataTablet {
         precond_keys: BTreeSet<Key>,
         mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()> {
-        self.state_machine
-            .with_state(async |state| {
-                if let TabletState::Active(tablet) = state {
-                    return tablet
-                        .cleanup_committed(txid, ts, precond_keys, mut_keys)
-                        .await;
-                }
-                Err(anyhow!(
-                    "{:?} in wrong state for cleanup_committed {}",
-                    self.tablet_id,
-                    state.name(),
-                ))
-            })
-            .await
+        self.if_active(async |tablet| {
+            tablet
+                .cleanup_committed(txid, ts, precond_keys, mut_keys)
+                .await
+        })
+        .await
     }
 
     async fn manifest(&self) -> anyhow::Result<Manifest> {
@@ -394,17 +342,7 @@ impl runtime::Tablet for ShardDataTablet {
     }
 
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
-        self.state_machine
-            .with_state(async |state| {
-                if let TabletState::Active(tablet) = state {
-                    return tablet.find_split().await;
-                }
-                Err(anyhow!(
-                    "{:?} in wrong state for find_split {}",
-                    self.tablet_id,
-                    state.name(),
-                ))
-            })
+        self.if_active(async |tablet| tablet.find_split().await)
             .await
     }
 }
