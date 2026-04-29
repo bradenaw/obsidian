@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::ops::Deref as _;
+use std::ops::DerefMut;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -144,9 +145,12 @@ impl HydratingTablet {
             Arc::clone(&self.inner.storage),
             Arc::clone(&self.inner.shards),
         );
-        let extra_keyspaces = self.extra_keyspaces.lock().unwrap();
+        let extra_keyspaces = {
+            let mut guard = self.extra_keyspaces.lock().unwrap();
+            std::mem::replace(guard.deref_mut(), HashSet::new())
+        };
         for keyspace_id in extra_keyspaces.iter() {
-            data_tablet.create_keyspace(*keyspace_id)?;
+            data_tablet.create_keyspace(*keyspace_id).await?;
         }
         Ok(data_tablet)
     }

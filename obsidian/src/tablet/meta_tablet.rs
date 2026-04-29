@@ -7,9 +7,7 @@ use async_trait::async_trait;
 
 use crate::lsm::Lsm;
 use crate::lsm::Manifest;
-use crate::meta::TabletState;
 use crate::runtime::Tablet;
-use crate::tablet::protected::ProtectedLsm;
 use crate::tablet::tablet_inner::TabletInner;
 use crate::tablet::tablet_journal_writer::TabletJournalWriter;
 use crate::Bound;
@@ -50,7 +48,7 @@ impl MetaTablet {
                 TabletId::META,
                 ColoGroupId::META,
                 Range::all(),
-                ProtectedLsm::new(TabletId::META, lsm, TabletState::Active),
+                lsm,
                 journal,
             ),
         }

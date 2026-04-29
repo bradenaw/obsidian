@@ -160,10 +160,10 @@ impl ShardDataTablet {
                         hydrating_tablet.create_keyspace(keyspace_id)?;
                     }
                     TabletState::Active(data_tablet) => {
-                        data_tablet.create_keyspace(keyspace_id)?;
+                        data_tablet.create_keyspace(keyspace_id).await?;
                     }
                     TabletState::Frozen(data_tablet) => {
-                        data_tablet.create_keyspace(keyspace_id)?;
+                        data_tablet.create_keyspace(keyspace_id).await?;
                     }
                 }
 

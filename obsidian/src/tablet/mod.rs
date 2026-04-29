@@ -1,8 +1,8 @@
 mod data_tablet;
 mod hydrating_tablet;
+mod journaled_lsm;
 mod lock_mgr;
 mod meta_tablet;
-mod protected;
 mod scan_locks;
 mod sequencer;
 mod shard_meta_tablet;

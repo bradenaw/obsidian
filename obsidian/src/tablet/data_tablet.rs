@@ -11,13 +11,9 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::lsm::Lsm;
 use crate::lsm::Manifest;
-use crate::meta::TabletState;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
 use crate::runtime::Tablet;
-use crate::tablet::protected::LsmRead;
-use crate::tablet::protected::LsmReadWrite;
-use crate::tablet::protected::ProtectedLsm;
 use crate::tablet::tablet_inner::PendingMutation;
 use crate::tablet::tablet_inner::PrecondLocks;
 use crate::tablet::tablet_inner::TabletInner;
@@ -117,16 +113,13 @@ impl Tablet for DataTablet {
         preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
-        let lsm_rw = self.0.inner.lsm.read_write()?;
         let _guard = self.0.inner.acquire_write_locks(&preconds, &muts).await?;
 
-        if let Some(conflict_txid) =
-            TabletInner::check_write_conflicts(&lsm_rw, &preconds, &muts).await?
-        {
+        if let Some(conflict_txid) = self.0.inner.check_write_conflicts(&preconds, &muts).await? {
             return Err(InternalError::Conflict(conflict_txid));
         }
 
-        self.0.inner.check_preconds(&lsm_rw, &preconds).await?;
+        self.0.inner.check_preconds(&preconds).await?;
 
         let ts = self.0.inner.sequencer.start_write();
 
@@ -139,7 +132,10 @@ impl Tablet for DataTablet {
                     precond.keyspace_id()
                 )
             })?;
-            let value = TabletInner::unsafe_get_latest_record(&lsm_rw, keyspace_id, precond.key())
+            let value = self
+                .0
+                .inner
+                .unsafe_get_latest_record(keyspace_id, precond.key())
                 .await
                 .map_err(|e| InternalError::Other(e.into()))?
                 .map(|(_, v)| match v {
@@ -175,7 +171,7 @@ impl Tablet for DataTablet {
             );
         }
 
-        lsm_rw.write(*ts, actual_muts);
+        self.0.inner.lsm.write(*ts, actual_muts).await?;
 
         for precond in preconds {
             _ = self
@@ -189,6 +185,7 @@ impl Tablet for DataTablet {
                 ))
                 .await;
         }
+        // TODO: Release locks first?
         for ((keyspace_id, key), _) in muts {
             _ = self
                 .0
@@ -242,17 +239,7 @@ impl DataTablet {
         let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
 
         let tablet = DataTablet(WithBackground::new(Arc::new(Arc::new(DataTabletInner {
-            inner: TabletInner::new(
-                tablet_id,
-                colo_group_id,
-                range,
-                // Start out in Defunct because it has no permissions to do anything and we don't
-                // actually know what we should be allowed to do until the meta sync finishes.
-                //
-                // TODO: remove indirect
-                ProtectedLsm::new(tablet_id, lsm, TabletState::Active),
-                journal,
-            ),
+            inner: TabletInner::new(tablet_id, colo_group_id, range, lsm, journal),
             storage: storage,
             shards: shards,
             prepare_sender: prepare_sender.clone(),
@@ -292,14 +279,17 @@ impl DataTablet {
         self.0.inner.lsm.flush().await
     }
 
-    pub fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
-        self.0.inner.create_keyspace(keyspace_id)
+    pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        self.0.inner.create_keyspace(keyspace_id).await
     }
 }
 
 impl DataTabletInner {
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
-        self.inner.lsm.find_split().await
+        self.inner
+            .lsm
+            .find_split()
+            .ok_or_else(|| anyhow!("no split candidates for {:?}", self.inner.tablet_id))
     }
 
     // Scans for pending mutations that exist on disk already and delivers them to `sender`.
@@ -307,7 +297,7 @@ impl DataTabletInner {
         &self,
         sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
     ) {
-        let keyspace_ids = self.inner.lsm.wait_read().await.keyspaces();
+        let keyspace_ids = self.inner.lsm.keyspaces();
         for keyspace_id in keyspace_ids {
             if !keyspace_id.is_pending() {
                 continue;
@@ -347,7 +337,7 @@ impl DataTabletInner {
         &self,
         sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
     ) {
-        let keyspace_ids = self.inner.lsm.wait_read().await.keyspaces();
+        let keyspace_ids = self.inner.lsm.keyspaces();
         for keyspace_id in keyspace_ids {
             if !keyspace_id.is_precond() {
                 continue;
@@ -426,14 +416,12 @@ impl DataTabletInner {
         // Commits get cleaned up by the owner tablet calling cleanup_committed. Ignore them
         // here to avoid duplicating work.
         if let TxOutcome::Aborted = tx_outcome {
-            let lsm_rw = self.inner.lsm.wait_read_write().await;
             match prepare_type {
                 PrepareType::Precondition => {
-                    self.cleanup_precond_key(&lsm_rw, txid, keyspace_id, key)
-                        .await?;
+                    self.cleanup_precond_key(txid, keyspace_id, key).await?;
                 }
                 PrepareType::Mutation => {
-                    self.cleanup_pending_key(&lsm_rw, txid, tx_outcome, keyspace_id, key)
+                    self.cleanup_pending_key(txid, tx_outcome, keyspace_id, key)
                         .await?;
                 }
             }
@@ -449,23 +437,19 @@ impl DataTabletInner {
         mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()> {
         let tx_outcome = TxOutcome::Committed(ts);
-        let lsm_rw = self.inner.lsm.read_write()?;
-
         for (keyspace_id, key) in precond_keys {
-            self.cleanup_precond_key(&lsm_rw, txid, keyspace_id, key)
-                .await?;
+            self.cleanup_precond_key(txid, keyspace_id, key).await?;
         }
         for (keyspace_id, key) in mut_keys {
-            self.cleanup_pending_key(&lsm_rw, txid, tx_outcome, keyspace_id, key)
+            self.cleanup_pending_key(txid, tx_outcome, keyspace_id, key)
                 .await?;
         }
 
         Ok(())
     }
 
-    async fn cleanup_pending_key<RW: LsmReadWrite>(
+    async fn cleanup_pending_key(
         &self,
-        lsm_rw: &RW,
         txid: Txid,
         tx_outcome: TxOutcome,
         keyspace_id: KeyspaceId,
@@ -477,11 +461,14 @@ impl DataTabletInner {
 
         let _guard = self.inner.lock_mgr.write_lock(&key[..]).await;
 
-        let (pending_ts, value) =
-            match TabletInner::unsafe_get_latest_record(lsm_rw, pending_keyspace_id, &key).await? {
-                Some((pending_ts, value)) => (pending_ts, value),
-                None => return Ok(()),
-            };
+        let (pending_ts, value) = match self
+            .inner
+            .unsafe_get_latest_record(pending_keyspace_id, &key)
+            .await?
+        {
+            Some((pending_ts, value)) => (pending_ts, value),
+            None => return Ok(()),
+        };
         let m = match value {
             RevisionValue::Regular(v) => {
                 let pending_m = PendingMutation::decode(&v)?;
@@ -515,24 +502,29 @@ impl DataTabletInner {
             // This guard guarantees that any concurrent scans complete before we remove the
             // pending record.
             let cleanup_guard = self.inner.scan_locks.cleanup();
-            lsm_rw.write(
-                resolve_ts,
-                BTreeMap::from([((keyspace_id, key.clone()), m)]),
-            );
+            self.inner
+                .lsm
+                .write(
+                    resolve_ts,
+                    BTreeMap::from([((keyspace_id, key.clone()), m)]),
+                )
+                .await?;
             log::info!("cleanup_pending_key wait");
             cleanup_guard.wait().await;
             log::info!("cleanup_pending_key wait -> done");
         }
-        lsm_rw.write(
-            resolve_ts,
-            BTreeMap::from([((pending_keyspace_id, key.clone()), Mutation::Delete)]),
-        );
+        self.inner
+            .lsm
+            .write(
+                resolve_ts,
+                BTreeMap::from([((pending_keyspace_id, key.clone()), Mutation::Delete)]),
+            )
+            .await?;
         Ok(())
     }
 
-    async fn cleanup_precond_key<RW: LsmReadWrite>(
+    async fn cleanup_precond_key(
         &self,
-        lsm_rw: &RW,
         txid: Txid,
         keyspace_id: KeyspaceId,
         key: Vec<u8>,
@@ -544,8 +536,10 @@ impl DataTabletInner {
         let mut muts = BTreeMap::new();
         let _guard = self.inner.lock_mgr.write_lock(&key[..]).await;
 
-        let (overwrite_ts, m) = if let Some((prepare_ts, RevisionValue::Regular(bytes))) =
-            TabletInner::unsafe_get_latest_record(lsm_rw, precond_keyspace_id, &key).await?
+        let (overwrite_ts, m) = if let Some((prepare_ts, RevisionValue::Regular(bytes))) = self
+            .inner
+            .unsafe_get_latest_record(precond_keyspace_id, &key)
+            .await?
         {
             let mut precond_locks = PrecondLocks::decode(&bytes)?;
             if precond_locks.txids.remove(&txid) {
@@ -563,7 +557,7 @@ impl DataTabletInner {
             return Ok(());
         };
         muts.insert((precond_keyspace_id, key.clone()), m);
-        lsm_rw.write(overwrite_ts, muts);
+        self.inner.lsm.write(overwrite_ts, muts).await?;
         Ok(())
     }
 }
