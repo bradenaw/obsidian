@@ -14,15 +14,18 @@ use crate::lsm::Manifest;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
 use crate::runtime::Tablet;
+use crate::tablet::frozen_tablet::FrozenTablet;
+use crate::tablet::journaled_lsm::JournaledLsm;
+use crate::tablet::journaled_lsm::LsmWrite;
 use crate::tablet::read_only_lsm::LsmRead;
 use crate::tablet::tablet_inner::PendingMutation;
 use crate::tablet::tablet_inner::PrecondLocks;
 use crate::tablet::tablet_inner::TabletInner;
-use crate::tablet::tablet_journal_writer::TabletJournalWriter;
+use crate::tablet::TabletJournalWriter;
 use crate::util::encode;
 use crate::util::Decode;
+use crate::util::OwnedWithBackground;
 use crate::util::Retry;
-use crate::util::WithBackground;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -43,10 +46,10 @@ use crate::Txid;
 
 const MAX_PRECOND_VALUE_LEN: usize = 256;
 
-pub(crate) struct DataTablet(WithBackground<Arc<DataTabletInner>>);
+pub(crate) struct DataTablet(OwnedWithBackground<DataTabletInner>);
 
 struct DataTabletInner {
-    inner: TabletInner,
+    inner: TabletInner<JournaledLsm>,
     storage: Arc<dyn Storage>,
     shards: Arc<dyn Shards>,
     prepare_sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
@@ -237,14 +240,33 @@ impl DataTablet {
         storage: Arc<dyn Storage>,
         shards: Arc<dyn Shards>,
     ) -> Self {
+        Self::new_inner(
+            tablet_id,
+            colo_group_id,
+            range,
+            JournaledLsm::new(lsm, journal),
+            storage,
+            shards,
+        )
+    }
+
+    // TODO: collapse with new
+    pub(super) fn new_inner(
+        tablet_id: TabletId,
+        colo_group_id: ColoGroupId,
+        range: Range<Vec<u8>>,
+        lsm: JournaledLsm,
+        storage: Arc<dyn Storage>,
+        shards: Arc<dyn Shards>,
+    ) -> Self {
         let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
 
-        let tablet = DataTablet(WithBackground::new(Arc::new(Arc::new(DataTabletInner {
-            inner: TabletInner::new(tablet_id, colo_group_id, range, lsm, journal),
+        let tablet = DataTablet(OwnedWithBackground::new(DataTabletInner {
+            inner: TabletInner::new(tablet_id, colo_group_id, range, lsm),
             storage: storage,
             shards: shards,
             prepare_sender: prepare_sender.clone(),
-        }))));
+        }));
 
         // TODO: These need to not be happening while tablet is frozen
         tablet.0.spawn(async |inner| {
@@ -263,6 +285,18 @@ impl DataTablet {
         });
 
         tablet
+    }
+
+    pub async fn freeze(self) -> FrozenTablet {
+        let data_tablet_inner = self.0.take().await;
+        FrozenTablet::new(
+            data_tablet_inner.inner.tablet_id,
+            data_tablet_inner.inner.colo_group_id,
+            data_tablet_inner.inner.range,
+            data_tablet_inner.inner.lsm.make_read_only().await,
+            data_tablet_inner.storage,
+            data_tablet_inner.shards,
+        )
     }
 
     pub fn tablet_id(&self) -> TabletId {

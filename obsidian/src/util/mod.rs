@@ -22,6 +22,7 @@ pub(crate) use atomic_timestamp::AtomicTimestamp;
 pub(crate) use background::spawn_owned;
 pub(crate) use background::Background;
 pub(crate) use background::OwnedJoinHandle;
+pub(crate) use background::OwnedWithBackground;
 pub(crate) use background::WithBackground;
 pub(crate) use bytes::byte_width;
 pub(crate) use bytes::encode;

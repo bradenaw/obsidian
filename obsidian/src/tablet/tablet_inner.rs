@@ -3,22 +3,19 @@ use std::cmp::max;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::future::Future;
-use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_stream::try_stream;
 use futures::future;
 use futures::Stream;
 
-use crate::lsm::Lsm;
 use crate::lsm::Manifest;
-use crate::tablet::journaled_lsm::JournaledLsm;
+use crate::tablet::journaled_lsm::LsmWrite;
 use crate::tablet::lock_mgr::Guard;
 use crate::tablet::lock_mgr::LockMgr;
 use crate::tablet::read_only_lsm::LsmRead;
 use crate::tablet::scan_locks::ScanLocks;
 use crate::tablet::sequencer::Sequencer;
-use crate::tablet::tablet_journal_writer::TabletJournalWriter;
 use crate::util::Decode;
 use crate::util::Encode;
 use crate::ColoGroupId;
@@ -37,30 +34,32 @@ use crate::TabletId;
 use crate::Timestamp;
 use crate::Txid;
 
-pub(super) struct TabletInner {
+pub(super) struct TabletInner<L> {
     pub tablet_id: TabletId,
     pub colo_group_id: ColoGroupId,
     pub range: Range<Vec<u8>>,
 
-    pub lsm: JournaledLsm,
+    pub lsm: L,
     pub sequencer: Sequencer,
     pub lock_mgr: LockMgr,
     pub scan_locks: ScanLocks,
 }
 
-impl TabletInner {
+impl<L> TabletInner<L>
+where
+    L: LsmRead,
+{
     pub(super) fn new(
         tablet_id: TabletId,
         colo_group_id: ColoGroupId,
         range: Range<Vec<u8>>,
-        lsm: Lsm,
-        journal: Arc<dyn TabletJournalWriter>,
+        lsm: L,
     ) -> Self {
         Self {
             tablet_id,
             colo_group_id,
             range,
-            lsm: JournaledLsm::new(lsm, journal),
+            lsm: lsm,
             sequencer: Sequencer::new(),
             lock_mgr: LockMgr::new(1 << 16 /*buckets*/),
             scan_locks: ScanLocks::new(),
@@ -351,29 +350,6 @@ impl TabletInner {
         ))
     }
 
-    pub(super) async fn write(
-        &self,
-        preconds: Vec<Precondition>,
-        muts: BTreeMap<Key, Mutation>,
-    ) -> Result<Timestamp, InternalError> {
-        // XXX: This is not tolerant of timeouts, since that might cause us to release the locks
-        // before the write completes.
-
-        let _guard = self.acquire_write_locks(&preconds, &muts).await?;
-
-        if let Some(conflict_txid) = self.check_write_conflicts(&preconds, &muts).await? {
-            return Err(InternalError::Conflict(conflict_txid));
-        }
-
-        self.check_preconds(&preconds).await?;
-
-        let ts = self.sequencer.start_write();
-
-        self.lsm.write(*ts, muts).await?;
-
-        Ok(*ts)
-    }
-
     // TODO: make this take a lockmgr guard that proves the lock is held
     pub(super) async fn unsafe_get_latest_record(
         &self,
@@ -381,52 +357,6 @@ impl TabletInner {
         key: &[u8],
     ) -> anyhow::Result<Option<(Timestamp, RevisionValue)>> {
         self.lsm.get(Timestamp(u64::MAX), keyspace_id, key).await
-    }
-
-    pub(super) async fn acquire_write_locks<'a>(
-        &'a self,
-        preconds: &Vec<Precondition>,
-        muts: &BTreeMap<Key, Mutation>,
-    ) -> anyhow::Result<Guard<'a>> {
-        for precond in preconds {
-            self.check_key(precond.keyspace_id().0, precond.key())?;
-        }
-        for (keyspace_id, key) in muts.keys() {
-            self.check_key(keyspace_id.0, &key)?;
-        }
-        Ok(self
-            .lock_mgr
-            .lock_all(
-                preconds.iter().map(|precond| precond.key()),
-                muts.keys().map(|(_, k)| &k[..]),
-            )
-            .await)
-    }
-
-    // TODO: make this take a lockmgr guard that proves the lock is held
-    pub(super) async fn check_write_conflicts(
-        &self,
-        preconds: &Vec<Precondition>,
-        muts: &BTreeMap<Key, Mutation>,
-    ) -> anyhow::Result<Option<Txid>> {
-        for (keyspace_id, key) in Iterator::chain(
-            preconds
-                .iter()
-                .map(|precond| (precond.keyspace_id(), precond.key())),
-            muts.keys()
-                .map(|(keyspace_id, key)| (*keyspace_id, &key[..])),
-        ) {
-            if let Some(pending_keyspace_id) = keyspace_id.pending() {
-                if let Some((_, RevisionValue::Regular(value))) = self
-                    .unsafe_get_latest_record(pending_keyspace_id, key)
-                    .await?
-                {
-                    let other_txid = Txid::decode(&value[..Txid::ENCODED_LEN])?;
-                    return Ok(Some(other_txid));
-                }
-            }
-        }
-        Ok(None)
     }
 
     // Scans the entirety of `range` by calling scan_page repeatedly.
@@ -494,6 +424,92 @@ impl TabletInner {
         Ok(intersection.to_vec())
     }
 
+    pub(super) fn check_key(&self, colo_group_id: ColoGroupId, key: &[u8]) -> anyhow::Result<()> {
+        if self.colo_group_id != colo_group_id || !self.range.contains(&key) {
+            return Err(anyhow!("{:?}/{:?} not owned", colo_group_id, key).into());
+        }
+
+        Ok(())
+    }
+
+    pub(super) fn manifest(&self) -> Manifest {
+        self.lsm.manifest()
+    }
+}
+
+impl<L> TabletInner<L>
+where
+    L: LsmRead + LsmWrite,
+{
+    pub(super) async fn write(
+        &self,
+        preconds: Vec<Precondition>,
+        muts: BTreeMap<Key, Mutation>,
+    ) -> Result<Timestamp, InternalError> {
+        // XXX: This is not tolerant of timeouts, since that might cause us to release the locks
+        // before the write completes.
+
+        let _guard = self.acquire_write_locks(&preconds, &muts).await?;
+
+        if let Some(conflict_txid) = self.check_write_conflicts(&preconds, &muts).await? {
+            return Err(InternalError::Conflict(conflict_txid));
+        }
+
+        self.check_preconds(&preconds).await?;
+
+        let ts = self.sequencer.start_write();
+
+        self.lsm.write(*ts, muts).await?;
+
+        Ok(*ts)
+    }
+
+    pub(super) async fn acquire_write_locks<'a>(
+        &'a self,
+        preconds: &Vec<Precondition>,
+        muts: &BTreeMap<Key, Mutation>,
+    ) -> anyhow::Result<Guard<'a>> {
+        for precond in preconds {
+            self.check_key(precond.keyspace_id().0, precond.key())?;
+        }
+        for (keyspace_id, key) in muts.keys() {
+            self.check_key(keyspace_id.0, &key)?;
+        }
+        Ok(self
+            .lock_mgr
+            .lock_all(
+                preconds.iter().map(|precond| precond.key()),
+                muts.keys().map(|(_, k)| &k[..]),
+            )
+            .await)
+    }
+
+    // TODO: make this take a lockmgr guard that proves the lock is held
+    pub(super) async fn check_write_conflicts(
+        &self,
+        preconds: &Vec<Precondition>,
+        muts: &BTreeMap<Key, Mutation>,
+    ) -> anyhow::Result<Option<Txid>> {
+        for (keyspace_id, key) in Iterator::chain(
+            preconds
+                .iter()
+                .map(|precond| (precond.keyspace_id(), precond.key())),
+            muts.keys()
+                .map(|(keyspace_id, key)| (*keyspace_id, &key[..])),
+        ) {
+            if let Some(pending_keyspace_id) = keyspace_id.pending() {
+                if let Some((_, RevisionValue::Regular(value))) = self
+                    .unsafe_get_latest_record(pending_keyspace_id, key)
+                    .await?
+                {
+                    let other_txid = Txid::decode(&value[..Txid::ENCODED_LEN])?;
+                    return Ok(Some(other_txid));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     pub(super) async fn check_preconds(
         &self,
         preconds: &[Precondition],
@@ -515,14 +531,6 @@ impl TabletInner {
         Ok(())
     }
 
-    pub(super) fn check_key(&self, colo_group_id: ColoGroupId, key: &[u8]) -> anyhow::Result<()> {
-        if self.colo_group_id != colo_group_id || !self.range.contains(&key) {
-            return Err(anyhow!("{:?}/{:?} not owned", colo_group_id, key).into());
-        }
-
-        Ok(())
-    }
-
     pub(super) async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
         if keyspace_id.0 != self.colo_group_id {
             return Err(anyhow!(
@@ -540,10 +548,6 @@ impl TabletInner {
         }
 
         Ok(())
-    }
-
-    pub(super) fn manifest(&self) -> Manifest {
-        self.lsm.manifest()
     }
 }
 
@@ -662,6 +666,7 @@ mod tests {
 
     use crate::lsm::Lsm;
     use crate::lsm::LsmOptions;
+    use crate::tablet::journaled_lsm::JournaledLsm;
     use crate::tablet::tablet_inner::PendingMutation;
     use crate::tablet::tablet_inner::TabletInner;
     use crate::tablet::tablet_journal_writer::TabletJournalWriter;
@@ -707,8 +712,7 @@ mod tests {
             tablet_id,
             keyspace_id.0,
             Range::all(),
-            lsm,
-            Arc::new(NoopJournalWriter {}),
+            JournaledLsm::new(lsm, Arc::new(NoopJournalWriter {})),
         );
 
         let write_0_ts = tablet_inner
@@ -821,8 +825,7 @@ mod tests {
             tablet_id,
             keyspace_id.0,
             Range::all(),
-            lsm,
-            Arc::new(NoopJournalWriter {}),
+            JournaledLsm::new(lsm, Arc::new(NoopJournalWriter {})),
         );
 
         let mut ts = Timestamp::ZERO;

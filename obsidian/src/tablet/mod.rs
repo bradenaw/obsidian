@@ -1,4 +1,5 @@
 mod data_tablet;
+mod frozen_tablet;
 mod hydrating_tablet;
 mod journaled_lsm;
 mod lock_mgr;

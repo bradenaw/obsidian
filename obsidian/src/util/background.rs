@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::future::Future;
+use std::mem;
 use std::ops::Deref;
+use std::ops::DerefMut;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -27,6 +29,17 @@ impl Background {
         });
         guard.0 += 1;
         guard.1.insert(id, handle);
+    }
+
+    pub(crate) async fn stop(self) {
+        let tasks_map = {
+            let mut guard = self.tasks.lock().unwrap();
+            mem::replace(guard.deref_mut(), (0, HashMap::new()))
+        };
+        for (_, join_handle) in tasks_map.1.into_iter() {
+            join_handle.0.abort();
+            let _ = join_handle.await;
+        }
     }
 }
 
@@ -61,6 +74,52 @@ where
 }
 
 impl<T> Deref for WithBackground<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.deref()
+    }
+}
+
+pub(crate) struct OwnedWithBackground<T> {
+    inner: Arc<T>,
+    bg: Background,
+}
+
+impl<T> OwnedWithBackground<T>
+where
+    T: Send + Sync + 'static,
+{
+    pub fn new(t: T) -> Self {
+        Self {
+            inner: Arc::new(t),
+            bg: Background::new(),
+        }
+    }
+
+    pub(crate) fn spawn<F>(&self, f: F)
+    where
+        F: AsyncFnOnce(&T) + Send + 'static,
+        for<'a> <F as AsyncFnOnce<(&'a T,)>>::CallOnceFuture: Send,
+    {
+        self.bg.spawn({
+            let inner = Arc::clone(&self.inner);
+            async move {
+                let inner2 = Arc::clone(&inner);
+                f(inner2.deref()).await;
+            }
+        });
+    }
+
+    pub async fn take(self) -> T {
+        self.bg.stop().await;
+        // This unwrap is safe because the only way we end up with clones of self.inner is in
+        // spawn, and bg.stop() already made sure all of those are gone.
+        Arc::into_inner(self.inner).unwrap()
+    }
+}
+
+impl<T> Deref for OwnedWithBackground<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {

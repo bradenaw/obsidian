@@ -22,6 +22,8 @@ use crate::meta::MetaSynced;
 use crate::pb;
 use crate::runtime::Shards;
 use crate::runtime::Tablet;
+use crate::tablet::journaled_lsm::JournaledLsm;
+use crate::tablet::journaled_lsm::LsmWrite;
 use crate::tablet::tablet_inner::TabletInner;
 use crate::tablet::tablet_journal_writer::TabletJournalWriter;
 use crate::util::Decode;
@@ -59,7 +61,7 @@ const WAIT_ABORT_TIMEOUT: Duration = Duration::from_millis(1_000);
 pub(crate) struct ShardMetaTablet(WithBackground<ShardMetaTabletInner>);
 
 struct ShardMetaTabletInner {
-    inner: TabletInner,
+    inner: TabletInner<JournaledLsm>,
     meta_synced: Arc<MetaSynced>,
     shards: Arc<dyn Shards>,
     waiters: Waiters,
@@ -86,8 +88,7 @@ impl ShardMetaTablet {
                 tablet_id,
                 ColoGroupId::SHARD_META,
                 TabletId::shard_meta_owned_range(shard_id),
-                lsm,
-                journal,
+                JournaledLsm::new(lsm, journal),
             ),
             commit_sender: commit_sender.clone(),
             meta_synced,

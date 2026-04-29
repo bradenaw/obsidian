@@ -20,6 +20,20 @@ use crate::RevisionValue;
 use crate::TabletJournalEntry;
 use crate::Timestamp;
 
+pub(super) trait LsmWrite {
+    fn set_splits(&self, splits: Vec<Bound<Vec<u8>>>);
+
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()>;
+
+    async fn write(
+        &self,
+        ts: Timestamp,
+        muts: BTreeMap<Key, Mutation>,
+    ) -> Result<(), InternalError>;
+
+    async fn flush(&self) -> anyhow::Result<()>;
+}
+
 pub(super) struct JournaledLsm {
     lsm: Lsm,
     journal: Arc<dyn TabletJournalWriter>,
@@ -36,54 +50,6 @@ impl JournaledLsm {
             .await;
         self.lsm.pause_compaction().await;
         ReadOnlyLsm::new(self.lsm)
-    }
-
-    pub fn set_splits(&self, splits: Vec<Bound<Vec<u8>>>) {
-        self.lsm.set_splits(splits)
-    }
-
-    pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
-        // TODO: Journal.
-        self.lsm.create_keyspace(keyspace_id);
-        Ok(())
-    }
-
-    pub async fn write(
-        &self,
-        ts: Timestamp,
-        muts: BTreeMap<Key, Mutation>,
-    ) -> Result<(), InternalError> {
-        self.journal
-            .append(TabletJournalEntry::Write(
-                ts,
-                muts.iter()
-                    .map(|((keyspace_id, key), mutation)| {
-                        let value = match mutation {
-                            Mutation::Put(value) => RevisionValue::Regular(value.clone()),
-                            Mutation::Delete => RevisionValue::Tombstone,
-                        };
-                        (*keyspace_id, key.clone(), value)
-                    })
-                    .collect(),
-            ))
-            .await?;
-
-        for (key, mutation) in muts {
-            self.lsm.write(ts, key, mutation);
-        }
-
-        Ok(())
-    }
-
-    pub async fn flush(&self) -> anyhow::Result<()> {
-        // TODO: Journal.
-        //let seqno = self.journal.append(TabletJournalEntry::NoOp).await?;
-        self.lsm.flush().await?;
-        //let manifest = self.lsm.manifest();
-        //self.journal
-        //    .append(TabletJournalEntry::Manifest(seqno, manifest))
-        //    .await?;
-        Ok(())
     }
 }
 
@@ -133,5 +99,55 @@ impl LsmRead for JournaledLsm {
 
     fn find_split(&self) -> Option<Bound<Vec<u8>>> {
         self.lsm.find_split()
+    }
+}
+
+impl LsmWrite for JournaledLsm {
+    fn set_splits(&self, splits: Vec<Bound<Vec<u8>>>) {
+        self.lsm.set_splits(splits)
+    }
+
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        // TODO: Journal.
+        self.lsm.create_keyspace(keyspace_id);
+        Ok(())
+    }
+
+    async fn write(
+        &self,
+        ts: Timestamp,
+        muts: BTreeMap<Key, Mutation>,
+    ) -> Result<(), InternalError> {
+        self.journal
+            .append(TabletJournalEntry::Write(
+                ts,
+                muts.iter()
+                    .map(|((keyspace_id, key), mutation)| {
+                        let value = match mutation {
+                            Mutation::Put(value) => RevisionValue::Regular(value.clone()),
+                            Mutation::Delete => RevisionValue::Tombstone,
+                        };
+                        (*keyspace_id, key.clone(), value)
+                    })
+                    .collect(),
+            ))
+            .await?;
+
+        for (key, mutation) in muts {
+            self.lsm.write(ts, key, mutation);
+        }
+
+        Ok(())
+    }
+
+    async fn flush(&self) -> anyhow::Result<()> {
+        // TODO: Journal.
+        //let seqno = self.journal.append(TabletJournalEntry::NoOp).await?;
+        self.lsm.flush().await?;
+        //let manifest = self.lsm.manifest();
+        //self.journal
+        //    .append(TabletJournalEntry::Manifest(seqno, manifest))
+        //    .await?;
+        Ok(())
     }
 }
