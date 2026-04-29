@@ -3,8 +3,10 @@ use std::sync::Arc;
 
 use crate::lsm::Lsm;
 use crate::lsm::Manifest;
-use crate::lsm::Preloaded;
+use crate::tablet::read_only_lsm::LsmRead;
+use crate::tablet::read_only_lsm::ReadOnlyLsm;
 use crate::tablet::TabletJournalWriter;
+use crate::util::Retry;
 use crate::Bound;
 use crate::Direction;
 use crate::HistoryRange;
@@ -26,6 +28,24 @@ pub(super) struct JournaledLsm {
 impl JournaledLsm {
     pub fn new(lsm: Lsm, journal: Arc<dyn TabletJournalWriter>) -> Self {
         Self { lsm, journal }
+    }
+
+    pub async fn make_read_only(self) -> ReadOnlyLsm {
+        Retry::new()
+            .indefinitely(&async || self.flush().await)
+            .await;
+        self.lsm.pause_compaction().await;
+        ReadOnlyLsm::new(self.lsm)
+    }
+
+    pub fn set_splits(&self, splits: Vec<Bound<Vec<u8>>>) {
+        self.lsm.set_splits(splits)
+    }
+
+    pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        // TODO: Journal.
+        self.lsm.create_keyspace(keyspace_id);
+        Ok(())
     }
 
     pub async fn write(
@@ -55,7 +75,20 @@ impl JournaledLsm {
         Ok(())
     }
 
-    pub async fn get(
+    pub async fn flush(&self) -> anyhow::Result<()> {
+        // TODO: Journal.
+        //let seqno = self.journal.append(TabletJournalEntry::NoOp).await?;
+        self.lsm.flush().await?;
+        //let manifest = self.lsm.manifest();
+        //self.journal
+        //    .append(TabletJournalEntry::Manifest(seqno, manifest))
+        //    .await?;
+        Ok(())
+    }
+}
+
+impl LsmRead for JournaledLsm {
+    async fn get(
         &self,
         ts: Timestamp,
         keyspace_id: KeyspaceId,
@@ -64,7 +97,7 @@ impl JournaledLsm {
         self.lsm.get(ts, keyspace_id, key).await
     }
 
-    pub async fn scan_page(
+    async fn scan_page(
         &self,
         ts: Timestamp,
         keyspace_id: KeyspaceId,
@@ -77,7 +110,7 @@ impl JournaledLsm {
             .await
     }
 
-    pub async fn history_page(
+    async fn history_page(
         &self,
         keyspace_id: KeyspaceId,
         key: &[u8],
@@ -90,48 +123,15 @@ impl JournaledLsm {
             .await
     }
 
-    pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
-        // TODO: Journal.
-        self.lsm.create_keyspace(keyspace_id);
-        Ok(())
-    }
-
-    pub fn manifest(&self) -> Manifest {
+    fn manifest(&self) -> Manifest {
         self.lsm.manifest()
     }
 
-    pub fn keyspaces(&self) -> Vec<KeyspaceId> {
+    fn keyspaces(&self) -> Vec<KeyspaceId> {
         self.lsm.keyspaces()
     }
 
-    pub async fn flush(&self) -> anyhow::Result<()> {
-        // TODO: Journal.
-        //let seqno = self.journal.append(TabletJournalEntry::NoOp).await?;
-        self.lsm.flush().await?;
-        //let manifest = self.lsm.manifest();
-        //self.journal
-        //    .append(TabletJournalEntry::Manifest(seqno, manifest))
-        //    .await?;
-        Ok(())
-    }
-
-    pub fn find_split(&self) -> Option<Bound<Vec<u8>>> {
+    fn find_split(&self) -> Option<Bound<Vec<u8>>> {
         self.lsm.find_split()
-    }
-
-    pub fn load(&self, preloaded: Preloaded) -> anyhow::Result<()> {
-        self.lsm.load(preloaded)
-    }
-
-    pub fn set_splits(&self, splits: Vec<Bound<Vec<u8>>>) {
-        self.lsm.set_splits(splits)
-    }
-
-    pub async fn pause_compaction(&self) {
-        self.lsm.pause_compaction().await;
-    }
-
-    pub fn unpause_compaction(&self) {
-        self.lsm.unpause_compaction();
     }
 }

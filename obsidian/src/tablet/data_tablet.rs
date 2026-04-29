@@ -14,6 +14,7 @@ use crate::lsm::Manifest;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
 use crate::runtime::Tablet;
+use crate::tablet::read_only_lsm::LsmRead;
 use crate::tablet::tablet_inner::PendingMutation;
 use crate::tablet::tablet_inner::PrecondLocks;
 use crate::tablet::tablet_inner::TabletInner;
@@ -245,6 +246,7 @@ impl DataTablet {
             prepare_sender: prepare_sender.clone(),
         }))));
 
+        // TODO: These need to not be happening while tablet is frozen
         tablet.0.spawn(async |inner| {
             inner.resolve_prepared(prepare_receiver).await;
         });

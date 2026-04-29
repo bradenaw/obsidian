@@ -3,6 +3,7 @@ mod hydrating_tablet;
 mod journaled_lsm;
 mod lock_mgr;
 mod meta_tablet;
+mod read_only_lsm;
 mod scan_locks;
 mod sequencer;
 mod shard_meta_tablet;

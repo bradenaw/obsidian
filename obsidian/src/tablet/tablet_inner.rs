@@ -15,6 +15,7 @@ use crate::lsm::Manifest;
 use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::lock_mgr::Guard;
 use crate::tablet::lock_mgr::LockMgr;
+use crate::tablet::read_only_lsm::LsmRead;
 use crate::tablet::scan_locks::ScanLocks;
 use crate::tablet::sequencer::Sequencer;
 use crate::tablet::tablet_journal_writer::TabletJournalWriter;
