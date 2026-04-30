@@ -37,8 +37,7 @@ impl Background {
             mem::replace(guard.deref_mut(), (0, HashMap::new()))
         };
         for (_, join_handle) in tasks_map.1.into_iter() {
-            join_handle.0.abort();
-            let _ = join_handle.await;
+            join_handle.cancel().await;
         }
     }
 }
@@ -136,14 +135,22 @@ where
     F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    OwnedJoinHandle(Box::pin(tokio::spawn(f)))
+    OwnedJoinHandle(Some(Box::pin(tokio::spawn(f))))
 }
 
 /// Wraps a JoinHandle, calling abort() on it when dropped.
 ///
 /// tokio::spawn naturally just allows the task to keep running in the background indefinitely, but
 /// this is used when a function is supposed to 'own' the tasks it spawns.
-pub(crate) struct OwnedJoinHandle<T>(Pin<Box<tokio::task::JoinHandle<T>>>);
+pub(crate) struct OwnedJoinHandle<T>(Option<Pin<Box<tokio::task::JoinHandle<T>>>>);
+
+impl<T> OwnedJoinHandle<T> {
+    async fn cancel(mut self) {
+        let inner = self.0.take().unwrap();
+        inner.abort();
+        let _ = inner.await;
+    }
+}
 
 impl<T> Future for OwnedJoinHandle<T> {
     type Output = T;
@@ -156,7 +163,7 @@ impl<T> Future for OwnedJoinHandle<T> {
         // 1. The task is aborted. This can't happen because we only abort on drop, which means we
         //    can't be polling.
         // 2. The task itself panics. We're allowed to panic the calling task by the API contract.
-        Pin::as_mut(&mut self.0)
+        Pin::as_mut(&mut self.0.as_mut().unwrap())
             .poll(cx)
             .map(|result| result.unwrap())
     }
@@ -164,6 +171,8 @@ impl<T> Future for OwnedJoinHandle<T> {
 
 impl<T> Drop for OwnedJoinHandle<T> {
     fn drop(&mut self) {
-        self.0.abort();
+        if let Some(inner) = self.0.take() {
+            inner.abort();
+        }
     }
 }

@@ -1,3 +1,4 @@
+mod active_tablet;
 mod data_tablet;
 mod frozen_tablet;
 mod hydrating_tablet;
@@ -12,12 +13,7 @@ mod tablet_inner;
 mod tablet_journal_writer;
 mod tests;
 
-#[allow(unused_imports)]
 pub(crate) use data_tablet::DataTablet;
-#[allow(unused_imports)]
-pub(crate) use hydrating_tablet::HydratingTablet;
-#[allow(unused_imports)]
 pub(crate) use meta_tablet::MetaTablet;
-#[allow(unused_imports)]
 pub(crate) use shard_meta_tablet::ShardMetaTablet;
 pub(crate) use tablet_journal_writer::TabletJournalWriter;

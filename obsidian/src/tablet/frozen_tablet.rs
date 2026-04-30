@@ -9,9 +9,9 @@ use crate::lsm::Manifest;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
 use crate::runtime::Tablet;
+use crate::tablet::active_tablet::ActiveTablet;
 use crate::tablet::read_only_lsm::ReadOnlyLsm;
 use crate::tablet::tablet_inner::TabletInner;
-use crate::tablet::DataTablet;
 use crate::tablet::TabletJournalWriter;
 use crate::Bound;
 use crate::ColoGroupId;
@@ -29,7 +29,7 @@ use crate::TabletId;
 use crate::Timestamp;
 use crate::Txid;
 
-pub(crate) struct FrozenTablet {
+pub(super) struct FrozenTablet {
     inner: TabletInner<ReadOnlyLsm>,
     storage: Arc<dyn Storage>,
     shards: Arc<dyn Shards>,
@@ -51,8 +51,16 @@ impl FrozenTablet {
         }
     }
 
-    pub fn make_active(self, journal: Arc<dyn TabletJournalWriter>) -> DataTablet {
-        DataTablet::new_inner(
+    pub fn tablet_id(&self) -> TabletId {
+        self.inner.tablet_id
+    }
+
+    pub fn colo_group_id(&self) -> ColoGroupId {
+        self.inner.colo_group_id
+    }
+
+    pub fn make_active(self, journal: Arc<dyn TabletJournalWriter>) -> ActiveTablet {
+        ActiveTablet::new(
             self.inner.tablet_id,
             self.inner.colo_group_id,
             self.inner.range,

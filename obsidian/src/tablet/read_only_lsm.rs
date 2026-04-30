@@ -51,7 +51,8 @@ pub(super) struct ReadOnlyLsm {
 }
 
 impl ReadOnlyLsm {
-    pub fn new(lsm: Lsm) -> Self {
+    pub async fn new(lsm: Lsm) -> Self {
+        lsm.pause_compaction().await;
         Self { lsm }
     }
 

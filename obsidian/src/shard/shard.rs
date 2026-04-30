@@ -20,9 +20,7 @@ use crate::runtime::Meta;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
 use crate::runtime::Tablet;
-use crate::shard::shard_data_tablet::ShardDataTablet;
 use crate::tablet::DataTablet;
-use crate::tablet::HydratingTablet;
 use crate::tablet::MetaTablet;
 use crate::tablet::ShardMetaTablet;
 use crate::tablet::TabletJournalWriter;
@@ -186,7 +184,7 @@ struct ShardInner {
 
     shard_meta_tablet: Arc<ShardMetaTablet>,
     meta_tablet: Option<Arc<MetaTablet>>, // Present only if id==ShardId::META.
-    tablets: ShardedLock<HashMap<TabletId, Arc<ShardDataTablet>>>,
+    tablets: ShardedLock<HashMap<TabletId, Arc<DataTablet>>>,
 }
 
 impl ShardInner {
@@ -264,9 +262,9 @@ impl ShardInner {
         tablet_id: TabletId,
         tablet_metadata: ShardTabletMetadata,
         lsm: Lsm,
-    ) -> anyhow::Result<ShardDataTablet> {
+    ) -> anyhow::Result<DataTablet> {
         Ok(match tablet_metadata.state {
-            TabletState::Active => ShardDataTablet::new_active(DataTablet::new(
+            TabletState::Active => DataTablet::new_active(
                 tablet_id,
                 tablet_metadata.colo_group_id,
                 tablet_metadata.range,
@@ -277,7 +275,7 @@ impl ShardInner {
                 )),
                 Arc::clone(&self.storage),
                 Arc::clone(&self.shards),
-            )),
+            ),
             TabletState::Hydrating => {
                 let srcs = if let Some(TabletTransfer::Dst { srcs }) = tablet_metadata.transfer {
                     srcs
@@ -289,7 +287,7 @@ impl ShardInner {
                     ));
                 };
 
-                ShardDataTablet::new_hydrating(HydratingTablet::new(
+                DataTablet::new_hydrating(
                     tablet_id,
                     tablet_metadata.colo_group_id,
                     tablet_metadata.range,
@@ -301,7 +299,7 @@ impl ShardInner {
                         Arc::clone(&self.journal),
                     )),
                     srcs,
-                ))
+                )
             }
             _ => {
                 todo!()
@@ -353,7 +351,12 @@ impl ShardInner {
                     }
                 }
                 TabletState::Active => {
-                    tablet.transition_active().await?;
+                    tablet
+                        .transition_active(Arc::new(ShardTabletJournalWriter::new(
+                            tablet_id,
+                            Arc::clone(&self.journal),
+                        )))
+                        .await?;
                 }
                 TabletState::Frozen => {
                     tablet.transition_frozen().await?;

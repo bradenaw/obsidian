@@ -17,7 +17,8 @@ use crate::lsm::Preloader;
 use crate::runtime;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
-use crate::tablet::DataTablet;
+use crate::tablet::frozen_tablet::FrozenTablet;
+use crate::tablet::read_only_lsm::ReadOnlyLsm;
 use crate::tablet::TabletJournalWriter;
 use crate::util::spawn_owned;
 use crate::util::OwnedJoinHandle;
@@ -37,7 +38,7 @@ use crate::TabletId;
 use crate::Timestamp;
 use crate::Txid;
 
-pub(crate) struct HydratingTablet {
+pub(super) struct HydratingTablet {
     inner: Arc<HydratingTabletInner>,
     lsm_options: LsmOptions,
     // Holds keyspace_ids that were created during hydration. Most of these will already have been
@@ -129,29 +130,35 @@ impl HydratingTablet {
         Ok(())
     }
 
-    pub async fn finish(self) -> anyhow::Result<DataTablet> {
+    pub async fn finish(self) -> anyhow::Result<FrozenTablet> {
         let preloader = self.task.await?;
         let lsm = Lsm::open(
             self.lsm_options,
             Arc::clone(&self.inner.storage),
             preloader.load().await?,
         );
-        let data_tablet = DataTablet::new(
-            self.inner.tablet_id,
-            self.inner.colo_group_id,
-            self.inner.range.clone(),
-            lsm,
-            Arc::clone(&self.inner.journal),
-            Arc::clone(&self.inner.storage),
-            Arc::clone(&self.inner.shards),
-        );
         let extra_keyspaces = {
             let mut guard = self.extra_keyspaces.lock().unwrap();
             std::mem::replace(guard.deref_mut(), HashSet::new())
         };
         for keyspace_id in extra_keyspaces.iter() {
-            data_tablet.create_keyspace(*keyspace_id).await?;
+            lsm.create_keyspace(*keyspace_id);
+            if let Some(pending_keyspace_id) = keyspace_id.pending() {
+                lsm.create_keyspace(pending_keyspace_id);
+            }
+            if let Some(precond_keyspace_id) = keyspace_id.precond() {
+                lsm.create_keyspace(precond_keyspace_id);
+            }
         }
+        // TODO: Flush manifests to journal, else the whole thing can go poof.
+        let data_tablet = FrozenTablet::new(
+            self.inner.tablet_id,
+            self.inner.colo_group_id,
+            self.inner.range.clone(),
+            ReadOnlyLsm::new(lsm).await,
+            Arc::clone(&self.inner.storage),
+            Arc::clone(&self.inner.shards),
+        );
         Ok(data_tablet)
     }
 }

@@ -48,8 +48,7 @@ impl JournaledLsm {
         Retry::new()
             .indefinitely(&async || self.flush().await)
             .await;
-        self.lsm.pause_compaction().await;
-        ReadOnlyLsm::new(self.lsm)
+        ReadOnlyLsm::new(self.lsm).await
     }
 }
 
