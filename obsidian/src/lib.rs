@@ -1,5 +1,7 @@
 #![allow(dead_code)]
+#![feature(async_fn_traits)]
 #![feature(coroutines)]
+#![feature(unboxed_closures)]
 #![feature(iter_from_coroutine)]
 #![feature(thread_id_value)]
 

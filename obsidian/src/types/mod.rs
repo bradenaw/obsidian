@@ -42,6 +42,7 @@ pub(crate) use keyspace_id::KeyspaceId;
 pub(crate) use mutation::Mutation;
 pub(crate) use node_id::NodeId;
 pub(crate) use precondition::Precondition;
+pub(crate) use range::ranges_to_splits;
 pub(crate) use range::Range;
 pub(crate) use range_map::RangeMap;
 pub(crate) use range_set::RangeSet;

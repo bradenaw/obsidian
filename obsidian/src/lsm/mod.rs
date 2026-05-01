@@ -17,6 +17,7 @@ pub(crate) use crate::lsm::manifest::KeyspaceManifest;
 pub(crate) use crate::lsm::manifest::LevelManifest;
 pub(crate) use crate::lsm::manifest::Manifest;
 pub(crate) use crate::lsm::manifest::RunManifest;
+#[allow(unused_imports)]
 pub(crate) use crate::lsm::preload::Preloaded;
 pub(crate) use crate::lsm::preload::Preloader;
 pub(crate) use crate::lsm::run_id::RunId;

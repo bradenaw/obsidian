@@ -501,8 +501,8 @@ impl Gateway {
         let snapshot = self.meta_synced.snapshot();
         let shard_ids = snapshot.shard_ids().await?;
 
-        for shard_id in shard_ids {
-            self.shards.shard(shard_id)?.wait_meta_sync(ts).await?;
+        for shard_id in &shard_ids {
+            self.shards.shard(*shard_id)?.wait_meta_sync(ts).await?;
         }
 
         let tablet_ids = {
@@ -513,9 +513,9 @@ impl Gateway {
 
         log::info!("sync_meta() to {:?} for {:?} tablets", ts, tablet_ids.len());
 
-        futures::stream::iter(tablet_ids.into_iter())
-            .map(|tablet_id| async move {
-                self.shards.tablet(tablet_id)?.wait_meta_sync(ts).await?;
+        futures::stream::iter(shard_ids.into_iter())
+            .map(|shard_id| async move {
+                self.shards.shard(shard_id)?.wait_meta_sync(ts).await?;
                 Ok::<_, anyhow::Error>(())
             })
             .buffer_unordered(64)

@@ -19,12 +19,11 @@ use tokio::sync::mpsc;
 use crate::lsm::Lsm;
 use crate::lsm::Manifest;
 use crate::meta::MetaSynced;
-use crate::meta::TabletState;
 use crate::pb;
 use crate::runtime::Shards;
 use crate::runtime::Tablet;
-use crate::tablet::protected::LsmReadWrite;
-use crate::tablet::protected::ProtectedLsm;
+use crate::tablet::journaled_lsm::JournaledLsm;
+use crate::tablet::journaled_lsm::LsmWrite;
 use crate::tablet::tablet_inner::TabletInner;
 use crate::tablet::tablet_journal_writer::TabletJournalWriter;
 use crate::util::Decode;
@@ -62,7 +61,7 @@ const WAIT_ABORT_TIMEOUT: Duration = Duration::from_millis(1_000);
 pub(crate) struct ShardMetaTablet(WithBackground<ShardMetaTabletInner>);
 
 struct ShardMetaTabletInner {
-    inner: TabletInner,
+    inner: TabletInner<JournaledLsm>,
     meta_synced: Arc<MetaSynced>,
     shards: Arc<dyn Shards>,
     waiters: Waiters,
@@ -89,8 +88,7 @@ impl ShardMetaTablet {
                 tablet_id,
                 ColoGroupId::SHARD_META,
                 TabletId::shard_meta_owned_range(shard_id),
-                ProtectedLsm::new(tablet_id, lsm, TabletState::Active),
-                journal,
+                JournaledLsm::new(lsm, journal),
             ),
             commit_sender: commit_sender.clone(),
             meta_synced,
@@ -141,15 +139,13 @@ impl ShardMetaTablet {
             .check_key(KeyspaceId::TX_OUTCOMES.0, &tx_outcome_key[..])?;
         loop {
             let wait = {
-                let lsm_read = self.0.inner.lsm.read()?;
                 let _guard = self.0.inner.lock_mgr.read_lock(&tx_outcome_key[..]).await;
 
-                match TabletInner::unsafe_get_latest_record(
-                    &lsm_read,
-                    KeyspaceId::TX_OUTCOMES,
-                    &tx_outcome_key[..],
-                )
-                .await?
+                match self
+                    .0
+                    .inner
+                    .unsafe_get_latest_record(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
+                    .await?
                 {
                     Some((_, RevisionValue::Regular(tx_outcome_bytes))) => {
                         let tx_outcome_record: TxOutcomeRecord =
@@ -249,10 +245,6 @@ impl Tablet for ShardMetaTablet {
         Err(anyhow!("ShardMetaTablet::cleanup_committed not allowed").into())
     }
 
-    async fn wait_meta_sync(&self, _ts: Timestamp) -> anyhow::Result<()> {
-        Err(anyhow!("ShardMetaTablet::wait_meta_sync not allowed").into())
-    }
-
     async fn manifest(&self) -> anyhow::Result<Manifest> {
         Ok(self.0.inner.manifest())
     }
@@ -286,15 +278,11 @@ impl ShardMetaTabletInner {
             self.inner
                 .check_key(KeyspaceId::TX_OUTCOMES.0, &tx_outcome_key[..])?;
 
-            let lsm_rw = self.inner.lsm.read_write()?;
             let _guard = self.inner.lock_mgr.write_lock(&tx_outcome_key[..]).await;
 
-            if let Some((_, RevisionValue::Regular(tx_outcome_bytes))) =
-                TabletInner::unsafe_get_latest_record(
-                    &lsm_rw,
-                    KeyspaceId::TX_OUTCOMES,
-                    &tx_outcome_key[..],
-                )
+            if let Some((_, RevisionValue::Regular(tx_outcome_bytes))) = self
+                .inner
+                .unsafe_get_latest_record(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
                 .await?
             {
                 let existing_tx_outcome_record: TxOutcomeRecord =
@@ -304,13 +292,16 @@ impl ShardMetaTabletInner {
 
             let tx_outcome_record_bytes =
                 pb::internal::TxOutcomeRecord::from(tx_outcome_record.clone()).encode_to_vec();
-            lsm_rw.write(
-                Timestamp::ZERO,
-                BTreeMap::from([(
-                    (KeyspaceId::TX_OUTCOMES, tx_outcome_key.to_vec()),
-                    Mutation::Put(tx_outcome_record_bytes),
-                )]),
-            );
+            self.inner
+                .lsm
+                .write(
+                    Timestamp::ZERO,
+                    BTreeMap::from([(
+                        (KeyspaceId::TX_OUTCOMES, tx_outcome_key.to_vec()),
+                        Mutation::Put(tx_outcome_record_bytes),
+                    )]),
+                )
+                .await?;
         }
         let tx_outcome = tx_outcome_record.tx_outcome();
         if let TxOutcomeRecord::Committed {

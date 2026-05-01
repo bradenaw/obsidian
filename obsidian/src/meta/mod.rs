@@ -28,6 +28,5 @@ pub(crate) use meta_value::MetaValue;
 pub(crate) use shard_metadata::ShardMetadata;
 pub(crate) use tablet_metadata::TabletMetadata;
 pub(crate) use transfer::TabletState;
-pub(crate) use transfer::TabletStateProperties;
 pub(crate) use transfer::TransferState;
 pub(crate) use transfer_metadata::TransferMetadata;

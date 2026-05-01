@@ -188,6 +188,28 @@ impl TryFrom<pb::Range> for Range<Vec<u8>> {
     }
 }
 
+/// If ranges are contiguous, returns the bounds that lie between them.
+pub(crate) fn ranges_to_splits(
+    mut ranges: Vec<Range<Vec<u8>>>,
+) -> anyhow::Result<Vec<Bound<Vec<u8>>>> {
+    ranges.sort_unstable_by(|a, b| Ord::cmp(&a.lower, &b.lower));
+    let mut out = Vec::with_capacity(ranges.len() - 1);
+    let ranges_len = ranges.len();
+    for (i, range) in ranges.into_iter().enumerate() {
+        if out.len() > 0 && out[out.len() - 1] != range.lower {
+            return Err(anyhow!(
+                "can't range_to_splits, ranges not contiguous: gap at {:?} {:?}",
+                out[out.len() - 1],
+                range.lower
+            ));
+        }
+        if i < ranges_len - 1 {
+            out.push(range.upper);
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::Range;

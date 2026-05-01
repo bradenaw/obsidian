@@ -536,10 +536,10 @@ impl SupervisorInner {
                 }
 
                 if let MetaState::Transitioning(_, next_tablet_state) = tablet_metadata.state {
-                    // IMPORTANT: Must make sure that all of the participating tablets are aware of
-                    // the transitioning state before continuing.
+                    // IMPORTANT: Must make sure that all of the participating tablets have
+                    // transitioned before continuing.
                     self.shards
-                        .tablet(*tablet_id)?
+                        .shard(tablet_id.0)?
                         .wait_meta_sync(snapshot.ts())
                         .await?;
 

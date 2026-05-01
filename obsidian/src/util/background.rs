@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::future::Future;
+use std::mem;
 use std::ops::Deref;
+use std::ops::DerefMut;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -27,6 +29,16 @@ impl Background {
         });
         guard.0 += 1;
         guard.1.insert(id, handle);
+    }
+
+    pub(crate) async fn stop(self) {
+        let tasks_map = {
+            let mut guard = self.tasks.lock().unwrap();
+            mem::replace(guard.deref_mut(), (0, HashMap::new()))
+        };
+        for (_, join_handle) in tasks_map.1.into_iter() {
+            join_handle.cancel().await;
+        }
     }
 }
 
@@ -68,6 +80,53 @@ impl<T> Deref for WithBackground<T> {
     }
 }
 
+pub(crate) struct OwnedWithBackground<T> {
+    inner: Arc<T>,
+    bg: Background,
+}
+
+impl<T> OwnedWithBackground<T>
+where
+    T: Send + Sync + 'static,
+{
+    pub fn new(t: T) -> Self {
+        Self {
+            inner: Arc::new(t),
+            bg: Background::new(),
+        }
+    }
+
+    pub(crate) fn spawn<F>(&self, f: F)
+    where
+        F: AsyncFnOnce(&T) + Send + 'static,
+        for<'a> <F as AsyncFnOnce<(&'a T,)>>::CallOnceFuture: Send,
+    {
+        self.bg.spawn({
+            let inner = Arc::clone(&self.inner);
+            async move {
+                let inner2 = Arc::clone(&inner);
+                f(inner2.deref()).await;
+            }
+        });
+    }
+
+    /// Stops all background tasks and returns ownership of the contained item.
+    pub async fn take(self) -> T {
+        self.bg.stop().await;
+        // This unwrap is safe because the only way we end up with clones of self.inner is in
+        // spawn, and bg.stop() already made sure all of those are gone.
+        Arc::into_inner(self.inner).unwrap()
+    }
+}
+
+impl<T> Deref for OwnedWithBackground<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.deref()
+    }
+}
+
 /// spawn_owned is just like tokio::spawn, but if the returned handle is dropped the task is
 /// aborted.
 ///
@@ -77,14 +136,23 @@ where
     F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    OwnedJoinHandle(Box::pin(tokio::spawn(f)))
+    OwnedJoinHandle(Some(Box::pin(tokio::spawn(f))))
 }
 
 /// Wraps a JoinHandle, calling abort() on it when dropped.
 ///
 /// tokio::spawn naturally just allows the task to keep running in the background indefinitely, but
 /// this is used when a function is supposed to 'own' the tasks it spawns.
-pub(crate) struct OwnedJoinHandle<T>(Pin<Box<tokio::task::JoinHandle<T>>>);
+pub(crate) struct OwnedJoinHandle<T>(Option<Pin<Box<tokio::task::JoinHandle<T>>>>);
+
+impl<T> OwnedJoinHandle<T> {
+    /// Aborts the task and blocks until it stops running.
+    pub async fn cancel(mut self) {
+        let inner = self.0.take().unwrap();
+        inner.abort();
+        let _ = inner.await;
+    }
+}
 
 impl<T> Future for OwnedJoinHandle<T> {
     type Output = T;
@@ -97,7 +165,7 @@ impl<T> Future for OwnedJoinHandle<T> {
         // 1. The task is aborted. This can't happen because we only abort on drop, which means we
         //    can't be polling.
         // 2. The task itself panics. We're allowed to panic the calling task by the API contract.
-        Pin::as_mut(&mut self.0)
+        Pin::as_mut(&mut self.0.as_mut().unwrap())
             .poll(cx)
             .map(|result| result.unwrap())
     }
@@ -105,6 +173,8 @@ impl<T> Future for OwnedJoinHandle<T> {
 
 impl<T> Drop for OwnedJoinHandle<T> {
     fn drop(&mut self) {
-        self.0.abort();
+        if let Some(inner) = self.0.take() {
+            inner.abort();
+        }
     }
 }

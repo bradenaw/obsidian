@@ -5,12 +5,14 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use async_trait::async_trait;
 
-use crate::lsm::Lsm;
 use crate::lsm::Manifest;
+use crate::runtime::Shards;
+use crate::runtime::Storage;
 use crate::runtime::Tablet;
-use crate::tablet::journaled_lsm::JournaledLsm;
+use crate::tablet::active_tablet::ActiveTablet;
+use crate::tablet::read_only_lsm::ReadOnlyLsm;
 use crate::tablet::tablet_inner::TabletInner;
-use crate::tablet::tablet_journal_writer::TabletJournalWriter;
+use crate::tablet::TabletJournalWriter;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -27,36 +29,50 @@ use crate::TabletId;
 use crate::Timestamp;
 use crate::Txid;
 
-/// MetaTablets are special from LsmTablets in two necessary ways:
-///
-/// 1. They always have TabletState::Active, and never transitions, because they can't participate
-///    in transfers. This is important because all other tablets default to having no RW
-///    permissions until they observe their own TabletMetadata. Obviously that doesn't work for the
-///    tablet hosting TabletId::META, because it needs to receive a write to make any
-///    TabletMetadata at all.
-/// 2. They cannot participate in 2PC. For the sake of the simplicity of the interface, it
-///    implements those methods, but always errors.
-pub(crate) struct MetaTablet {
-    inner: TabletInner<JournaledLsm>,
+pub(super) struct FrozenTablet {
+    inner: TabletInner<ReadOnlyLsm>,
+    storage: Arc<dyn Storage>,
+    shards: Arc<dyn Shards>,
 }
 
-impl MetaTablet {
-    pub(crate) fn new(lsm: Lsm, journal: Arc<dyn TabletJournalWriter>) -> Self {
-        lsm.create_keyspace(KeyspaceId::META);
-
+impl FrozenTablet {
+    pub fn new(
+        tablet_id: TabletId,
+        colo_group_id: ColoGroupId,
+        range: Range<Vec<u8>>,
+        lsm: ReadOnlyLsm,
+        storage: Arc<dyn Storage>,
+        shards: Arc<dyn Shards>,
+    ) -> Self {
         Self {
-            inner: TabletInner::new(
-                TabletId::META,
-                ColoGroupId::META,
-                Range::all(),
-                JournaledLsm::new(lsm, journal),
-            ),
+            inner: TabletInner::new(tablet_id, colo_group_id, range, lsm),
+            storage,
+            shards,
         }
+    }
+
+    pub fn tablet_id(&self) -> TabletId {
+        self.inner.tablet_id
+    }
+
+    pub fn colo_group_id(&self) -> ColoGroupId {
+        self.inner.colo_group_id
+    }
+
+    pub fn make_active(self, journal: Arc<dyn TabletJournalWriter>) -> ActiveTablet {
+        ActiveTablet::new(
+            self.inner.tablet_id,
+            self.inner.colo_group_id,
+            self.inner.range,
+            self.inner.lsm.make_writeable(journal),
+            self.storage,
+            self.shards,
+        )
     }
 }
 
 #[async_trait]
-impl Tablet for MetaTablet {
+impl Tablet for FrozenTablet {
     async fn get_multi(
         &self,
         ts: Timestamp,
@@ -101,10 +117,10 @@ impl Tablet for MetaTablet {
 
     async fn write(
         &self,
-        preconds: Vec<Precondition>,
-        muts: BTreeMap<Key, Mutation>,
+        _preconds: Vec<Precondition>,
+        _muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
-        self.inner.write(preconds, muts).await
+        Err(anyhow!("FrozenTablet::write not allowed").into())
     }
 
     async fn prepare(
@@ -113,7 +129,7 @@ impl Tablet for MetaTablet {
         _preconds: Vec<Precondition>,
         _muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError> {
-        Err(anyhow!("MetaTablet::prepare not allowed").into())
+        Err(anyhow!("FrozenTablet::prepare not allowed").into())
     }
 
     async fn cleanup_committed(
@@ -123,7 +139,7 @@ impl Tablet for MetaTablet {
         _precond_keys: BTreeSet<Key>,
         _mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()> {
-        Err(anyhow!("MetaTablet::cleanup_committed not allowed").into())
+        Err(anyhow!("FrozenTablet::cleanup_committed not allowed").into())
     }
 
     async fn manifest(&self) -> anyhow::Result<Manifest> {
@@ -131,14 +147,14 @@ impl Tablet for MetaTablet {
     }
 
     async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
-        Err(anyhow!("MetaTablet::wait_mostly_hydrated not allowed").into())
+        Err(anyhow!("FrozenTablet::wait_mostly_hydrated not allowed").into())
     }
 
     async fn catchup(&self) -> anyhow::Result<()> {
-        Err(anyhow!("MetaTablet::catchup not allowed").into())
+        Err(anyhow!("FrozenTablet::catchup not allowed").into())
     }
 
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
-        Err(anyhow!("MetaTablet::find_split not allowed").into())
+        self.find_split().await
     }
 }
