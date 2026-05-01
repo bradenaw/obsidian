@@ -68,6 +68,15 @@ impl<S> StateMachine<S> {
         }
     }
 
+    /// Calls f with the current state of the state machine.
+    pub async fn inspect<F, T>(&self, f: F) -> T
+    where
+        F: FnOnce(&S) -> T,
+    {
+        let guard = self.state.read().await;
+        f(guard.deref())
+    }
+
     /// Interrupts ongoing calls to with_state and allows modifying the current state.
     pub async fn transition<F, E>(&self, f: F) -> Result<(), E>
     where

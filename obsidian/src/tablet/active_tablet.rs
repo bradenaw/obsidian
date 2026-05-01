@@ -267,11 +267,12 @@ impl ActiveTablet {
 
     pub async fn freeze(self) -> FrozenTablet {
         let data_tablet_inner = self.0.take().await;
+        let lsm = data_tablet_inner.inner.lsm.make_read_only().await;
         FrozenTablet::new(
             data_tablet_inner.inner.tablet_id,
             data_tablet_inner.inner.colo_group_id,
             data_tablet_inner.inner.range,
-            data_tablet_inner.inner.lsm.make_read_only().await,
+            lsm,
             data_tablet_inner.storage,
             data_tablet_inner.shards,
         )

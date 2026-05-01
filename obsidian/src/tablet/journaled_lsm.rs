@@ -45,6 +45,8 @@ impl JournaledLsm {
     }
 
     pub async fn make_read_only(self) -> ReadOnlyLsm {
+        // Important: the expectation for a read-only LSM is that its manifest shows all of the
+        // writes.
         Retry::new()
             .indefinitely(&async || self.flush().await)
             .await;

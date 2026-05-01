@@ -360,10 +360,6 @@ impl ShardInner {
                 }
                 TabletState::Frozen => {
                     tablet.transition_frozen().await?;
-                    // Important: once we reach frozen, and before we respond from wait_meta_sync
-                    // (so, once sync_meta returns), we need to guarantee that the manifest
-                    // actually contains all of the writes.
-                    tablet.flush().await?;
                 }
             }
             if let Some(TabletTransfer::Src { splits }) = tablet_metadata.transfer {
@@ -371,6 +367,12 @@ impl ShardInner {
             } else {
                 tablet.set_splits(vec![]).await;
             }
+            log::info!(
+                "{:?} possibly transitioning {:?} to {:?} -> done",
+                self.id,
+                tablet_id,
+                tablet_metadata.state,
+            );
             return Ok(());
         }
 

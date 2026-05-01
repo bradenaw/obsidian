@@ -178,19 +178,9 @@ impl DataTablet {
     }
 
     pub async fn is_hydrating(&self) -> bool {
-        // This loop is a little ugly but we should only ever get an error from with_state if
-        // there's a concurrent transition in a particular and unlikely critical section.
-        loop {
-            if let Ok(out) = self
-                .state_machine
-                .with_state(async |state| {
-                    Ok::<_, anyhow::Error>(matches!(state, TabletState::Hydrating(_)))
-                })
-                .await
-            {
-                return out;
-            }
-        }
+        self.state_machine
+            .inspect(|state| matches!(state, TabletState::Hydrating(_)))
+            .await
     }
 
     pub async fn flush(&self) -> anyhow::Result<()> {
