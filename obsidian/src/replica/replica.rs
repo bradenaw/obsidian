@@ -268,8 +268,9 @@ struct ReplicaTablet {
     participant: Arc<Participant<JournalEntry, LeaderReplica, FollowerReplica>>,
 }
 
-impl ReplicaTablet {
-    async fn get_inner(
+#[async_trait]
+impl runtime::Tablet for ReplicaTablet {
+    async fn get_multi(
         &self,
         ts: Timestamp,
         keys: BTreeSet<Key>,
@@ -283,42 +284,6 @@ impl ReplicaTablet {
                 Err(InternalError::NotLeader(tablet_id.0))
             })
             .await
-    }
-
-    async fn if_leader<F, T>(&self, f: F) -> Result<T, InternalError>
-    where
-        F: AsyncFnOnce(Arc<dyn runtime::Tablet>) -> Result<T, InternalError>,
-        T: Send + 'static,
-    {
-        let tablet_id = self.tablet_id;
-        self.participant
-            .with_state(async move |participant_state| {
-                if let ParticipantState::Leader(leader) = participant_state {
-                    let tablet = leader.shard.tablet(tablet_id)?;
-                    return f(tablet).await;
-                }
-                Err(InternalError::NotLeader(tablet_id.0))
-            })
-            .await
-    }
-
-    async fn get_latest_inner(
-        &self,
-        key: Key,
-    ) -> Result<(Timestamp, Option<Record>), InternalError> {
-        self.if_leader(async move |tablet: Arc<dyn runtime::Tablet>| tablet.get_latest(key).await)
-            .await
-    }
-}
-
-#[async_trait]
-impl runtime::Tablet for ReplicaTablet {
-    async fn get_multi(
-        &self,
-        ts: Timestamp,
-        keys: BTreeSet<Key>,
-    ) -> Result<BTreeMap<Key, Record>, InternalError> {
-        self.get_inner(ts, keys).await
     }
 
     async fn get_latest_multi(
