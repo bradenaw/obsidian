@@ -246,7 +246,6 @@ impl ActiveTablet {
             prepare_sender: prepare_sender.clone(),
         }));
 
-        // TODO: These need to not be happening while tablet is frozen
         tablet.0.spawn(async |inner| {
             inner.resolve_prepared(prepare_receiver).await;
         });

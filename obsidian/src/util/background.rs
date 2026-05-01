@@ -110,6 +110,7 @@ where
         });
     }
 
+    /// Stops all background tasks and returns ownership of the contained item.
     pub async fn take(self) -> T {
         self.bg.stop().await;
         // This unwrap is safe because the only way we end up with clones of self.inner is in
