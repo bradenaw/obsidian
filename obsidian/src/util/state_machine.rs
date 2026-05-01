@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use tokio::select;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::Notify;
 use tokio::sync::RwLock as AsyncRwLock;
 
@@ -21,6 +22,7 @@ pub(crate) struct StateMachine<S> {
     // (Ab)used to keep the reference count of transitions that are waiting to acquire the write
     // lock, handy because dropping them decreases the refcount which makes this cancel-safe.
     transitions_waiting: Arc<()>,
+    transition_lock: AsyncMutex<()>,
 }
 
 impl<S> StateMachine<S> {
@@ -29,6 +31,7 @@ impl<S> StateMachine<S> {
             state: AsyncRwLock::new(state),
             transition_request: Notify::new(),
             transitions_waiting: Arc::new(()),
+            transition_lock: AsyncMutex::new(()),
         }
     }
 
@@ -78,11 +81,30 @@ impl<S> StateMachine<S> {
     }
 
     /// Interrupts ongoing calls to with_state and allows modifying the current state.
-    pub async fn transition<F, E>(&self, f: F) -> Result<(), E>
+    pub async fn transition<F, T>(&self, f: F) -> T
     where
-        F: AsyncFnOnce(&mut S) -> Result<(), E>,
-        E: Send + 'static,
+        F: AsyncFnOnce(&mut S) -> T,
     {
+        self.maybe_transition(|_| true, f).await.unwrap()
+    }
+
+    /// If should_transition returns true for the current state, interrupts ongoing calls to
+    /// with_state and allows modifying the current state.
+    ///
+    /// Returns None if should_transition returned false and no transition was attempted.
+    pub async fn maybe_transition<FShould, FDo, T>(
+        &self,
+        should_transition: FShould,
+        do_transition: FDo,
+    ) -> Option<T>
+    where
+        FShould: FnOnce(&S) -> bool,
+        FDo: AsyncFnOnce(&mut S) -> T,
+    {
+        let _guard = self.transition_lock.lock().await;
+        if !self.inspect(should_transition).await {
+            return None;
+        }
         let _waiting_count = Arc::clone(&self.transitions_waiting);
         self.transition_request.notify_waiters();
         let mut guard = self.state.write().await;
@@ -90,6 +112,6 @@ impl<S> StateMachine<S> {
         // might've been unnecessarily cancelled if we do it in the other order.
         drop(_waiting_count);
 
-        f(guard.deref_mut()).await
+        Some(do_transition(guard.deref_mut()).await)
     }
 }
