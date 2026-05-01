@@ -6,6 +6,7 @@ use std::iter;
 use std::ops::DerefMut;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use async_stream::try_stream;
 use futures::future::Either;
@@ -28,8 +29,7 @@ use crate::runtime::FileName;
 use crate::runtime::Storage;
 use crate::util::merge_sorted_streams;
 use crate::util::spawn_owned;
-use crate::util::Pause;
-use crate::util::WithBackground;
+use crate::util::OwnedJoinHandle;
 use crate::Bound;
 use crate::KeyspaceId;
 use crate::Range;
@@ -41,7 +41,11 @@ use crate::Timestamp;
 /// but with the same logical content, as well as persisting from memory (where new writes go in
 /// addition to the WAL) into storage so that tablets don't have to replay as much of the WAL on
 /// startup.
-pub(super) struct Compactor(WithBackground<CompactorInner>);
+pub(super) struct Compactor {
+    inner: Arc<CompactorInner>,
+    concurrency: usize,
+    task: Mutex<Option<OwnedJoinHandle<()>>>,
+}
 
 impl Compactor {
     pub(super) fn new(
@@ -52,28 +56,44 @@ impl Compactor {
         run_size_target: u64,
         block_size_target: u64,
     ) -> Self {
-        let bg = WithBackground::new(Arc::new(CompactorInner {
+        let inner = Arc::new(CompactorInner {
             index,
             storage,
             l1_max_size,
             run_size_target,
             block_size_target,
-            pause: Pause::new(),
-        }));
-
-        bg.spawn(async move |inner| {
-            inner.schedule(concurrency).await;
         });
 
-        Self(bg)
+        let compactor = Self {
+            inner,
+            concurrency,
+            task: Mutex::new(None),
+        };
+        compactor.unpause();
+
+        compactor
     }
 
     pub(super) async fn pause(&self) {
-        self.0.pause.pause().await;
+        let maybe_task = self.task.lock().unwrap().take();
+        if let Some(task) = maybe_task {
+            task.cancel().await;
+        }
     }
 
     pub(super) fn unpause(&self) {
-        self.0.pause.unpause();
+        let mut guard = self.task.lock().unwrap();
+        if guard.is_some() {
+            return;
+        }
+        let task = spawn_owned({
+            let inner = Arc::clone(&self.inner);
+            let concurrency = self.concurrency;
+            async move {
+                inner.schedule(concurrency).await;
+            }
+        });
+        *guard = Some(task);
     }
 }
 
@@ -83,7 +103,6 @@ struct CompactorInner {
     l1_max_size: u64,
     run_size_target: u64,
     block_size_target: u64,
-    pause: Pause,
 }
 
 impl CompactorInner {
@@ -92,11 +111,7 @@ impl CompactorInner {
         let mut in_flight_from: HashSet<RunId> = HashSet::new();
         let mut in_flight_into: HashSet<RunId> = HashSet::new();
 
-        let mut pause = self.pause.subscribe().await;
-
         loop {
-            pause.maybe().await;
-
             let (snapshot, snapshot_changed) = self.index.snapshot_subscribe();
 
             let mut expanded = false;

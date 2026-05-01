@@ -145,7 +145,8 @@ where
 pub(crate) struct OwnedJoinHandle<T>(Option<Pin<Box<tokio::task::JoinHandle<T>>>>);
 
 impl<T> OwnedJoinHandle<T> {
-    async fn cancel(mut self) {
+    /// Aborts the task and blocks until it stops running.
+    pub async fn cancel(mut self) {
         let inner = self.0.take().unwrap();
         inner.abort();
         let _ = inner.await;
