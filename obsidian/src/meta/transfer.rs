@@ -1,29 +1,27 @@
 use std::fmt::Debug;
 
 use anyhow::anyhow;
-use bitmask_enum::bitmask;
 
 use crate::pb;
 
-// State properties shown as [hcrw] for hydrating, complete, readable, writable on states that have
-// any.
+// State properties shown as [crw] for complete, readable, writable on states that have any.
 //
 // In a range transfer, the source tablet starts at Active and the destination starts at Hydrating.
 // The goal is to get the source to Defunct and the destination to Active.
 //
-//                                      ┌──────────────────┐                                      //
-//       new transfer destination╶─────>│ Hydrating [h___] ├──────────────────┐                   //
-//                                      └────────┬─────────┘                  │                   //
-//                                               │                            │                   //
-//                                               v                            v                   //
-//                                       ┌─────────────────┐             ┌─────────┐              //
-//                                       │ Frozen   [_cr_] ├────────────>│ Defunct │              //
-//                                       └────┬────────────┘             └─────────┘              //
+//                                      ┌─────────────────┐                                       //
+//       new transfer destination╶─────>│ Hydrating [___] ├──────────────────┐                    //
+//                                      └────────┬────────┘                  │                    //
+//                                               │                           │                    //
+//                                               v                           v                    //
+//                                       ┌────────────────┐             ┌─────────┐               //
+//                                       │ Frozen   [cr_] ├────────────>│ Defunct │               //
+//                                       └────┬───────────┘             └─────────┘               //
 //                                            │     ^                                             //
 //                                            v     │                                             //
-//                                       ┌──────────┴──────┐                                      //
-//           new colo group╶────────────>│ Active   [_crw] │                                      //
-//                                       └─────────────────┘                                      //
+//                                       ┌──────────┴─────┐                                       //
+//           new colo group╶────────────>│ Active   [crw] │                                       //
+//                                       └────────────────┘                                       //
 //
 //
 // And a state machine of the entire transfer, with source(s) on the left and destination(s) on the
@@ -64,6 +62,13 @@ use crate::pb;
 //      │ Defunct │ Active [crw] │                                                                //
 //      └────────────────────────┘                                                                //
 //        * Transfer Succeeded! *                                                                 //
+//
+// The read and write state properties are enforced by the state machine in DataTablet. Complete is
+// more subtle, it's produced by the mechanics of transfer. On transition Copy->Catchup, writes are
+// cut off and L0 is compacted into L1, so that the manifest is a complete representation.
+// Transfers guarantee that the source and destination manifests match before transition
+// Catchup->Synced, so that the destinations are guaranteed to contain the same data as the
+// sources.
 #[derive(Eq, PartialEq, Clone, Copy, Debug)]
 pub(crate) enum TabletState {
     Defunct,
@@ -94,23 +99,6 @@ impl TryFrom<pb::internal::TabletState> for TabletState {
             pb::internal::TabletState::Frozen => TabletState::Frozen,
             _ => return Err(anyhow!("unrecognized TabletState {:?}", value)),
         })
-    }
-}
-
-impl TabletState {
-    pub(crate) fn properties(self) -> TabletStateProperties {
-        match self {
-            TabletState::Defunct => TabletStateProperties::none(),
-            TabletState::Hydrating => TabletStateProperties::Hydrating,
-            TabletState::Active => {
-                TabletStateProperties::Complete
-                    | TabletStateProperties::Readable
-                    | TabletStateProperties::Writable
-            }
-            TabletState::Frozen => {
-                TabletStateProperties::Complete | TabletStateProperties::Readable
-            }
-        }
     }
 }
 
@@ -180,17 +168,4 @@ impl From<TransferState> for pb::internal::TransferState {
             TransferState::Aborted => pb::internal::TransferState::Aborted,
         }
     }
-}
-
-#[bitmask(u8)]
-#[bitmask_config(vec_debug)]
-pub(crate) enum TabletStateProperties {
-    // The tablet is hydrating with a transfer from another tablet.
-    Hydrating = 0b00001000,
-    // Tablet has a complete copy of the data.
-    Complete = 0b00000100,
-    // Tablet can be read from. Requires complete.
-    Readable = 0b00000010,
-    // Tablet can be written to. Requires complete.
-    Writable = 0b00000001,
 }
