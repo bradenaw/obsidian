@@ -3,7 +3,6 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use anyhow::anyhow;
-use async_trait::async_trait;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use tokio::sync::mpsc;
@@ -12,7 +11,6 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::lsm::Manifest;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
-use crate::runtime::Tablet;
 use crate::tablet::frozen_tablet::FrozenTablet;
 use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::journaled_lsm::LsmWrite;
@@ -53,9 +51,76 @@ struct ActiveTabletInner {
     prepare_sender: mpsc::Sender<(Txid, KeyspaceId, Vec<u8>, PrepareType)>,
 }
 
-#[async_trait]
-impl Tablet for ActiveTablet {
-    async fn get_multi(
+impl ActiveTablet {
+    pub fn new(
+        tablet_id: TabletId,
+        colo_group_id: ColoGroupId,
+        range: Range<Vec<u8>>,
+        lsm: JournaledLsm,
+        storage: Arc<dyn Storage>,
+        shards: Arc<dyn Shards>,
+    ) -> Self {
+        let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
+
+        let tablet = ActiveTablet(OwnedWithBackground::new(ActiveTabletInner {
+            inner: TabletInner::new(tablet_id, colo_group_id, range, lsm),
+            storage: storage,
+            shards: shards,
+            prepare_sender: prepare_sender.clone(),
+        }));
+
+        tablet.0.spawn(async |inner| {
+            inner.resolve_prepared(prepare_receiver).await;
+        });
+
+        tablet.0.spawn({
+            let prepare_sender = prepare_sender.clone();
+            async |inner| {
+                inner.scan_for_pending_mutations(prepare_sender).await;
+            }
+        });
+
+        tablet.0.spawn(async |inner| {
+            inner.scan_for_precond_locks(prepare_sender).await;
+        });
+
+        tablet
+    }
+
+    pub async fn freeze(self) -> FrozenTablet {
+        let data_tablet_inner = self.0.take().await;
+        let lsm = data_tablet_inner.inner.lsm.make_read_only().await;
+        FrozenTablet::new(
+            data_tablet_inner.inner.tablet_id,
+            data_tablet_inner.inner.colo_group_id,
+            data_tablet_inner.inner.range,
+            lsm,
+            data_tablet_inner.storage,
+            data_tablet_inner.shards,
+        )
+    }
+
+    pub fn tablet_id(&self) -> TabletId {
+        self.0.inner.tablet_id
+    }
+
+    pub fn colo_group_id(&self) -> ColoGroupId {
+        self.0.inner.colo_group_id
+    }
+
+    pub fn set_splits(&self, splits: Vec<Bound<Vec<u8>>>) {
+        self.0.inner.lsm.set_splits(splits);
+    }
+
+    pub async fn flush(&self) -> anyhow::Result<()> {
+        self.0.inner.lsm.flush().await
+    }
+
+    pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        self.0.inner.create_keyspace(keyspace_id).await
+    }
+
+    pub async fn get_multi(
         &self,
         ts: Timestamp,
         keys: BTreeSet<Key>,
@@ -63,18 +128,18 @@ impl Tablet for ActiveTablet {
         self.0.inner.get_multi(ts, keys).await
     }
 
-    async fn get_latest_multi(
+    pub async fn get_latest_multi(
         &self,
         keys: BTreeSet<Key>,
     ) -> Result<(Timestamp, BTreeMap<Key, Record>), InternalError> {
         self.0.inner.get_latest_multi(keys).await
     }
 
-    async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError> {
+    pub async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError> {
         self.0.inner.latest_snapshot(keys).await
     }
 
-    async fn scan_page(
+    pub async fn scan_page(
         &self,
         ts: Timestamp,
         keyspace_id: KeyspaceId,
@@ -88,7 +153,7 @@ impl Tablet for ActiveTablet {
             .await
     }
 
-    async fn history_page(
+    pub async fn history_page(
         &self,
         key: Key,
         range: HistoryRange,
@@ -101,7 +166,7 @@ impl Tablet for ActiveTablet {
             .await
     }
 
-    async fn write(
+    pub async fn write(
         &self,
         preconds: Vec<Precondition>,
         muts: BTreeMap<Key, Mutation>,
@@ -109,7 +174,7 @@ impl Tablet for ActiveTablet {
         self.0.inner.write(preconds, muts).await
     }
 
-    async fn prepare(
+    pub async fn prepare(
         &self,
         txid: Txid,
         preconds: Vec<Precondition>,
@@ -199,7 +264,7 @@ impl Tablet for ActiveTablet {
         Ok(*ts)
     }
 
-    async fn cleanup_committed(
+    pub async fn cleanup_committed(
         &self,
         txid: Txid,
         ts: Timestamp,
@@ -211,90 +276,12 @@ impl Tablet for ActiveTablet {
             .await
     }
 
-    async fn manifest(&self) -> anyhow::Result<Manifest> {
+    pub async fn manifest(&self) -> anyhow::Result<Manifest> {
         Ok(self.0.inner.manifest())
     }
 
-    async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
-        Err(anyhow!("ActiveTablet::wait_mostly_hydrated not allowed").into())
-    }
-
-    async fn catchup(&self) -> anyhow::Result<()> {
-        Err(anyhow!("ActiveTablet::catchup not allowed").into())
-    }
-
-    async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
+    pub async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
         self.0.find_split().await
-    }
-}
-
-impl ActiveTablet {
-    pub fn new(
-        tablet_id: TabletId,
-        colo_group_id: ColoGroupId,
-        range: Range<Vec<u8>>,
-        lsm: JournaledLsm,
-        storage: Arc<dyn Storage>,
-        shards: Arc<dyn Shards>,
-    ) -> Self {
-        let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
-
-        let tablet = ActiveTablet(OwnedWithBackground::new(ActiveTabletInner {
-            inner: TabletInner::new(tablet_id, colo_group_id, range, lsm),
-            storage: storage,
-            shards: shards,
-            prepare_sender: prepare_sender.clone(),
-        }));
-
-        tablet.0.spawn(async |inner| {
-            inner.resolve_prepared(prepare_receiver).await;
-        });
-
-        tablet.0.spawn({
-            let prepare_sender = prepare_sender.clone();
-            async |inner| {
-                inner.scan_for_pending_mutations(prepare_sender).await;
-            }
-        });
-
-        tablet.0.spawn(async |inner| {
-            inner.scan_for_precond_locks(prepare_sender).await;
-        });
-
-        tablet
-    }
-
-    pub async fn freeze(self) -> FrozenTablet {
-        let data_tablet_inner = self.0.take().await;
-        let lsm = data_tablet_inner.inner.lsm.make_read_only().await;
-        FrozenTablet::new(
-            data_tablet_inner.inner.tablet_id,
-            data_tablet_inner.inner.colo_group_id,
-            data_tablet_inner.inner.range,
-            lsm,
-            data_tablet_inner.storage,
-            data_tablet_inner.shards,
-        )
-    }
-
-    pub fn tablet_id(&self) -> TabletId {
-        self.0.inner.tablet_id
-    }
-
-    pub fn colo_group_id(&self) -> ColoGroupId {
-        self.0.inner.colo_group_id
-    }
-
-    pub fn set_splits(&self, splits: Vec<Bound<Vec<u8>>>) {
-        self.0.inner.lsm.set_splits(splits);
-    }
-
-    pub async fn flush(&self) -> anyhow::Result<()> {
-        self.0.inner.lsm.flush().await
-    }
-
-    pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
-        self.0.inner.create_keyspace(keyspace_id).await
     }
 }
 

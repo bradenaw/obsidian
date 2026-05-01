@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::ops::Deref as _;
 use std::ops::DerefMut;
@@ -8,13 +6,11 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use async_trait::async_trait;
 
 use crate::lsm::Lsm;
 use crate::lsm::LsmOptions;
 use crate::lsm::Manifest;
 use crate::lsm::Preloader;
-use crate::runtime;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
 use crate::tablet::frozen_tablet::FrozenTablet;
@@ -22,21 +18,10 @@ use crate::tablet::read_only_lsm::ReadOnlyLsm;
 use crate::tablet::TabletJournalWriter;
 use crate::util::spawn_owned;
 use crate::util::OwnedJoinHandle;
-use crate::Bound;
 use crate::ColoGroupId;
-use crate::Direction;
-use crate::HistoryRange;
-use crate::InternalError;
-use crate::Key;
 use crate::KeyspaceId;
-use crate::Mutation;
-use crate::Precondition;
 use crate::Range;
-use crate::Record;
-use crate::Revision;
 use crate::TabletId;
-use crate::Timestamp;
-use crate::Txid;
 
 pub(super) struct HydratingTablet {
     inner: Arc<HydratingTabletInner>,
@@ -161,82 +146,12 @@ impl HydratingTablet {
         );
         Ok(data_tablet)
     }
-}
 
-#[async_trait]
-impl runtime::Tablet for HydratingTablet {
-    async fn get_multi(
-        &self,
-        _ts: Timestamp,
-        _keys: BTreeSet<Key>,
-    ) -> Result<BTreeMap<Key, Record>, InternalError> {
-        Err(anyhow!("HydratingTablet::get_multi not allowed").into())
-    }
-
-    async fn get_latest_multi(
-        &self,
-        _keys: BTreeSet<Key>,
-    ) -> Result<(Timestamp, BTreeMap<Key, Record>), InternalError> {
-        Err(anyhow!("HydratingTablet::get_latest_multi not allowed").into())
-    }
-
-    async fn latest_snapshot(&self, _keys: BTreeSet<Key>) -> Result<Timestamp, InternalError> {
-        Err(anyhow!("HydratingTablet::latest_snapshot not allowed").into())
-    }
-
-    async fn scan_page(
-        &self,
-        _ts: Timestamp,
-        _keyspace_id: KeyspaceId,
-        _range: Range<&[u8]>,
-        _direction: Direction,
-        _limit: usize,
-    ) -> Result<(Vec<Record>, Option<Range<Vec<u8>>>), InternalError> {
-        Err(anyhow!("HydratingTablet::scan_page not allowed").into())
-    }
-
-    async fn history_page(
-        &self,
-        _key: Key,
-        _range: HistoryRange,
-        _direction: Direction,
-        _limit: usize,
-    ) -> Result<(Vec<Revision>, Option<HistoryRange>), InternalError> {
-        Err(anyhow!("HydratingTablet::history_page not allowed").into())
-    }
-
-    async fn write(
-        &self,
-        _preconds: Vec<Precondition>,
-        _muts: BTreeMap<Key, Mutation>,
-    ) -> Result<Timestamp, InternalError> {
-        Err(anyhow!("HydratingTablet::write not allowed").into())
-    }
-
-    async fn prepare(
-        &self,
-        _txid: Txid,
-        _preconds: Vec<Precondition>,
-        _muts: BTreeMap<Key, Mutation>,
-    ) -> Result<Timestamp, InternalError> {
-        Err(anyhow!("HydratingTablet::prepare not allowed").into())
-    }
-
-    async fn cleanup_committed(
-        &self,
-        _txid: Txid,
-        _ts: Timestamp,
-        _precond_keys: BTreeSet<Key>,
-        _mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<()> {
-        Err(anyhow!("HydratingTablet::cleanup_committed not allowed").into())
-    }
-
-    async fn manifest(&self) -> anyhow::Result<Manifest> {
+    pub async fn manifest(&self) -> anyhow::Result<Manifest> {
         Ok(self.inner.manifest.lock().unwrap().clone())
     }
 
-    async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
+    pub async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
         let mut state = self.inner.state.clone();
         loop {
             {
@@ -251,7 +166,7 @@ impl runtime::Tablet for HydratingTablet {
         }
     }
 
-    async fn catchup(&self) -> anyhow::Result<()> {
+    pub async fn catchup(&self) -> anyhow::Result<()> {
         self.inner.set_state.send_modify(|value| {
             if matches!(value, HydrationState::Mostly) {
                 *value = HydrationState::Catchup;
@@ -269,10 +184,6 @@ impl runtime::Tablet for HydratingTablet {
             }
             state.changed().await?;
         }
-    }
-
-    async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
-        Err(anyhow!("HydratingTablet::find_split not allowed").into())
     }
 }
 

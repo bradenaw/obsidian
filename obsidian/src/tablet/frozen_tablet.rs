@@ -2,32 +2,24 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use anyhow::anyhow;
-use async_trait::async_trait;
-
 use crate::lsm::Manifest;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
-use crate::runtime::Tablet;
 use crate::tablet::active_tablet::ActiveTablet;
 use crate::tablet::read_only_lsm::ReadOnlyLsm;
 use crate::tablet::tablet_inner::TabletInner;
 use crate::tablet::TabletJournalWriter;
-use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
 use crate::HistoryRange;
 use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
-use crate::Mutation;
-use crate::Precondition;
 use crate::Range;
 use crate::Record;
 use crate::Revision;
 use crate::TabletId;
 use crate::Timestamp;
-use crate::Txid;
 
 pub(super) struct FrozenTablet {
     inner: TabletInner<ReadOnlyLsm>,
@@ -69,11 +61,8 @@ impl FrozenTablet {
             self.shards,
         )
     }
-}
 
-#[async_trait]
-impl Tablet for FrozenTablet {
-    async fn get_multi(
+    pub async fn get_multi(
         &self,
         ts: Timestamp,
         keys: BTreeSet<Key>,
@@ -81,18 +70,18 @@ impl Tablet for FrozenTablet {
         self.inner.get_multi(ts, keys).await
     }
 
-    async fn get_latest_multi(
+    pub async fn get_latest_multi(
         &self,
         keys: BTreeSet<Key>,
     ) -> Result<(Timestamp, BTreeMap<Key, Record>), InternalError> {
         self.inner.get_latest_multi(keys).await
     }
 
-    async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError> {
+    pub async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError> {
         self.inner.latest_snapshot(keys).await
     }
 
-    async fn scan_page(
+    pub async fn scan_page(
         &self,
         ts: Timestamp,
         keyspace_id: KeyspaceId,
@@ -105,7 +94,7 @@ impl Tablet for FrozenTablet {
             .await
     }
 
-    async fn history_page(
+    pub async fn history_page(
         &self,
         key: Key,
         range: HistoryRange,
@@ -115,46 +104,7 @@ impl Tablet for FrozenTablet {
         self.inner.history_page(key, range, direction, limit).await
     }
 
-    async fn write(
-        &self,
-        _preconds: Vec<Precondition>,
-        _muts: BTreeMap<Key, Mutation>,
-    ) -> Result<Timestamp, InternalError> {
-        Err(anyhow!("FrozenTablet::write not allowed").into())
-    }
-
-    async fn prepare(
-        &self,
-        _txid: Txid,
-        _preconds: Vec<Precondition>,
-        _muts: BTreeMap<Key, Mutation>,
-    ) -> Result<Timestamp, InternalError> {
-        Err(anyhow!("FrozenTablet::prepare not allowed").into())
-    }
-
-    async fn cleanup_committed(
-        &self,
-        _txid: Txid,
-        _ts: Timestamp,
-        _precond_keys: BTreeSet<Key>,
-        _mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<()> {
-        Err(anyhow!("FrozenTablet::cleanup_committed not allowed").into())
-    }
-
-    async fn manifest(&self) -> anyhow::Result<Manifest> {
+    pub async fn manifest(&self) -> anyhow::Result<Manifest> {
         Ok(self.inner.manifest())
-    }
-
-    async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
-        Err(anyhow!("FrozenTablet::wait_mostly_hydrated not allowed").into())
-    }
-
-    async fn catchup(&self) -> anyhow::Result<()> {
-        Err(anyhow!("FrozenTablet::catchup not allowed").into())
-    }
-
-    async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
-        self.find_split().await
     }
 }
