@@ -290,16 +290,14 @@ where
                         );
                     }
                     participant.poison.store(true, Ordering::SeqCst);
-                    {
-                        participant
-                            .state_machine
-                            .transition(async |state| {
-                                *state =
-                                    Some(InnerParticipantState::Follower(follower_builder.build()));
-                            })
-                            .await;
-                        participant.poison.store(false, Ordering::SeqCst);
-                    }
+                    participant
+                        .state_machine
+                        .transition(async |state| {
+                            *state =
+                                Some(InnerParticipantState::Follower(follower_builder.build()));
+                        })
+                        .await;
+                    participant.poison.store(false, Ordering::SeqCst);
                     Err::<(), anyhow::Error>(anyhow!(
                         "{} background_process terminated",
                         participant.name,
