@@ -25,7 +25,7 @@ use crate::Range;
 use crate::RevisionValue;
 use crate::Timestamp;
 
-/// A Block is conceptually a BTreeMap<Vec<u8>, BTreeMap<Timestamp, RevisionValue>>, but it is
+/// A Block is conceptually a [`BTreeMap<Vec<u8>, BTreeMap<Timestamp, RevisionValue>>`], but it is
 /// compactly serialized and can be used as-is without fully deserializing.
 pub(super) struct Block<'a> {
     values_offset_in_file: u64,

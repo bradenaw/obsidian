@@ -1,3 +1,11 @@
+//! Meta holds the global metadata that Obsidian stores about itself: routing, keyspace metadata,
+//! tablet state, etc.
+//!
+//! This information is needed by every node in the system, so it also allows syncing and holding
+//! in-memory copies.
+//!
+//! Meta resides in KeyspaceId::META, which is hardcoded to be owned by TabletId::META.
+
 mod meta;
 mod meta_key;
 mod meta_mutation;
@@ -9,8 +17,9 @@ mod meta_synced;
 mod meta_value;
 mod shard_metadata;
 mod tablet_metadata;
-mod transfer;
+mod tablet_state;
 mod transfer_metadata;
+mod transfer_state;
 
 pub(crate) use meta::Meta;
 #[allow(unused_imports)]
@@ -27,6 +36,6 @@ pub(crate) use meta_synced::SyncType;
 pub(crate) use meta_value::MetaValue;
 pub(crate) use shard_metadata::ShardMetadata;
 pub(crate) use tablet_metadata::TabletMetadata;
-pub(crate) use transfer::TabletState;
-pub(crate) use transfer::TransferState;
+pub(crate) use tablet_state::TabletState;
 pub(crate) use transfer_metadata::TransferMetadata;
+pub(crate) use transfer_state::TransferState;

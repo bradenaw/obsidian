@@ -1,3 +1,6 @@
+//! Tuple encoding is a way of serializing tuples of elements with a handful of types such that the
+//! lexical ordering of the encoding matches the logical ordering of the tuples.
+
 use std::cmp;
 
 use anyhow::anyhow;

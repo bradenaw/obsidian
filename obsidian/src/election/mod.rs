@@ -1,3 +1,5 @@
+//! Election provides leader election for a group of participants sharing a journal.
+
 mod seq_waiters;
 #[cfg(test)]
 mod tests;

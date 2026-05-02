@@ -1,3 +1,5 @@
+//! Nodes represent a single process, and can be assigned shards to serve.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -48,8 +50,9 @@ use crate::TabletId;
 use crate::Timestamp;
 use crate::TransferId;
 
-/// Node represents one of the processes of Obsidian running in a system. All nodes serve the
-/// gateway service as well as being available to having shards assigned to them.
+/// Node represents one of the processes of Obsidian running in a system. Nodes register themselves
+/// with meta to make themselves available to having shards assigned, at which point they join
+/// leader election for the shard.
 ///
 /// Most shards are assigned by the Supervisor via metadata stored in Meta. However, this obviously
 /// cannot work for the Meta shard itself nor the Supervisor, so those are boostrapped specially.

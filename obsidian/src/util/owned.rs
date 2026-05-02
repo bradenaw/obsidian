@@ -6,16 +6,16 @@ use anyhow::anyhow;
 use tokio::select;
 use tokio::sync::SetOnce;
 
-/// Dropping an Owned<T> will interrupt the calls in progress on the associated WeakView<T>s,
-/// causing them to return an error. This does not drop T synchronously, it just bounds how long
-/// the callers can keep T alive via the WeakView<T>.
+/// Dropping an [`Owned<T>`] will interrupt the calls in progress on the associated
+/// [`WeakView<T>`]s, causing them to return an error. This does not drop `T` synchronously, it just
+/// bounds how long the callers can keep `T` alive via the `WeakView<T>`.
 ///
-/// This exists because of the prevance of Arc<dyn U>. We want to be able to hand these out without
-/// worrying that the caller keeps the underlying thing alive indefinitely, for example by calling
-/// a function that blocks.
+/// This exists because of the prevalence of `Arc<dyn U>`. We want to be able to hand these out
+/// without worrying that the caller keeps the underlying thing alive indefinitely, for example by
+/// calling a function that blocks.
 ///
-/// The intended use of this is to impl U for WeakView<T>, and then make Arc<dyn U> via
-/// Owned::weak(&t).
+/// The intended use of this is to `impl U for WeakView<T>`, and then make `Arc<dyn U>` via
+/// [`Owned::weak()`].
 pub(crate) struct Owned<T> {
     inner: Arc<T>,
     closed: Arc<SetOnce<()>>,
@@ -56,16 +56,17 @@ impl<T> Drop for Owned<T> {
     }
 }
 
+/// A weak reference to an [`Owned<T>`].
 pub(crate) struct WeakView<T> {
     inner: Weak<T>,
     closed: Arc<SetOnce<()>>,
 }
 
 impl<T> WeakView<T> {
-    /// or_closed calls f with a reference to the inner T.
+    /// `or_closed` calls `f` with a reference to the inner `T`.
     ///
-    /// If the associated Owned<T> is dropped, f's future is also dropped and or_closed returns an
-    /// error.
+    /// If the associated [`Owned<T>`] is dropped, `f`'s future is also dropped and `or_closed`
+    /// returns an error.
     pub async fn or_closed<F, U, E>(&self, f: F) -> Result<U, E>
     where
         F: AsyncFnOnce(&T) -> Result<U, E>,
@@ -76,12 +77,14 @@ impl<T> WeakView<T> {
             .upgrade()
             .ok_or_else(|| anyhow!("closed").into())?;
         select! {
-            out = f(inner.deref()) => {
-                return out;
-            },
+            biased;
+
             _ = self.closed.wait() => {
                 return Err(anyhow!("closed").into());
             }
+            out = f(inner.deref()) => {
+                return out;
+            },
         }
     }
 }

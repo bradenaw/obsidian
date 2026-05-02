@@ -1,3 +1,5 @@
+//! Discovery's purpose is to locate logical objects in the system.
+
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;

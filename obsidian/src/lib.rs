@@ -26,6 +26,7 @@ mod tuple_encoding;
 mod types;
 mod util;
 
+/// pb holds the compiled protocol buffers from `proto/`.
 mod pb {
     mod obsidian {
         tonic::include_proto!("obsidian");

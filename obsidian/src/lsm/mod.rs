@@ -1,3 +1,5 @@
+//! LSM is the log-structured merge tree.
+
 mod compactor;
 mod index;
 mod lsm;
