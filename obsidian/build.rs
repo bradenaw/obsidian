@@ -10,5 +10,9 @@ fn main() -> std::io::Result<()> {
         ],
         &["../proto", "../proto/internal/"],
     )?;
+    tonic_build::configure().compile(
+        &["../proto/external/journals.proto"],
+        &["../proto", "../proto/external/"],
+    )?;
     Ok(())
 }

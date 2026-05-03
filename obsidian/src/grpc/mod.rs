@@ -4,6 +4,7 @@
 
 mod gateway_client;
 mod gateway_server;
+mod journals_server;
 mod node_client;
 mod node_server;
 #[cfg(test)]

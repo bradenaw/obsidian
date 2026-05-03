@@ -31,6 +31,9 @@ mod pb {
     mod obsidian {
         tonic::include_proto!("obsidian");
     }
+    pub(crate) mod external {
+        tonic::include_proto!("obsidian_external");
+    }
     pub(crate) mod internal {
         tonic::include_proto!("obsidian_internal");
     }
