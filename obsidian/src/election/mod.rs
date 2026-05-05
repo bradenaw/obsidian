@@ -428,14 +428,9 @@ where
                     true
                 },
                 async |state| {
-                    if let Some(InnerParticipantState::Leader { lease_end, .. }) = state {
-                        lease_end.store(new_lease_end);
-                        return Ok(());
-                    }
-
                     let lease_end = Arc::new(AtomicTimestamp::new(new_lease_end));
                     let leader = match state.take().unwrap() {
-                        InnerParticipantState::Leader { .. } => unreachable!(),
+                        InnerParticipantState::Leader { leader, .. } => leader,
                         InnerParticipantState::Follower(follower) => {
                             let journal_writer = JournalWriter {
                                 name: self.name.clone(),
@@ -468,15 +463,12 @@ where
             .maybe_transition(
                 |state| !matches!(state, Some(InnerParticipantState::Follower(_))),
                 async |state| {
-                    if matches!(state, Some(InnerParticipantState::Follower(_))) {
-                        return Ok(());
-                    }
-
-                    log::info!("{} demoting to follower", self.name);
-
                     let follower = match state.take().unwrap() {
-                        InnerParticipantState::Leader { leader, .. } => leader.demote().await?,
-                        InnerParticipantState::Follower(_) => unreachable!(),
+                        InnerParticipantState::Leader { leader, .. } => {
+                            log::info!("{} demoting to follower", self.name);
+                            leader.demote().await?
+                        }
+                        InnerParticipantState::Follower(follower) => follower,
                     };
                     *state = Some(InnerParticipantState::Follower(follower));
                     self.became_leader_at.set(None);
