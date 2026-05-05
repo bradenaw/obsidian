@@ -13,6 +13,7 @@ use futures::Stream;
 use futures::StreamExt;
 use tokio::sync::Notify;
 
+use crate::election::proposal::ProposalType;
 use crate::election::Follower;
 use crate::election::FollowerBuilder;
 use crate::election::JournalWriter;
@@ -20,7 +21,6 @@ use crate::election::Leader;
 use crate::election::Participant;
 use crate::election::ParticipantState;
 use crate::election::Proposal;
-use crate::election::ProposalType;
 use crate::runtime::Journal;
 use crate::test::MemJournal;
 use crate::JournalSeq;

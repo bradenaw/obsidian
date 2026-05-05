@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package obsidian_internal;
+
+import "google/protobuf/empty.proto";
+
+import "internal/internal.proto";
+import "obsidian.proto";
+
+message Proposal {
+    Uuid participant_id = 1;
+    fixed64 ts = 2;
+
+    message Acquire {
+        fixed64 lease_end = 1;
+    }
+    message Append {
+        bytes entry = 1;
+    }
+    
+    oneof proposal_type {
+        Acquire acquire = 3;
+        google.protobuf.Empty relinquish = 4;
+        Append append = 5;
+        google.protobuf.Empty heartbeat = 6;
+    }
+}
+
+message JournalEntry {
+    TabletId tablet_id = 1;
+    TabletJournalEntry tablet_entry = 2;
+}
+
+message TabletJournalEntry {
+    message WriteEntry {
+        fixed64 ts = 1;
+        repeated obsidian.Revision revisions = 2;
+    }
+
+    message ManifestEntry {
+        uint64 lower_bound_seq = 1;
+        Manifest manifest = 2;
+    }
+
+    oneof entry_type {
+        google.protobuf.Empty no_op = 1;
+        WriteEntry write = 2;
+        ManifestEntry manifest = 3;
+    }
+}
