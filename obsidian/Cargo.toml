@@ -16,6 +16,9 @@ crossbeam-skiplist = "0.1.3"
 futures = "0.3.23"
 im = "15.1.0"
 log = "^0.4"
+obsidian_pb = { path = "../obsidian_pb" }
+obsidian_util = { path = "../obsidian_util" }
+obsidian_common = { path = "../obsidian_common" }
 pretty_env_logger = "^0.5"
 priority-queue = "^1.3"
 prost = "0.11.9"

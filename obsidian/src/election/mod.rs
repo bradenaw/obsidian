@@ -18,6 +18,11 @@ use async_trait::async_trait;
 use futures::future::pending;
 use futures::Stream;
 use futures::StreamExt;
+use obsidian_util::AtomicInstant;
+use obsidian_util::Retry;
+use obsidian_util::StateMachine;
+use obsidian_util::Watchable;
+use obsidian_util::WithBackground;
 use rand::Rng;
 use tokio::select;
 use tokio::sync::Notify;
@@ -29,12 +34,7 @@ use uuid::Uuid;
 
 use crate::election::seq_waiters::SeqWaiters;
 use crate::runtime::Journal;
-use crate::util::AtomicInstant;
 use crate::util::AtomicTimestamp;
-use crate::util::Retry;
-use crate::util::StateMachine;
-use crate::util::Watchable;
-use crate::util::WithBackground;
 use crate::JournalSeq;
 use crate::Timestamp;
 

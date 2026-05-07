@@ -1,6 +1,6 @@
 use std::ops::Deref;
 
-use crate::lsm::RunId;
+use crate::RunId;
 use crate::olf::OlfFile;
 
 pub(super) struct Run {

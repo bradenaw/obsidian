@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::lsm::RunId;
+use crate::RunId;
 
 #[async_trait]
 pub(crate) trait Storage: Sync + Send + 'static {

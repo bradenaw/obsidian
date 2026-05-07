@@ -1,9 +1,9 @@
 use std::fmt::Debug;
 
 use anyhow::anyhow;
+use obsidian_pb as pb;
 
 use crate::meta::TabletState;
-use crate::pb;
 
 /// The state for a transfer of a key range from source tablet(s) to destination tablet(s).
 ///

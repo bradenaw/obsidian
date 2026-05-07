@@ -18,7 +18,7 @@ use crate::election::Participant;
 use crate::election::ParticipantState;
 use crate::election::Proposal;
 use crate::lsm::LsmOptions;
-use crate::lsm::Manifest;
+use crate::Manifest;
 use crate::replica::recovery::ShardRecovery;
 use crate::runtime;
 use crate::runtime::Journal;

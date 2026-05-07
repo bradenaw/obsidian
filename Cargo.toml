@@ -2,5 +2,7 @@
 
 members = [
     "obsidian",
+    "obsidian_pb",
+    "obsidian_util",
 ]
 resolver = "2"

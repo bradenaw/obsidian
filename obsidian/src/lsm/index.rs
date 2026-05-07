@@ -7,19 +7,19 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use anyhow::anyhow;
+use obsidian_util::binary_search_by_idx;
 use tokio::sync::Notify;
 
 use crate::lsm::memtable::Memtable;
 use crate::lsm::run::Run;
-use crate::lsm::KeyspaceManifest;
-use crate::lsm::LevelManifest;
-use crate::lsm::Manifest;
-use crate::lsm::RunId;
-use crate::lsm::RunManifest;
+use crate::KeyspaceManifest;
+use crate::LevelManifest;
+use crate::Manifest;
+use crate::RunId;
+use crate::RunManifest;
 use crate::olf::OlfFile;
 use crate::runtime::FileName;
 use crate::runtime::Storage;
-use crate::util::binary_search_by_idx;
 use crate::Bound;
 use crate::KeyOrBound;
 use crate::KeyspaceId;

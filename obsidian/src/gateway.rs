@@ -16,15 +16,15 @@ use futures::future::try_join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use futures::TryStreamExt;
+use obsidian_util::sleep_for_retry;
+use obsidian_util::Retry;
+use obsidian_util::RetryResult;
 use rand::seq::SliceRandom;
 
 use crate::meta::MetaReader;
 use crate::meta::MetaSynced;
 use crate::runtime::Meta;
 use crate::runtime::Shards;
-use crate::util::sleep_for_retry;
-use crate::util::Retry;
-use crate::util::RetryResult;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;

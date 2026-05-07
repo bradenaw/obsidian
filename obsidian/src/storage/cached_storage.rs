@@ -647,7 +647,7 @@ mod tests {
     use super::TreeList;
     use super::HASH_TRIE_LEAF_MAX;
     use super::TREE_LIST_NODE_SIZE;
-    use crate::lsm::RunId;
+    use crate::RunId;
     use crate::runtime::FileName;
     use crate::test::MemStorage;
 

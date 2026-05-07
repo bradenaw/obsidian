@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::lsm::Lsm;
-use crate::lsm::Manifest;
+use crate::Manifest;
 use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::TabletJournalWriter;
 use crate::Bound;

@@ -13,22 +13,24 @@ use async_trait::async_trait;
 use futures::future;
 use futures::StreamExt;
 use futures::TryStreamExt;
+use obsidian_pb as pb;
+use obsidian_util::Decode;
+use obsidian_util::Retry;
+use obsidian_util::WithBackground;
 use prost::Message;
 use tokio::sync::mpsc;
 
 use crate::lsm::Lsm;
-use crate::lsm::Manifest;
+use crate::Manifest;
 use crate::meta::MetaSynced;
-use crate::pb;
 use crate::runtime::Shards;
 use crate::runtime::Tablet;
 use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::journaled_lsm::LsmWrite;
 use crate::tablet::tablet_inner::TabletInner;
 use crate::tablet::tablet_journal_writer::TabletJournalWriter;
-use crate::util::Decode;
-use crate::util::Retry;
-use crate::util::WithBackground;
+use crate::util::key_set_from_proto;
+use crate::util::key_set_to_proto;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -461,8 +463,8 @@ impl From<TxOutcomeRecord> for pb::internal::TxOutcomeRecord {
                 } => Some(pb::internal::tx_outcome_record::OutcomeType::Committed(
                     pb::internal::tx_outcome_record::Committed {
                         ts: ts.as_micros(),
-                        precond_keys: Some(precond_keys.into()),
-                        mut_keys: Some(mut_keys.into()),
+                        precond_keys: Some(key_set_to_proto(precond_keys)),
+                        mut_keys: Some(key_set_to_proto(mut_keys)),
                     },
                 )),
                 TxOutcomeRecord::Aborted {} => {
@@ -486,10 +488,8 @@ impl TryFrom<pb::internal::TxOutcomeRecord> for TxOutcomeRecord {
                 },
             )) => TxOutcomeRecord::Committed {
                 ts: Timestamp::from_micros(ts),
-                mut_keys: BTreeSet::<Key>::try_from(
-                    mut_keys.ok_or_else(|| anyhow!("missing mut_keys"))?,
-                )?,
-                precond_keys: BTreeSet::<Key>::try_from(
+                mut_keys: key_set_from_proto(mut_keys.ok_or_else(|| anyhow!("missing mut_keys"))?)?,
+                precond_keys: key_set_from_proto(
                     precond_keys.ok_or_else(|| anyhow!("missing precond_keys"))?,
                 )?,
             },
@@ -571,8 +571,9 @@ impl Waiters {
 mod tests {
     use std::collections::BTreeSet;
 
+    use obsidian_pb as pb;
+
     use super::TxOutcomeRecord;
-    use crate::pb;
     use crate::test::assert_roundtrip_pb;
     use crate::ColoGroupId;
     use crate::KeyspaceId;

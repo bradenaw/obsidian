@@ -5,9 +5,10 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
 
-use crate::util::spawn_owned;
-use crate::util::OrdEqByFirst;
-use crate::util::OwnedJoinHandle;
+use obsidian_util::spawn_owned;
+use obsidian_util::OrdEqByFirst;
+use obsidian_util::OwnedJoinHandle;
+
 use crate::Timestamp;
 
 const ADVANCE_TICK: Duration = Duration::from_millis(25);

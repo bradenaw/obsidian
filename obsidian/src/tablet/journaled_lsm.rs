@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use obsidian_util::Retry;
+
 use crate::lsm::Lsm;
-use crate::lsm::Manifest;
+use crate::Manifest;
 use crate::tablet::read_only_lsm::LsmRead;
 use crate::tablet::read_only_lsm::ReadOnlyLsm;
 use crate::tablet::TabletJournalWriter;
-use crate::util::Retry;
 use crate::Bound;
 use crate::Direction;
 use crate::HistoryRange;

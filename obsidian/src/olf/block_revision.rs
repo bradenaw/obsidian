@@ -1,7 +1,8 @@
 use std::cmp::Ordering;
 use std::fmt::Debug;
 
-use crate::util::hexlify;
+use obsidian_util::hexlify;
+
 use crate::RevisionValue;
 use crate::Timestamp;
 

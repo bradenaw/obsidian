@@ -16,6 +16,10 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use obsidian_util::encode;
+use obsidian_util::Decode;
+use obsidian_util::Encode;
+use obsidian_util::Retry;
 
 use crate::election::Proposal;
 use crate::gateway::Gateway;
@@ -39,10 +43,6 @@ pub(crate) use crate::test::obsidian_suite::obsidian_test_suite;
 pub(crate) use crate::test::tablet_suite::tablet_test_suite;
 pub(crate) use crate::test::test_node_builder::TestNodeBuilder;
 pub(crate) use crate::test::test_nodes::TestNodes;
-use crate::util::encode;
-use crate::util::Decode;
-use crate::util::Encode;
-use crate::util::Retry;
 use crate::Bound;
 use crate::JournalEntry;
 use crate::Obsidian;

@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use anyhow::anyhow;
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
+use obsidian_util::hexlify;
 
-use crate::util::hexlify;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -127,8 +127,9 @@ impl StaticRouter {
 mod tests {
     use core::assert_matches;
 
+    use obsidian_util::encode;
+
     use super::StaticRouter;
-    use crate::util::encode;
     use crate::Bound;
     use crate::ColoGroupId;
     use crate::Direction;

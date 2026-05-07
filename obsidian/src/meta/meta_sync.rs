@@ -2,9 +2,11 @@ use std::collections::BTreeSet;
 use std::collections::HashSet;
 
 use anyhow::anyhow;
+use obsidian_pb as pb;
 
 use crate::meta::MetaKey;
-use crate::pb;
+use crate::util::key_set_from_proto;
+use crate::util::key_set_to_proto;
 use crate::KeyspaceId;
 
 #[derive(Clone, Debug)]
@@ -17,7 +19,7 @@ impl TryFrom<pb::internal::MetaSync> for MetaSync {
 
     fn try_from(value_pb: pb::internal::MetaSync) -> Result<Self, Self::Error> {
         Ok(Self {
-            keys: BTreeSet::try_from(
+            keys: key_set_from_proto(
                 value_pb
                     .keys
                     .ok_or_else(|| anyhow!("MetaSync missing field keys"))?,
@@ -32,7 +34,7 @@ impl TryFrom<pb::internal::MetaSync> for MetaSync {
 impl From<MetaSync> for pb::internal::MetaSync {
     fn from(value: MetaSync) -> Self {
         Self {
-            keys: Some(pb::internal::CompressedKeySet::from(
+            keys: Some(key_set_to_proto(
                 value
                     .keys
                     .iter()

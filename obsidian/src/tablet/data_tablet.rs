@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use obsidian_util::StateMachine;
 
 use crate::lsm::Lsm;
 use crate::lsm::LsmOptions;
-use crate::lsm::Manifest;
+use crate::Manifest;
 use crate::runtime;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
@@ -16,7 +17,6 @@ use crate::tablet::frozen_tablet::FrozenTablet;
 use crate::tablet::hydrating_tablet::HydratingTablet;
 use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::TabletJournalWriter;
-use crate::util::StateMachine;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;

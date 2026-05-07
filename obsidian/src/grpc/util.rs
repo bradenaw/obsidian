@@ -5,10 +5,12 @@ use std::ops::Deref;
 use std::ops::DerefMut;
 
 use anyhow::anyhow;
+use obsidian_common::key_from_proto;
+use obsidian_common::key_to_proto;
+use obsidian_pb as pb;
 use prost::Message;
 use tonic::metadata::MetadataValue;
 
-use crate::pb;
 use crate::Direction;
 use crate::InternalError;
 use crate::Key;
@@ -119,7 +121,7 @@ pub(super) fn parse_preconds_muts(
         .into_iter()
         .map(|key_mut_pb| -> anyhow::Result<(Key, Mutation)> {
             Ok((
-                Key::try_from(
+                key_from_proto(
                     key_mut_pb
                         .key
                         .ok_or_else(|| anyhow!("KeyMutation.key missing"))?,
@@ -168,7 +170,7 @@ pub(super) fn preconds_muts_to_proto(
     let key_muts_pb: Vec<_> = muts
         .into_iter()
         .map(|(key, mutation)| pb::KeyMutation {
-            key: Some(pb::Key::from(key)),
+            key: Some(key_to_proto(key)),
             mutation: Some(pb::Mutation::from(mutation)),
         })
         .collect();

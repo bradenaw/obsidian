@@ -3,10 +3,10 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use anyhow::anyhow;
+use obsidian_pb as pb;
 
 use crate::meta::MetaState;
 use crate::meta::TransferState;
-use crate::pb;
 use crate::TabletId;
 
 #[derive(Clone, Debug)]

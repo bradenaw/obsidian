@@ -5,6 +5,7 @@ use std::sync::Arc;
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
 use futures::TryStreamExt;
+use obsidian_util::binary_search_by_idx;
 use proptest::prelude::*;
 use uuid::Uuid;
 
@@ -20,7 +21,6 @@ use crate::olf::OlfFile;
 use crate::olf::OlfFileBuilder;
 use crate::test::MemFileWriter;
 use crate::test::MemStorage;
-use crate::util::binary_search_by_idx;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;

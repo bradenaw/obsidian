@@ -6,7 +6,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 
 use crate::lsm::Lsm;
-use crate::lsm::Manifest;
+use crate::Manifest;
 use crate::runtime::Tablet;
 use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::tablet_inner::TabletInner;

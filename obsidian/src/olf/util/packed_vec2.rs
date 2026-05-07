@@ -4,8 +4,7 @@ use std::ops::Deref;
 use anyhow::anyhow;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
-
-use crate::util::byte_width;
+use obsidian_util::byte_width;
 
 /// PackedVec2 encodes a sequence of `(u64, u64)` such that each element is a fixed width, but each
 /// uses only the minumum number of bytes needed to store the largest value.

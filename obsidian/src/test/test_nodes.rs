@@ -4,13 +4,13 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use im::OrdSet;
+use obsidian_util::Watchable;
 
 use crate::discovery::Discovery;
 use crate::runtime::Node;
 use crate::runtime::Nodes;
 use crate::runtime::Shards;
 use crate::test::TestNodeBuilder;
-use crate::util::Watchable;
 use crate::NodeId;
 
 pub(crate) struct TestNodes {

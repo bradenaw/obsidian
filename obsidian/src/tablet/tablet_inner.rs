@@ -8,16 +8,16 @@ use anyhow::anyhow;
 use async_stream::try_stream;
 use futures::future;
 use futures::Stream;
+use obsidian_util::Decode;
+use obsidian_util::Encode;
 
-use crate::lsm::Manifest;
+use crate::Manifest;
 use crate::tablet::journaled_lsm::LsmWrite;
 use crate::tablet::lock_mgr::Guard;
 use crate::tablet::lock_mgr::LockMgr;
 use crate::tablet::read_only_lsm::LsmRead;
 use crate::tablet::scan_locks::ScanLocks;
 use crate::tablet::sequencer::Sequencer;
-use crate::util::Decode;
-use crate::util::Encode;
 use crate::ColoGroupId;
 use crate::Direction;
 use crate::HistoryRange;
@@ -663,6 +663,7 @@ mod tests {
 
     use async_trait::async_trait;
     use futures::StreamExt;
+    use obsidian_util::encode;
 
     use crate::lsm::Lsm;
     use crate::lsm::LsmOptions;
@@ -671,7 +672,6 @@ mod tests {
     use crate::tablet::tablet_inner::TabletInner;
     use crate::tablet::tablet_journal_writer::TabletJournalWriter;
     use crate::test::MemStorage;
-    use crate::util::encode;
     use crate::Bound;
     use crate::ColoGroupId;
     use crate::Direction;

@@ -10,6 +10,7 @@ use anyhow::anyhow;
 use async_stream::try_stream;
 use async_trait::async_trait;
 use futures::Stream;
+use obsidian_util::sleep_for_retry;
 use rand::seq::SliceRandom;
 
 use crate::meta::MetaKey;
@@ -24,7 +25,6 @@ use crate::meta::TabletState;
 use crate::runtime;
 use crate::runtime::Meta as _;
 use crate::runtime::Tablet;
-use crate::util::sleep_for_retry;
 use crate::util::WaitableTimestamp;
 use crate::Bound;
 use crate::ColoGroupId;

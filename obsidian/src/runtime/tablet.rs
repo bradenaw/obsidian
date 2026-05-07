@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 
-use crate::lsm::Manifest;
+use crate::Manifest;
 use crate::Bound;
 use crate::Direction;
 use crate::HistoryRange;

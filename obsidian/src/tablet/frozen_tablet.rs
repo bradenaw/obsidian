@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::lsm::Manifest;
+use crate::Manifest;
 use crate::runtime::Shards;
 use crate::runtime::Storage;
 use crate::tablet::active_tablet::ActiveTablet;
