@@ -1,8 +1,6 @@
 mod grpc_bridge;
 mod grpc_in_process_node_builder;
 mod in_process_node_builder;
-mod mem_file_reader;
-mod mem_file_writer;
 mod mem_journal;
 mod mem_journals;
 mod mem_storage;
@@ -34,8 +32,6 @@ pub(crate) use crate::test::grpc_bridge::obsidian_grpc_bridge;
 pub(crate) use crate::test::grpc_bridge::GrpcBridge;
 pub(crate) use crate::test::grpc_in_process_node_builder::GrpcInProcessNodeBuilder;
 pub(crate) use crate::test::in_process_node_builder::InProcessNodeBuilder;
-pub(crate) use crate::test::mem_file_reader::MemFileReader;
-pub(crate) use crate::test::mem_file_writer::MemFileWriter;
 pub(crate) use crate::test::mem_journal::MemJournal;
 pub(crate) use crate::test::mem_journals::MemJournals;
 pub(crate) use crate::test::mem_storage::MemStorage;

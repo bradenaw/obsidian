@@ -7,7 +7,7 @@ use byteorder::LittleEndian;
 use obsidian_util::binary_search_by_idx;
 use obsidian_util::longest_shared_prefix;
 
-use crate::olf::util::PackedVec2;
+use crate::util::PackedVec2;
 
 /// `PrefixCompressedKV` is like a `BTreeMap<Vec<u8>, u64>`, but packed much more tightly. Any
 /// prefix shared by all of the keys is only encoded once, and then we're left with a map from

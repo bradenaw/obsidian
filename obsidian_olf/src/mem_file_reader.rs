@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 
-use crate::runtime::FileReader;
+use crate::FileReader;
 
-pub(crate) struct MemFileReader {
+pub struct MemFileReader {
     inner: Vec<u8>,
 }
 

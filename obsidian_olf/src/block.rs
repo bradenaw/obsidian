@@ -8,22 +8,22 @@ use async_stream::try_stream;
 use byteorder::ByteOrder;
 use byteorder::LittleEndian;
 use futures::Stream;
+use obsidian_common::Direction;
+use obsidian_common::HistoryRange;
+use obsidian_common::KeyOrBound;
+use obsidian_common::Range;
+use obsidian_common::RevisionValue;
+use obsidian_common::Timestamp;
 use obsidian_util::binary_search_by_idx;
 use obsidian_util::byte_width;
 use obsidian_util::hexlify;
 use obsidian_util::longest_shared_prefix_len;
 use obsidian_util::IteratorEither;
 
-use crate::olf::block_revision::BlockRevision;
-use crate::olf::util::PackedVec2;
-use crate::olf::util::PrefixCompressedKV;
-use crate::runtime::FileReader;
-use crate::Direction;
-use crate::HistoryRange;
-use crate::KeyOrBound;
-use crate::Range;
-use crate::RevisionValue;
-use crate::Timestamp;
+use crate::block_revision::BlockRevision;
+use crate::util::PackedVec2;
+use crate::util::PrefixCompressedKV;
+use crate::FileReader;
 
 /// A Block is conceptually a [`BTreeMap<Vec<u8>, BTreeMap<Timestamp, RevisionValue>>`], but it is
 /// compactly serialized and can be used as-is without fully deserializing.
@@ -33,8 +33,6 @@ pub(super) struct Block<'a> {
     version_index: BlockVersionIndex<Vec<u8>>,
     reader: &'a dyn FileReader,
 }
-
-const BLOCK_TRAILER_SIZE: usize = 20;
 
 impl<'a> Block<'a> {
     pub(super) async fn open(
@@ -125,42 +123,6 @@ impl<'a> Block<'a> {
             };
 
             for j in key_idxs {
-                let key = self.key_index.get_key(j);
-                if !range.contains(&key) {
-                    break;
-                }
-
-                let versions = self.versions_for_key(j);
-                let version_idx = binary_search_by_idx(versions.len(), Reverse(ts), |idx| {
-                    Reverse(versions.ts(idx))
-                })
-                .unwrap_or_else(core::convert::identity);
-                if version_idx == versions.len() {
-                    continue;
-                }
-
-                let ts = versions.ts(version_idx);
-                let value = self.value(&versions, version_idx).await?;
-
-                yield BlockRevision { key, ts, value };
-            }
-        }
-    }
-
-    pub(super) fn scan_desc(
-        &self,
-        ts: Timestamp,
-        range: Range<Vec<u8>>,
-    ) -> impl Stream<Item = anyhow::Result<BlockRevision>> + '_ {
-        try_stream! {
-            let upper_key_idx = binary_search_by_idx(
-                    self.key_index.len(),
-                    KeyOrBound::Bound(range.upper.clone()),
-                    |idx| KeyOrBound::Key(self.key_index.get_key(idx)),
-                )
-                .unwrap_or_else(core::convert::identity);
-
-            for j in (0..upper_key_idx).rev() {
                 let key = self.key_index.get_key(j);
                 if !range.contains(&key) {
                     break;
@@ -707,17 +669,17 @@ mod tests {
     use std::collections::BTreeMap;
 
     use futures::TryStreamExt;
+    use obsidian_common::Bound;
+    use obsidian_common::Direction;
+    use obsidian_common::HistoryRange;
+    use obsidian_common::Range;
+    use obsidian_common::RevisionValue;
+    use obsidian_common::Timestamp;
 
     use super::Block;
     use super::BlockBuilder;
-    use crate::olf::block_revision::BlockRevision;
-    use crate::test::MemFileReader;
-    use crate::Bound;
-    use crate::Direction;
-    use crate::HistoryRange;
-    use crate::Range;
-    use crate::RevisionValue;
-    use crate::Timestamp;
+    use crate::block_revision::BlockRevision;
+    use crate::MemFileReader;
 
     fn encode(
         buffer: &BTreeMap<Vec<u8>, Vec<(Timestamp, RevisionValue)>>,

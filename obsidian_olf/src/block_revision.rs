@@ -1,10 +1,9 @@
 use std::cmp::Ordering;
 use std::fmt::Debug;
 
+use obsidian_common::RevisionValue;
+use obsidian_common::Timestamp;
 use obsidian_util::hexlify;
-
-use crate::RevisionValue;
-use crate::Timestamp;
 
 // Distinct from crate::Revision because blocks aren't aware of keyspace IDs. Here the keys are
 // just Vec<u8>.

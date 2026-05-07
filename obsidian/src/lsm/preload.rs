@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::anyhow;
+use obsidian_olf::OlfFile;
 use obsidian_util::spawn_owned;
 use obsidian_util::OwnedJoinHandle;
 
@@ -11,11 +12,10 @@ use crate::lsm::index::Keyspace;
 use crate::lsm::index::Level;
 use crate::lsm::memtable::Memtable;
 use crate::lsm::run::Run;
-use crate::Manifest;
-use crate::RunId;
-use crate::olf::OlfFile;
 use crate::runtime::FileName;
 use crate::runtime::Storage;
+use crate::Manifest;
+use crate::RunId;
 
 pub(crate) struct Preloader {
     storage: Arc<dyn Storage>,

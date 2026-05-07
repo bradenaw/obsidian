@@ -1,7 +1,8 @@
 use std::ops::Deref;
 
+use obsidian_olf::OlfFile;
+
 use crate::RunId;
-use crate::olf::OlfFile;
 
 pub(super) struct Run {
     inner: OlfFile,

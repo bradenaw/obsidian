@@ -14,6 +14,8 @@ use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::Stream;
 use futures::StreamExt;
+use obsidian_olf::OlfFile;
+use obsidian_olf::OlfFileBuilder;
 use obsidian_util::merge_sorted_streams;
 use obsidian_util::spawn_owned;
 use obsidian_util::OwnedJoinHandle;
@@ -25,9 +27,6 @@ use crate::lsm::index::IndexSnapshot;
 use crate::lsm::index::Keyspace;
 use crate::lsm::memtable::Memtable;
 use crate::lsm::run::Run;
-use crate::RunId;
-use crate::olf::OlfFile;
-use crate::olf::OlfFileBuilder;
 use crate::runtime::FileName;
 use crate::runtime::Storage;
 use crate::Bound;
@@ -35,6 +34,7 @@ use crate::KeyspaceId;
 use crate::Range;
 use crate::Revision;
 use crate::RevisionValue;
+use crate::RunId;
 use crate::Timestamp;
 
 /// The compactor's purpose is to mutate an `Index` to a more efficient physical represesentation,

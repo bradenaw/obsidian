@@ -10,31 +10,31 @@ use byteorder::LittleEndian;
 use futures::pin_mut;
 use futures::Stream;
 use futures::TryStreamExt;
+use obsidian_common::Bound;
+use obsidian_common::ColoGroupId;
+use obsidian_common::Direction;
+use obsidian_common::HistoryRange;
+use obsidian_common::KeyOrBound;
+use obsidian_common::KeyspaceId;
+use obsidian_common::Range;
+use obsidian_common::Revision;
+use obsidian_common::RevisionValue;
+use obsidian_common::Timestamp;
 use obsidian_util::binary_search_by_idx;
 use obsidian_util::hexlify;
 use obsidian_util::IteratorEither;
 use uuid::Uuid;
 
-use crate::olf::block::dump_block;
-use crate::olf::block::Block;
-use crate::olf::block::BlockBuilder;
-use crate::olf::block_revision::BlockRevision;
-use crate::olf::util::PrefixCompressedKV;
-use crate::runtime::FileReader;
-use crate::runtime::FileWriter;
-use crate::Bound;
-use crate::ColoGroupId;
-use crate::Direction;
-use crate::HistoryRange;
-use crate::KeyOrBound;
-use crate::KeyspaceId;
-use crate::Range;
-use crate::Revision;
-use crate::RevisionValue;
-use crate::Timestamp;
+use crate::block::dump_block;
+use crate::block::Block;
+use crate::block::BlockBuilder;
+use crate::block_revision::BlockRevision;
+use crate::util::PrefixCompressedKV;
+use crate::FileReader;
+use crate::FileWriter;
 
 #[derive(Clone)]
-pub(crate) struct OlfFile {
+pub struct OlfFile {
     reader: Arc<dyn FileReader>,
 
     id: Uuid,
@@ -237,7 +237,7 @@ impl OlfFile {
     }
 }
 
-pub(crate) struct OlfFileBuilder<'a> {
+pub struct OlfFileBuilder<'a> {
     w: &'a mut dyn FileWriter,
     id: Uuid,
     keyspace_id: KeyspaceId,
@@ -450,7 +450,7 @@ impl OlfFileTrailer {
 }
 
 /// Prints a debug representation of the given file to stdout.
-pub(crate) async fn dump_olf_file(olf: &OlfFile) -> anyhow::Result<()> {
+pub async fn dump_olf_file(olf: &OlfFile) -> anyhow::Result<()> {
     println!("    min_ts: {}", olf.min_ts);
     println!("    max_ts: {}", olf.max_ts);
     println!("    range: {:?}", olf.range());
@@ -481,6 +481,14 @@ mod tests {
 
     use futures::StreamExt;
     use futures::TryStreamExt;
+    use obsidian_common::Bound;
+    use obsidian_common::ColoGroupId;
+    use obsidian_common::Direction;
+    use obsidian_common::KeyspaceId;
+    use obsidian_common::Range;
+    use obsidian_common::Revision;
+    use obsidian_common::RevisionValue;
+    use obsidian_common::Timestamp;
     use proptest::prelude::*;
     use rand::RngCore;
     use uuid::Uuid;
@@ -488,15 +496,7 @@ mod tests {
     use super::dump_olf_file;
     use super::OlfFile;
     use super::OlfFileBuilder;
-    use crate::test::MemFileWriter;
-    use crate::Bound;
-    use crate::ColoGroupId;
-    use crate::Direction;
-    use crate::KeyspaceId;
-    use crate::Range;
-    use crate::Revision;
-    use crate::RevisionValue;
-    use crate::Timestamp;
+    use crate::MemFileWriter;
 
     #[tokio::test]
     async fn test_olf_file() -> anyhow::Result<()> {
