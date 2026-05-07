@@ -307,7 +307,7 @@ impl BlockBuilder {
         } else if let Some((last_key, _)) = self.buffer.last_key_value() {
             if &revision.key < last_key {
                 return Err(anyhow!(
-                    "entries for block not in ascending key order: {:?} then {:?}",
+                    "entries for block not in ascending key order: {} then {}",
                     hexlify(last_key),
                     hexlify(&revision.key[..]),
                 ));

@@ -297,7 +297,7 @@ impl MetaSyncedInner {
                     sync_items.insert(meta_key);
                 } else {
                     log::warn!(
-                        "ignoring unknown MetaKey during sync {:?}",
+                        "ignoring unknown MetaKey during sync {}",
                         hexlify(&revision.key.1[..])
                     );
                 }

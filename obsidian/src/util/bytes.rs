@@ -1,4 +1,5 @@
 use std::cmp;
+use std::fmt::Display;
 use std::io::Read;
 use std::io::Write;
 
@@ -20,8 +21,21 @@ pub(crate) fn encode<E: Encode>(e: &E) -> Vec<u8> {
     v
 }
 
-pub(crate) fn hexlify(b: &[u8]) -> String {
-    b.iter().map(|b| format!("{:02x}", b)).collect()
+pub(crate) fn hexlify(b: &[u8]) -> Hex<'_> {
+    Hex { b }
+}
+
+pub(crate) struct Hex<'a> {
+    b: &'a [u8],
+}
+
+impl<'a> Display for Hex<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for byte in self.b {
+            write!(f, "{:02x}", byte)?;
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn longest_shared_prefix(a: &[u8], b: &[u8]) -> Vec<u8> {
