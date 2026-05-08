@@ -7,9 +7,9 @@ use obsidian_pb as pb;
 use obsidian_util::merge_sorted2;
 use obsidian_util::OrdEqByFirst;
 
-use crate::RunId;
 use crate::KeyspaceId;
 use crate::Range;
+use crate::RunId;
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct Manifest {
@@ -380,15 +380,15 @@ mod tests {
     use std::assert_matches;
     use std::collections::HashMap;
 
-    use crate::KeyspaceManifest;
-    use crate::LevelManifest;
-    use crate::Manifest;
-    use crate::RunId;
-    use crate::RunManifest;
     use crate::Bound;
     use crate::ColoGroupId;
     use crate::KeyspaceId;
+    use crate::KeyspaceManifest;
+    use crate::LevelManifest;
+    use crate::Manifest;
     use crate::Range;
+    use crate::RunId;
+    use crate::RunManifest;
 
     fn run(lower: &str, upper: &str) -> RunManifest {
         RunManifest {

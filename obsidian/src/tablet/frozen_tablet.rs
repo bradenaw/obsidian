@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::Manifest;
-use crate::runtime::Shards;
 use obsidian_external::Storage;
+
+use crate::runtime::Shards;
 use crate::tablet::active_tablet::ActiveTablet;
 use crate::tablet::read_only_lsm::ReadOnlyLsm;
 use crate::tablet::tablet_inner::TabletInner;
@@ -15,6 +15,7 @@ use crate::HistoryRange;
 use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Range;
 use crate::Record;
 use crate::Revision;

@@ -3,21 +3,21 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::anyhow;
+use obsidian_common::Manifest;
+use obsidian_common::RunId;
+use obsidian_external::FileName;
+use obsidian_external::Storage;
 use obsidian_olf::OlfFile;
 use obsidian_util::spawn_owned;
 use obsidian_util::OwnedJoinHandle;
 
-use crate::lsm::index::IndexSnapshot;
-use crate::lsm::index::Keyspace;
-use crate::lsm::index::Level;
-use crate::lsm::memtable::Memtable;
-use crate::lsm::run::Run;
-use obsidian_external::FileName;
-use obsidian_external::Storage;
-use crate::Manifest;
-use crate::RunId;
+use crate::index::IndexSnapshot;
+use crate::index::Keyspace;
+use crate::index::Level;
+use crate::memtable::Memtable;
+use crate::run::Run;
 
-pub(crate) struct Preloader {
+pub struct Preloader {
     storage: Arc<dyn Storage>,
 
     semaphore: Arc<tokio::sync::Semaphore>,
@@ -127,6 +127,6 @@ impl Preloader {
     }
 }
 
-pub(crate) struct Preloaded {
-    pub(super) snapshot: IndexSnapshot,
+pub struct Preloaded {
+    pub(crate) snapshot: IndexSnapshot,
 }

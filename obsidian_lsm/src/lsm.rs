@@ -4,32 +4,32 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use futures::stream::StreamExt;
 use futures::TryStreamExt;
+use obsidian_common::Bound;
+use obsidian_common::Direction;
+use obsidian_common::HistoryRange;
+use obsidian_common::Key;
+use obsidian_common::KeyspaceId;
+use obsidian_common::Manifest;
+use obsidian_common::Mutation;
+use obsidian_common::Range;
+use obsidian_common::Revision;
+use obsidian_common::RevisionValue;
+use obsidian_common::Timestamp;
+use obsidian_external::Storage;
 use obsidian_util::hexlify;
 use obsidian_util::merge_sorted_streams;
 use obsidian_util::shortest_between;
 use obsidian_util::IteratorEither;
 use obsidian_util::OrdEqByFirst;
 
-use crate::lsm::compactor::Compactor;
-use crate::lsm::index::Index;
-use crate::lsm::index::IndexSnapshot;
-use crate::lsm::index::Keyspace;
-use crate::lsm::preload::Preloaded;
-use crate::Manifest;
-use obsidian_external::Storage;
-use crate::Bound;
-use crate::Direction;
-use crate::HistoryRange;
-use crate::Key;
-use crate::KeyspaceId;
-use crate::Mutation;
-use crate::Range;
-use crate::Revision;
-use crate::RevisionValue;
-use crate::Timestamp;
+use crate::compactor::Compactor;
+use crate::index::Index;
+use crate::index::IndexSnapshot;
+use crate::index::Keyspace;
+use crate::preload::Preloaded;
 
 #[derive(Clone)]
-pub(crate) struct LsmOptions {
+pub struct LsmOptions {
     pub l0_max_size: u64,
     pub l1_max_size: u64,
     pub run_size_target: u64,
@@ -47,12 +47,11 @@ impl Default for LsmOptions {
     }
 }
 
-pub(crate) struct Lsm {
+pub struct Lsm {
     options: LsmOptions,
 
     index: Arc<Index>,
     compactor: Compactor,
-    storage: Arc<dyn Storage>,
 }
 
 impl Lsm {
@@ -85,7 +84,6 @@ impl Lsm {
 
             compactor,
             index: index_arc,
-            storage,
         }
     }
 
@@ -275,6 +273,7 @@ impl Lsm {
         self.index.set_splits(splits);
     }
 
+    #[cfg(test)]
     pub(super) fn index_snapshot(&self) -> Arc<IndexSnapshot> {
         self.index.snapshot()
     }
@@ -310,10 +309,8 @@ impl<'a> KeyspaceReader<'a> {
             return Ok(Some((revision_ts, v)));
         }
         for level in &self.0.levels {
-            if let Some(run) = level.run_for_key(k) {
-                if let Some((revision_ts, v)) = run.get(ts, k).await? {
-                    return Ok(Some((revision_ts, v)));
-                }
+            if let Some((revision_ts, v)) = level.get(ts, k).await? {
+                return Ok(Some((revision_ts, v)));
             }
         }
         Ok(None)

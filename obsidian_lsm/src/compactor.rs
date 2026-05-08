@@ -14,6 +14,15 @@ use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::Stream;
 use futures::StreamExt;
+use obsidian_common::Bound;
+use obsidian_common::KeyspaceId;
+use obsidian_common::Range;
+use obsidian_common::Revision;
+use obsidian_common::RevisionValue;
+use obsidian_common::RunId;
+use obsidian_common::Timestamp;
+use obsidian_external::FileName;
+use obsidian_external::Storage;
 use obsidian_olf::OlfFile;
 use obsidian_olf::OlfFileBuilder;
 use obsidian_util::merge_sorted_streams;
@@ -22,20 +31,11 @@ use obsidian_util::OwnedJoinHandle;
 use rand::Rng;
 use uuid::Uuid;
 
-use crate::lsm::index::Index;
-use crate::lsm::index::IndexSnapshot;
-use crate::lsm::index::Keyspace;
-use crate::lsm::memtable::Memtable;
-use crate::lsm::run::Run;
-use obsidian_external::FileName;
-use obsidian_external::Storage;
-use crate::Bound;
-use crate::KeyspaceId;
-use crate::Range;
-use crate::Revision;
-use crate::RevisionValue;
-use crate::RunId;
-use crate::Timestamp;
+use crate::index::Index;
+use crate::index::IndexSnapshot;
+use crate::index::Keyspace;
+use crate::memtable::Memtable;
+use crate::run::Run;
 
 /// The compactor's purpose is to mutate an `Index` to a more efficient physical represesentation,
 /// but with the same logical content, as well as persisting from memory (where new writes go in
@@ -364,8 +364,6 @@ impl CompactorInner {
 
             return Some((
                 Compaction {
-                    keyspace_id,
-                    from_level: level_idx,
                     from: HashSet::from([run.run_id()]),
                     into,
                 },
@@ -399,8 +397,6 @@ impl CompactorInner {
 
             return Some((
                 Compaction {
-                    keyspace_id,
-                    from_level: level_idx,
                     from: siblings.iter().map(|run| run.run_id()).collect(),
                     into: HashSet::new(),
                 },
@@ -467,12 +463,7 @@ impl CompactorInner {
                 .any(|run_id| in_flight_from.contains(run_id) || in_flight_into.contains(run_id));
             if !conflict {
                 return Some((
-                    Compaction {
-                        keyspace_id,
-                        from_level: 0,
-                        from,
-                        into,
-                    },
+                    Compaction { from, into },
                     self.compact_l0(keyspace_id, &splits, &l0_available[..], intersecting_runs),
                 ));
             }
@@ -758,8 +749,6 @@ fn group_by_key(
 }
 
 struct Compaction {
-    keyspace_id: KeyspaceId,
-    from_level: usize,
     from: HashSet<RunId>,
     into: HashSet<RunId>,
 }

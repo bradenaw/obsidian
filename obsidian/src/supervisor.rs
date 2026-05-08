@@ -15,7 +15,6 @@ use obsidian_util::Retry;
 use obsidian_util::WithBackground;
 use tokio::sync::Notify;
 
-use crate::Manifest;
 use crate::meta::MetaKey;
 use crate::meta::MetaMutation;
 use crate::meta::MetaReader;
@@ -32,6 +31,7 @@ use crate::meta::TransferState;
 use crate::runtime;
 use crate::runtime::Meta;
 use crate::runtime::Shards;
+use crate::Manifest;
 use crate::Range;
 use crate::RangeSet;
 use crate::ShardId;

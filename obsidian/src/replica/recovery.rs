@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use obsidian_external::Storage;
+use obsidian_lsm::Lsm;
+use obsidian_lsm::LsmOptions;
+use obsidian_lsm::Preloader;
 use obsidian_util::hexlify;
 
-use crate::lsm::Lsm;
-use crate::lsm::LsmOptions;
-use crate::lsm::Preloader;
 use crate::JournalEntry;
 use crate::JournalSeq;
 use crate::KeyspaceId;

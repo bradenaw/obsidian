@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use obsidian_lsm::Lsm;
 use obsidian_util::Retry;
 
-use crate::lsm::Lsm;
-use crate::Manifest;
 use crate::tablet::read_only_lsm::LsmRead;
 use crate::tablet::read_only_lsm::ReadOnlyLsm;
 use crate::tablet::TabletJournalWriter;
@@ -14,6 +13,7 @@ use crate::HistoryRange;
 use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Mutation;
 use crate::Range;
 use crate::Revision;

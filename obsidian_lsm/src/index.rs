@@ -7,26 +7,23 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use anyhow::anyhow;
-use obsidian_olf::OlfFile;
+use obsidian_common::Bound;
+use obsidian_common::KeyOrBound;
+use obsidian_common::KeyspaceId;
+use obsidian_common::KeyspaceManifest;
+use obsidian_common::LevelManifest;
+use obsidian_common::Manifest;
+use obsidian_common::Range;
+use obsidian_common::RangeMap;
+use obsidian_common::RevisionValue;
+use obsidian_common::RunId;
+use obsidian_common::RunManifest;
+use obsidian_common::Timestamp;
 use obsidian_util::binary_search_by_idx;
 use tokio::sync::Notify;
 
-use crate::lsm::memtable::Memtable;
-use crate::lsm::run::Run;
-use obsidian_external::FileName;
-use obsidian_external::Storage;
-use crate::Bound;
-use crate::KeyOrBound;
-use crate::KeyspaceId;
-use crate::KeyspaceManifest;
-use crate::LevelManifest;
-use crate::Manifest;
-use crate::Range;
-use crate::RangeMap;
-use crate::RevisionValue;
-use crate::RunId;
-use crate::RunManifest;
-use crate::Timestamp;
+use crate::memtable::Memtable;
+use crate::run::Run;
 
 const N_STRIPES: usize = 32;
 
@@ -51,27 +48,11 @@ pub(super) struct Index {
 }
 
 impl Index {
-    pub(super) fn new() -> Self {
-        Self::from_snapshot(IndexSnapshot {
-            keyspaces: HashMap::new(),
-            splits: vec![],
-        })
-    }
-
     pub(super) fn from_snapshot(index_snapshot: IndexSnapshot) -> Self {
         Self {
             current: array::from_fn(|_| RwLock::new(Arc::new(index_snapshot.clone()))),
             updated: Notify::new(),
         }
-    }
-
-    pub(super) async fn from_manifest(
-        storage: &dyn Storage,
-        manifest: Manifest,
-    ) -> anyhow::Result<Self> {
-        let index_snapshot = IndexSnapshot::from_manifest(storage, manifest).await?;
-
-        Ok(Self::from_snapshot(index_snapshot))
     }
 
     /// Returns the current snapshot of the index state.
@@ -232,19 +213,6 @@ impl IndexSnapshot {
         }
     }
 
-    async fn from_manifest(storage: &dyn Storage, manifest: Manifest) -> anyhow::Result<Self> {
-        let mut keyspaces = HashMap::new();
-        for (keyspace_id, keyspace_manifest) in manifest.keyspaces {
-            let keyspace = Keyspace::from_manifest(storage, keyspace_id, keyspace_manifest).await?;
-            keyspaces.insert(keyspace_id, keyspace);
-        }
-
-        Ok(Self {
-            keyspaces,
-            splits: vec![],
-        })
-    }
-
     pub(super) fn manifest(&self) -> Manifest {
         Manifest {
             keyspaces: self
@@ -267,33 +235,6 @@ pub(super) struct Keyspace {
 }
 
 impl Keyspace {
-    async fn from_manifest(
-        storage: &dyn Storage,
-        keyspace_id: KeyspaceId,
-        manifest: KeyspaceManifest,
-    ) -> anyhow::Result<Self> {
-        let mut levels = Vec::with_capacity(manifest.levels().len());
-
-        for level_manifest in manifest.levels() {
-            let mut runs = Vec::with_capacity(level_manifest.runs().len());
-
-            for run_manifest in level_manifest.runs() {
-                let run = Run::new(
-                    OlfFile::open(storage.get(FileName::Run(run_manifest.run_id)).await?).await?,
-                );
-                runs.push(Arc::new(run));
-            }
-
-            levels.push(Level { runs });
-        }
-
-        Ok(Self {
-            l0_active: Arc::new(Memtable::new(keyspace_id)),
-            l0_sealed: Vec::new(),
-            levels,
-        })
-    }
-
     pub(super) fn manifest(&self) -> KeyspaceManifest {
         let mut level_manifests = Vec::with_capacity(self.levels.len());
         level_manifests.push(LevelManifest::empty());
@@ -417,7 +358,7 @@ impl Level {
         Self { runs: Vec::new() }
     }
 
-    async fn get(
+    pub async fn get(
         &self,
         ts: Timestamp,
         k: &[u8],

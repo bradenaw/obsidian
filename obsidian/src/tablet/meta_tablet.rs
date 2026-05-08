@@ -4,9 +4,8 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use obsidian_lsm::Lsm;
 
-use crate::lsm::Lsm;
-use crate::Manifest;
 use crate::runtime::Tablet;
 use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::tablet_inner::TabletInner;
@@ -18,6 +17,7 @@ use crate::HistoryRange;
 use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Mutation;
 use crate::Precondition;
 use crate::Range;

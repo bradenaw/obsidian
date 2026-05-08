@@ -6,20 +6,20 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::anyhow;
+use obsidian_external::Storage;
+use obsidian_lsm::Lsm;
+use obsidian_lsm::LsmOptions;
+use obsidian_lsm::Preloader;
 use obsidian_util::spawn_owned;
 use obsidian_util::OwnedJoinHandle;
 
-use crate::lsm::Lsm;
-use crate::lsm::LsmOptions;
-use crate::Manifest;
-use crate::lsm::Preloader;
 use crate::runtime::Shards;
-use obsidian_external::Storage;
 use crate::tablet::frozen_tablet::FrozenTablet;
 use crate::tablet::read_only_lsm::ReadOnlyLsm;
 use crate::tablet::TabletJournalWriter;
 use crate::ColoGroupId;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Range;
 use crate::TabletId;
 

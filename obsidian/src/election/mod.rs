@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use futures::future::pending;
 use futures::Stream;
 use futures::StreamExt;
+use obsidian_external::Journal;
 use obsidian_util::AtomicInstant;
 use obsidian_util::Retry;
 use obsidian_util::StateMachine;
@@ -33,7 +34,6 @@ use tokio_stream::wrappers::IntervalStream;
 use uuid::Uuid;
 
 use crate::election::seq_waiters::SeqWaiters;
-use obsidian_external::Journal;
 use crate::util::AtomicTimestamp;
 use crate::JournalSeq;
 use crate::Timestamp;

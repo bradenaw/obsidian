@@ -15,7 +15,6 @@ use obsidian_util::OwnedJoinHandle;
 use obsidian_util::Retry;
 use obsidian_util::WithBackground;
 
-use crate::Manifest;
 use crate::meta::MetaKey;
 use crate::meta::MetaMutation;
 use crate::runtime;
@@ -29,6 +28,7 @@ use crate::InternalError;
 use crate::JournalSeq;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Mutation;
 use crate::NodeId;
 use crate::Precondition;

@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
-
 use obsidian_external::FileName;
 use obsidian_external::FileReader;
 use obsidian_external::FileWriter;
@@ -639,7 +638,9 @@ mod tests {
     use std::hash::Hash;
     use std::hash::RandomState;
 
+    use obsidian_common::RunId;
     use obsidian_external::mem::MemStorage;
+    use obsidian_external::FileName;
 
     use super::Cache;
     use super::CachedStorage;
@@ -649,8 +650,6 @@ mod tests {
     use super::TreeList;
     use super::HASH_TRIE_LEAF_MAX;
     use super::TREE_LIST_NODE_SIZE;
-    use obsidian_external::FileName;
-    use crate::RunId;
 
     #[tokio::test]
     async fn test_cached_storage() -> anyhow::Result<()> {

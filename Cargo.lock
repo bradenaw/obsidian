@@ -1022,6 +1022,7 @@ dependencies = [
  "log",
  "obsidian_common",
  "obsidian_external",
+ "obsidian_lsm",
  "obsidian_olf",
  "obsidian_pb",
  "obsidian_util",
@@ -1069,6 +1070,30 @@ dependencies = [
  "obsidian_common",
  "pretty_env_logger",
  "tokio",
+]
+
+[[package]]
+name = "obsidian_lsm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "byteorder",
+ "console-subscriber",
+ "crossbeam",
+ "crossbeam-skiplist",
+ "futures",
+ "im",
+ "log",
+ "obsidian_common",
+ "obsidian_external",
+ "obsidian_olf",
+ "obsidian_util",
+ "pretty_env_logger",
+ "proptest",
+ "rand 0.8.6",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -1,18 +1,17 @@
 use std::sync::RwLock;
 
 use crossbeam_skiplist::SkipMap;
+use obsidian_common::Bound;
+use obsidian_common::Direction;
+use obsidian_common::HistoryRange;
+use obsidian_common::KeyspaceId;
+use obsidian_common::Range;
+use obsidian_common::Revision;
+use obsidian_common::RevisionValue;
+use obsidian_common::RunId;
+use obsidian_common::Timestamp;
 use obsidian_util::hexlify;
 use obsidian_util::IteratorEither;
-
-use crate::RunId;
-use crate::Bound;
-use crate::Direction;
-use crate::HistoryRange;
-use crate::KeyspaceId;
-use crate::Range;
-use crate::Revision;
-use crate::RevisionValue;
-use crate::Timestamp;
 
 pub(crate) struct Memtable {
     run_id: RunId,
@@ -43,6 +42,7 @@ impl Memtable {
         self.run_id
     }
 
+    #[cfg(test)]
     pub fn size(&self) -> u64 {
         self.stats.read().unwrap().size
     }
@@ -173,6 +173,7 @@ impl Memtable {
             .flatten()
     }
 
+    #[cfg(test)]
     pub(crate) fn dump(&self) {
         println!("=== memtable ===");
         for revision in self.iter() {

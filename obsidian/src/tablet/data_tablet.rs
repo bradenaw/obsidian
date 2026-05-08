@@ -4,14 +4,13 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use obsidian_external::Storage;
+use obsidian_lsm::Lsm;
+use obsidian_lsm::LsmOptions;
 use obsidian_util::StateMachine;
 
-use crate::lsm::Lsm;
-use crate::lsm::LsmOptions;
-use crate::Manifest;
 use crate::runtime;
 use crate::runtime::Shards;
-use obsidian_external::Storage;
 use crate::tablet::active_tablet::ActiveTablet;
 use crate::tablet::frozen_tablet::FrozenTablet;
 use crate::tablet::hydrating_tablet::HydratingTablet;
@@ -24,6 +23,7 @@ use crate::HistoryRange;
 use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Mutation;
 use crate::Precondition;
 use crate::Range;

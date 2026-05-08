@@ -12,6 +12,7 @@ use futures::future::Either;
 use futures::Stream;
 use futures::StreamExt;
 use obsidian_external::mem::MemJournal;
+use obsidian_external::Journal;
 use tokio::sync::Notify;
 
 use crate::election::Follower;
@@ -22,7 +23,6 @@ use crate::election::Participant;
 use crate::election::ParticipantState;
 use crate::election::Proposal;
 use crate::election::ProposalType;
-use obsidian_external::Journal;
 use crate::JournalSeq;
 
 #[derive(Clone)]

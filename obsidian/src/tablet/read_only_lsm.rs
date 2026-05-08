@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
-use crate::lsm::Lsm;
-use crate::Manifest;
+use obsidian_lsm::Lsm;
+
 use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::TabletJournalWriter;
 use crate::Bound;
 use crate::Direction;
 use crate::HistoryRange;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Range;
 use crate::Revision;
 use crate::RevisionValue;

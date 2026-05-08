@@ -1,6 +1,6 @@
-use crate::Manifest;
 use crate::JournalSeq;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::RevisionValue;
 use crate::Timestamp;
 

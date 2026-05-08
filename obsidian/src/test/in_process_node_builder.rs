@@ -3,12 +3,12 @@ use std::net::Ipv6Addr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use obsidian_external::Journals;
+use obsidian_external::Storage;
 
 use crate::election::Proposal;
 use crate::meta::MetaSynced;
 use crate::runtime;
-use obsidian_external::Journals;
-use obsidian_external::Storage;
 use crate::storage::CachedStorage;
 use crate::test::TestNodeBuilder;
 use crate::JournalEntry;

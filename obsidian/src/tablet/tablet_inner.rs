@@ -664,10 +664,10 @@ mod tests {
     use async_trait::async_trait;
     use futures::StreamExt;
     use obsidian_external::mem::MemStorage;
+    use obsidian_lsm::Lsm;
+    use obsidian_lsm::LsmOptions;
     use obsidian_util::encode;
 
-    use crate::lsm::Lsm;
-    use crate::lsm::LsmOptions;
     use crate::tablet::journaled_lsm::JournaledLsm;
     use crate::tablet::tablet_inner::PendingMutation;
     use crate::tablet::tablet_inner::TabletInner;

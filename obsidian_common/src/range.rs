@@ -189,9 +189,7 @@ impl TryFrom<pb::Range> for Range<Vec<u8>> {
 }
 
 /// If ranges are contiguous, returns the bounds that lie between them.
-pub fn ranges_to_splits(
-    mut ranges: Vec<Range<Vec<u8>>>,
-) -> anyhow::Result<Vec<Bound<Vec<u8>>>> {
+pub fn ranges_to_splits(mut ranges: Vec<Range<Vec<u8>>>) -> anyhow::Result<Vec<Bound<Vec<u8>>>> {
     ranges.sort_unstable_by(|a, b| Ord::cmp(&a.lower, &b.lower));
     let mut out = Vec::with_capacity(ranges.len() - 1);
     let ranges_len = ranges.len();

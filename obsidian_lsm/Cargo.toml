@@ -1,5 +1,5 @@
 [package]
-name = "obsidian"
+name = "obsidian_lsm"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,7 +8,6 @@ edition = "2021"
 [dependencies]
 anyhow = { version = "1.0.58", features = ["backtrace"] }
 async-stream = "0.3.3"
-async-trait = "0.1.57"
 byteorder = "1.4.3"
 console-subscriber = "0.4.1"
 crossbeam = "0.8.4"
@@ -18,23 +17,12 @@ im = "15.1.0"
 log = "^0.4"
 obsidian_common = { path = "../obsidian_common" }
 obsidian_external = { path = "../obsidian_external" }
-obsidian_lsm = { path = "../obsidian_lsm" }
 obsidian_olf = { path = "../obsidian_olf" }
-obsidian_pb = { path = "../obsidian_pb" }
 obsidian_util = { path = "../obsidian_util" }
 pretty_env_logger = "^0.5"
-priority-queue = "^1.3"
-prost = "0.11.9"
 rand = "0.8.5"
-regex = "1.12.3"
-thiserror = "^1.0"
 tokio = { version = "1.47.1", features = [ "fs", "io-util", "macros", "rt", "rt-multi-thread", "sync", "time", "tracing" ] }
-tokio-stream = "0.1.18"
-tonic = "0.9"
 uuid = { version = "1.18.1", features = ["v4", "v7"] }
 
 [dev-dependencies]
 proptest = "1.0.0"
-
-[build-dependencies]
-tonic-build = "0.9"
