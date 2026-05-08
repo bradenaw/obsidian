@@ -3,14 +3,14 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use obsidian_common::ShardId;
 
-use crate::runtime::Journal;
-use crate::runtime::Journals;
-use crate::test::MemJournal;
-use crate::ShardId;
+use crate::mem::MemJournal;
+use crate::Journal;
+use crate::Journals;
 
 #[derive(Clone)]
-pub(crate) struct MemJournals<E> {
+pub struct MemJournals<E> {
     m: Arc<Mutex<HashMap<ShardId, Arc<dyn Journal<E>>>>>,
 }
 

@@ -14,7 +14,7 @@ use crate::lsm::LsmOptions;
 use crate::Manifest;
 use crate::lsm::Preloader;
 use crate::runtime::Shards;
-use crate::runtime::Storage;
+use obsidian_external::Storage;
 use crate::tablet::frozen_tablet::FrozenTablet;
 use crate::tablet::read_only_lsm::ReadOnlyLsm;
 use crate::tablet::TabletJournalWriter;

@@ -11,6 +11,7 @@ use futures::future;
 use futures::future::Either;
 use futures::Stream;
 use futures::StreamExt;
+use obsidian_external::mem::MemJournal;
 use tokio::sync::Notify;
 
 use crate::election::Follower;
@@ -21,8 +22,7 @@ use crate::election::Participant;
 use crate::election::ParticipantState;
 use crate::election::Proposal;
 use crate::election::ProposalType;
-use crate::runtime::Journal;
-use crate::test::MemJournal;
+use obsidian_external::Journal;
 use crate::JournalSeq;
 
 #[derive(Clone)]
@@ -116,7 +116,7 @@ impl TestReplicaGroup {
 
 struct TestReplica {
     id: usize,
-    journal_view: Arc<TestJournal<Arc<dyn Journal<Proposal<TestEntry>>>>>,
+    journal_view: Arc<TestJournal>,
     participant: Participant<TestEntry, TestLeader, TestFollower>,
 }
 
@@ -200,17 +200,14 @@ impl Follower<TestEntry, TestLeader> for TestFollower {
     }
 }
 
-struct TestJournal<J> {
-    inner: J,
+struct TestJournal {
+    inner: Arc<dyn Journal<Proposal<TestEntry>>>,
     offset: usize,
     paused: Mutex<Option<Arc<Notify>>>,
 }
 
-impl<J> TestJournal<J>
-where
-    J: Journal<Proposal<TestEntry>>,
-{
-    fn new(offset: usize, inner: J) -> Self {
+impl TestJournal {
+    fn new(offset: usize, inner: Arc<dyn Journal<Proposal<TestEntry>>>) -> Self {
         Self {
             offset,
             inner,
@@ -233,10 +230,7 @@ where
 }
 
 #[async_trait]
-impl<J> Journal<Proposal<TestEntry>> for TestJournal<J>
-where
-    J: Journal<Proposal<TestEntry>>,
-{
+impl Journal<Proposal<TestEntry>> for TestJournal {
     async fn append(&self, proposal: Proposal<TestEntry>) -> anyhow::Result<JournalSeq> {
         let seq = self.inner.append(proposal.clone()).await?;
         log::info!(
@@ -300,34 +294,5 @@ where
 
     async fn trim(&self, before: JournalSeq) -> anyhow::Result<()> {
         self.inner.trim(before).await
-    }
-}
-
-#[async_trait]
-impl<E> Journal<E> for Arc<dyn Journal<E>>
-where
-    E: Send + 'static,
-{
-    async fn append(&self, entry: E) -> anyhow::Result<JournalSeq> {
-        Journal::append(self.deref(), entry).await
-    }
-
-    fn tail(
-        &self,
-        first: JournalSeq,
-    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<(JournalSeq, E)>> + Send + '_>> {
-        Journal::tail(self.deref(), first)
-    }
-
-    async fn latest(&self) -> anyhow::Result<JournalSeq> {
-        Journal::latest(self.deref()).await
-    }
-
-    async fn oldest_available(&self) -> anyhow::Result<JournalSeq> {
-        Journal::oldest_available(self.deref()).await
-    }
-
-    async fn trim(&self, before: JournalSeq) -> anyhow::Result<()> {
-        Journal::trim(self.deref(), before).await
     }
 }

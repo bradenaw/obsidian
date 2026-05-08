@@ -11,7 +11,7 @@ use crate::lsm::LsmOptions;
 use crate::Manifest;
 use crate::runtime;
 use crate::runtime::Shards;
-use crate::runtime::Storage;
+use obsidian_external::Storage;
 use crate::tablet::active_tablet::ActiveTablet;
 use crate::tablet::frozen_tablet::FrozenTablet;
 use crate::tablet::hydrating_tablet::HydratingTablet;

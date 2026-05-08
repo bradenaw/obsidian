@@ -11,7 +11,6 @@ use futures::Stream;
 use obsidian_util::Decode;
 use obsidian_util::Encode;
 
-use crate::Manifest;
 use crate::tablet::journaled_lsm::LsmWrite;
 use crate::tablet::lock_mgr::Guard;
 use crate::tablet::lock_mgr::LockMgr;
@@ -24,6 +23,7 @@ use crate::HistoryRange;
 use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Mutation;
 use crate::Precondition;
 use crate::Range;
@@ -663,6 +663,7 @@ mod tests {
 
     use async_trait::async_trait;
     use futures::StreamExt;
+    use obsidian_external::mem::MemStorage;
     use obsidian_util::encode;
 
     use crate::lsm::Lsm;
@@ -671,7 +672,6 @@ mod tests {
     use crate::tablet::tablet_inner::PendingMutation;
     use crate::tablet::tablet_inner::TabletInner;
     use crate::tablet::tablet_journal_writer::TabletJournalWriter;
-    use crate::test::MemStorage;
     use crate::Bound;
     use crate::ColoGroupId;
     use crate::Direction;

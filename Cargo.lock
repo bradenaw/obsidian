@@ -1021,6 +1021,7 @@ dependencies = [
  "im",
  "log",
  "obsidian_common",
+ "obsidian_external",
  "obsidian_olf",
  "obsidian_pb",
  "obsidian_util",
@@ -1057,6 +1058,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "obsidian_external"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "futures",
+ "log",
+ "obsidian_common",
+ "pretty_env_logger",
+ "tokio",
+]
+
+[[package]]
 name = "obsidian_olf"
 version = "0.1.0"
 dependencies = [
@@ -1067,6 +1082,7 @@ dependencies = [
  "futures",
  "log",
  "obsidian_common",
+ "obsidian_external",
  "obsidian_util",
  "pretty_env_logger",
  "proptest",

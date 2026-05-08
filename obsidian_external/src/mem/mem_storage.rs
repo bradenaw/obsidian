@@ -7,16 +7,16 @@ use std::sync::Weak;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
-use obsidian_olf::MemFileReader;
-use obsidian_olf::MemFileWriter;
 
-use crate::runtime::FileName;
-use crate::runtime::FileReader;
-use crate::runtime::FileWriter;
-use crate::runtime::Storage;
+use crate::mem::MemFileReader;
+use crate::mem::MemFileWriter;
+use crate::FileName;
+use crate::FileReader;
+use crate::FileWriter;
+use crate::Storage;
 
 #[derive(Clone)]
-pub(crate) struct MemStorage {
+pub struct MemStorage {
     inner: Arc<Mutex<MemStorageInner>>,
 }
 
@@ -26,7 +26,7 @@ struct MemStorageInner {
 }
 
 impl MemStorage {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(MemStorageInner {
                 files: HashMap::new(),

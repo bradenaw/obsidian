@@ -16,7 +16,7 @@ use crate::lsm::index::IndexSnapshot;
 use crate::lsm::index::Keyspace;
 use crate::lsm::preload::Preloaded;
 use crate::Manifest;
-use crate::runtime::Storage;
+use obsidian_external::Storage;
 use crate::Bound;
 use crate::Direction;
 use crate::HistoryRange;

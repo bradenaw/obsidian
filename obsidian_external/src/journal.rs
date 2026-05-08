@@ -2,11 +2,10 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use futures::Stream;
-
-use crate::JournalSeq;
+use obsidian_common::JournalSeq;
 
 #[async_trait]
-pub(crate) trait Journal<E>: Send + Sync + 'static {
+pub trait Journal<E>: Send + Sync + 'static {
     async fn append(&self, entry: E) -> anyhow::Result<JournalSeq>;
 
     fn tail(

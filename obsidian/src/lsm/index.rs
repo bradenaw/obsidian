@@ -13,8 +13,8 @@ use tokio::sync::Notify;
 
 use crate::lsm::memtable::Memtable;
 use crate::lsm::run::Run;
-use crate::runtime::FileName;
-use crate::runtime::Storage;
+use obsidian_external::FileName;
+use obsidian_external::Storage;
 use crate::Bound;
 use crate::KeyOrBound;
 use crate::KeyspaceId;

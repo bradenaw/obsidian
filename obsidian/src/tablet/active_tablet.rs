@@ -14,7 +14,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::Manifest;
 use crate::runtime::Shards;
-use crate::runtime::Storage;
+use obsidian_external::Storage;
 use crate::tablet::frozen_tablet::FrozenTablet;
 use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::journaled_lsm::LsmWrite;

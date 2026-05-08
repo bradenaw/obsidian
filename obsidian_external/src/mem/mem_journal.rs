@@ -6,12 +6,12 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use futures::Stream;
 use futures::StreamExt;
+use obsidian_common::JournalSeq;
 use tokio::sync::watch;
 
-use crate::runtime::Journal;
-use crate::JournalSeq;
+use crate::Journal;
 
-pub(crate) struct MemJournal<E> {
+pub struct MemJournal<E> {
     inner: Mutex<MemJournalInner<E>>,
     highest_seqno_send: watch::Sender<JournalSeq>,
     highest_seqno: watch::Receiver<JournalSeq>,
@@ -123,12 +123,12 @@ mod tests {
 
     use futures::StreamExt;
     use futures::TryStreamExt;
+    use obsidian_common::JournalSeq;
+    use obsidian_common::TabletJournalEntry;
+    use obsidian_common::Timestamp;
 
-    use crate::runtime::Journal;
-    use crate::test::MemJournal;
-    use crate::JournalSeq;
-    use crate::TabletJournalEntry;
-    use crate::Timestamp;
+    use crate::mem::MemJournal;
+    use crate::Journal;
 
     fn wal_entry(i: usize) -> TabletJournalEntry {
         TabletJournalEntry::Write(Timestamp(i as u64), vec![])

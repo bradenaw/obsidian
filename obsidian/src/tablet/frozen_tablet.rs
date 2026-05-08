@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::Manifest;
 use crate::runtime::Shards;
-use crate::runtime::Storage;
+use obsidian_external::Storage;
 use crate::tablet::active_tablet::ActiveTablet;
 use crate::tablet::read_only_lsm::ReadOnlyLsm;
 use crate::tablet::tablet_inner::TabletInner;

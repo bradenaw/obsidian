@@ -33,7 +33,7 @@ use tokio_stream::wrappers::IntervalStream;
 use uuid::Uuid;
 
 use crate::election::seq_waiters::SeqWaiters;
-use crate::runtime::Journal;
+use obsidian_external::Journal;
 use crate::util::AtomicTimestamp;
 use crate::JournalSeq;
 use crate::Timestamp;

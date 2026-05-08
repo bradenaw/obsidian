@@ -2,6 +2,9 @@
 
 members = [
     "obsidian",
+    "obsidian_common",
+    "obsidian_external",
+    "obsidian_olf",
     "obsidian_pb",
     "obsidian_util",
 ]

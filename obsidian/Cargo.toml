@@ -17,6 +17,7 @@ futures = "0.3.23"
 im = "15.1.0"
 log = "^0.4"
 obsidian_common = { path = "../obsidian_common" }
+obsidian_external = { path = "../obsidian_external" }
 obsidian_olf = { path = "../obsidian_olf" }
 obsidian_pb = { path = "../obsidian_pb" }
 obsidian_util = { path = "../obsidian_util" }

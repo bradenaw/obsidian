@@ -751,6 +751,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use obsidian_external::mem::MemJournals;
+    use obsidian_external::mem::MemStorage;
+
     use super::strongly_connected_components;
     use super::EdgeType;
     use super::Txid;
@@ -759,8 +762,6 @@ mod tests {
     use crate::rtest::workload_append::WorkloadAppendOptions;
     use crate::test::GrpcInProcessNodeBuilder;
     use crate::test::InProcessNodeBuilder;
-    use crate::test::MemJournals;
-    use crate::test::MemStorage;
     use crate::test::ObsidianForTest;
     use crate::test::ObsidianForTestBuilder;
     use crate::Bound;

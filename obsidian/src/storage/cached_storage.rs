@@ -12,10 +12,10 @@ use std::sync::RwLock;
 
 use async_trait::async_trait;
 
-use crate::runtime::FileName;
-use crate::runtime::FileReader;
-use crate::runtime::FileWriter;
-use crate::runtime::Storage;
+use obsidian_external::FileName;
+use obsidian_external::FileReader;
+use obsidian_external::FileWriter;
+use obsidian_external::Storage;
 
 /// CachedStorage wraps another implementation of `Storage`, holding pages in an
 /// approximately-LRU in-memory cache.
@@ -639,6 +639,8 @@ mod tests {
     use std::hash::Hash;
     use std::hash::RandomState;
 
+    use obsidian_external::mem::MemStorage;
+
     use super::Cache;
     use super::CachedStorage;
     use super::HashTrie;
@@ -647,9 +649,8 @@ mod tests {
     use super::TreeList;
     use super::HASH_TRIE_LEAF_MAX;
     use super::TREE_LIST_NODE_SIZE;
+    use obsidian_external::FileName;
     use crate::RunId;
-    use crate::runtime::FileName;
-    use crate::test::MemStorage;
 
     #[tokio::test]
     async fn test_cached_storage() -> anyhow::Result<()> {

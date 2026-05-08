@@ -14,6 +14,7 @@ use obsidian_common::KeyOrBound;
 use obsidian_common::Range;
 use obsidian_common::RevisionValue;
 use obsidian_common::Timestamp;
+use obsidian_external::FileReader;
 use obsidian_util::binary_search_by_idx;
 use obsidian_util::byte_width;
 use obsidian_util::hexlify;
@@ -23,7 +24,6 @@ use obsidian_util::IteratorEither;
 use crate::block_revision::BlockRevision;
 use crate::util::PackedVec2;
 use crate::util::PrefixCompressedKV;
-use crate::FileReader;
 
 /// A Block is conceptually a [`BTreeMap<Vec<u8>, BTreeMap<Timestamp, RevisionValue>>`], but it is
 /// compactly serialized and can be used as-is without fully deserializing.
@@ -675,11 +675,11 @@ mod tests {
     use obsidian_common::Range;
     use obsidian_common::RevisionValue;
     use obsidian_common::Timestamp;
+    use obsidian_external::mem::MemFileReader;
 
     use super::Block;
     use super::BlockBuilder;
     use crate::block_revision::BlockRevision;
-    use crate::MemFileReader;
 
     fn encode(
         buffer: &BTreeMap<Vec<u8>, Vec<(Timestamp, RevisionValue)>>,

@@ -21,7 +21,7 @@ use crate::meta::SyncType;
 use crate::meta::TabletState;
 use crate::runtime::Meta;
 use crate::runtime::Shards;
-use crate::runtime::Storage;
+use obsidian_external::Storage;
 use crate::runtime::Tablet;
 use crate::tablet::DataTablet;
 use crate::tablet::MetaTablet;

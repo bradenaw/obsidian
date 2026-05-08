@@ -20,6 +20,8 @@ use obsidian_common::Range;
 use obsidian_common::Revision;
 use obsidian_common::RevisionValue;
 use obsidian_common::Timestamp;
+use obsidian_external::FileReader;
+use obsidian_external::FileWriter;
 use obsidian_util::binary_search_by_idx;
 use obsidian_util::hexlify;
 use obsidian_util::IteratorEither;
@@ -30,8 +32,6 @@ use crate::block::Block;
 use crate::block::BlockBuilder;
 use crate::block_revision::BlockRevision;
 use crate::util::PrefixCompressedKV;
-use crate::FileReader;
-use crate::FileWriter;
 
 #[derive(Clone)]
 pub struct OlfFile {
@@ -489,6 +489,7 @@ mod tests {
     use obsidian_common::Revision;
     use obsidian_common::RevisionValue;
     use obsidian_common::Timestamp;
+    use obsidian_external::mem::MemFileWriter;
     use proptest::prelude::*;
     use rand::RngCore;
     use uuid::Uuid;
@@ -496,7 +497,6 @@ mod tests {
     use super::dump_olf_file;
     use super::OlfFile;
     use super::OlfFileBuilder;
-    use crate::MemFileWriter;
 
     #[tokio::test]
     async fn test_olf_file() -> anyhow::Result<()> {

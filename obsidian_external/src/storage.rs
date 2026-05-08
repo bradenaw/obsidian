@@ -2,13 +2,13 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-pub(crate) use obsidian_olf::FileReader;
-pub(crate) use obsidian_olf::FileWriter;
+use obsidian_common::RunId;
 
-use crate::RunId;
+use crate::FileReader;
+use crate::FileWriter;
 
 #[async_trait]
-pub(crate) trait Storage: Sync + Send + 'static {
+pub trait Storage: Sync + Send + 'static {
     async fn put(&self, name: FileName) -> anyhow::Result<Box<dyn FileWriter>>;
 
     async fn delete(&self, name: FileName) -> anyhow::Result<()>;
@@ -17,7 +17,7 @@ pub(crate) trait Storage: Sync + Send + 'static {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum FileName {
+pub enum FileName {
     Run(RunId),
 }
 

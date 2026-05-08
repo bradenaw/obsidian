@@ -2,8 +2,8 @@ use std::io;
 
 use async_trait::async_trait;
 
+use crate::mem::MemFileReader;
 use crate::FileWriter;
-use crate::MemFileReader;
 
 pub struct MemFileWriter {
     inner: Vec<u8>,
