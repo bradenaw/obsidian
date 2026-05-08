@@ -27,7 +27,7 @@ where
         let inserted = self
             .edges
             .entry(src)
-            .or_insert_with(HashMap::new)
+            .or_default()
             .insert(dst, edge)
             .is_none();
         if inserted {
@@ -36,10 +36,7 @@ where
     }
 
     pub fn edge(&self, src: &V, dst: &V) -> Option<&E> {
-        self.edges
-            .get(src)
-            .map(|out_edges| out_edges.get(dst))
-            .flatten()
+        self.edges.get(src).and_then(|out_edges| out_edges.get(dst))
     }
 
     pub fn out_edges<'a>(&'a self, src: &'a V) -> impl Iterator<Item = (&'a V, &'a E)> + 'a {

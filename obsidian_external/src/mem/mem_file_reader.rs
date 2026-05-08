@@ -20,9 +20,11 @@ impl FileReader for MemFileReader {
                 std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "unexpected eof").into(),
             );
         }
-        Ok(buf.copy_from_slice(&self.inner[(offset as usize)..(offset as usize) + buf.len()]))
+        buf.copy_from_slice(&self.inner[(offset as usize)..(offset as usize) + buf.len()]);
+        Ok(())
     }
 
+    #[allow(clippy::len_without_is_empty)]
     fn len(&self) -> u64 {
         self.inner.len() as u64
     }

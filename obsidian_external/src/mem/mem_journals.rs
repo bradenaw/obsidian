@@ -22,6 +22,12 @@ impl<E> MemJournals<E> {
     }
 }
 
+impl<E> Default for MemJournals<E> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl<E> Journals<E> for MemJournals<E>
 where

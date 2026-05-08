@@ -75,6 +75,7 @@ pub enum RevisionValue {
 }
 
 impl RevisionValue {
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         match self {
             RevisionValue::Regular(v) => v.len(),

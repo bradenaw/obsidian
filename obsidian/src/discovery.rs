@@ -186,12 +186,12 @@ impl DiscoveryInner {
 
     fn current_leader_id(&self, shard_id: ShardId) -> anyhow::Result<NodeId> {
         let routing = self.routing.read().unwrap();
-        Ok(routing
+        routing
             .get(&shard_id)
             .ok_or_else(|| anyhow!("{:?} not in the routing table", shard_id))?
             .leader
             .map(|(node_id, _)| node_id)
-            .ok_or_else(|| anyhow!("{:?}'s leader is not known", shard_id))?)
+            .ok_or_else(|| anyhow!("{:?}'s leader is not known", shard_id))
     }
 }
 
@@ -231,7 +231,7 @@ impl runtime::Shard for ShardProxy {
         }
         Ok(Arc::new(TabletProxy {
             parent: Arc::clone(&self.parent),
-            tablet_id: tablet_id,
+            tablet_id,
         }))
     }
 

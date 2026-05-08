@@ -64,8 +64,8 @@ impl ActiveTablet {
 
         let tablet = ActiveTablet(OwnedWithBackground::new(ActiveTabletInner {
             inner: TabletInner::new(tablet_id, colo_group_id, range, lsm),
-            storage: storage,
-            shards: shards,
+            storage,
+            shards,
             prepare_sender: prepare_sender.clone(),
         }));
 
@@ -204,7 +204,7 @@ impl ActiveTablet {
                 .inner
                 .unsafe_get_latest_record(keyspace_id, precond.key())
                 .await
-                .map_err(|e| InternalError::Other(e.into()))?
+                .map_err(InternalError::Other)?
                 .map(|(_, v)| match v {
                     RevisionValue::Regular(v) => v,
                     RevisionValue::Tombstone => vec![],

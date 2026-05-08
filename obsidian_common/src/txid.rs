@@ -35,7 +35,7 @@ impl Txid {
     pub fn next(mut self) -> Self {
         self.rand = rand::random();
         self.ts -= 1;
-        return self;
+        self
     }
 
     pub fn can_preempt(&self, other: &Txid) -> bool {

@@ -85,6 +85,7 @@ impl TransferState {
     }
 
     pub fn can_transition(&self, to: Self) -> bool {
+        #[allow(clippy::match_like_matches_macro)]
         match (self, to) {
             (TransferState::Copy, TransferState::Catchup) => true,
             (TransferState::Catchup, TransferState::Synced) => true,

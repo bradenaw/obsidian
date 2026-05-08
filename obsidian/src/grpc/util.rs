@@ -177,6 +177,7 @@ pub(super) fn preconds_muts_to_proto(
     (preconds_pb, key_muts_pb)
 }
 
+#[allow(clippy::result_large_err)]
 pub(super) fn required<T, U>(name: &'static str, v: Option<T>) -> Result<U, tonic::Status>
 where
     U: TryFrom<T, Error = anyhow::Error>,
@@ -184,7 +185,7 @@ where
     v.ok_or_else(|| tonic::Status::invalid_argument(format!("missing {}", name)))?
         .try_into()
         .map_err(|e: anyhow::Error| {
-            tonic::Status::invalid_argument(format!("couldn't parse {}: {}", name, e.to_string()))
+            tonic::Status::invalid_argument(format!("couldn't parse {}: {}", name, e))
         })
 }
 
@@ -326,7 +327,7 @@ pub(super) fn internal_err_from_status(status: tonic::Status) -> InternalError {
 
     match InternalError::try_from(err_pb) {
         Ok(err) => err,
-        Err(_) => return InternalError::Other(anyhow::Error::msg(status.message().to_string())),
+        Err(_) => InternalError::Other(anyhow::Error::msg(status.message().to_string())),
     }
 }
 

@@ -19,6 +19,12 @@ impl MemFileWriter {
     }
 }
 
+impl Default for MemFileWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl FileWriter for MemFileWriter {
     async fn write_all(&mut self, src: &[u8]) -> io::Result<()> {

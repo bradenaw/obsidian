@@ -297,7 +297,7 @@ impl CompactorInner {
         // regularly lock up all of l1 and we might never be able to compact from l1.
         for i in (1..keyspace.levels.len()).rev() {
             let level = &keyspace.levels[i];
-            if level.runs.len() == 0 {
+            if level.runs.is_empty() {
                 continue;
             }
 
@@ -328,6 +328,7 @@ impl CompactorInner {
         None
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn try_schedule(
         self: &Arc<Self>,
         keyspace_id: KeyspaceId,
@@ -356,13 +357,13 @@ impl CompactorInner {
             let into: HashSet<_> = intersecting_runs.iter().map(|run| run.run_id()).collect();
             let conflict = into
                 .iter()
-                .any(|run_id| in_flight_from.contains(&run_id) || in_flight_into.contains(&run_id));
+                .any(|run_id| in_flight_from.contains(run_id) || in_flight_into.contains(run_id));
 
             if conflict {
                 return None;
             }
 
-            return Some((
+            Some((
                 Compaction {
                     from: HashSet::from([run.run_id()]),
                     into,
@@ -374,7 +375,7 @@ impl CompactorInner {
                     run,
                     intersecting_runs,
                 )),
-            ));
+            ))
         } else {
             let run_idx = keyspace.levels[level_idx]
                 .runs
@@ -395,13 +396,13 @@ impl CompactorInner {
                 return None;
             }
 
-            return Some((
+            Some((
                 Compaction {
                     from: siblings.iter().map(|run| run.run_id()).collect(),
                     into: HashSet::new(),
                 },
                 Either::Right(self.compact_max(keyspace_id, splits, siblings)),
-            ));
+            ))
         }
     }
 
@@ -464,7 +465,7 @@ impl CompactorInner {
             if !conflict {
                 return Some((
                     Compaction { from, into },
-                    self.compact_l0(keyspace_id, &splits, &l0_available[..], intersecting_runs),
+                    self.compact_l0(keyspace_id, splits, &l0_available[..], intersecting_runs),
                 ));
             }
         }
@@ -529,9 +530,7 @@ impl CompactorInner {
         let streams = {
             let mut streams = Vec::with_capacity(memtables.len() + 1);
             for memtable in memtables {
-                streams.push(
-                    futures::stream::iter(memtable.iter().map(|revision| Ok(revision))).boxed(),
-                );
+                streams.push(futures::stream::iter(memtable.iter().map(Ok)).boxed());
             }
             streams.push(
                 futures::stream::iter(runs.iter().map(|run| run.stream()))

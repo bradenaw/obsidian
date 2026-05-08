@@ -116,7 +116,7 @@ impl Node {
             // so we need to wait to do this until after the leader election is finished.
             Retry::new()
                 .indefinitely(&async || {
-                    inner.meta.add_node(inner.node_id.clone()).await?;
+                    inner.meta.add_node(inner.node_id).await?;
                     Ok::<(), anyhow::Error>(())
                 })
                 .await;
@@ -142,9 +142,9 @@ impl runtime::Node for Node {
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn runtime::Shard>> {
         let replicas = self.0.replicas.read().unwrap();
         if let Some(shard) = replicas.get(&shard_id).as_ref() {
-            return Ok(Arc::clone(shard) as Arc<dyn runtime::Shard>);
+            Ok(Arc::clone(shard) as Arc<dyn runtime::Shard>)
         } else {
-            return Err(anyhow!("{:?} does not own {:?}", self.0.node_id, shard_id));
+            Err(anyhow!("{:?} does not own {:?}", self.0.node_id, shard_id))
         }
     }
 
@@ -153,7 +153,7 @@ impl runtime::Node for Node {
         let meta = maybe_meta
             .as_ref()
             .ok_or_else(|| anyhow!("{:?} is not currently hosting meta", self.0.node_id))?;
-        Ok(Owned::weak(&meta))
+        Ok(Owned::weak(meta))
     }
 
     fn supervisor(&self) -> anyhow::Result<Arc<dyn runtime::Supervisor>> {
@@ -164,14 +164,14 @@ impl runtime::Node for Node {
                 self.0.node_id
             )
         })?;
-        Ok(Owned::weak(&supervisor))
+        Ok(Owned::weak(supervisor))
     }
 
     fn shards_subscribe(
         &self,
     ) -> Box<dyn Stream<Item = anyhow::Result<HashMap<ShardId, ReplicaState>>> + Send + Unpin + '_>
     {
-        Box::new(self.0.shards_subscribe().map(|shards| Ok(shards)))
+        Box::new(self.0.shards_subscribe().map(Ok))
     }
 }
 

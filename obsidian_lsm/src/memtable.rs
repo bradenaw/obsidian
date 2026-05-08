@@ -142,7 +142,7 @@ impl Memtable {
 
         let (min, max) = range.as_min_max();
 
-        return match direction {
+        match direction {
             Direction::Asc => IteratorEither::Left(IteratorEither::Left(HistoryAscIterator {
                 entry,
                 cursor: min,
@@ -153,24 +153,21 @@ impl Memtable {
                 cursor: Some(max),
                 min,
             })),
-        };
+        }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = Revision> + '_ {
         let keyspace_id = self.keyspace_id;
-        self.kvs
-            .iter()
-            .map(move |entry| {
-                let key = entry.key().clone();
+        self.kvs.iter().flat_map(move |entry| {
+            let key = entry.key().clone();
 
-                self.history(&key, HistoryRange::All, Direction::Desc)
-                    .map(move |(ts, value)| Revision {
-                        key: (keyspace_id, key.clone()),
-                        ts,
-                        value,
-                    })
-            })
-            .flatten()
+            self.history(&key, HistoryRange::All, Direction::Desc)
+                .map(move |(ts, value)| Revision {
+                    key: (keyspace_id, key.clone()),
+                    ts,
+                    value,
+                })
+        })
     }
 
     #[cfg(test)]

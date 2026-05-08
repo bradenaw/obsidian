@@ -545,7 +545,7 @@ impl pb::internal::node_server::Node for NodeServer {
             }
 
             let mutation = Mutation::try_from(meta_key_mut_pb.mutation.ok_or_else(|| {
-                tonic::Status::invalid_argument(format!("missing mutation on MetaKeyMutation"))
+                tonic::Status::invalid_argument("missing mutation on MetaKeyMutation")
             })?)
             .map_err(invalid_argument)?;
             let meta_mutation = match mutation {

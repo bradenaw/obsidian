@@ -144,7 +144,7 @@ impl runtime::Meta for Meta {
             Ok(())
         })
         .await
-        .map_err(|e| anyhow::Error::from(e))?;
+        .map_err(anyhow::Error::from)?;
 
         log::info!("create_colo_group({:?})", colo_group_id);
 
@@ -167,7 +167,7 @@ impl runtime::Meta for Meta {
             Ok(())
         })
         .await
-        .map_err(|e| anyhow::Error::from(e))
+        .map_err(anyhow::Error::from)
     }
 
     async fn latest_snapshot(&self) -> anyhow::Result<Timestamp> {
@@ -225,7 +225,7 @@ impl runtime::Meta for Meta {
                         None => RevisionValue::Tombstone,
                     };
                     let revision = Revision {
-                        key: key,
+                        key,
                         ts: revision.ts,
                         value: rev_value,
                     };
@@ -345,7 +345,7 @@ impl Meta {
                 Err(e) => return Err(e),
             }
         }
-        return Err(InternalError::PreconditionFailed);
+        Err(InternalError::PreconditionFailed)
     }
 }
 

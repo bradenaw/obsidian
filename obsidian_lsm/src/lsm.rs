@@ -205,7 +205,7 @@ impl Lsm {
         // because they're more likely to keep relevant data together.
 
         let mut runs = vec![];
-        for (_, keyspace) in &index_snapshot.keyspaces {
+        for keyspace in index_snapshot.keyspaces.values() {
             for level in &keyspace.levels {
                 for run in &level.runs {
                     runs.push((run.min_key(), run.size()));
@@ -225,7 +225,7 @@ impl Lsm {
 
             if running_size > total_size / 5 {
                 let new_candidate_distance_from_mid =
-                    ((running_size as i64) - (total_size as i64 / 2)).abs() as u64;
+                    ((running_size as i64) - (total_size as i64 / 2)).unsigned_abs();
                 match maybe_candidate {
                     Some(ref candidate) => {
                         let new_candidate = shortest_between(runs[0].0, lower);
@@ -249,7 +249,7 @@ impl Lsm {
             }
         }
 
-        maybe_candidate.map(|key| Bound::Before(key))
+        maybe_candidate.map(Bound::Before)
     }
 
     fn keyspace(
@@ -303,7 +303,7 @@ impl<'a> KeyspaceReader<'a> {
             .l0_sealed
             .iter()
             .map(|memtable| memtable.get(ts, k))
-            .filter_map(core::convert::identity)
+            .flatten()
             .max_by_key(|(ts, _)| *ts);
         if let Some((revision_ts, v)) = maybe_revision {
             return Ok(Some((revision_ts, v)));
@@ -336,20 +336,13 @@ impl<'a> KeyspaceReader<'a> {
             let revisions: Vec<_> = self
                 .0
                 .l0_active
-                .scan(ts, range.clone(), direction)
-                .map(|revision| Ok(revision))
+                .scan(ts, range, direction)
+                .map(Ok)
                 .collect();
             streams.push(futures::stream::iter(revisions.into_iter()).boxed());
         }
         for l0_run in &self.0.l0_sealed {
-            streams.push(
-                futures::stream::iter(
-                    l0_run
-                        .scan(ts, range.clone(), direction)
-                        .map(|revision| Ok(revision)),
-                )
-                .boxed(),
-            );
+            streams.push(futures::stream::iter(l0_run.scan(ts, range, direction).map(Ok)).boxed());
         }
         for i in 1..self.0.levels.len() {
             let overlapping_runs = self.0.levels[i].range(range.to_vec());
@@ -427,27 +420,21 @@ impl<'a> KeyspaceReader<'a> {
             }
         }
 
-        let continue_cursor = match page.last() {
-            Some(Revision { key: last_key, .. }) => Some(match direction {
+        let continue_cursor = page.last().map(|revision| {
+            let last_key = &revision.key;
+            match direction {
                 Direction::Asc => Range {
                     lower: Bound::After(last_key.1.clone()),
-                    upper: range.upper.clone().map(Vec::from),
+                    upper: range.upper.map(Vec::from),
                 },
                 Direction::Desc => Range {
-                    lower: range.lower.clone().map(Vec::from),
+                    lower: range.lower.map(Vec::from),
                     upper: Bound::Before(last_key.1.clone()),
                 },
-            }),
-            None => None,
-        };
+            }
+        });
 
-        page = page
-            .into_iter()
-            .filter(|revision| match revision.value {
-                RevisionValue::Tombstone => false,
-                _ => true,
-            })
-            .collect();
+        page.retain(|revision| !matches!(revision.value, RevisionValue::Tombstone));
 
         Ok((page, continue_cursor))
     }
@@ -466,7 +453,7 @@ impl<'a> KeyspaceReader<'a> {
                 .0
                 .l0_active
                 .history(key, range, direction)
-                .map(|revision| Ok(revision))
+                .map(Ok)
                 .collect();
             l0_streams.push(futures::stream::iter(revisions.into_iter()).boxed());
         }

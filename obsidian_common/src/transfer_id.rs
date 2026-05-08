@@ -10,6 +10,7 @@ use crate::uuid_to_proto;
 pub struct TransferId(pub uuid::Uuid);
 
 impl TransferId {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self(uuid::Uuid::now_v7())
     }

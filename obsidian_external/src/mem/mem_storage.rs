@@ -36,6 +36,12 @@ impl MemStorage {
     }
 }
 
+impl Default for MemStorage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl Storage for MemStorage {
     async fn put(&self, name: FileName) -> anyhow::Result<Box<dyn FileWriter>> {
@@ -61,7 +67,7 @@ impl Storage for MemStorage {
 
         Ok(Arc::new(MemStorageFileReader {
             inner: Arc::downgrade(file_content),
-            len: file_content.len() as u64,
+            len: file_content.len(),
         }))
     }
 
@@ -107,7 +113,7 @@ impl FileWriter for MemStorageFileWriter {
     async fn write_all(&mut self, src: &[u8]) -> io::Result<()> {
         self.inner
             .as_mut()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, anyhow!("writer already closed")))?
+            .ok_or_else(|| io::Error::other(anyhow!("writer already closed")))?
             .write_all(src)
             .await
     }

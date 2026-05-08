@@ -48,7 +48,7 @@ impl<B: Deref<Target = [u8]>> PackedVec2<B> {
         let width_a = encoded[encoded.len() - 2] as usize;
         let width_b = encoded[encoded.len() - 1] as usize;
         Ok(Self {
-            encoded: encoded,
+            encoded,
             width_a,
             width_b,
         })
@@ -73,7 +73,7 @@ impl<B: Deref<Target = [u8]>> PackedVec2<B> {
         (self.encoded.len() - 2) / (self.width_a + self.width_b)
     }
 
-    pub fn slice<'a>(&'a self, start_idx: usize, end_idx: usize) -> PackedVec2<&'a [u8]> {
+    pub fn slice(&self, start_idx: usize, end_idx: usize) -> PackedVec2<&[u8]> {
         PackedVec2 {
             encoded: &self.encoded[start_idx * self.width()..end_idx * self.width() + 2],
             width_a: self.width_a,
@@ -81,7 +81,7 @@ impl<B: Deref<Target = [u8]>> PackedVec2<B> {
         }
     }
 
-    pub fn borrow<'a>(&'a self) -> PackedVec2<&'a [u8]> {
+    pub fn borrow(&self) -> PackedVec2<&[u8]> {
         PackedVec2 {
             encoded: self.encoded.deref(),
             width_a: self.width_a,

@@ -31,7 +31,7 @@ impl TabletId {
     pub fn encode_fixed(&self) -> [u8; Self::ENCODED_LEN] {
         let mut out = [0u8; Self::ENCODED_LEN];
         let shard_id_encoded = self.0.encode_fixed();
-        (&mut out[..ShardId::ENCODED_LEN]).copy_from_slice(&shard_id_encoded[..]);
+        (out[..ShardId::ENCODED_LEN]).copy_from_slice(&shard_id_encoded[..]);
         BigEndian::write_u64(&mut out[ShardId::ENCODED_LEN..], self.1);
         out
     }
@@ -56,10 +56,10 @@ impl Decode for TabletId {
                 hexlify(b)
             ));
         }
-        return Ok(TabletId(
+        Ok(TabletId(
             ShardId(BigEndian::read_u32(&b[0..4])),
             BigEndian::read_u64(&b[4..12]),
-        ));
+        ))
     }
 }
 

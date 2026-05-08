@@ -121,7 +121,7 @@ impl OlfFile {
         if let Some(block) = self.block_for_key(k).await? {
             return block.get(ts, k).await;
         }
-        return Ok(None);
+        Ok(None)
     }
 
     pub fn scan(
@@ -157,7 +157,7 @@ impl OlfFile {
 
             for i in block_idxs {
                 let block_end_offset = self.index.get_value(i);
-                let block = Block::open(self.reader.deref(), block_end_offset as u64).await?;
+                let block = Block::open(self.reader.deref(), block_end_offset).await?;
                 let block_scan = block.scan(ts, range.clone(), direction);
                 pin_mut!(block_scan);
                 while let Some(lsm_revision) = block_scan.try_next().await? {
@@ -206,7 +206,7 @@ impl OlfFile {
         try_stream! {
             for i in 0..self.index.len() {
                 let block_end_offset = self.index.get_value(i);
-                let block = Block::open(self.reader.deref(), block_end_offset as u64).await?;
+                let block = Block::open(self.reader.deref(), block_end_offset).await?;
                 let block_stream = block.stream();
                 pin_mut!(block_stream);
                 while let Some(lsm_revision) = block_stream.try_next().await? {
@@ -232,7 +232,7 @@ impl OlfFile {
         };
         let block_end_offset = self.index.get_value(block_header_idx);
         Ok(Some(
-            Block::open(self.reader.deref(), block_end_offset as u64).await?,
+            Block::open(self.reader.deref(), block_end_offset).await?,
         ))
     }
 }
@@ -326,8 +326,7 @@ impl<'a> OlfFileBuilder<'a> {
         self.bytes_written += block.len() as u64;
 
         let block_end_offset = self.bytes_written;
-        self.index
-            .insert(first_key.clone(), block_end_offset as u64);
+        self.index.insert(first_key.clone(), block_end_offset);
 
         self.buffer = BlockBuilder::new();
 
@@ -361,12 +360,12 @@ impl<'a> OlfFileBuilder<'a> {
             keyspace_id: self.keyspace_id,
             min_ts: self.min_ts,
             max_ts: self.max_ts,
-            max_key_offset: max_key_offset as u64,
+            max_key_offset,
             max_key_len: self.last_key.len() as u32,
-            index_offset: index_offset as u64,
+            index_offset,
             index_len: encoded_index.len() as u64,
         };
-        trailer.write(self.w, trailer_offset as u64).await?;
+        trailer.write(self.w, trailer_offset).await?;
 
         Ok(())
     }
@@ -468,7 +467,7 @@ pub async fn dump_olf_file(olf: &OlfFile) -> anyhow::Result<()> {
         println!("    first key: [{}]", hexlify(&olf.index.get_key(i)),);
         println!("    block_end_offset: {}", olf.index.get_value(i));
         let block_end_offset = olf.index.get_value(i);
-        let block = Block::open(olf.reader.deref(), block_end_offset as u64).await?;
+        let block = Block::open(olf.reader.deref(), block_end_offset).await?;
         dump_block(&block).await?;
     }
     Ok(())

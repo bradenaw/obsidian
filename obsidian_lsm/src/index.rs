@@ -260,8 +260,7 @@ impl Keyspace {
         self.levels
             .iter()
             .enumerate()
-            .map(|(i, level)| level.runs.iter().map(move |run| (i, run)))
-            .flatten()
+            .flat_map(|(i, level)| level.runs.iter().map(move |run| (i, run)))
     }
 
     fn replace(&mut self, add: Vec<Run>, remove: HashSet<RunId>) -> anyhow::Result<()> {

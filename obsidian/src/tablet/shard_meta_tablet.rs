@@ -244,7 +244,7 @@ impl Tablet for ShardMetaTablet {
         _precond_keys: BTreeSet<Key>,
         _mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()> {
-        Err(anyhow!("ShardMetaTablet::cleanup_committed not allowed").into())
+        Err(anyhow!("ShardMetaTablet::cleanup_committed not allowed"))
     }
 
     async fn manifest(&self) -> anyhow::Result<Manifest> {
@@ -252,15 +252,15 @@ impl Tablet for ShardMetaTablet {
     }
 
     async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
-        Err(anyhow!("ShardMetaTablet::wait_mostly_hydrated not allowed").into())
+        Err(anyhow!("ShardMetaTablet::wait_mostly_hydrated not allowed"))
     }
 
     async fn catchup(&self) -> anyhow::Result<()> {
-        Err(anyhow!("ShardMetaTablet::catchup not allowed").into())
+        Err(anyhow!("ShardMetaTablet::catchup not allowed"))
     }
 
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
-        Err(anyhow!("ShardMetaTablet::find_split not allowed").into())
+        Err(anyhow!("ShardMetaTablet::find_split not allowed"))
     }
 }
 
@@ -385,7 +385,7 @@ impl ShardMetaTabletInner {
         let mut by_tablet = HashMap::new();
 
         for (keyspace_id, key) in precond_keys {
-            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
+            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, key)?;
             by_tablet
                 .entry(tablet_id)
                 .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()))
@@ -393,7 +393,7 @@ impl ShardMetaTabletInner {
                 .insert((*keyspace_id, key.clone()));
         }
         for (keyspace_id, key) in mut_keys {
-            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
+            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, key)?;
             by_tablet
                 .entry(tablet_id)
                 .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()))
@@ -467,7 +467,7 @@ impl From<TxOutcomeRecord> for pb::internal::TxOutcomeRecord {
                         mut_keys: Some(key_set_to_proto(mut_keys)),
                     },
                 )),
-                TxOutcomeRecord::Aborted {} => {
+                TxOutcomeRecord::Aborted => {
                     Some(pb::internal::tx_outcome_record::OutcomeType::Aborted(()))
                 }
             },

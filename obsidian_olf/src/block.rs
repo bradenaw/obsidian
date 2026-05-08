@@ -315,7 +315,7 @@ impl BlockBuilder {
 
         self.buffer
             .entry(revision.key)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push((revision.ts, revision.value));
 
         Ok(())
@@ -474,13 +474,13 @@ impl BlockTrailer {
 
     fn write(&self, out: &mut Vec<u8>) {
         let mut trailer = [0u8; Self::ENCODED_LEN];
-        LittleEndian::write_u32(&mut trailer[0..4], self.key_index_offset_in_block as u32);
-        LittleEndian::write_u32(&mut trailer[4..8], self.key_index_len as u32);
+        LittleEndian::write_u32(&mut trailer[0..4], self.key_index_offset_in_block);
+        LittleEndian::write_u32(&mut trailer[4..8], self.key_index_len);
         LittleEndian::write_u32(
             &mut trailer[8..12],
             self.version_index_offset_in_block as u32,
         );
-        LittleEndian::write_u32(&mut trailer[12..16], self.version_index_len as u32);
+        LittleEndian::write_u32(&mut trailer[12..16], self.version_index_len);
         LittleEndian::write_u32(&mut trailer[16..20], self.block_size);
         out.extend_from_slice(&trailer[..]);
     }
@@ -593,7 +593,7 @@ impl<B: Deref<Target = [u8]> + Slice> BlockVersionIndex<B> {
         Some((start, end))
     }
 
-    fn slice<'a>(&'a self, start_idx: usize, end_idx: usize) -> BlockVersionIndex<&'a [u8]> {
+    fn slice(&self, start_idx: usize, end_idx: usize) -> BlockVersionIndex<&[u8]> {
         let values_len = if end_idx == self.len() {
             self.values_len
         } else {
@@ -606,7 +606,7 @@ impl<B: Deref<Target = [u8]> + Slice> BlockVersionIndex<B> {
         }
     }
 
-    fn borrow<'a>(&'a self) -> BlockVersionIndex<&'a [u8]> {
+    fn borrow(&self) -> BlockVersionIndex<&[u8]> {
         BlockVersionIndex {
             min_ts: self.min_ts,
             values_len: self.values_len,
@@ -627,7 +627,7 @@ impl Slice for Vec<u8> {
         if start_idx > 0 {
             return self.split_off(start_idx);
         }
-        return self;
+        self
     }
 }
 

@@ -99,8 +99,8 @@ enum InnerParticipantState<TLeader, TFollower> {
 impl<TLeader, TFollower> InnerParticipantState<TLeader, TFollower> {
     fn as_participant_state(&self) -> ParticipantState<'_, TLeader, TFollower> {
         match self {
-            InnerParticipantState::Leader { leader, .. } => ParticipantState::Leader(&leader),
-            InnerParticipantState::Follower(follower) => ParticipantState::Follower(&follower),
+            InnerParticipantState::Leader { leader, .. } => ParticipantState::Leader(leader),
+            InnerParticipantState::Follower(follower) => ParticipantState::Follower(follower),
         }
     }
 }
@@ -245,7 +245,7 @@ where
             return Err(anyhow!("{} entry not accepted", self.name));
         }
 
-        return Ok(());
+        Ok(())
     }
 }
 
@@ -587,13 +587,12 @@ where
                                 }
                             },
                         },
-                        Ratification::Rejected(proposal) => match proposal.proposal_type {
-                            ProposalType::Acquire{..} => {
+                        Ratification::Rejected(proposal) => {
+                            if let ProposalType::Acquire{..} = proposal.proposal_type {
                                 if proposal.participant_id == participant_id {
                                     pending_acquire = None;
                                 }
                             }
-                            _ => {},
                         },
                     }
                 },
@@ -630,7 +629,7 @@ fn jittered_ticker(x: Duration) -> impl Stream<Item = ()> {
     let mut next = Instant::now();
     stream! {
         loop {
-            next = next + rand::thread_rng().gen_range(x / 2..x * 3/2);
+            next += rand::thread_rng().gen_range(x / 2..x * 3/2);
             yield ();
             sleep_until(next).await;
         }

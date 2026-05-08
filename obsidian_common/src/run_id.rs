@@ -11,6 +11,7 @@ use crate::uuid_to_proto;
 pub struct RunId(Uuid);
 
 impl RunId {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
@@ -19,10 +20,6 @@ impl RunId {
         let mut out = [0u8; 16];
         out.copy_from_slice(self.0.as_bytes());
         out
-    }
-
-    pub fn to_string(&self) -> String {
-        self.0.to_string()
     }
 }
 

@@ -101,8 +101,8 @@ impl<B: Deref<Target = [u8]>> PrefixCompressedKV<B> {
 
     pub fn search(&self, k: &[u8]) -> Result<usize, usize> {
         let prefix = self.prefix();
-        if !k.starts_with(&prefix) {
-            match k.cmp(&prefix) {
+        if !k.starts_with(prefix) {
+            match k.cmp(prefix) {
                 Ordering::Equal => unreachable!(),
                 Ordering::Less => return Err(0),
                 Ordering::Greater => return Err(self.len()),

@@ -60,6 +60,7 @@ enum HydrationState {
 }
 
 impl HydratingTablet {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         tablet_id: TabletId,
         colo_group_id: ColoGroupId,
@@ -124,7 +125,7 @@ impl HydratingTablet {
         );
         let extra_keyspaces = {
             let mut guard = self.extra_keyspaces.lock().unwrap();
-            std::mem::replace(guard.deref_mut(), HashSet::new())
+            std::mem::take(guard.deref_mut())
         };
         for keyspace_id in extra_keyspaces.iter() {
             lsm.create_keyspace(*keyspace_id);

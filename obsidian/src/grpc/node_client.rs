@@ -139,7 +139,7 @@ impl runtime::Node for NodeClient {
                 .retry_stream_indefinitely(move || {
                     Self::shards_subscribe_inner(grpc_client.clone())
                 })
-                .map(|item| Ok(item)),
+                .map(Ok),
         )
     }
 }
@@ -312,7 +312,7 @@ impl runtime::Tablet for TabletProxy {
                 tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
                 inner: Some(
                     scan_req_to_proto(ts, keyspace_id, range, direction, limit)
-                        .map_err(|e| InternalError::Other(e.into()))?,
+                        .map_err(InternalError::Other)?,
                 ),
             })
             .await
@@ -638,10 +638,7 @@ impl runtime::Meta for MetaProxy {
             .into_iter()
             .map(Record::try_from)
             .collect::<anyhow::Result<Vec<_>>>()?;
-        let maybe_continue_range = resp
-            .remaining
-            .map(|range_pb| Range::try_from(range_pb))
-            .transpose()?;
+        let maybe_continue_range = resp.remaining.map(Range::try_from).transpose()?;
 
         Ok((records, maybe_continue_range))
     }

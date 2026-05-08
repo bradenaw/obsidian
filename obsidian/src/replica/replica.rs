@@ -194,7 +194,7 @@ impl runtime::Shard for Replica {
         {
             let tablets = self.tablets.read().unwrap();
             if let Some(tablet) = tablets.get(&tablet_id) {
-                return Ok(Arc::clone(&tablet));
+                return Ok(Arc::clone(tablet));
             }
         }
 
@@ -257,7 +257,7 @@ impl runtime::Shard for Replica {
                 if let ParticipantState::Leader(leader) = participant_state {
                     return leader.shard.tx_wait(txid).await;
                 }
-                Err(InternalError::NotLeader(self.shard_id).into())
+                Err(InternalError::NotLeader(self.shard_id))
             })
             .await
     }

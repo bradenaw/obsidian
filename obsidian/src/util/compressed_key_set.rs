@@ -100,7 +100,7 @@ pub(crate) fn key_set_from_proto(
 
         let mut key = vec![0u8; n_shared + n_more];
         (key[..n_shared]).copy_from_slice(&prev_key[..n_shared]);
-        (key[n_shared..]).copy_from_slice(&key_fragment);
+        (key[n_shared..]).copy_from_slice(key_fragment);
 
         if keyspace_ids.len() == 1 {
             out.insert((keyspace_ids[0], key.clone()));

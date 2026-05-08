@@ -65,6 +65,15 @@ where
     }
 }
 
+impl<E> Default for MemJournal<E>
+where
+    E: Clone + Send + 'static,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl<E> Journal<E> for MemJournal<E>
 where
@@ -99,7 +108,7 @@ where
     }
 
     async fn latest(&self) -> anyhow::Result<JournalSeq> {
-        Ok(self.highest_seqno.borrow().clone())
+        Ok(*self.highest_seqno.borrow())
     }
 
     async fn oldest_available(&self) -> anyhow::Result<JournalSeq> {
