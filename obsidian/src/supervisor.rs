@@ -11,9 +11,10 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::stream::FuturesUnordered;
 use futures::TryStreamExt;
+use obsidian_util::Retry;
+use obsidian_util::WithBackground;
 use tokio::sync::Notify;
 
-use crate::lsm::Manifest;
 use crate::meta::MetaKey;
 use crate::meta::MetaMutation;
 use crate::meta::MetaReader;
@@ -30,8 +31,7 @@ use crate::meta::TransferState;
 use crate::runtime;
 use crate::runtime::Meta;
 use crate::runtime::Shards;
-use crate::util::Retry;
-use crate::util::WithBackground;
+use crate::Manifest;
 use crate::Range;
 use crate::RangeSet;
 use crate::ShardId;
@@ -80,7 +80,13 @@ impl Supervisor {
     ) -> anyhow::Result<TransferId> {
         let snapshot = self.0.latest_snapshot().await?;
 
-        if !((srcs.len() == 1 && dsts.len() >= 1) || (srcs.len() >= 1 && dsts.len() == 1)) {
+        if srcs.is_empty() {
+            return Err(anyhow!("no sources"));
+        }
+        if dsts.is_empty() {
+            return Err(anyhow!("no destinations"));
+        }
+        if srcs.len() > 1 && dsts.len() > 1 {
             return Err(anyhow!(
                 "can't do m:n transfers, only 1:1 move, 1:n split, and n:1 merge"
             ));
@@ -616,7 +622,7 @@ impl SupervisorInner {
             let shard_metadata = snapshot.shard_metadata(shard_id).await?;
 
             for node_id in &shard_metadata.assigned_node_ids {
-                unassigned_node_ids.remove(&node_id);
+                unassigned_node_ids.remove(node_id);
             }
             if shard_metadata.assigned_node_ids.is_empty() {
                 unassigned_shard_ids.insert(shard_id);

@@ -11,10 +11,16 @@ use futures::future::Either;
 use futures::stream::FuturesUnordered;
 use futures::Stream;
 use futures::StreamExt;
+use obsidian_external::Journals;
+use obsidian_external::Storage;
+use obsidian_lsm::LsmOptions;
+use obsidian_util::Owned;
+use obsidian_util::Retry;
+use obsidian_util::WeakView;
+use obsidian_util::WithBackground;
 use tokio::sync::Notify;
 
 use crate::election::Proposal;
-use crate::lsm::LsmOptions;
 use crate::meta::Meta;
 use crate::meta::MetaKey;
 use crate::meta::MetaMutation;
@@ -25,17 +31,11 @@ use crate::meta::MetaSyncedSnapshot;
 use crate::meta::SyncType;
 use crate::replica::Replica;
 use crate::runtime;
-use crate::runtime::Journals;
 use crate::runtime::Nodes;
 use crate::runtime::ReplicaState;
 use crate::runtime::Shard as _;
 use crate::runtime::Shards;
-use crate::runtime::Storage;
 use crate::supervisor::Supervisor;
-use crate::util::Owned;
-use crate::util::Retry;
-use crate::util::WeakView;
-use crate::util::WithBackground;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::InternalError;
@@ -116,7 +116,7 @@ impl Node {
             // so we need to wait to do this until after the leader election is finished.
             Retry::new()
                 .indefinitely(&async || {
-                    inner.meta.add_node(inner.node_id.clone()).await?;
+                    inner.meta.add_node(inner.node_id).await?;
                     Ok::<(), anyhow::Error>(())
                 })
                 .await;
@@ -142,9 +142,9 @@ impl runtime::Node for Node {
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn runtime::Shard>> {
         let replicas = self.0.replicas.read().unwrap();
         if let Some(shard) = replicas.get(&shard_id).as_ref() {
-            return Ok(Arc::clone(shard) as Arc<dyn runtime::Shard>);
+            Ok(Arc::clone(shard) as Arc<dyn runtime::Shard>)
         } else {
-            return Err(anyhow!("{:?} does not own {:?}", self.0.node_id, shard_id));
+            Err(anyhow!("{:?} does not own {:?}", self.0.node_id, shard_id))
         }
     }
 
@@ -153,7 +153,7 @@ impl runtime::Node for Node {
         let meta = maybe_meta
             .as_ref()
             .ok_or_else(|| anyhow!("{:?} is not currently hosting meta", self.0.node_id))?;
-        Ok(Owned::weak(&meta))
+        Ok(Owned::weak(meta))
     }
 
     fn supervisor(&self) -> anyhow::Result<Arc<dyn runtime::Supervisor>> {
@@ -164,14 +164,14 @@ impl runtime::Node for Node {
                 self.0.node_id
             )
         })?;
-        Ok(Owned::weak(&supervisor))
+        Ok(Owned::weak(supervisor))
     }
 
     fn shards_subscribe(
         &self,
     ) -> Box<dyn Stream<Item = anyhow::Result<HashMap<ShardId, ReplicaState>>> + Send + Unpin + '_>
     {
-        Box::new(self.0.shards_subscribe().map(|shards| Ok(shards)))
+        Box::new(self.0.shards_subscribe().map(Ok))
     }
 }
 

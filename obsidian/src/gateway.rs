@@ -16,15 +16,15 @@ use futures::future::try_join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use futures::TryStreamExt;
+use obsidian_util::sleep_for_retry;
+use obsidian_util::Retry;
+use obsidian_util::RetryResult;
 use rand::seq::SliceRandom;
 
 use crate::meta::MetaReader;
 use crate::meta::MetaSynced;
 use crate::runtime::Meta;
 use crate::runtime::Shards;
-use crate::util::sleep_for_retry;
-use crate::util::Retry;
-use crate::util::RetryResult;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -74,8 +74,7 @@ impl Obsidian for Gateway {
         .await?;
         Ok(results
             .into_iter()
-            .map(|tablet_results| tablet_results.into_iter())
-            .flatten()
+            .flat_map(|tablet_results| tablet_results.into_iter())
             .collect())
     }
 
@@ -150,11 +149,10 @@ impl Obsidian for Gateway {
                 })
                 .await
                 .map_err(|e| {
-                    match e.downcast_ref::<InternalError>() {
-                        Some(InternalError::PreconditionFailed) => {
-                            return WriteError::PreconditionFailed;
-                        }
-                        _ => {}
+                    if let Some(InternalError::PreconditionFailed) =
+                        e.downcast_ref::<InternalError>()
+                    {
+                        return WriteError::PreconditionFailed;
                     }
                     e.into()
                 });
@@ -164,12 +162,7 @@ impl Obsidian for Gateway {
         let mut any_prepare_succeeded = false;
         for i in 0..MAX_CONFLICT_RETRIES {
             if i != 0 {
-                sleep_for_retry(
-                    i as usize,
-                    Duration::from_millis(10),
-                    Duration::from_millis(5000),
-                )
-                .await;
+                sleep_for_retry(i, Duration::from_millis(10), Duration::from_millis(5000)).await;
             }
 
             match self
@@ -256,7 +249,7 @@ impl Gateway {
     fn split_keys(&self, keys: BTreeSet<Key>) -> anyhow::Result<BTreeMap<TabletId, BTreeSet<Key>>> {
         let mut by_tablet = BTreeMap::new();
         for (keyspace_id, key) in &keys {
-            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
+            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, key)?;
             by_tablet
                 .entry(tablet_id)
                 .or_insert_with(BTreeSet::new)
@@ -311,7 +304,7 @@ impl Gateway {
             .n_attempts(MAX_CONFLICT_RETRIES + 1)
             .with_retry(|| async {
                 match f().await {
-                    Ok(v) => return RetryResult::Ok(v),
+                    Ok(v) => RetryResult::Ok(v),
                     Err(InternalError::Conflict(other_txid)) => {
                         // If we've already seen this txid as a conflict that means we already
                         // wait/aborted it and we're still just waiting for it to get cleaned up,
@@ -339,7 +332,7 @@ impl Gateway {
                                 // retrying will work.
                                 Ok(_) | Err(InternalError::TxOutcomeMissing) => {}
                                 Err(e) => {
-                                    return RetryResult::Err(e.into());
+                                    return RetryResult::Err(e);
                                 }
                             }
                         }
@@ -347,9 +340,7 @@ impl Gateway {
                         already_seen_conflicts.lock().unwrap().insert(other_txid);
                         RetryResult::Retry(InternalError::Conflict(other_txid))
                     }
-                    Err(e) => {
-                        return RetryResult::Err(e.into());
-                    }
+                    Err(e) => RetryResult::Err(e),
                 }
             })
             .await
@@ -404,7 +395,7 @@ impl Gateway {
             for tablet_id in &pending_tablets {
                 let (tablet_preconds, tablet_muts) = write_by_tablet.get(tablet_id).unwrap();
                 let tablet_id = *tablet_id;
-                let tablet = tablets.get(&tablet_id).unwrap();
+                let tablet = tablets.get(tablet_id).unwrap();
                 prepare_futures.push(async move {
                     (
                         tablet_id,
@@ -457,7 +448,7 @@ impl Gateway {
                     },
                 ))
                 .await
-                .map_err(|e| WriteError::Other(e.into()))?;
+                .map_err(WriteError::Other)?;
                 for other_txid in preempt_conflicts {
                     already_seen_conflicts.insert(other_txid);
                 }
@@ -473,18 +464,16 @@ impl Gateway {
 
         let precond_keys: BTreeSet<_> = write_by_tablet
             .values()
-            .map(|(preconds, _)| {
+            .flat_map(|(preconds, _)| {
                 preconds
                     .iter()
                     .map(|precond| (precond.keyspace_id(), precond.key().to_vec()))
             })
-            .flatten()
             .collect();
 
         let mut_keys: BTreeSet<_> = write_by_tablet
             .values()
-            .map(|(_, muts)| muts.keys())
-            .flatten()
+            .flat_map(|(_, muts)| muts.keys())
             .cloned()
             .collect();
 

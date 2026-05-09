@@ -8,22 +8,22 @@ use anyhow::anyhow;
 use async_stream::try_stream;
 use futures::future;
 use futures::Stream;
+use obsidian_util::Decode;
+use obsidian_util::Encode;
 
-use crate::lsm::Manifest;
 use crate::tablet::journaled_lsm::LsmWrite;
 use crate::tablet::lock_mgr::Guard;
 use crate::tablet::lock_mgr::LockMgr;
 use crate::tablet::read_only_lsm::LsmRead;
 use crate::tablet::scan_locks::ScanLocks;
 use crate::tablet::sequencer::Sequencer;
-use crate::util::Decode;
-use crate::util::Encode;
 use crate::ColoGroupId;
 use crate::Direction;
 use crate::HistoryRange;
 use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Mutation;
 use crate::Precondition;
 use crate::Range;
@@ -59,7 +59,7 @@ where
             tablet_id,
             colo_group_id,
             range,
-            lsm: lsm,
+            lsm,
             sequencer: Sequencer::new(),
             lock_mgr: LockMgr::new(1 << 16 /*buckets*/),
             scan_locks: ScanLocks::new(),
@@ -342,8 +342,8 @@ where
             page.into_iter()
                 .map(|(ts, value)| Revision {
                     key: key.clone(),
-                    ts: ts,
-                    value: value,
+                    ts,
+                    value,
                 })
                 .collect(),
             continue_cursor,
@@ -426,7 +426,7 @@ where
 
     pub(super) fn check_key(&self, colo_group_id: ColoGroupId, key: &[u8]) -> anyhow::Result<()> {
         if self.colo_group_id != colo_group_id || !self.range.contains(&key) {
-            return Err(anyhow!("{:?}/{:?} not owned", colo_group_id, key).into());
+            return Err(anyhow!("{:?}/{:?} not owned", colo_group_id, key));
         }
 
         Ok(())
@@ -473,7 +473,7 @@ where
             self.check_key(precond.keyspace_id().0, precond.key())?;
         }
         for (keyspace_id, key) in muts.keys() {
-            self.check_key(keyspace_id.0, &key)?;
+            self.check_key(keyspace_id.0, key)?;
         }
         Ok(self
             .lock_mgr
@@ -487,7 +487,7 @@ where
     // TODO: make this take a lockmgr guard that proves the lock is held
     pub(super) async fn check_write_conflicts(
         &self,
-        preconds: &Vec<Precondition>,
+        preconds: &[Precondition],
         muts: &BTreeMap<Key, Mutation>,
     ) -> anyhow::Result<Option<Txid>> {
         for (keyspace_id, key) in Iterator::chain(
@@ -516,7 +516,7 @@ where
     ) -> Result<(), InternalError> {
         for precond in preconds {
             let res = self
-                .unsafe_get_latest_record(precond.keyspace_id(), &precond.key())
+                .unsafe_get_latest_record(precond.keyspace_id(), precond.key())
                 .await?;
             match precond {
                 Precondition::NotChangedSince(_, _, ts) => {
@@ -638,7 +638,7 @@ impl Encode for PrecondLocks {
 
 impl Decode for PrecondLocks {
     fn decode(b: &[u8]) -> anyhow::Result<Self> {
-        if b.len() % Txid::ENCODED_LEN != 0 {
+        if !b.len().is_multiple_of(Txid::ENCODED_LEN) {
             return Err(anyhow!(
                 "wrong length for precond value {}: must be a multiple of {}",
                 b.len(),
@@ -663,15 +663,15 @@ mod tests {
 
     use async_trait::async_trait;
     use futures::StreamExt;
+    use obsidian_external::mem::MemStorage;
+    use obsidian_lsm::Lsm;
+    use obsidian_lsm::LsmOptions;
+    use obsidian_util::encode;
 
-    use crate::lsm::Lsm;
-    use crate::lsm::LsmOptions;
     use crate::tablet::journaled_lsm::JournaledLsm;
     use crate::tablet::tablet_inner::PendingMutation;
     use crate::tablet::tablet_inner::TabletInner;
     use crate::tablet::tablet_journal_writer::TabletJournalWriter;
-    use crate::test::MemStorage;
-    use crate::util::encode;
     use crate::Bound;
     use crate::ColoGroupId;
     use crate::Direction;

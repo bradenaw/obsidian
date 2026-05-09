@@ -6,14 +6,13 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use futures::Stream;
 use futures::StreamExt;
+use obsidian_external::Journal;
+use obsidian_external::Journals;
+use obsidian_pb as pb;
+use obsidian_util::encode;
+use obsidian_util::Decode;
+use obsidian_util::Encode;
 
-use crate::pb;
-use crate::runtime;
-use crate::runtime::Journal;
-use crate::runtime::Journals;
-use crate::util::encode;
-use crate::util::Decode;
-use crate::util::Encode;
 use crate::JournalSeq;
 use crate::ShardId;
 
@@ -30,7 +29,7 @@ impl<E> Journals<E> for JournalsClient<E>
 where
     E: Encode + Decode + Send + Sync + 'static,
 {
-    async fn journal(&self, shard_id: ShardId) -> Arc<dyn runtime::Journal<E>> {
+    async fn journal(&self, shard_id: ShardId) -> Arc<dyn Journal<E>> {
         Arc::new(JournalClient {
             phantom: PhantomData::default(),
             shard_id,

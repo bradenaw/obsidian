@@ -4,9 +4,8 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use obsidian_lsm::Lsm;
 
-use crate::lsm::Lsm;
-use crate::lsm::Manifest;
 use crate::runtime::Tablet;
 use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::tablet_inner::TabletInner;
@@ -18,6 +17,7 @@ use crate::HistoryRange;
 use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Mutation;
 use crate::Precondition;
 use crate::Range;
@@ -123,7 +123,7 @@ impl Tablet for MetaTablet {
         _precond_keys: BTreeSet<Key>,
         _mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()> {
-        Err(anyhow!("MetaTablet::cleanup_committed not allowed").into())
+        Err(anyhow!("MetaTablet::cleanup_committed not allowed"))
     }
 
     async fn manifest(&self) -> anyhow::Result<Manifest> {
@@ -131,14 +131,14 @@ impl Tablet for MetaTablet {
     }
 
     async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
-        Err(anyhow!("MetaTablet::wait_mostly_hydrated not allowed").into())
+        Err(anyhow!("MetaTablet::wait_mostly_hydrated not allowed"))
     }
 
     async fn catchup(&self) -> anyhow::Result<()> {
-        Err(anyhow!("MetaTablet::catchup not allowed").into())
+        Err(anyhow!("MetaTablet::catchup not allowed"))
     }
 
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
-        Err(anyhow!("MetaTablet::find_split not allowed").into())
+        Err(anyhow!("MetaTablet::find_split not allowed"))
     }
 }

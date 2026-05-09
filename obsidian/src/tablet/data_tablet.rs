@@ -4,19 +4,18 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use obsidian_external::Storage;
+use obsidian_lsm::Lsm;
+use obsidian_lsm::LsmOptions;
+use obsidian_util::StateMachine;
 
-use crate::lsm::Lsm;
-use crate::lsm::LsmOptions;
-use crate::lsm::Manifest;
 use crate::runtime;
 use crate::runtime::Shards;
-use crate::runtime::Storage;
 use crate::tablet::active_tablet::ActiveTablet;
 use crate::tablet::frozen_tablet::FrozenTablet;
 use crate::tablet::hydrating_tablet::HydratingTablet;
 use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::TabletJournalWriter;
-use crate::util::StateMachine;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -24,6 +23,7 @@ use crate::HistoryRange;
 use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Mutation;
 use crate::Precondition;
 use crate::Range;
@@ -45,6 +45,7 @@ pub(crate) struct DataTablet {
 }
 
 impl DataTablet {
+    #[allow(clippy::too_many_arguments)]
     pub fn new_hydrating(
         tablet_id: TabletId,
         colo_group_id: ColoGroupId,
@@ -81,8 +82,8 @@ impl DataTablet {
         shards: Arc<dyn Shards>,
     ) -> Self {
         Self {
-            tablet_id: tablet_id,
-            colo_group_id: colo_group_id,
+            tablet_id,
+            colo_group_id,
             state_machine: StateMachine::new(DataTabletState::Active(ActiveTablet::new(
                 tablet_id,
                 colo_group_id,
@@ -338,6 +339,7 @@ impl runtime::Tablet for DataTablet {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum DataTabletState {
     Defunct,
     Hydrating(HydratingTablet),
@@ -476,7 +478,7 @@ impl runtime::Tablet for DataTabletState {
                     .cleanup_committed(txid, ts, precond_keys, mut_keys)
                     .await
             }
-            _ => Err(anyhow!("wrong state {}", self.name()).into()),
+            _ => Err(anyhow!("wrong state {}", self.name())),
         }
     }
 
@@ -485,7 +487,7 @@ impl runtime::Tablet for DataTabletState {
             DataTabletState::Hydrating(hydrating_tablet) => hydrating_tablet.manifest().await,
             DataTabletState::Active(active_tablet) => active_tablet.manifest().await,
             DataTabletState::Frozen(frozen_tablet) => frozen_tablet.manifest().await,
-            _ => Err(anyhow!("wrong state {}", self.name()).into()),
+            _ => Err(anyhow!("wrong state {}", self.name())),
         }
     }
 
@@ -494,21 +496,21 @@ impl runtime::Tablet for DataTabletState {
             DataTabletState::Hydrating(hydrating_tablet) => {
                 hydrating_tablet.wait_mostly_hydrated().await
             }
-            _ => Err(anyhow!("wrong state {}", self.name()).into()),
+            _ => Err(anyhow!("wrong state {}", self.name())),
         }
     }
 
     async fn catchup(&self) -> anyhow::Result<()> {
         match self {
             DataTabletState::Hydrating(hydrating_tablet) => hydrating_tablet.catchup().await,
-            _ => Err(anyhow!("wrong state {}", self.name()).into()),
+            _ => Err(anyhow!("wrong state {}", self.name())),
         }
     }
 
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
         match self {
             DataTabletState::Active(active_tablet) => active_tablet.find_split().await,
-            _ => Err(anyhow!("wrong state {}", self.name()).into()),
+            _ => Err(anyhow!("wrong state {}", self.name())),
         }
     }
 }

@@ -6,6 +6,8 @@ use async_stream::stream;
 use async_trait::async_trait;
 use futures::Stream;
 use futures::StreamExt;
+use obsidian_pb as pb;
+use obsidian_util::hexlify;
 
 use crate::grpc::util::get_req_results;
 use crate::grpc::util::internal;
@@ -19,10 +21,8 @@ use crate::grpc::util::required;
 use crate::meta::MetaKey;
 use crate::meta::MetaMutation;
 use crate::meta::MetaValue;
-use crate::pb;
 use crate::runtime::Node;
 use crate::runtime::ReplicaState;
-use crate::util::hexlify;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -545,7 +545,7 @@ impl pb::internal::node_server::Node for NodeServer {
             }
 
             let mutation = Mutation::try_from(meta_key_mut_pb.mutation.ok_or_else(|| {
-                tonic::Status::invalid_argument(format!("missing mutation on MetaKeyMutation"))
+                tonic::Status::invalid_argument("missing mutation on MetaKeyMutation")
             })?)
             .map_err(invalid_argument)?;
             let meta_mutation = match mutation {

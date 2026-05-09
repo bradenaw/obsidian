@@ -3,11 +3,12 @@ use std::collections::BTreeSet;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use obsidian_common::key_to_proto;
+use obsidian_pb as pb;
 
 use crate::grpc::util::preconds_muts_to_proto;
 use crate::grpc::util::scan_req_to_proto;
 use crate::grpc::util::Pool;
-use crate::pb;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -46,7 +47,7 @@ impl Obsidian for GatewayClient {
             .await
             .get(pb::GetReq {
                 snapshot_ts: ts.as_micros(),
-                keys: keys.into_iter().map(pb::Key::from).collect(),
+                keys: keys.into_iter().map(key_to_proto).collect(),
             })
             .await?
             .into_inner();
@@ -102,7 +103,7 @@ impl Obsidian for GatewayClient {
             .acquire()
             .await
             .get_latest(pb::GetLatestReq {
-                keys: keys.into_iter().map(pb::Key::from).collect(),
+                keys: keys.into_iter().map(key_to_proto).collect(),
             })
             .await?
             .into_inner();
@@ -175,10 +176,10 @@ mod tests {
     use anyhow::anyhow;
     use async_trait::async_trait;
     use futures::FutureExt;
+    use obsidian_pb as pb;
     use tokio::sync::oneshot;
 
     use crate::grpc::GatewayServer;
-    use crate::pb;
     use crate::test::obsidian_grpc_bridge;
     use crate::test::obsidian_test_suite;
     use crate::test::ObsidianForTestBuilder;
@@ -219,9 +220,10 @@ mod tests {
     obsidian_test_suite!({
         use std::sync::Arc;
 
+        use obsidian_pb as pb;
+
         use crate::grpc::GatewayClient;
         use crate::grpc::GatewayServer;
-        use crate::pb;
         use crate::test::obsidian_grpc_bridge;
         use crate::test::GrpcBridge;
         use crate::test::ObsidianForTestBuilder;

@@ -7,5 +7,5 @@ pub(crate) async fn wait_all<I: Iterator<Item: Future<Output = ()>>>(iter: I) {
     for item in iter {
         waits.push(item);
     }
-    while let Some(_) = waits.next().await {}
+    while waits.next().await.is_some() {}
 }

@@ -1,7 +1,7 @@
+use obsidian_pb as pb;
 use prost::Message;
 
 use crate::meta::MetaValue;
-use crate::pb;
 use crate::Mutation;
 
 #[derive(Debug, Clone)]

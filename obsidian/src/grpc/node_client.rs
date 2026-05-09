@@ -8,22 +8,22 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use futures::Stream;
 use futures::StreamExt;
+use obsidian_common::key_to_proto;
+use obsidian_pb as pb;
+use obsidian_util::Retry;
 
 use crate::grpc::util::internal_err_from_status;
 use crate::grpc::util::preconds_muts_to_proto;
 use crate::grpc::util::scan_req_to_proto;
 use crate::grpc::util::Pool;
-use crate::lsm::Manifest;
 use crate::meta::MetaKey;
 use crate::meta::MetaMutation;
-use crate::pb;
 use crate::runtime;
 use crate::runtime::Meta;
 use crate::runtime::ReplicaState;
 use crate::runtime::Shard;
 use crate::runtime::Supervisor;
 use crate::runtime::Tablet;
-use crate::util::Retry;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -32,6 +32,7 @@ use crate::InternalError;
 use crate::JournalSeq;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Mutation;
 use crate::NodeId;
 use crate::Precondition;
@@ -138,7 +139,7 @@ impl runtime::Node for NodeClient {
                 .retry_stream_indefinitely(move || {
                     Self::shards_subscribe_inner(grpc_client.clone())
                 })
-                .map(|item| Ok(item)),
+                .map(Ok),
         )
     }
 }
@@ -196,8 +197,8 @@ impl runtime::Shard for ShardProxy {
                 shard_id: self.shard_id.0,
                 txid: Some(pb::internal::Txid::from(txid)),
                 ts: ts.as_micros(),
-                precond_keys: precond_keys.into_iter().map(pb::Key::from).collect(),
-                mut_keys: mut_keys.into_iter().map(pb::Key::from).collect(),
+                precond_keys: precond_keys.into_iter().map(key_to_proto).collect(),
+                mut_keys: mut_keys.into_iter().map(key_to_proto).collect(),
             })
             .await
             .map_err(internal_err_from_status)?
@@ -272,7 +273,7 @@ impl runtime::Tablet for TabletProxy {
                 tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
                 inner: Some(pb::GetReq {
                     snapshot_ts: ts.as_micros(),
-                    keys: keys.into_iter().map(pb::Key::from).collect(),
+                    keys: keys.into_iter().map(key_to_proto).collect(),
                 }),
             })
             .await
@@ -311,7 +312,7 @@ impl runtime::Tablet for TabletProxy {
                 tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
                 inner: Some(
                     scan_req_to_proto(ts, keyspace_id, range, direction, limit)
-                        .map_err(|e| InternalError::Other(e.into()))?,
+                        .map_err(InternalError::Other)?,
                 ),
             })
             .await
@@ -339,7 +340,7 @@ impl runtime::Tablet for TabletProxy {
             .tablet_get_latest(pb::internal::TabletGetLatestReq {
                 tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
                 inner: Some(pb::GetLatestReq {
-                    keys: keys.into_iter().map(pb::Key::from).collect(),
+                    keys: keys.into_iter().map(key_to_proto).collect(),
                 }),
             })
             .await
@@ -371,7 +372,7 @@ impl runtime::Tablet for TabletProxy {
             .tablet_latest_snapshot(pb::internal::TabletGetLatestReq {
                 tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
                 inner: Some(pb::GetLatestReq {
-                    keys: keys.into_iter().map(pb::Key::from).collect(),
+                    keys: keys.into_iter().map(key_to_proto).collect(),
                 }),
             })
             .await
@@ -458,8 +459,8 @@ impl runtime::Tablet for TabletProxy {
                 tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
                 txid: Some(pb::internal::Txid::from(txid)),
                 ts: ts.as_micros(),
-                precond_keys: precond_keys.into_iter().map(pb::Key::from).collect(),
-                mut_keys: mut_keys.into_iter().map(pb::Key::from).collect(),
+                precond_keys: precond_keys.into_iter().map(key_to_proto).collect(),
+                mut_keys: mut_keys.into_iter().map(key_to_proto).collect(),
             })
             .await
             .map_err(internal_err_from_status)?;
@@ -637,10 +638,7 @@ impl runtime::Meta for MetaProxy {
             .into_iter()
             .map(Record::try_from)
             .collect::<anyhow::Result<Vec<_>>>()?;
-        let maybe_continue_range = resp
-            .remaining
-            .map(|range_pb| Range::try_from(range_pb))
-            .transpose()?;
+        let maybe_continue_range = resp.remaining.map(Range::try_from).transpose()?;
 
         Ok((records, maybe_continue_range))
     }

@@ -1,8 +1,7 @@
 use std::fmt::Debug;
 
 use anyhow::anyhow;
-
-use crate::pb;
+use obsidian_pb as pb;
 
 /// TabletState facilitates transfers of key ranges between tablets.
 ///

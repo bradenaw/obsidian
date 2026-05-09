@@ -1020,6 +1020,12 @@ dependencies = [
  "futures",
  "im",
  "log",
+ "obsidian_common",
+ "obsidian_external",
+ "obsidian_lsm",
+ "obsidian_olf",
+ "obsidian_pb",
+ "obsidian_util",
  "pretty_env_logger",
  "priority-queue",
  "proptest",
@@ -1032,6 +1038,105 @@ dependencies = [
  "tonic 0.9.2",
  "tonic-build",
  "uuid",
+]
+
+[[package]]
+name = "obsidian_common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "byteorder",
+ "console-subscriber",
+ "log",
+ "obsidian_pb",
+ "obsidian_util",
+ "pretty_env_logger",
+ "proptest",
+ "prost 0.11.9",
+ "rand 0.8.6",
+ "regex",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "obsidian_external"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "futures",
+ "log",
+ "obsidian_common",
+ "pretty_env_logger",
+ "tokio",
+]
+
+[[package]]
+name = "obsidian_lsm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "byteorder",
+ "console-subscriber",
+ "crossbeam",
+ "crossbeam-skiplist",
+ "futures",
+ "im",
+ "log",
+ "obsidian_common",
+ "obsidian_external",
+ "obsidian_olf",
+ "obsidian_util",
+ "pretty_env_logger",
+ "proptest",
+ "rand 0.8.6",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "obsidian_olf"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "byteorder",
+ "futures",
+ "log",
+ "obsidian_common",
+ "obsidian_external",
+ "obsidian_util",
+ "pretty_env_logger",
+ "proptest",
+ "rand 0.8.6",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "obsidian_pb"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "prost 0.11.9",
+ "tonic 0.9.2",
+ "tonic-build",
+]
+
+[[package]]
+name = "obsidian_util"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "futures",
+ "log",
+ "rand 0.8.6",
+ "tokio",
 ]
 
 [[package]]

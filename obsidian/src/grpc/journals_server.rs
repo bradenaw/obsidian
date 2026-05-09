@@ -6,13 +6,12 @@ use async_trait::async_trait;
 use futures::Stream;
 use futures::StreamExt;
 use futures::TryStreamExt;
+use obsidian_external::Journals;
+use obsidian_pb as pb;
+use obsidian_util::encode;
+use obsidian_util::Decode;
+use obsidian_util::Encode;
 
-use crate::pb;
-use crate::pb::external::JournalName;
-use crate::runtime::Journals;
-use crate::util::encode;
-use crate::util::Decode;
-use crate::util::Encode;
 use crate::JournalSeq;
 use crate::ShardId;
 
@@ -109,7 +108,9 @@ where
     }
 }
 
-fn shard_id_from_journal_name(journal_name: Option<JournalName>) -> Result<ShardId, tonic::Status> {
+fn shard_id_from_journal_name(
+    journal_name: Option<pb::external::JournalName>,
+) -> Result<ShardId, tonic::Status> {
     match journal_name
         .ok_or_else(|| tonic::Status::invalid_argument("missing journal_name"))?
         .journal_name

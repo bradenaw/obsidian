@@ -19,6 +19,12 @@ use async_trait::async_trait;
 use futures::future::pending;
 use futures::Stream;
 use futures::StreamExt;
+use obsidian_external::Journal;
+use obsidian_util::AtomicInstant;
+use obsidian_util::Retry;
+use obsidian_util::StateMachine;
+use obsidian_util::Watchable;
+use obsidian_util::WithBackground;
 use rand::Rng;
 use tokio::select;
 use tokio::sync::Notify;
@@ -31,13 +37,7 @@ use uuid::Uuid;
 pub(crate) use crate::election::proposal::Proposal;
 use crate::election::proposal::ProposalType;
 use crate::election::seq_waiters::SeqWaiters;
-use crate::runtime::Journal;
-use crate::util::AtomicInstant;
 use crate::util::AtomicTimestamp;
-use crate::util::Retry;
-use crate::util::StateMachine;
-use crate::util::Watchable;
-use crate::util::WithBackground;
 use crate::JournalSeq;
 use crate::Timestamp;
 
@@ -102,8 +102,8 @@ enum InnerParticipantState<TLeader, TFollower> {
 impl<TLeader, TFollower> InnerParticipantState<TLeader, TFollower> {
     fn as_participant_state(&self) -> ParticipantState<'_, TLeader, TFollower> {
         match self {
-            InnerParticipantState::Leader { leader, .. } => ParticipantState::Leader(&leader),
-            InnerParticipantState::Follower(follower) => ParticipantState::Follower(&follower),
+            InnerParticipantState::Leader { leader, .. } => ParticipantState::Leader(leader),
+            InnerParticipantState::Follower(follower) => ParticipantState::Follower(follower),
         }
     }
 }
@@ -227,7 +227,7 @@ where
             return Err(anyhow!("{} entry not accepted", self.name));
         }
 
-        return Ok(());
+        Ok(())
     }
 }
 
@@ -410,14 +410,9 @@ where
                     true
                 },
                 async |state| {
-                    if let Some(InnerParticipantState::Leader { lease_end, .. }) = state {
-                        lease_end.store(new_lease_end);
-                        return Ok(());
-                    }
-
                     let lease_end = Arc::new(AtomicTimestamp::new(new_lease_end));
                     let leader = match state.take().unwrap() {
-                        InnerParticipantState::Leader { .. } => unreachable!(),
+                        InnerParticipantState::Leader { leader, .. } => leader,
                         InnerParticipantState::Follower(follower) => {
                             let journal_writer = JournalWriter {
                                 name: self.name.clone(),
@@ -450,15 +445,12 @@ where
             .maybe_transition(
                 |state| !matches!(state, Some(InnerParticipantState::Follower(_))),
                 async |state| {
-                    if matches!(state, Some(InnerParticipantState::Follower(_))) {
-                        return Ok(());
-                    }
-
-                    log::info!("{} demoting to follower", self.name);
-
                     let follower = match state.take().unwrap() {
-                        InnerParticipantState::Leader { leader, .. } => leader.demote().await?,
-                        InnerParticipantState::Follower(_) => unreachable!(),
+                        InnerParticipantState::Leader { leader, .. } => {
+                            log::info!("{} demoting to follower", self.name);
+                            leader.demote().await?
+                        }
+                        InnerParticipantState::Follower(follower) => follower,
                     };
                     *state = Some(InnerParticipantState::Follower(follower));
                     self.became_leader_at.set(None);
@@ -577,13 +569,12 @@ where
                                 }
                             },
                         },
-                        Ratification::Rejected(proposal) => match proposal.proposal_type {
-                            ProposalType::Acquire{..} => {
+                        Ratification::Rejected(proposal) => {
+                            if let ProposalType::Acquire{..} = proposal.proposal_type {
                                 if proposal.participant_id == participant_id {
                                     pending_acquire = None;
                                 }
                             }
-                            _ => {},
                         },
                     }
                 },
@@ -620,7 +611,7 @@ fn jittered_ticker(x: Duration) -> impl Stream<Item = ()> {
     let mut next = Instant::now();
     stream! {
         loop {
-            next = next + rand::thread_rng().gen_range(x / 2..x * 3/2);
+            next += rand::thread_rng().gen_range(x / 2..x * 3/2);
             yield ();
             sleep_until(next).await;
         }

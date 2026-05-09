@@ -24,7 +24,7 @@ impl LockMgr {
         self.lock_all(read, std::iter::empty()).await
     }
 
-    pub async fn read_lock<'a, 'b>(&'a self, key: &'b [u8]) -> Guard<'a> {
+    pub async fn read_lock<'a>(&'a self, key: &[u8]) -> Guard<'a> {
         self.read_lock_all(std::iter::once(key)).await
     }
 
@@ -35,7 +35,7 @@ impl LockMgr {
         self.lock_all(std::iter::empty(), write).await
     }
 
-    pub async fn write_lock<'a, 'b>(&'a self, key: &'b [u8]) -> Guard<'a> {
+    pub async fn write_lock<'a>(&'a self, key: &[u8]) -> Guard<'a> {
         self.write_lock_all(std::iter::once(key)).await
     }
 

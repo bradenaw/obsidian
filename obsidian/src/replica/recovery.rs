@@ -3,16 +3,16 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use anyhow::anyhow;
+use obsidian_external::Storage;
+use obsidian_lsm::Lsm;
+use obsidian_lsm::LsmOptions;
+use obsidian_lsm::Preloader;
+use obsidian_util::hexlify;
 
-use crate::lsm::Lsm;
-use crate::lsm::LsmOptions;
-use crate::lsm::Manifest;
-use crate::lsm::Preloader;
-use crate::runtime;
-use crate::util::hexlify;
 use crate::JournalEntry;
 use crate::JournalSeq;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Mutation;
 use crate::RevisionValue;
 use crate::TabletId;
@@ -21,13 +21,13 @@ use crate::Timestamp;
 
 pub(super) struct ShardRecovery {
     lsm_options: LsmOptions,
-    storage: Arc<dyn runtime::Storage>,
+    storage: Arc<dyn Storage>,
 
     tablets: HashMap<TabletId, TabletRecovery>,
 }
 
 impl ShardRecovery {
-    pub fn empty(lsm_options: LsmOptions, storage: Arc<dyn runtime::Storage>) -> ShardRecovery {
+    pub fn empty(lsm_options: LsmOptions, storage: Arc<dyn Storage>) -> ShardRecovery {
         ShardRecovery {
             lsm_options,
             storage,
@@ -37,7 +37,7 @@ impl ShardRecovery {
 
     pub fn from_manifests(
         lsm_options: LsmOptions,
-        storage: Arc<dyn runtime::Storage>,
+        storage: Arc<dyn Storage>,
         manifests: HashMap<TabletId, Manifest>,
     ) -> ShardRecovery {
         let mut recovery = ShardRecovery::empty(lsm_options.clone(), Arc::clone(&storage));
@@ -74,11 +74,11 @@ struct TabletRecovery {
     )>,
     preloader: Preloader,
     lsm_options: LsmOptions,
-    storage: Arc<dyn runtime::Storage>,
+    storage: Arc<dyn Storage>,
 }
 
 impl TabletRecovery {
-    fn empty(lsm_options: LsmOptions, storage: Arc<dyn runtime::Storage>) -> TabletRecovery {
+    fn empty(lsm_options: LsmOptions, storage: Arc<dyn Storage>) -> TabletRecovery {
         TabletRecovery {
             writes: VecDeque::new(),
             preloader: Preloader::new(Arc::clone(&storage)),
@@ -89,7 +89,7 @@ impl TabletRecovery {
 
     fn from_manifest(
         lsm_options: LsmOptions,
-        storage: Arc<dyn runtime::Storage>,
+        storage: Arc<dyn Storage>,
         manifest: Manifest,
     ) -> TabletRecovery {
         let mut recovery = TabletRecovery::empty(lsm_options, storage);

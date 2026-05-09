@@ -1,13 +1,13 @@
 use anyhow::anyhow;
+use obsidian_common::uuid_from_proto;
+use obsidian_common::uuid_to_proto;
+use obsidian_pb as pb;
+use obsidian_util::encode;
+use obsidian_util::Decode;
+use obsidian_util::Encode;
 use prost::Message as _;
 
 use crate::election::ParticipantId;
-use crate::pb;
-use crate::types::uuid_from_proto;
-use crate::types::uuid_to_proto;
-use crate::util::encode;
-use crate::util::Decode;
-use crate::util::Encode;
 use crate::Timestamp;
 
 #[derive(Clone)]

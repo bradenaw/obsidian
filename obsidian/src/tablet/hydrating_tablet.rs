@@ -6,20 +6,20 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::anyhow;
+use obsidian_external::Storage;
+use obsidian_lsm::Lsm;
+use obsidian_lsm::LsmOptions;
+use obsidian_lsm::Preloader;
+use obsidian_util::spawn_owned;
+use obsidian_util::OwnedJoinHandle;
 
-use crate::lsm::Lsm;
-use crate::lsm::LsmOptions;
-use crate::lsm::Manifest;
-use crate::lsm::Preloader;
 use crate::runtime::Shards;
-use crate::runtime::Storage;
 use crate::tablet::frozen_tablet::FrozenTablet;
 use crate::tablet::read_only_lsm::ReadOnlyLsm;
 use crate::tablet::TabletJournalWriter;
-use crate::util::spawn_owned;
-use crate::util::OwnedJoinHandle;
 use crate::ColoGroupId;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Range;
 use crate::TabletId;
 
@@ -60,6 +60,7 @@ enum HydrationState {
 }
 
 impl HydratingTablet {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         tablet_id: TabletId,
         colo_group_id: ColoGroupId,
@@ -124,7 +125,7 @@ impl HydratingTablet {
         );
         let extra_keyspaces = {
             let mut guard = self.extra_keyspaces.lock().unwrap();
-            std::mem::replace(guard.deref_mut(), HashSet::new())
+            std::mem::take(guard.deref_mut())
         };
         for keyspace_id in extra_keyspaces.iter() {
             lsm.create_keyspace(*keyspace_id);

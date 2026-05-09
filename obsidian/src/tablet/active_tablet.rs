@@ -5,12 +5,15 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use futures::StreamExt;
 use futures::TryStreamExt;
+use obsidian_external::Storage;
+use obsidian_util::encode;
+use obsidian_util::Decode;
+use obsidian_util::OwnedWithBackground;
+use obsidian_util::Retry;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::lsm::Manifest;
 use crate::runtime::Shards;
-use crate::runtime::Storage;
 use crate::tablet::frozen_tablet::FrozenTablet;
 use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::journaled_lsm::LsmWrite;
@@ -18,10 +21,6 @@ use crate::tablet::read_only_lsm::LsmRead;
 use crate::tablet::tablet_inner::PendingMutation;
 use crate::tablet::tablet_inner::PrecondLocks;
 use crate::tablet::tablet_inner::TabletInner;
-use crate::util::encode;
-use crate::util::Decode;
-use crate::util::OwnedWithBackground;
-use crate::util::Retry;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -29,6 +28,7 @@ use crate::HistoryRange;
 use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Mutation;
 use crate::Precondition;
 use crate::Range;
@@ -64,8 +64,8 @@ impl ActiveTablet {
 
         let tablet = ActiveTablet(OwnedWithBackground::new(ActiveTabletInner {
             inner: TabletInner::new(tablet_id, colo_group_id, range, lsm),
-            storage: storage,
-            shards: shards,
+            storage,
+            shards,
             prepare_sender: prepare_sender.clone(),
         }));
 
@@ -204,7 +204,7 @@ impl ActiveTablet {
                 .inner
                 .unsafe_get_latest_record(keyspace_id, precond.key())
                 .await
-                .map_err(|e| InternalError::Other(e.into()))?
+                .map_err(InternalError::Other)?
                 .map(|(_, v)| match v {
                     RevisionValue::Regular(v) => v,
                     RevisionValue::Tombstone => vec![],

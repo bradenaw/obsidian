@@ -13,22 +13,23 @@ use async_trait::async_trait;
 use futures::future;
 use futures::StreamExt;
 use futures::TryStreamExt;
+use obsidian_lsm::Lsm;
+use obsidian_pb as pb;
+use obsidian_util::Decode;
+use obsidian_util::Retry;
+use obsidian_util::WithBackground;
 use prost::Message;
 use tokio::sync::mpsc;
 
-use crate::lsm::Lsm;
-use crate::lsm::Manifest;
 use crate::meta::MetaSynced;
-use crate::pb;
 use crate::runtime::Shards;
 use crate::runtime::Tablet;
 use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::journaled_lsm::LsmWrite;
 use crate::tablet::tablet_inner::TabletInner;
 use crate::tablet::tablet_journal_writer::TabletJournalWriter;
-use crate::util::Decode;
-use crate::util::Retry;
-use crate::util::WithBackground;
+use crate::util::key_set_from_proto;
+use crate::util::key_set_to_proto;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -36,6 +37,7 @@ use crate::HistoryRange;
 use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Mutation;
 use crate::Precondition;
 use crate::Range;
@@ -242,7 +244,7 @@ impl Tablet for ShardMetaTablet {
         _precond_keys: BTreeSet<Key>,
         _mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()> {
-        Err(anyhow!("ShardMetaTablet::cleanup_committed not allowed").into())
+        Err(anyhow!("ShardMetaTablet::cleanup_committed not allowed"))
     }
 
     async fn manifest(&self) -> anyhow::Result<Manifest> {
@@ -250,15 +252,15 @@ impl Tablet for ShardMetaTablet {
     }
 
     async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
-        Err(anyhow!("ShardMetaTablet::wait_mostly_hydrated not allowed").into())
+        Err(anyhow!("ShardMetaTablet::wait_mostly_hydrated not allowed"))
     }
 
     async fn catchup(&self) -> anyhow::Result<()> {
-        Err(anyhow!("ShardMetaTablet::catchup not allowed").into())
+        Err(anyhow!("ShardMetaTablet::catchup not allowed"))
     }
 
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
-        Err(anyhow!("ShardMetaTablet::find_split not allowed").into())
+        Err(anyhow!("ShardMetaTablet::find_split not allowed"))
     }
 }
 
@@ -383,7 +385,7 @@ impl ShardMetaTabletInner {
         let mut by_tablet = HashMap::new();
 
         for (keyspace_id, key) in precond_keys {
-            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
+            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, key)?;
             by_tablet
                 .entry(tablet_id)
                 .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()))
@@ -391,7 +393,7 @@ impl ShardMetaTabletInner {
                 .insert((*keyspace_id, key.clone()));
         }
         for (keyspace_id, key) in mut_keys {
-            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
+            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, key)?;
             by_tablet
                 .entry(tablet_id)
                 .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()))
@@ -461,11 +463,11 @@ impl From<TxOutcomeRecord> for pb::internal::TxOutcomeRecord {
                 } => Some(pb::internal::tx_outcome_record::OutcomeType::Committed(
                     pb::internal::tx_outcome_record::Committed {
                         ts: ts.as_micros(),
-                        precond_keys: Some(precond_keys.into()),
-                        mut_keys: Some(mut_keys.into()),
+                        precond_keys: Some(key_set_to_proto(precond_keys)),
+                        mut_keys: Some(key_set_to_proto(mut_keys)),
                     },
                 )),
-                TxOutcomeRecord::Aborted {} => {
+                TxOutcomeRecord::Aborted => {
                     Some(pb::internal::tx_outcome_record::OutcomeType::Aborted(()))
                 }
             },
@@ -486,10 +488,8 @@ impl TryFrom<pb::internal::TxOutcomeRecord> for TxOutcomeRecord {
                 },
             )) => TxOutcomeRecord::Committed {
                 ts: Timestamp::from_micros(ts),
-                mut_keys: BTreeSet::<Key>::try_from(
-                    mut_keys.ok_or_else(|| anyhow!("missing mut_keys"))?,
-                )?,
-                precond_keys: BTreeSet::<Key>::try_from(
+                mut_keys: key_set_from_proto(mut_keys.ok_or_else(|| anyhow!("missing mut_keys"))?)?,
+                precond_keys: key_set_from_proto(
                     precond_keys.ok_or_else(|| anyhow!("missing precond_keys"))?,
                 )?,
             },
@@ -571,8 +571,9 @@ impl Waiters {
 mod tests {
     use std::collections::BTreeSet;
 
+    use obsidian_pb as pb;
+
     use super::TxOutcomeRecord;
-    use crate::pb;
     use crate::test::assert_roundtrip_pb;
     use crate::ColoGroupId;
     use crate::KeyspaceId;

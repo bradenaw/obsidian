@@ -1,0 +1,23 @@
+[package]
+name = "obsidian_common"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = { version = "1.0.58", features = ["backtrace"] }
+byteorder = "1.4.3"
+console-subscriber = "0.4.1"
+log = "^0.4"
+obsidian_pb = { path = "../obsidian_pb" }
+obsidian_util = { path = "../obsidian_util" }
+pretty_env_logger = "^0.5"
+prost = "0.11.9"
+rand = "0.8.5"
+regex = "1.12.3"
+thiserror = "^1.0"
+uuid = { version = "1.18.1", features = ["v4", "v7"] }
+
+[dev-dependencies]
+proptest = "1.0.0"

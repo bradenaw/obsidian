@@ -9,6 +9,9 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use obsidian_external::Journal;
+use obsidian_external::Storage;
+use obsidian_lsm::LsmOptions;
 
 use crate::election::Follower;
 use crate::election::FollowerBuilder;
@@ -17,15 +20,11 @@ use crate::election::Leader;
 use crate::election::Participant;
 use crate::election::ParticipantState;
 use crate::election::Proposal;
-use crate::lsm::LsmOptions;
-use crate::lsm::Manifest;
 use crate::replica::recovery::ShardRecovery;
 use crate::runtime;
-use crate::runtime::Journal;
 use crate::runtime::Meta;
 use crate::runtime::Shard as _;
 use crate::runtime::Shards;
-use crate::runtime::Storage;
 use crate::shard::Shard;
 use crate::shard::ShardJournalWriter;
 use crate::Bound;
@@ -36,6 +35,7 @@ use crate::JournalEntry;
 use crate::JournalSeq;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Mutation;
 use crate::Precondition;
 use crate::Range;
@@ -194,7 +194,7 @@ impl runtime::Shard for Replica {
         {
             let tablets = self.tablets.read().unwrap();
             if let Some(tablet) = tablets.get(&tablet_id) {
-                return Ok(Arc::clone(&tablet));
+                return Ok(Arc::clone(tablet));
             }
         }
 
@@ -257,7 +257,7 @@ impl runtime::Shard for Replica {
                 if let ParticipantState::Leader(leader) = participant_state {
                     return leader.shard.tx_wait(txid).await;
                 }
-                Err(InternalError::NotLeader(self.shard_id).into())
+                Err(InternalError::NotLeader(self.shard_id))
             })
             .await
     }
