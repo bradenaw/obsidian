@@ -4,20 +4,17 @@ use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::hash::Hash;
 use std::hash::RandomState;
-use std::pin::pin;
-use std::pin::Pin;
+use std::io;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
-use tokio::io::AsyncWrite;
-
-use crate::runtime::FileName;
-use crate::runtime::FileReader;
-use crate::runtime::FileWriter;
-use crate::runtime::Storage;
+use obsidian_external::FileName;
+use obsidian_external::FileReader;
+use obsidian_external::FileWriter;
+use obsidian_external::Storage;
 
 /// CachedStorage wraps another implementation of `Storage`, holding pages in an
 /// approximately-LRU in-memory cache.
@@ -29,7 +26,13 @@ pub(crate) struct CachedStorage<S: Storage> {
     // Pages are cached by the name of their file and the offset of the start of the page.
     //
     // Values are at most `page_size`, but might be shorter at the end of a file.
-    cache: Arc<Cache<(FileName, u64), Arc<Vec<u8>>>>,
+    cache: Arc<Cache<CacheKey, Arc<Vec<u8>>>>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct CacheKey {
+    file_name: FileName,
+    offset: u64,
 }
 
 impl<S: Storage> CachedStorage<S> {
@@ -66,12 +69,12 @@ impl<S: Storage> Storage for CachedStorage<S> {
 
     async fn put(&self, name: FileName) -> anyhow::Result<Box<dyn FileWriter>> {
         Ok(Box::new(PutCacher {
-            inner: Box::pin(self.inner.put(name.clone()).await?),
+            inner: self.inner.put(name.clone()).await?,
             cache: self.cache.clone(),
             name,
             buf: Vec::with_capacity(self.page_size),
             buf_offset: 0,
-            page_size: self.page_size as usize,
+            page_size: self.page_size,
         }))
     }
 
@@ -80,9 +83,9 @@ impl<S: Storage> Storage for CachedStorage<S> {
         let len = f.len();
         Ok(Arc::new(GetCacher {
             inner: f,
-            len: len,
+            len,
             page_size: self.page_size,
-            name: name,
+            name,
             cache: self.cache.clone(),
         }) as Arc<dyn FileReader>)
     }
@@ -95,15 +98,12 @@ impl<S: Storage> Storage for CachedStorage<S> {
 // Caches pages while a file is being put.
 //
 // put() takes in a stream of bytes, so we have to wrap the reader of that stream.
-pub(crate) struct PutCacher<W>
-where
-    W: AsyncWrite,
-{
-    inner: W,
+pub(crate) struct PutCacher {
+    inner: Box<dyn FileWriter>,
     // The name of the file being written.
     name: FileName,
     // A reference to the cache from the CachedStorage this PutCacher was made from.
-    cache: Arc<Cache<(FileName, u64), Arc<Vec<u8>>>>,
+    cache: Arc<Cache<CacheKey, Arc<Vec<u8>>>>,
     // Must have `buf.capacity() == page_size`.
     buf: Vec<u8>,
     // The offset of the bytes contained in `buf` from the start of the file.
@@ -111,13 +111,10 @@ where
     page_size: usize,
 }
 
-impl<W> PutCacher<W>
-where
-    W: AsyncWrite + Unpin,
-{
+impl PutCacher {
     fn put(&mut self, buf: &[u8]) {
         let mut remaining = buf;
-        while remaining.len() > 0 {
+        while !remaining.is_empty() {
             let take = cmp::min(self.page_size - self.buf.len(), remaining.len());
             self.buf.extend_from_slice(&remaining[..take]);
             remaining = &remaining[take..];
@@ -130,59 +127,28 @@ where
 
     fn flush(&mut self) {
         let page = std::mem::replace(&mut self.buf, Vec::with_capacity(self.page_size));
-        self.cache
-            .insert((self.name.clone(), self.buf_offset), Arc::new(page));
+        self.cache.insert(
+            CacheKey {
+                file_name: self.name.clone(),
+                offset: self.buf_offset,
+            },
+            Arc::new(page),
+        );
         self.buf_offset += self.page_size as u64;
-    }
-
-    fn poll_write_inner(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        let inner = pin!(&mut self.inner);
-        match inner.poll_write(cx, &buf[..]) {
-            std::task::Poll::Ready(Ok(n)) => {
-                self.put(&buf[..n]);
-                return std::task::Poll::Ready(Ok(n));
-            }
-            x => return x,
-        }
     }
 }
 
-impl<W> AsyncWrite for PutCacher<W>
-where
-    W: FileWriter + Unpin,
-{
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        let self_ = Pin::get_mut(self);
-        self_.poll_write_inner(cx, buf)
+#[async_trait]
+impl FileWriter for PutCacher {
+    async fn write_all(&mut self, src: &[u8]) -> io::Result<()> {
+        self.inner.write_all(src).await?;
+        self.put(src);
+        Ok(())
     }
 
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), std::io::Error>> {
-        let self_ = Pin::get_mut(self);
-        let inner = pin!(&mut self_.inner);
-        inner.poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), std::io::Error>> {
-        let self_ = Pin::get_mut(self);
-        if self_.buf.len() > 0 {
-            self_.flush();
-        }
-        let inner = pin!(&mut self_.inner);
-        inner.poll_shutdown(cx)
+    async fn shutdown(&mut self) -> io::Result<()> {
+        self.flush();
+        self.inner.shutdown().await
     }
 }
 
@@ -194,7 +160,7 @@ pub(crate) struct GetCacher {
     len: u64,
     name: FileName,
     // A reference to the cache from the CachedStorage this GetCacher was made from.
-    cache: Arc<Cache<(FileName, u64), Arc<Vec<u8>>>>,
+    cache: Arc<Cache<CacheKey, Arc<Vec<u8>>>>,
 }
 
 #[async_trait]
@@ -218,15 +184,23 @@ impl FileReader for GetCacher {
             let page_offset = current_offset - (current_offset % (self.page_size as u64));
 
             // Attempt to fetch from cache, fall through and populate on a miss.
-            let page = match self.cache.get(&(self.name.clone(), page_offset)) {
+            let page = match self.cache.get(&CacheKey {
+                file_name: self.name.clone(),
+                offset: page_offset,
+            }) {
                 Some(b) => b,
                 None => {
                     let mut page =
                         vec![0u8; cmp::min(self.page_size as u64, self.len - page_offset) as usize];
                     self.inner.read_exact_at(&mut page, page_offset).await?;
                     let page_arc = Arc::new(page);
-                    self.cache
-                        .insert((self.name.clone(), page_offset), page_arc.clone());
+                    self.cache.insert(
+                        CacheKey {
+                            file_name: self.name.clone(),
+                            offset: page_offset,
+                        },
+                        page_arc.clone(),
+                    );
                     page_arc
                 }
             };
@@ -334,7 +308,7 @@ struct CacheEntry<K, V> {
 impl<K: Eq + Hash + Clone, V: Clone> CacheStripe<K, V> {
     fn new(capacity: usize) -> Self {
         Self {
-            capacity: capacity,
+            capacity,
             m: HashTrie::new(),
             entries: TreeList::new(),
             hand: 0,
@@ -382,7 +356,7 @@ impl<K: Eq + Hash + Clone, V: Clone> CacheStripe<K, V> {
             // place to put our new item.
             if let Some(prev_entry) = maybe_entry.replace(CacheEntry {
                 k: k.clone(),
-                v: v,
+                v,
                 touched: AtomicBool::new(true),
             }) {
                 self.evictions += 1;
@@ -400,7 +374,7 @@ impl<K: Eq + Hash + Clone, V: Clone> CacheStripe<K, V> {
                 entry.touched.store(true, Ordering::SeqCst);
                 Some(entry.v.clone())
             }
-            None => return None,
+            None => None,
         }
     }
 
@@ -464,7 +438,7 @@ impl<K: Eq + Hash, V> HashTrie<K, V> {
                     let child = children[child_idx]
                         .get_or_insert_with(|| Box::new(HashTrieNode::Leaf(HashMap::new())));
 
-                    return insert_inner(random_state, child, depth + 1, h, k, v);
+                    insert_inner(random_state, child, depth + 1, h, k, v)
                 }
                 HashTrieNode::Leaf(m) => {
                     // If we're this deep then we're out of hash bits, so we don't have any choice
@@ -474,10 +448,7 @@ impl<K: Eq + Hash, V> HashTrie<K, V> {
                         || m.len() < HASH_TRIE_LEAF_MAX
                         || m.contains_key(&k)
                     {
-                        if let None = m.insert(k, v) {
-                            return true;
-                        }
-                        return false;
+                        return m.insert(k, v).is_none();
                     }
 
                     // We didn't insert because we need to split the node.
@@ -489,7 +460,7 @@ impl<K: Eq + Hash, V> HashTrie<K, V> {
 
                         let child_idx = HashTrie::<K, V>::child_idx(other_h, depth);
 
-                        new_leaves[child_idx as usize]
+                        new_leaves[child_idx]
                             .get_or_insert_with(|| HashMap::new())
                             .insert(other_k, other_v);
                     }
@@ -499,7 +470,7 @@ impl<K: Eq + Hash, V> HashTrie<K, V> {
                     *node = HashTrieNode::Internal(children);
 
                     // After split, revisit the same node to actually insert k,v.
-                    return insert_inner(random_state, node, depth, h, k, v);
+                    insert_inner(random_state, node, depth, h, k, v)
                 }
             }
         }
@@ -513,7 +484,7 @@ impl<K: Eq + Hash, V> HashTrie<K, V> {
     fn get(&self, k: &K) -> Option<&V> {
         let mut curr = &self.root;
         let mut depth = 0;
-        let h = self.random_state.hash_one(&k);
+        let h = self.random_state.hash_one(k);
         loop {
             match curr {
                 HashTrieNode::Internal(children) => {
@@ -534,7 +505,7 @@ impl<K: Eq + Hash, V> HashTrie<K, V> {
     }
 
     fn remove(&mut self, k: &K) -> Option<V> {
-        let h = self.random_state.hash_one(&k);
+        let h = self.random_state.hash_one(k);
 
         fn remove_inner<K: Hash + Eq, V>(
             node: &mut HashTrieNode<K, V>,
@@ -545,7 +516,7 @@ impl<K: Eq + Hash, V> HashTrie<K, V> {
             match node {
                 HashTrieNode::Internal(children) => {
                     let child_idx = HashTrie::<K, V>::child_idx(h, depth);
-                    let child = (&mut children[child_idx]).as_mut()?;
+                    let child = children[child_idx].as_mut()?;
                     let result = remove_inner(child, depth + 1, h, k);
 
                     if result.is_some() {
@@ -577,7 +548,7 @@ impl<K: Eq + Hash, V> HashTrie<K, V> {
 
                         if all_leaves_or_vacant && n_grandchildren < HASH_TRIE_LEAF_MAX / 2 {
                             let all_grandchildren = children
-                                .into_iter()
+                                .iter_mut()
                                 .filter_map(|maybe_child| {
                                     maybe_child.take().map(|child| match *child {
                                         HashTrieNode::Leaf(m) => m.into_iter(),
@@ -597,11 +568,7 @@ impl<K: Eq + Hash, V> HashTrie<K, V> {
 
                     result
                 }
-                HashTrieNode::Leaf(m) => {
-                    let result = m.remove(k);
-
-                    result
-                }
+                HashTrieNode::Leaf(m) => m.remove(k),
             }
         }
 
@@ -683,7 +650,9 @@ mod tests {
     use std::hash::Hash;
     use std::hash::RandomState;
 
-    use tokio::io::AsyncWriteExt;
+    use obsidian_common::RunId;
+    use obsidian_external::mem::MemStorage;
+    use obsidian_external::FileName;
 
     use super::Cache;
     use super::CachedStorage;
@@ -693,9 +662,7 @@ mod tests {
     use super::TreeList;
     use super::HASH_TRIE_LEAF_MAX;
     use super::TREE_LIST_NODE_SIZE;
-    use crate::lsm::RunId;
-    use crate::runtime::FileName;
-    use crate::test::MemStorage;
+    use crate::storage::cached_storage::CacheKey;
 
     #[tokio::test]
     async fn test_cached_storage() -> anyhow::Result<()> {
@@ -745,7 +712,10 @@ mod tests {
         let mut pages_cached = 0;
         for (name, content) in &test_files {
             for page_offset in (0..content.len()).step_by(PAGE_SIZE) {
-                let key = (name.clone(), page_offset as u64);
+                let key = CacheKey {
+                    file_name: name.clone(),
+                    offset: page_offset as u64,
+                };
                 if let Some(_) = storage.cache.get(&key) {
                     println!("{:?} is in cache", key);
                     pages_cached += 1;

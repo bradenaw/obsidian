@@ -4,12 +4,10 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use obsidian_lsm::Lsm;
 
-use crate::lsm::Lsm;
-use crate::lsm::Manifest;
-use crate::meta::TabletState;
 use crate::runtime::Tablet;
-use crate::tablet::protected::ProtectedLsm;
+use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::tablet_inner::TabletInner;
 use crate::tablet::tablet_journal_writer::TabletJournalWriter;
 use crate::Bound;
@@ -19,6 +17,7 @@ use crate::HistoryRange;
 use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Mutation;
 use crate::Precondition;
 use crate::Range;
@@ -26,7 +25,6 @@ use crate::Record;
 use crate::Revision;
 use crate::TabletId;
 use crate::Timestamp;
-use crate::TxOutcome;
 use crate::Txid;
 
 /// MetaTablets are special from LsmTablets in two necessary ways:
@@ -39,7 +37,7 @@ use crate::Txid;
 /// 2. They cannot participate in 2PC. For the sake of the simplicity of the interface, it
 ///    implements those methods, but always errors.
 pub(crate) struct MetaTablet {
-    inner: TabletInner,
+    inner: TabletInner<JournaledLsm>,
 }
 
 impl MetaTablet {
@@ -51,8 +49,7 @@ impl MetaTablet {
                 TabletId::META,
                 ColoGroupId::META,
                 Range::all(),
-                ProtectedLsm::new(TabletId::META, lsm, TabletState::Active),
-                journal,
+                JournaledLsm::new(lsm, journal),
             ),
         }
     }
@@ -119,24 +116,6 @@ impl Tablet for MetaTablet {
         Err(anyhow!("MetaTablet::prepare not allowed").into())
     }
 
-    async fn try_commit(
-        &self,
-        _txid: Txid,
-        _ts: Timestamp,
-        _precond_keys: BTreeSet<Key>,
-        _mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<TxOutcome> {
-        Err(anyhow!("MetaTablet::try_commit not allowed").into())
-    }
-
-    async fn try_abort(&self, _txid: Txid) -> anyhow::Result<TxOutcome> {
-        Err(anyhow!("MetaTablet::try_abort not allowed").into())
-    }
-
-    async fn wait(&self, _txid: Txid) -> Result<TxOutcome, InternalError> {
-        Err(anyhow!("MetaTablet::wait not allowed").into())
-    }
-
     async fn cleanup_committed(
         &self,
         _txid: Txid,
@@ -144,11 +123,7 @@ impl Tablet for MetaTablet {
         _precond_keys: BTreeSet<Key>,
         _mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()> {
-        Err(anyhow!("MetaTablet::cleanup_committed not allowed").into())
-    }
-
-    async fn wait_meta_sync(&self, _ts: Timestamp) -> anyhow::Result<()> {
-        Err(anyhow!("MetaTablet::wait_meta_sync not allowed").into())
+        Err(anyhow!("MetaTablet::cleanup_committed not allowed"))
     }
 
     async fn manifest(&self) -> anyhow::Result<Manifest> {
@@ -156,14 +131,14 @@ impl Tablet for MetaTablet {
     }
 
     async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
-        Err(anyhow!("MetaTablet::wait_mostly_hydrated not allowed").into())
+        Err(anyhow!("MetaTablet::wait_mostly_hydrated not allowed"))
     }
 
     async fn catchup(&self) -> anyhow::Result<()> {
-        Err(anyhow!("MetaTablet::catchup not allowed").into())
+        Err(anyhow!("MetaTablet::catchup not allowed"))
     }
 
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
-        Err(anyhow!("MetaTablet::find_split not allowed").into())
+        Err(anyhow!("MetaTablet::find_split not allowed"))
     }
 }

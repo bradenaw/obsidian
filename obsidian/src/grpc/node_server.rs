@@ -6,6 +6,8 @@ use async_stream::stream;
 use async_trait::async_trait;
 use futures::Stream;
 use futures::StreamExt;
+use obsidian_pb as pb;
+use obsidian_util::hexlify;
 
 use crate::grpc::util::get_req_results;
 use crate::grpc::util::internal;
@@ -19,10 +21,8 @@ use crate::grpc::util::required;
 use crate::meta::MetaKey;
 use crate::meta::MetaMutation;
 use crate::meta::MetaValue;
-use crate::pb;
 use crate::runtime::Node;
 use crate::runtime::ReplicaState;
-use crate::util::hexlify;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -210,21 +210,21 @@ impl pb::internal::node_server::Node for NodeServer {
         }))
     }
 
-    async fn tablet_try_commit(
+    async fn shard_tx_try_commit(
         &self,
-        req: tonic::Request<pb::internal::TabletTryCommitReq>,
+        req: tonic::Request<pb::internal::ShardTxTryCommitReq>,
     ) -> Result<tonic::Response<pb::internal::TxOutcomeResp>, tonic::Status> {
         let req_inner = req.into_inner();
-        let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
-        let tablet = self.node.tablet(tablet_id).map_err(internal)?;
+        let shard_id = ShardId(req_inner.shard_id);
+        let shard = self.node.shard(shard_id).map_err(internal)?;
 
         let txid: Txid = required("txid", req_inner.txid)?;
         let commit_ts = Timestamp::from_micros(req_inner.ts);
         let precond_keys = key_set(req_inner.precond_keys)?;
         let mut_keys = key_set(req_inner.mut_keys)?;
 
-        let tx_outcome = tablet
-            .try_commit(txid, commit_ts, precond_keys, mut_keys)
+        let tx_outcome = shard
+            .tx_try_commit(txid, commit_ts, precond_keys, mut_keys)
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
@@ -233,18 +233,18 @@ impl pb::internal::node_server::Node for NodeServer {
         }))
     }
 
-    async fn tablet_try_abort(
+    async fn shard_tx_try_abort(
         &self,
-        req: tonic::Request<pb::internal::TabletTxidReq>,
+        req: tonic::Request<pb::internal::ShardTxidReq>,
     ) -> Result<tonic::Response<pb::internal::TxOutcomeResp>, tonic::Status> {
         let req_inner = req.into_inner();
-        let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
-        let tablet = self.node.tablet(tablet_id).map_err(internal)?;
+        let shard_id = ShardId(req_inner.shard_id);
+        let shard = self.node.shard(shard_id).map_err(internal)?;
 
         let txid: Txid = required("txid", req_inner.txid)?;
 
-        let tx_outcome = tablet
-            .try_abort(txid)
+        let tx_outcome = shard
+            .tx_try_abort(txid)
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
@@ -253,18 +253,18 @@ impl pb::internal::node_server::Node for NodeServer {
         }))
     }
 
-    async fn tablet_wait(
+    async fn shard_tx_wait(
         &self,
-        req: tonic::Request<pb::internal::TabletTxidReq>,
+        req: tonic::Request<pb::internal::ShardTxidReq>,
     ) -> Result<tonic::Response<pb::internal::TxOutcomeResp>, tonic::Status> {
         let req_inner = req.into_inner();
-        let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
-        let tablet = self.node.tablet(tablet_id).map_err(internal)?;
+        let shard_id = ShardId(req_inner.shard_id);
+        let shard = self.node.shard(shard_id).map_err(internal)?;
 
         let txid: Txid = required("txid", req_inner.txid)?;
 
-        let tx_outcome = tablet
-            .wait(txid)
+        let tx_outcome = shard
+            .tx_wait(txid)
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
@@ -288,24 +288,6 @@ impl pb::internal::node_server::Node for NodeServer {
 
         tablet
             .cleanup_committed(txid, commit_ts, precond_keys, mut_keys)
-            .await
-            .map_err(|e| tonic::Status::internal(e.to_string()))?;
-
-        Ok(tonic::Response::new(()))
-    }
-
-    async fn tablet_wait_meta_sync(
-        &self,
-        req: tonic::Request<pb::internal::TabletWaitMetaSyncReq>,
-    ) -> Result<tonic::Response<()>, tonic::Status> {
-        let req_inner = req.into_inner();
-        let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
-        let tablet = self.node.tablet(tablet_id).map_err(internal)?;
-
-        let ts = Timestamp::from_micros(req_inner.ts);
-
-        tablet
-            .wait_meta_sync(ts)
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
@@ -563,7 +545,7 @@ impl pb::internal::node_server::Node for NodeServer {
             }
 
             let mutation = Mutation::try_from(meta_key_mut_pb.mutation.ok_or_else(|| {
-                tonic::Status::invalid_argument(format!("missing mutation on MetaKeyMutation"))
+                tonic::Status::invalid_argument("missing mutation on MetaKeyMutation")
             })?)
             .map_err(invalid_argument)?;
             let meta_mutation = match mutation {

@@ -1,9 +1,10 @@
+//! Election provides leader election for a group of participants sharing a journal.
+
 mod seq_waiters;
 #[cfg(test)]
 mod tests;
 
 use std::future::Future;
-use std::ops::Deref;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -17,10 +18,15 @@ use async_trait::async_trait;
 use futures::future::pending;
 use futures::Stream;
 use futures::StreamExt;
+use obsidian_external::Journal;
+use obsidian_util::AtomicInstant;
+use obsidian_util::Retry;
+use obsidian_util::StateMachine;
+use obsidian_util::Watchable;
+use obsidian_util::WithBackground;
 use rand::Rng;
 use tokio::select;
 use tokio::sync::Notify;
-use tokio::sync::RwLock as AsyncRwLock;
 use tokio::time::interval;
 use tokio::time::sleep_until;
 use tokio::time::Instant;
@@ -28,12 +34,7 @@ use tokio_stream::wrappers::IntervalStream;
 use uuid::Uuid;
 
 use crate::election::seq_waiters::SeqWaiters;
-use crate::runtime::Journal;
-use crate::util::AtomicInstant;
 use crate::util::AtomicTimestamp;
-use crate::util::Retry;
-use crate::util::Watchable;
-use crate::util::WithBackground;
 use crate::JournalSeq;
 use crate::Timestamp;
 
@@ -75,11 +76,8 @@ struct ParticipantInner<TEntry, TLeader, TFollower> {
     lease_grace_period: Duration,
 
     // This is Option just for the convenience of take() when promoting/demoting. It's always Some
-    // when locked.
-    state: AsyncRwLock<Option<InnerParticipantState<TLeader, TFollower>>>,
-    // Notified when the participant needs to be promoted or demoted, so that with_state can early
-    // exit.
-    state_change_request: Notify,
+    // when not transitioning.
+    state_machine: StateMachine<Option<InnerParticipantState<TLeader, TFollower>>>,
     // Just for the sake of became_leader_at_subscribe().
     became_leader_at: Watchable<Option<JournalSeq>>,
     poison: Arc<AtomicBool>,
@@ -101,8 +99,8 @@ enum InnerParticipantState<TLeader, TFollower> {
 impl<TLeader, TFollower> InnerParticipantState<TLeader, TFollower> {
     fn as_participant_state(&self) -> ParticipantState<'_, TLeader, TFollower> {
         match self {
-            InnerParticipantState::Leader { leader, .. } => ParticipantState::Leader(&leader),
-            InnerParticipantState::Follower(follower) => ParticipantState::Follower(&follower),
+            InnerParticipantState::Leader { leader, .. } => ParticipantState::Leader(leader),
+            InnerParticipantState::Follower(follower) => ParticipantState::Follower(follower),
         }
     }
 }
@@ -247,7 +245,7 @@ where
             return Err(anyhow!("{} entry not accepted", self.name));
         }
 
-        return Ok(());
+        Ok(())
     }
 }
 
@@ -274,10 +272,9 @@ where
             heartbeat_interval: lease_duration * 3 / 10,
             renew_interval: lease_duration * 3 / 10,
             lease_grace_period: lease_duration * 2 / 10,
-            state: AsyncRwLock::new(Some(InnerParticipantState::Follower(
+            state_machine: StateMachine::new(Some(InnerParticipantState::Follower(
                 follower_builder.build(),
             ))),
-            state_change_request: Notify::new(),
             became_leader_at: Watchable::new(None),
             poison: Arc::new(AtomicBool::new(false)),
             abandon: Arc::new(Notify::new()),
@@ -295,12 +292,14 @@ where
                         );
                     }
                     participant.poison.store(true, Ordering::SeqCst);
-                    participant.state_change_request.notify_waiters();
-                    {
-                        let mut state = participant.state.write().await;
-                        *state = Some(InnerParticipantState::Follower(follower_builder.build()));
-                        participant.poison.store(false, Ordering::SeqCst);
-                    }
+                    participant
+                        .state_machine
+                        .transition(async |state| {
+                            *state =
+                                Some(InnerParticipantState::Follower(follower_builder.build()));
+                        })
+                        .await;
+                    participant.poison.store(false, Ordering::SeqCst);
                     Err::<(), anyhow::Error>(anyhow!(
                         "{} background_process terminated",
                         participant.name,
@@ -323,64 +322,51 @@ where
         T: Send + 'static,
         E: From<anyhow::Error> + Send + 'static,
     {
-        let state_change_request = self.0.state_change_request.notified();
-        let state = self.0.state.read().await;
-        if self.0.poison.load(Ordering::SeqCst) {
-            return Err(anyhow!(
-                "{} aborted operation: participant state change requested",
-                self.0.name,
-            )
-            .into());
-        }
+        self.0
+            .state_machine
+            .with_state(async |state| {
+                if self.0.poison.load(Ordering::SeqCst) {
+                    return Err(anyhow!(
+                        "{} aborted operation: participant state change requested",
+                        self.0.name,
+                    )
+                    .into());
+                }
 
-        let out = select! {
-            biased; // Important: causes the state_change_request to take precedence. This is
-                    // important because otherwise we might cancel an `f` (causing its mutexes to
-                    // be released, even if state is intermediate) but continue running another
-                    // future that then acquires those mutexes.
+                let out = f(state
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("{} no participant state present", self.0.name))?
+                    .as_participant_state())
+                .await?;
 
-            _ = state_change_request => {
-                return Err(anyhow!(
-                    "{} aborted operation: participant state change requested",
-                    self.0.name,
-                )
-                .into());
-            },
-            out =
-                f(state
-                .as_ref()
-                .ok_or_else(|| anyhow!("{} no participant state present", self.0.name))?
-                .as_participant_state()) => {
-                out?
-            },
-        };
+                if let Some(InnerParticipantState::Leader {
+                    last_confirmation, ..
+                }) = state
+                {
+                    if self.0.poison.load(Ordering::SeqCst) {
+                        return Err(anyhow!(
+                            "{} aborted operation: participant state change requested",
+                            self.0.name
+                        )
+                        .into());
+                    }
+                    if Instant::now().duration_since(last_confirmation.load())
+                        > self
+                            .0
+                            .lease_duration
+                            .saturating_sub(self.0.lease_grace_period)
+                    {
+                        return Err(anyhow!(
+                            "{} aborted operation: lease expired before completion",
+                            self.0.name
+                        )
+                        .into());
+                    }
+                }
 
-        if let Some(InnerParticipantState::Leader {
-            last_confirmation, ..
-        }) = state.deref()
-        {
-            if self.0.poison.load(Ordering::SeqCst) {
-                return Err(anyhow!(
-                    "{} aborted operation: participant state change requested",
-                    self.0.name
-                )
-                .into());
-            }
-            if Instant::now().duration_since(last_confirmation.load())
-                > self
-                    .0
-                    .lease_duration
-                    .saturating_sub(self.0.lease_grace_period)
-            {
-                return Err(anyhow!(
-                    "{} aborted operation: lease expired before completion",
-                    self.0.name
-                )
-                .into());
-            }
-        }
-
-        Ok(out)
+                Ok(out)
+            })
+            .await
     }
 
     pub fn became_leader_at_subscribe(&self) -> (Option<JournalSeq>, impl Future<Output = ()>) {
@@ -426,97 +412,83 @@ where
         new_lease_end: Timestamp,
         new_confirmation: Instant,
     ) -> anyhow::Result<()> {
-        {
-            let maybe_state = self.state.read().await;
-            if let Some(InnerParticipantState::Leader {
-                lease_end,
-                last_confirmation,
-                ..
-            }) = maybe_state.deref()
-            {
-                lease_end.store(new_lease_end);
-                last_confirmation.store(new_confirmation);
-                return Ok(());
-            }
-        }
+        self.state_machine
+            .maybe_transition(
+                |state| {
+                    if let Some(InnerParticipantState::Leader {
+                        lease_end,
+                        last_confirmation,
+                        ..
+                    }) = state
+                    {
+                        lease_end.store(new_lease_end);
+                        last_confirmation.store(new_confirmation);
+                        return false;
+                    }
+                    true
+                },
+                async |state| {
+                    let lease_end = Arc::new(AtomicTimestamp::new(new_lease_end));
+                    let leader = match state.take().unwrap() {
+                        InnerParticipantState::Leader { leader, .. } => leader,
+                        InnerParticipantState::Follower(follower) => {
+                            let journal_writer = JournalWriter {
+                                name: self.name.clone(),
+                                participant_id,
+                                journal: Arc::clone(&self.journal),
+                                lease_end: Arc::downgrade(&lease_end),
+                                accepted_seqs: Arc::clone(&self.accepted_seqs),
+                                abandon: Arc::clone(&self.abandon),
+                                poison: Arc::clone(&self.poison),
+                            };
+                            follower.promote(journal_writer).await?
+                        }
+                    };
+                    *state = Some(InnerParticipantState::Leader {
+                        leader,
+                        lease_end,
+                        last_confirmation: AtomicInstant::new(new_confirmation),
+                    });
+                    self.became_leader_at.set(Some(seq));
 
-        self.state_change_request.notify_waiters();
-
-        let mut maybe_state = self.state.write().await;
-        if let Some(InnerParticipantState::Leader { lease_end, .. }) = maybe_state.deref() {
-            lease_end.store(new_lease_end);
-            return Ok(());
-        }
-
-        log::info!("{} promoting to leader", self.name);
-
-        let state = maybe_state.take().unwrap();
-        let lease_end = Arc::new(AtomicTimestamp::new(new_lease_end));
-        let leader = match state {
-            InnerParticipantState::Leader { .. } => unreachable!(),
-            InnerParticipantState::Follower(follower) => {
-                let journal_writer = JournalWriter {
-                    name: self.name.clone(),
-                    participant_id,
-                    journal: Arc::clone(&self.journal),
-                    lease_end: Arc::downgrade(&lease_end),
-                    accepted_seqs: Arc::clone(&self.accepted_seqs),
-                    abandon: Arc::clone(&self.abandon),
-                    poison: Arc::clone(&self.poison),
-                };
-                follower.promote(journal_writer).await?
-            }
-        };
-        *maybe_state = Some(InnerParticipantState::Leader {
-            leader,
-            lease_end,
-            last_confirmation: AtomicInstant::new(new_confirmation),
-        });
-        self.became_leader_at.set(Some(seq));
-
-        Ok(())
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_or(Ok(()))
     }
 
     async fn demote_if_leader(&self) -> anyhow::Result<()> {
-        {
-            let maybe_state = self.state.read().await;
-            if matches!(
-                maybe_state.deref(),
-                Some(InnerParticipantState::Follower(_))
-            ) {
-                return Ok(());
-            }
-        }
-
-        self.state_change_request.notify_waiters();
-
-        let mut maybe_state = self.state.write().await;
-        if matches!(
-            maybe_state.deref(),
-            Some(InnerParticipantState::Follower(_))
-        ) {
-            return Ok(());
-        }
-
-        log::info!("{} demoting to follower", self.name);
-
-        let state = maybe_state.take().unwrap();
-        let follower = match state {
-            InnerParticipantState::Leader { leader, .. } => leader.demote().await?,
-            InnerParticipantState::Follower(_) => unreachable!(),
-        };
-        *maybe_state = Some(InnerParticipantState::Follower(follower));
-        self.became_leader_at.set(None);
-
-        Ok(())
+        self.state_machine
+            .maybe_transition(
+                |state| !matches!(state, Some(InnerParticipantState::Follower(_))),
+                async |state| {
+                    let follower = match state.take().unwrap() {
+                        InnerParticipantState::Leader { leader, .. } => {
+                            log::info!("{} demoting to follower", self.name);
+                            leader.demote().await?
+                        }
+                        InnerParticipantState::Follower(follower) => follower,
+                    };
+                    *state = Some(InnerParticipantState::Follower(follower));
+                    self.became_leader_at.set(None);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_or(Ok(()))
     }
 
     async fn process(&self, seq: JournalSeq, entry: TEntry) {
-        let maybe_state = self.state.read().await;
-        let state = maybe_state.as_ref().unwrap();
-        if let InnerParticipantState::Follower(follower) = state {
-            follower.process(seq, entry).await;
-        }
+        self.state_machine
+            .with_state(async |state| {
+                if let InnerParticipantState::Follower(follower) = state.as_ref().unwrap() {
+                    follower.process(seq, entry).await;
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .expect("transition is not supposed to happen concurrently with process")
     }
 
     async fn background_process(&self, participant_id: ParticipantId) -> anyhow::Result<()> {
@@ -615,13 +587,12 @@ where
                                 }
                             },
                         },
-                        Ratification::Rejected(proposal) => match proposal.proposal_type {
-                            ProposalType::Acquire{..} => {
+                        Ratification::Rejected(proposal) => {
+                            if let ProposalType::Acquire{..} = proposal.proposal_type {
                                 if proposal.participant_id == participant_id {
                                     pending_acquire = None;
                                 }
                             }
-                            _ => {},
                         },
                     }
                 },
@@ -658,7 +629,7 @@ fn jittered_ticker(x: Duration) -> impl Stream<Item = ()> {
     let mut next = Instant::now();
     stream! {
         loop {
-            next = next + rand::thread_rng().gen_range(x / 2..x * 3/2);
+            next += rand::thread_rng().gen_range(x / 2..x * 3/2);
             yield ();
             sleep_until(next).await;
         }

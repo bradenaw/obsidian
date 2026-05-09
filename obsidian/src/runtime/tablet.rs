@@ -3,20 +3,19 @@ use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 
-use crate::lsm::Manifest;
 use crate::Bound;
 use crate::Direction;
 use crate::HistoryRange;
 use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Mutation;
 use crate::Precondition;
 use crate::Range;
 use crate::Record;
 use crate::Revision;
 use crate::Timestamp;
-use crate::TxOutcome;
 use crate::Txid;
 
 #[async_trait]
@@ -76,15 +75,6 @@ pub(crate) trait Tablet: Send + Sync {
         muts: BTreeMap<Key, Mutation>,
     ) -> Result<Timestamp, InternalError>;
 
-    async fn try_commit(
-        &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<Key>,
-        mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<TxOutcome>;
-    async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome>;
-    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError>;
     async fn cleanup_committed(
         &self,
         txid: Txid,
@@ -92,8 +82,6 @@ pub(crate) trait Tablet: Send + Sync {
         precond_keys: BTreeSet<Key>,
         mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()>;
-
-    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()>;
 
     async fn manifest(&self) -> anyhow::Result<Manifest>;
 
@@ -103,5 +91,3 @@ pub(crate) trait Tablet: Send + Sync {
 
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>>;
 }
-
-trait TabletExt {}

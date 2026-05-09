@@ -19,15 +19,15 @@ use futures::pin_mut;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use futures::TryStreamExt;
+use obsidian_util::encode;
+use obsidian_util::merge_sorted;
+use obsidian_util::Decode;
+use obsidian_util::Encode;
+use obsidian_util::OrdEqByFirst;
 use rand::thread_rng;
 use rand::Rng;
 
 use crate::rtest::graph::Graph;
-use crate::util::encode;
-use crate::util::merge_sorted;
-use crate::util::Decode;
-use crate::util::Encode;
-use crate::util::OrdEqByFirst;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -142,7 +142,7 @@ impl WorkloadAppend {
                 &histories,
             );
 
-            println!("");
+            println!();
             for (i, (txid, next_edge)) in cycle.iter().enumerate() {
                 let edge_expl = match next_edge {
                     EdgeType::RealTime => "[rt] happened after",
@@ -155,9 +155,9 @@ impl WorkloadAppend {
                 };
 
                 if i == 0 {
-                    println!("  ┌──> {:?}: {:?}", txid, tx_results.get(&txid).unwrap());
+                    println!("  ┌──> {:?}: {:?}", txid, tx_results.get(txid).unwrap());
                 } else {
-                    println!("  │    {:?}: {:?}", txid, tx_results.get(&txid).unwrap());
+                    println!("  │    {:?}: {:?}", txid, tx_results.get(txid).unwrap());
                 }
                 println!("  │     │");
                 println!("  │     │ {}...", edge_expl);
@@ -418,7 +418,7 @@ fn gen_graph(histories: &Vec<Vec<(Seq, HistoryItem)>>) -> anyhow::Result<Graph<T
                 }
 
                 let longest = longests.get(&list_id).unwrap();
-                if !longest.starts_with(&txids) {
+                if !longest.starts_with(txids) {
                     return Err(anyhow!(
                         "divergent histories for {:?}:\n\t{:?}\n\t{:?}",
                         list_id,
@@ -549,7 +549,7 @@ fn find_cycle(graph: &Graph<Txid, EdgeType>) -> Option<Vec<(Txid, EdgeType)>> {
 
         result.push((a, edge_type));
     }
-    return Some(result);
+    Some(result)
 }
 
 fn strongly_connected_components(graph: &Graph<Txid, EdgeType>) -> Vec<HashSet<Txid>> {
@@ -577,7 +577,7 @@ fn strongly_connected_components(graph: &Graph<Txid, EdgeType>) -> Vec<HashSet<T
         set.insert(txid);
 
         for (next, _) in graph.out_edges(&txid) {
-            if !low_links.contains_key(&next) {
+            if !low_links.contains_key(next) {
                 visit(*next, graph, stack, set, low_links, ids, sccs);
                 low_links.insert(
                     txid,
@@ -702,16 +702,17 @@ enum EdgeType {
 #[derive(Eq, PartialEq, Ord, PartialOrd, Hash, Clone, Copy, Debug)]
 struct ListId(u64);
 impl ListId {
-    fn to_key(&self) -> Vec<u8> {
+    fn to_key(self) -> Vec<u8> {
         let mut key = vec![0u8; 8];
         LittleEndian::write_u64(&mut key, self.0);
         key
     }
 }
 
+#[derive(Clone, Copy)]
 struct ListItem(ListId, u64);
 impl ListItem {
-    fn to_key(&self) -> Vec<u8> {
+    fn to_key(self) -> Vec<u8> {
         let mut key = vec![0u8; 16];
         LittleEndian::write_u64(&mut key, self.0 .0 + 1000);
         BigEndian::write_u64(&mut key[8..], self.1);
@@ -727,7 +728,7 @@ struct Seq(u64);
 
 impl Encode for Txid {
     fn encoded_size_estimate(&self) -> usize {
-        return 8;
+        8
     }
 
     fn encode(&self, w: &mut Vec<u8>) {
@@ -751,6 +752,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use obsidian_external::mem::MemJournals;
+    use obsidian_external::mem::MemStorage;
+
     use super::strongly_connected_components;
     use super::EdgeType;
     use super::Txid;
@@ -759,8 +763,6 @@ mod tests {
     use crate::rtest::workload_append::WorkloadAppendOptions;
     use crate::test::GrpcInProcessNodeBuilder;
     use crate::test::InProcessNodeBuilder;
-    use crate::test::MemJournals;
-    use crate::test::MemStorage;
     use crate::test::ObsidianForTest;
     use crate::test::ObsidianForTestBuilder;
     use crate::Bound;

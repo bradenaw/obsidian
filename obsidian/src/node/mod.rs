@@ -1,3 +1,5 @@
+//! Nodes represent a single process, and can be assigned shards to serve.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -9,12 +11,19 @@ use futures::future::Either;
 use futures::stream::FuturesUnordered;
 use futures::Stream;
 use futures::StreamExt;
+use obsidian_external::Journals;
+use obsidian_external::Storage;
+use obsidian_lsm::LsmOptions;
+use obsidian_util::Owned;
+use obsidian_util::Retry;
+use obsidian_util::WeakView;
+use obsidian_util::WithBackground;
 use tokio::sync::Notify;
 
 use crate::election::Proposal;
-use crate::lsm::LsmOptions;
 use crate::meta::Meta;
 use crate::meta::MetaKey;
+use crate::meta::MetaMutation;
 use crate::meta::MetaReader;
 use crate::meta::MetaSubscriber;
 use crate::meta::MetaSynced;
@@ -22,22 +31,28 @@ use crate::meta::MetaSyncedSnapshot;
 use crate::meta::SyncType;
 use crate::replica::Replica;
 use crate::runtime;
-use crate::runtime::Journals;
 use crate::runtime::Nodes;
 use crate::runtime::ReplicaState;
 use crate::runtime::Shard as _;
 use crate::runtime::Shards;
-use crate::runtime::Storage;
 use crate::supervisor::Supervisor;
-use crate::util::Retry;
-use crate::util::WithBackground;
+use crate::Bound;
+use crate::ColoGroupId;
+use crate::InternalError;
 use crate::JournalEntry;
+use crate::KeyspaceId;
 use crate::NodeId;
+use crate::Range;
+use crate::Record;
+use crate::Revision;
 use crate::ShardId;
 use crate::TabletId;
+use crate::Timestamp;
+use crate::TransferId;
 
-/// Node represents one of the processes of Obsidian running in a system. All nodes serve the
-/// gateway service as well as being available to having shards assigned to them.
+/// Node represents one of the processes of Obsidian running in a system. Nodes register themselves
+/// with meta to make themselves available to having shards assigned, at which point they join
+/// leader election for the shard.
 ///
 /// Most shards are assigned by the Supervisor via metadata stored in Meta. However, this obviously
 /// cannot work for the Meta shard itself nor the Supervisor, so those are boostrapped specially.
@@ -55,10 +70,8 @@ struct NodeInner {
     meta_synced: Arc<MetaSynced>,
     journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
 
-    // TODO: We want to be able to stop these just by setting them to None, but handing
-    // out an Arc from meta()/supervisor() means any caller can keep it alive indefinitely.
-    supervisor: RwLock<Option<Arc<Supervisor>>>,
-    maybe_meta: RwLock<Option<Arc<Meta>>>,
+    supervisor: RwLock<Option<Owned<Supervisor>>>,
+    maybe_meta: RwLock<Option<Owned<Meta>>>,
     replicas: RwLock<HashMap<ShardId, Arc<Replica>>>,
     replicas_changed: Notify,
 }
@@ -103,7 +116,7 @@ impl Node {
             // so we need to wait to do this until after the leader election is finished.
             Retry::new()
                 .indefinitely(&async || {
-                    inner.meta.add_node(inner.node_id.clone()).await?;
+                    inner.meta.add_node(inner.node_id).await?;
                     Ok::<(), anyhow::Error>(())
                 })
                 .await;
@@ -129,9 +142,9 @@ impl runtime::Node for Node {
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn runtime::Shard>> {
         let replicas = self.0.replicas.read().unwrap();
         if let Some(shard) = replicas.get(&shard_id).as_ref() {
-            return Ok(Arc::clone(shard) as Arc<dyn runtime::Shard>);
+            Ok(Arc::clone(shard) as Arc<dyn runtime::Shard>)
         } else {
-            return Err(anyhow!("{:?} does not own {:?}", self.0.node_id, shard_id));
+            Err(anyhow!("{:?} does not own {:?}", self.0.node_id, shard_id))
         }
     }
 
@@ -140,7 +153,7 @@ impl runtime::Node for Node {
         let meta = maybe_meta
             .as_ref()
             .ok_or_else(|| anyhow!("{:?} is not currently hosting meta", self.0.node_id))?;
-        Ok(Arc::clone(meta) as Arc<dyn runtime::Meta>)
+        Ok(Owned::weak(meta))
     }
 
     fn supervisor(&self) -> anyhow::Result<Arc<dyn runtime::Supervisor>> {
@@ -151,14 +164,14 @@ impl runtime::Node for Node {
                 self.0.node_id
             )
         })?;
-        Ok(Arc::clone(supervisor) as Arc<dyn runtime::Supervisor>)
+        Ok(Owned::weak(supervisor))
     }
 
     fn shards_subscribe(
         &self,
     ) -> Box<dyn Stream<Item = anyhow::Result<HashMap<ShardId, ReplicaState>>> + Send + Unpin + '_>
     {
-        Box::new(self.0.shards_subscribe().map(|shards| Ok(shards)))
+        Box::new(self.0.shards_subscribe().map(Ok))
     }
 }
 
@@ -248,9 +261,9 @@ impl NodeInner {
                     // leader and a later entry in `stream` should tell us that.
                     if let Some(meta_shard) = replicas.get(&ShardId::META) {
                         if let Ok(meta_tablet) = meta_shard.tablet(TabletId::META) {
-                            let meta = Arc::new(Meta::new(meta_tablet));
-                            *supervisor = Some(Arc::new(Supervisor::new(
-                                Arc::clone(&meta) as Arc<dyn runtime::Meta>,
+                            let meta = Owned::new(Meta::new(meta_tablet));
+                            *supervisor = Some(Owned::new(Supervisor::new(
+                                Owned::weak(&meta),
                                 Arc::clone(&self.meta_synced),
                                 Arc::clone(&self.shards),
                             )));
@@ -323,5 +336,97 @@ impl MetaSubscriber for NodeInner {
                 self.try_sync_meta(&sync_type, &snapshot).await
             })
             .await;
+    }
+}
+
+#[async_trait]
+impl runtime::Supervisor for WeakView<Supervisor> {
+    async fn start_move(&self, src: TabletId, dst: ShardId) -> anyhow::Result<TransferId> {
+        self.or_closed(async |inner| inner.start_move(src, dst).await)
+            .await
+    }
+
+    async fn start_split(
+        &self,
+        src: TabletId,
+        dst_a: ShardId,
+        dst_b: ShardId,
+    ) -> anyhow::Result<TransferId> {
+        self.or_closed(async |inner| inner.start_split(src, dst_a, dst_b).await)
+            .await
+    }
+
+    async fn start_merge(&self, srcs: Vec<TabletId>, dst: ShardId) -> anyhow::Result<TransferId> {
+        self.or_closed(async |inner| inner.start_merge(srcs, dst).await)
+            .await
+    }
+
+    async fn wait_transfer(&self, transfer_id: TransferId) -> anyhow::Result<()> {
+        self.or_closed(async |inner| inner.wait_transfer(transfer_id).await)
+            .await
+    }
+}
+
+#[async_trait]
+impl runtime::Meta for WeakView<Meta> {
+    async fn add_shard(&self, shard_id: ShardId) -> anyhow::Result<()> {
+        self.or_closed(async |inner| inner.add_shard(shard_id).await)
+            .await
+    }
+
+    async fn add_node(&self, node_id: NodeId) -> anyhow::Result<()> {
+        self.or_closed(async |inner| inner.add_node(node_id).await)
+            .await
+    }
+
+    async fn create_colo_group(
+        &self,
+        colo_group_id: ColoGroupId,
+        initial_splits: Vec<Bound<Vec<u8>>>,
+    ) -> anyhow::Result<()> {
+        self.or_closed(async |inner| inner.create_colo_group(colo_group_id, initial_splits).await)
+            .await
+    }
+
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+        self.or_closed(async |inner| inner.create_keyspace(keyspace_id).await)
+            .await
+    }
+
+    async fn latest_snapshot(&self) -> anyhow::Result<Timestamp> {
+        self.or_closed(async |inner| inner.latest_snapshot().await)
+            .await
+    }
+
+    async fn wait_for_newer(&self, ts: Timestamp) -> anyhow::Result<()> {
+        self.or_closed(async |inner| inner.wait_for_newer(ts).await)
+            .await
+    }
+
+    async fn scan_page(
+        &self,
+        ts: Timestamp,
+        range: Range<Vec<u8>>,
+    ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)> {
+        self.or_closed(async |inner| inner.scan_page(ts, range).await)
+            .await
+    }
+
+    async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Revision>, Timestamp)> {
+        self.or_closed(async |inner| inner.sync(ts).await).await
+    }
+
+    async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
+        self.or_closed(async |inner| inner.tablet_ids(ts).await)
+            .await
+    }
+
+    async fn write(
+        &self,
+        snapshot_ts: Timestamp,
+        muts: HashMap<MetaKey, MetaMutation>,
+    ) -> Result<Timestamp, InternalError> {
+        self.or_closed(async |inner| inner.write(snapshot_ts, muts).await)
+            .await
     }
 }

@@ -8,6 +8,10 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 use futures::FutureExt;
 use futures::Stream;
+use obsidian_util::hexlify;
+use obsidian_util::Background;
+use obsidian_util::Retry;
+use obsidian_util::WithBackground;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
@@ -18,12 +22,8 @@ use crate::meta::MetaSubscriber;
 use crate::meta::TabletState;
 use crate::router::StaticRouter;
 use crate::runtime::Meta;
-use crate::util::hexlify;
 use crate::util::wait_all;
-use crate::util::Background;
-use crate::util::Retry;
 use crate::util::WaitableTimestamp;
-use crate::util::WithBackground;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -150,7 +150,7 @@ impl MetaSynced {
         key: &[u8],
     ) -> anyhow::Result<TabletId> {
         let inner = self.inner.read().unwrap();
-        return inner.router.tablet_id_for_key(colo_group_id, key);
+        inner.router.tablet_id_for_key(colo_group_id, key)
     }
 
     pub(crate) fn tablet_id_for_bound(
@@ -160,9 +160,9 @@ impl MetaSynced {
         direction: Direction,
     ) -> anyhow::Result<TabletId> {
         let inner = self.inner.read().unwrap();
-        return inner
+        inner
             .router
-            .tablet_id_for_bound(colo_group_id, bound, direction);
+            .tablet_id_for_bound(colo_group_id, bound, direction)
     }
 }
 
@@ -253,9 +253,10 @@ impl MetaSyncedInner {
         let mut i = 0;
         while i < subscribers.len() {
             let (tx, rx) = oneshot::channel();
-            if let Err(_) = subscribers[i]
+            if subscribers[i]
                 .send((sync_type.clone(), snapshot.clone(), tx))
                 .await
+                .is_err()
             {
                 subscribers.swap_remove(i);
                 continue;
@@ -297,7 +298,7 @@ impl MetaSyncedInner {
                     sync_items.insert(meta_key);
                 } else {
                     log::warn!(
-                        "ignoring unknown MetaKey during sync {:?}",
+                        "ignoring unknown MetaKey during sync {}",
                         hexlify(&revision.key.1[..])
                     );
                 }

@@ -9,6 +9,9 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use obsidian_external::Journal;
+use obsidian_external::Storage;
+use obsidian_lsm::LsmOptions;
 
 use crate::election::Follower;
 use crate::election::FollowerBuilder;
@@ -17,15 +20,11 @@ use crate::election::Leader;
 use crate::election::Participant;
 use crate::election::ParticipantState;
 use crate::election::Proposal;
-use crate::lsm::LsmOptions;
-use crate::lsm::Manifest;
 use crate::replica::recovery::ShardRecovery;
 use crate::runtime;
-use crate::runtime::Journal;
 use crate::runtime::Meta;
 use crate::runtime::Shard as _;
 use crate::runtime::Shards;
-use crate::runtime::Storage;
 use crate::shard::Shard;
 use crate::shard::ShardJournalWriter;
 use crate::Bound;
@@ -36,6 +35,7 @@ use crate::JournalEntry;
 use crate::JournalSeq;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Mutation;
 use crate::Precondition;
 use crate::Range;
@@ -194,7 +194,7 @@ impl runtime::Shard for Replica {
         {
             let tablets = self.tablets.read().unwrap();
             if let Some(tablet) = tablets.get(&tablet_id) {
-                return Ok(Arc::clone(&tablet));
+                return Ok(Arc::clone(tablet));
             }
         }
 
@@ -202,7 +202,7 @@ impl runtime::Shard for Replica {
             let mut tablets = self.tablets.write().unwrap();
             Ok(Arc::clone(tablets.entry(tablet_id).or_insert_with(|| {
                 Arc::new(ReplicaTablet {
-                    tablet_id: tablet_id,
+                    tablet_id,
                     participant: Arc::clone(&self.participant),
                 }) as Arc<dyn runtime::Tablet>
             })))
@@ -219,6 +219,48 @@ impl runtime::Shard for Replica {
             })
             .await
     }
+
+    async fn tx_try_commit(
+        &self,
+        txid: Txid,
+        ts: Timestamp,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
+    ) -> anyhow::Result<TxOutcome> {
+        self.participant
+            .with_state(async move |participant_state| {
+                if let ParticipantState::Leader(leader) = participant_state {
+                    return leader
+                        .shard
+                        .tx_try_commit(txid, ts, precond_keys, mut_keys)
+                        .await;
+                }
+                Err(InternalError::NotLeader(self.shard_id).into())
+            })
+            .await
+    }
+
+    async fn tx_try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
+        self.participant
+            .with_state(async move |participant_state| {
+                if let ParticipantState::Leader(leader) = participant_state {
+                    return leader.shard.tx_try_abort(txid).await;
+                }
+                Err(InternalError::NotLeader(self.shard_id).into())
+            })
+            .await
+    }
+
+    async fn tx_wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
+        self.participant
+            .with_state(async move |participant_state| {
+                if let ParticipantState::Leader(leader) = participant_state {
+                    return leader.shard.tx_wait(txid).await;
+                }
+                Err(InternalError::NotLeader(self.shard_id))
+            })
+            .await
+    }
 }
 
 struct ReplicaTablet {
@@ -226,8 +268,9 @@ struct ReplicaTablet {
     participant: Arc<Participant<JournalEntry, LeaderReplica, FollowerReplica>>,
 }
 
-impl ReplicaTablet {
-    async fn get_inner(
+#[async_trait]
+impl runtime::Tablet for ReplicaTablet {
+    async fn get_multi(
         &self,
         ts: Timestamp,
         keys: BTreeSet<Key>,
@@ -241,42 +284,6 @@ impl ReplicaTablet {
                 Err(InternalError::NotLeader(tablet_id.0))
             })
             .await
-    }
-
-    async fn if_leader<F, T>(&self, f: F) -> Result<T, InternalError>
-    where
-        F: AsyncFnOnce(Arc<dyn runtime::Tablet>) -> Result<T, InternalError>,
-        T: Send + 'static,
-    {
-        let tablet_id = self.tablet_id;
-        self.participant
-            .with_state(async move |participant_state| {
-                if let ParticipantState::Leader(leader) = participant_state {
-                    let tablet = leader.shard.tablet(tablet_id)?;
-                    return f(tablet).await;
-                }
-                Err(InternalError::NotLeader(tablet_id.0))
-            })
-            .await
-    }
-
-    async fn get_latest_inner(
-        &self,
-        key: Key,
-    ) -> Result<(Timestamp, Option<Record>), InternalError> {
-        self.if_leader(async move |tablet: Arc<dyn runtime::Tablet>| tablet.get_latest(key).await)
-            .await
-    }
-}
-
-#[async_trait]
-impl runtime::Tablet for ReplicaTablet {
-    async fn get_multi(
-        &self,
-        ts: Timestamp,
-        keys: BTreeSet<Key>,
-    ) -> Result<BTreeMap<Key, Record>, InternalError> {
-        self.get_inner(ts, keys).await
     }
 
     async fn get_latest_multi(
@@ -388,52 +395,6 @@ impl runtime::Tablet for ReplicaTablet {
             .await
     }
 
-    async fn try_commit(
-        &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<Key>,
-        mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<TxOutcome> {
-        let tablet_id = self.tablet_id;
-        self.participant
-            .with_state(async move |participant_state| {
-                if let ParticipantState::Leader(leader) = participant_state {
-                    return leader
-                        .shard
-                        .tablet(tablet_id)?
-                        .try_commit(txid, ts, precond_keys, mut_keys)
-                        .await;
-                }
-                Err(InternalError::NotLeader(tablet_id.0).into())
-            })
-            .await
-    }
-
-    async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
-        let tablet_id = self.tablet_id;
-        self.participant
-            .with_state(async move |participant_state| {
-                if let ParticipantState::Leader(leader) = participant_state {
-                    return leader.shard.tablet(tablet_id)?.try_abort(txid).await;
-                }
-                Err(InternalError::NotLeader(tablet_id.0).into())
-            })
-            .await
-    }
-
-    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
-        let tablet_id = self.tablet_id;
-        self.participant
-            .with_state(async move |participant_state| {
-                if let ParticipantState::Leader(leader) = participant_state {
-                    return leader.shard.tablet(tablet_id)?.wait(txid).await;
-                }
-                Err(InternalError::NotLeader(tablet_id.0).into())
-            })
-            .await
-    }
-
     async fn cleanup_committed(
         &self,
         txid: Txid,
@@ -450,18 +411,6 @@ impl runtime::Tablet for ReplicaTablet {
                         .tablet(tablet_id)?
                         .cleanup_committed(txid, ts, precond_keys, mut_keys)
                         .await;
-                }
-                Err(InternalError::NotLeader(tablet_id.0).into())
-            })
-            .await
-    }
-
-    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
-        let tablet_id = self.tablet_id;
-        self.participant
-            .with_state(async move |participant_state| {
-                if let ParticipantState::Leader(leader) = participant_state {
-                    return leader.shard.tablet(tablet_id)?.wait_meta_sync(ts).await;
                 }
                 Err(InternalError::NotLeader(tablet_id.0).into())
             })

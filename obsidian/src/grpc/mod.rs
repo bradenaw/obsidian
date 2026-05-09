@@ -1,3 +1,5 @@
+//! GRPC translates the traits in [`crate::runtime`] over the network.
+
 #![allow(unused_imports)]
 
 mod gateway_client;

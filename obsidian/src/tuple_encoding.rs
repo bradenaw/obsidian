@@ -1,3 +1,6 @@
+//! Tuple encoding is a way of serializing tuples of elements with a handful of types such that the
+//! lexical ordering of the encoding matches the logical ordering of the tuples.
+
 use std::cmp;
 
 use anyhow::anyhow;
@@ -19,7 +22,7 @@ impl Element for u64 {
         } else if n_bits > 56 {
             return 9;
         }
-        ((n_bits as usize) + 6) / 7
+        (n_bits as usize).div_ceil(7)
     }
 
     fn encode(&self, w: &mut [u8]) {
@@ -29,11 +32,11 @@ impl Element for u64 {
                 w[0] = *self as u8;
             }
             8..=14 => {
-                w[0] = 0b10_000000 | ((*self >> 8) as u8);
+                w[0] = 0b1000_0000 | ((*self >> 8) as u8);
                 w[1] = *self as u8;
             }
             15..=21 => {
-                w[0] = 0b110_00000 | ((*self >> 16) as u8);
+                w[0] = 0b1100_0000 | ((*self >> 16) as u8);
                 w[1] = (*self >> 8) as u8;
                 w[2] = *self as u8;
             }
@@ -44,14 +47,14 @@ impl Element for u64 {
                 w[3] = *self as u8;
             }
             29..=35 => {
-                w[0] = 0b11110_000 | ((*self >> 32) as u8);
+                w[0] = 0b1111_0000 | ((*self >> 32) as u8);
                 w[1] = (*self >> 24) as u8;
                 w[2] = (*self >> 16) as u8;
                 w[3] = (*self >> 8) as u8;
                 w[4] = *self as u8;
             }
             36..=42 => {
-                w[0] = 0b111110_00 | ((*self >> 40) as u8);
+                w[0] = 0b1111_1000 | ((*self >> 40) as u8);
                 w[1] = (*self >> 32) as u8;
                 w[2] = (*self >> 24) as u8;
                 w[3] = (*self >> 16) as u8;
@@ -59,7 +62,7 @@ impl Element for u64 {
                 w[5] = *self as u8;
             }
             43..=49 => {
-                w[0] = 0b1111110_0 | ((*self >> 48) as u8);
+                w[0] = 0b1111_1100 | ((*self >> 48) as u8);
                 w[1] = (*self >> 40) as u8;
                 w[2] = (*self >> 32) as u8;
                 w[3] = (*self >> 24) as u8;
@@ -68,7 +71,7 @@ impl Element for u64 {
                 w[6] = *self as u8;
             }
             50..=56 => {
-                w[0] = 0b11111110;
+                w[0] = 0b1111_1110;
                 w[1] = (*self >> 48) as u8;
                 w[2] = (*self >> 40) as u8;
                 w[3] = (*self >> 32) as u8;
@@ -78,7 +81,7 @@ impl Element for u64 {
                 w[7] = *self as u8;
             }
             _ => {
-                w[0] = 0b11111111;
+                w[0] = 0b1111_1111;
                 w[1] = (*self >> 56) as u8;
                 w[2] = (*self >> 48) as u8;
                 w[3] = (*self >> 40) as u8;
@@ -95,93 +98,76 @@ impl Element for u64 {
         if b[0] & 0b10000000 == 0 {
             return Ok((b[0] as u64, 1));
         }
-        match b[0].leading_ones() {
-            1 => {
-                return Ok(((((b[0] & 0b00_111111) as u64) << 8) | (b[1] as u64), 2));
-            }
-            2 => {
-                return Ok((
-                    (((b[0] & 0b000_11111) as u64) << 16) | ((b[1] as u64) << 8) | (b[2] as u64),
-                    3,
-                ));
-            }
-            3 => {
-                return Ok((
-                    (((b[0] & 0b0000_1111) as u64) << 24)
-                        | ((b[1] as u64) << 16)
-                        | ((b[2] as u64) << 8)
-                        | (b[3] as u64),
-                    4,
-                ));
-            }
-            4 => {
-                return Ok((
-                    (((b[0] & 0b00000_111) as u64) << 32)
-                        | ((b[1] as u64) << 24)
-                        | ((b[2] as u64) << 16)
-                        | ((b[3] as u64) << 8)
-                        | (b[4] as u64),
-                    5,
-                ));
-            }
-            5 => {
-                return Ok((
-                    (((b[0] & 0b000000_11) as u64) << 40)
-                        | ((b[1] as u64) << 32)
-                        | ((b[2] as u64) << 24)
-                        | ((b[3] as u64) << 16)
-                        | ((b[4] as u64) << 8)
-                        | (b[5] as u64),
-                    6,
-                ));
-            }
-            6 => {
-                return Ok((
-                    (((b[0] & 0b0000000_1) as u64) << 48)
-                        | ((b[1] as u64) << 40)
-                        | ((b[2] as u64) << 32)
-                        | ((b[3] as u64) << 24)
-                        | ((b[4] as u64) << 16)
-                        | ((b[5] as u64) << 8)
-                        | (b[6] as u64),
-                    7,
-                ));
-            }
-            7 => {
-                return Ok((
-                    ((b[1] as u64) << 48)
-                        | ((b[2] as u64) << 40)
-                        | ((b[3] as u64) << 32)
-                        | ((b[4] as u64) << 24)
-                        | ((b[5] as u64) << 16)
-                        | ((b[6] as u64) << 8)
-                        | (b[7] as u64),
-                    8,
-                ));
-            }
-            8 => {
-                return Ok((
-                    ((b[1] as u64) << 56)
-                        | ((b[2] as u64) << 48)
-                        | ((b[3] as u64) << 40)
-                        | ((b[4] as u64) << 32)
-                        | ((b[5] as u64) << 24)
-                        | ((b[6] as u64) << 16)
-                        | ((b[7] as u64) << 8)
-                        | (b[8] as u64),
-                    9,
-                ));
-            }
-            _ => {
-                return Err(anyhow!("invalid first byte for u64 0x{:02x}", b[0]));
-            }
-        }
+
+        Ok(match b[0].leading_ones() {
+            1 => ((((b[0] & 0b0011_1111) as u64) << 8) | (b[1] as u64), 2),
+            2 => (
+                (((b[0] & 0b0001_1111) as u64) << 16) | ((b[1] as u64) << 8) | (b[2] as u64),
+                3,
+            ),
+            3 => (
+                (((b[0] & 0b0000_1111) as u64) << 24)
+                    | ((b[1] as u64) << 16)
+                    | ((b[2] as u64) << 8)
+                    | (b[3] as u64),
+                4,
+            ),
+            4 => (
+                (((b[0] & 0b0000_0111) as u64) << 32)
+                    | ((b[1] as u64) << 24)
+                    | ((b[2] as u64) << 16)
+                    | ((b[3] as u64) << 8)
+                    | (b[4] as u64),
+                5,
+            ),
+            5 => (
+                (((b[0] & 0b0000_0011) as u64) << 40)
+                    | ((b[1] as u64) << 32)
+                    | ((b[2] as u64) << 24)
+                    | ((b[3] as u64) << 16)
+                    | ((b[4] as u64) << 8)
+                    | (b[5] as u64),
+                6,
+            ),
+            6 => (
+                (((b[0] & 0b0000_0001) as u64) << 48)
+                    | ((b[1] as u64) << 40)
+                    | ((b[2] as u64) << 32)
+                    | ((b[3] as u64) << 24)
+                    | ((b[4] as u64) << 16)
+                    | ((b[5] as u64) << 8)
+                    | (b[6] as u64),
+                7,
+            ),
+            7 => (
+                ((b[1] as u64) << 48)
+                    | ((b[2] as u64) << 40)
+                    | ((b[3] as u64) << 32)
+                    | ((b[4] as u64) << 24)
+                    | ((b[5] as u64) << 16)
+                    | ((b[6] as u64) << 8)
+                    | (b[7] as u64),
+                8,
+            ),
+            8 => (
+                ((b[1] as u64) << 56)
+                    | ((b[2] as u64) << 48)
+                    | ((b[3] as u64) << 40)
+                    | ((b[4] as u64) << 32)
+                    | ((b[5] as u64) << 24)
+                    | ((b[6] as u64) << 16)
+                    | ((b[7] as u64) << 8)
+                    | (b[8] as u64),
+                9,
+            ),
+            _ => return Err(anyhow!("invalid first byte for u64 0x{:02x}", b[0])),
+        })
     }
 }
 
 impl Element for Vec<u8> {
     fn encoded_size(&self) -> usize {
-        cmp::max((self.len() * 8 + 6) / 7, 1)
+        cmp::max((self.len() * 8).div_ceil(7), 1)
     }
 
     fn encode(&self, w: &mut [u8]) {
@@ -208,7 +194,7 @@ impl Element for Vec<u8> {
     fn decode(encoded: &[u8]) -> anyhow::Result<(Self, usize)> {
         let mut reg = 0u32;
         let mut reg_bits = 0;
-        let mut out = Vec::with_capacity((encoded.len() * 7 + 7) / 8);
+        let mut out = Vec::with_capacity(encoded.len().div_ceil(8));
         let mut found_end = false;
         let mut i = 0;
         for b in encoded.iter() {

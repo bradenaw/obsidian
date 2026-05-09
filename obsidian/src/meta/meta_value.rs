@@ -1,13 +1,13 @@
 use std::fmt::Debug;
 
 use anyhow::anyhow;
+use obsidian_pb as pb;
 use prost::Message;
 
 use crate::meta::MetaSync;
 use crate::meta::ShardMetadata;
 use crate::meta::TabletMetadata;
 use crate::meta::TransferMetadata;
-use crate::pb;
 
 #[derive(Clone, Debug)]
 pub(crate) enum MetaValue {

@@ -13,23 +13,23 @@ use async_trait::async_trait;
 use futures::future;
 use futures::StreamExt;
 use futures::TryStreamExt;
+use obsidian_lsm::Lsm;
+use obsidian_pb as pb;
+use obsidian_util::Decode;
+use obsidian_util::Retry;
+use obsidian_util::WithBackground;
 use prost::Message;
 use tokio::sync::mpsc;
 
-use crate::lsm::Lsm;
-use crate::lsm::Manifest;
 use crate::meta::MetaSynced;
-use crate::meta::TabletState;
-use crate::pb;
 use crate::runtime::Shards;
 use crate::runtime::Tablet;
-use crate::tablet::protected::LsmReadWrite;
-use crate::tablet::protected::ProtectedLsm;
+use crate::tablet::journaled_lsm::JournaledLsm;
+use crate::tablet::journaled_lsm::LsmWrite;
 use crate::tablet::tablet_inner::TabletInner;
 use crate::tablet::tablet_journal_writer::TabletJournalWriter;
-use crate::util::Decode;
-use crate::util::Retry;
-use crate::util::WithBackground;
+use crate::util::key_set_from_proto;
+use crate::util::key_set_to_proto;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -37,6 +37,7 @@ use crate::HistoryRange;
 use crate::InternalError;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Mutation;
 use crate::Precondition;
 use crate::Range;
@@ -62,7 +63,7 @@ const WAIT_ABORT_TIMEOUT: Duration = Duration::from_millis(1_000);
 pub(crate) struct ShardMetaTablet(WithBackground<ShardMetaTabletInner>);
 
 struct ShardMetaTabletInner {
-    inner: TabletInner,
+    inner: TabletInner<JournaledLsm>,
     meta_synced: Arc<MetaSynced>,
     shards: Arc<dyn Shards>,
     waiters: Waiters,
@@ -89,8 +90,7 @@ impl ShardMetaTablet {
                 tablet_id,
                 ColoGroupId::SHARD_META,
                 TabletId::shard_meta_owned_range(shard_id),
-                ProtectedLsm::new(tablet_id, lsm, TabletState::Active),
-                journal,
+                JournaledLsm::new(lsm, journal),
             ),
             commit_sender: commit_sender.clone(),
             meta_synced,
@@ -109,6 +109,66 @@ impl ShardMetaTablet {
         });
 
         tablet
+    }
+
+    pub async fn tx_try_commit(
+        &self,
+        txid: Txid,
+        ts: Timestamp,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
+    ) -> anyhow::Result<TxOutcome> {
+        self.0
+            .try_write_tx_outcome(
+                txid,
+                TxOutcomeRecord::Committed {
+                    ts,
+                    precond_keys,
+                    mut_keys,
+                },
+            )
+            .await
+    }
+
+    pub async fn tx_try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
+        self.0.try_abort(txid).await
+    }
+
+    pub async fn tx_wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
+        let tx_outcome_key = txid.encode_fixed();
+        self.0
+            .inner
+            .check_key(KeyspaceId::TX_OUTCOMES.0, &tx_outcome_key[..])?;
+        loop {
+            let wait = {
+                let _guard = self.0.inner.lock_mgr.read_lock(&tx_outcome_key[..]).await;
+
+                match self
+                    .0
+                    .inner
+                    .unsafe_get_latest_record(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
+                    .await?
+                {
+                    Some((_, RevisionValue::Regular(tx_outcome_bytes))) => {
+                        let tx_outcome_record: TxOutcomeRecord =
+                            pb::internal::TxOutcomeRecord::decode(&tx_outcome_bytes[..])
+                                .map_err(|e| InternalError::Other(e.into()))?
+                                .try_into()?;
+                        return Ok(tx_outcome_record.tx_outcome());
+                    }
+                    // Must be done with _guard still active.
+                    None => self.0.waiters.wait(txid),
+                    _ => {
+                        // TODO: This should only happen when the pending records have already been
+                        // cleaned up, so we should return a specific error to tell the caller to
+                        // just retry whatever they were trying to do.
+                        return Err(InternalError::TxOutcomeMissing);
+                    }
+                }
+            };
+
+            wait.await;
+        }
     }
 }
 
@@ -177,68 +237,6 @@ impl Tablet for ShardMetaTablet {
         Err(anyhow!("ShardMetaTablet::prepare not allowed").into())
     }
 
-    async fn try_commit(
-        &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<Key>,
-        mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<TxOutcome> {
-        self.0
-            .try_write_tx_outcome(
-                txid,
-                TxOutcomeRecord::Committed {
-                    ts,
-                    precond_keys,
-                    mut_keys,
-                },
-            )
-            .await
-    }
-
-    async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
-        self.0.try_abort(txid).await
-    }
-
-    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
-        let tx_outcome_key = txid.encode_fixed();
-        self.0
-            .inner
-            .check_key(KeyspaceId::TX_OUTCOMES.0, &tx_outcome_key[..])?;
-        loop {
-            let wait = {
-                let lsm_read = self.0.inner.lsm.read()?;
-                let _guard = self.0.inner.lock_mgr.read_lock(&tx_outcome_key[..]).await;
-
-                match TabletInner::unsafe_get_latest_record(
-                    &lsm_read,
-                    KeyspaceId::TX_OUTCOMES,
-                    &tx_outcome_key[..],
-                )
-                .await?
-                {
-                    Some((_, RevisionValue::Regular(tx_outcome_bytes))) => {
-                        let tx_outcome_record: TxOutcomeRecord =
-                            pb::internal::TxOutcomeRecord::decode(&tx_outcome_bytes[..])
-                                .map_err(|e| InternalError::Other(e.into()))?
-                                .try_into()?;
-                        return Ok(tx_outcome_record.tx_outcome());
-                    }
-                    // Must be done with _guard still active.
-                    None => self.0.waiters.wait(txid),
-                    _ => {
-                        // TODO: This should only happen when the pending records have already been
-                        // cleaned up, so we should return a specific error to tell the caller to
-                        // just retry whatever they were trying to do.
-                        return Err(InternalError::TxOutcomeMissing);
-                    }
-                }
-            };
-
-            wait.await;
-        }
-    }
-
     async fn cleanup_committed(
         &self,
         _txid: Txid,
@@ -246,11 +244,7 @@ impl Tablet for ShardMetaTablet {
         _precond_keys: BTreeSet<Key>,
         _mut_keys: BTreeSet<Key>,
     ) -> anyhow::Result<()> {
-        Err(anyhow!("ShardMetaTablet::cleanup_committed not allowed").into())
-    }
-
-    async fn wait_meta_sync(&self, _ts: Timestamp) -> anyhow::Result<()> {
-        Err(anyhow!("ShardMetaTablet::wait_meta_sync not allowed").into())
+        Err(anyhow!("ShardMetaTablet::cleanup_committed not allowed"))
     }
 
     async fn manifest(&self) -> anyhow::Result<Manifest> {
@@ -258,15 +252,15 @@ impl Tablet for ShardMetaTablet {
     }
 
     async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
-        Err(anyhow!("ShardMetaTablet::wait_mostly_hydrated not allowed").into())
+        Err(anyhow!("ShardMetaTablet::wait_mostly_hydrated not allowed"))
     }
 
     async fn catchup(&self) -> anyhow::Result<()> {
-        Err(anyhow!("ShardMetaTablet::catchup not allowed").into())
+        Err(anyhow!("ShardMetaTablet::catchup not allowed"))
     }
 
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
-        Err(anyhow!("ShardMetaTablet::find_split not allowed").into())
+        Err(anyhow!("ShardMetaTablet::find_split not allowed"))
     }
 }
 
@@ -286,15 +280,11 @@ impl ShardMetaTabletInner {
             self.inner
                 .check_key(KeyspaceId::TX_OUTCOMES.0, &tx_outcome_key[..])?;
 
-            let lsm_rw = self.inner.lsm.read_write()?;
             let _guard = self.inner.lock_mgr.write_lock(&tx_outcome_key[..]).await;
 
-            if let Some((_, RevisionValue::Regular(tx_outcome_bytes))) =
-                TabletInner::unsafe_get_latest_record(
-                    &lsm_rw,
-                    KeyspaceId::TX_OUTCOMES,
-                    &tx_outcome_key[..],
-                )
+            if let Some((_, RevisionValue::Regular(tx_outcome_bytes))) = self
+                .inner
+                .unsafe_get_latest_record(KeyspaceId::TX_OUTCOMES, &tx_outcome_key[..])
                 .await?
             {
                 let existing_tx_outcome_record: TxOutcomeRecord =
@@ -304,13 +294,16 @@ impl ShardMetaTabletInner {
 
             let tx_outcome_record_bytes =
                 pb::internal::TxOutcomeRecord::from(tx_outcome_record.clone()).encode_to_vec();
-            lsm_rw.write(
-                Timestamp::ZERO,
-                BTreeMap::from([(
-                    (KeyspaceId::TX_OUTCOMES, tx_outcome_key.to_vec()),
-                    Mutation::Put(tx_outcome_record_bytes),
-                )]),
-            );
+            self.inner
+                .lsm
+                .write(
+                    Timestamp::ZERO,
+                    BTreeMap::from([(
+                        (KeyspaceId::TX_OUTCOMES, tx_outcome_key.to_vec()),
+                        Mutation::Put(tx_outcome_record_bytes),
+                    )]),
+                )
+                .await?;
         }
         let tx_outcome = tx_outcome_record.tx_outcome();
         if let TxOutcomeRecord::Committed {
@@ -392,7 +385,7 @@ impl ShardMetaTabletInner {
         let mut by_tablet = HashMap::new();
 
         for (keyspace_id, key) in precond_keys {
-            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
+            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, key)?;
             by_tablet
                 .entry(tablet_id)
                 .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()))
@@ -400,7 +393,7 @@ impl ShardMetaTabletInner {
                 .insert((*keyspace_id, key.clone()));
         }
         for (keyspace_id, key) in mut_keys {
-            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, &key)?;
+            let tablet_id = self.meta_synced.tablet_id_for_key(keyspace_id.0, key)?;
             by_tablet
                 .entry(tablet_id)
                 .or_insert_with(|| (BTreeSet::new(), BTreeSet::new()))
@@ -470,11 +463,11 @@ impl From<TxOutcomeRecord> for pb::internal::TxOutcomeRecord {
                 } => Some(pb::internal::tx_outcome_record::OutcomeType::Committed(
                     pb::internal::tx_outcome_record::Committed {
                         ts: ts.as_micros(),
-                        precond_keys: Some(precond_keys.into()),
-                        mut_keys: Some(mut_keys.into()),
+                        precond_keys: Some(key_set_to_proto(precond_keys)),
+                        mut_keys: Some(key_set_to_proto(mut_keys)),
                     },
                 )),
-                TxOutcomeRecord::Aborted {} => {
+                TxOutcomeRecord::Aborted => {
                     Some(pb::internal::tx_outcome_record::OutcomeType::Aborted(()))
                 }
             },
@@ -495,10 +488,8 @@ impl TryFrom<pb::internal::TxOutcomeRecord> for TxOutcomeRecord {
                 },
             )) => TxOutcomeRecord::Committed {
                 ts: Timestamp::from_micros(ts),
-                mut_keys: BTreeSet::<Key>::try_from(
-                    mut_keys.ok_or_else(|| anyhow!("missing mut_keys"))?,
-                )?,
-                precond_keys: BTreeSet::<Key>::try_from(
+                mut_keys: key_set_from_proto(mut_keys.ok_or_else(|| anyhow!("missing mut_keys"))?)?,
+                precond_keys: key_set_from_proto(
                     precond_keys.ok_or_else(|| anyhow!("missing precond_keys"))?,
                 )?,
             },
@@ -580,8 +571,9 @@ impl Waiters {
 mod tests {
     use std::collections::BTreeSet;
 
+    use obsidian_pb as pb;
+
     use super::TxOutcomeRecord;
-    use crate::pb;
     use crate::test::assert_roundtrip_pb;
     use crate::ColoGroupId;
     use crate::KeyspaceId;

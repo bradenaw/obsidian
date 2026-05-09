@@ -1,3 +1,5 @@
+//! Discovery's purpose is to locate logical objects in the system.
+
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -8,17 +10,16 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use im::OrdSet;
+use obsidian_util::spawn_owned;
+use obsidian_util::OwnedJoinHandle;
+use obsidian_util::Retry;
+use obsidian_util::WithBackground;
 
-use crate::lsm::Manifest;
 use crate::meta::MetaKey;
 use crate::meta::MetaMutation;
 use crate::runtime;
 use crate::runtime::Nodes;
 use crate::runtime::ReplicaState;
-use crate::util::spawn_owned;
-use crate::util::OwnedJoinHandle;
-use crate::util::Retry;
-use crate::util::WithBackground;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;
@@ -27,6 +28,7 @@ use crate::InternalError;
 use crate::JournalSeq;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Manifest;
 use crate::Mutation;
 use crate::NodeId;
 use crate::Precondition;
@@ -184,12 +186,12 @@ impl DiscoveryInner {
 
     fn current_leader_id(&self, shard_id: ShardId) -> anyhow::Result<NodeId> {
         let routing = self.routing.read().unwrap();
-        Ok(routing
+        routing
             .get(&shard_id)
             .ok_or_else(|| anyhow!("{:?} not in the routing table", shard_id))?
             .leader
             .map(|(node_id, _)| node_id)
-            .ok_or_else(|| anyhow!("{:?}'s leader is not known", shard_id))?)
+            .ok_or_else(|| anyhow!("{:?}'s leader is not known", shard_id))
     }
 }
 
@@ -229,7 +231,7 @@ impl runtime::Shard for ShardProxy {
         }
         Ok(Arc::new(TabletProxy {
             parent: Arc::clone(&self.parent),
-            tablet_id: tablet_id,
+            tablet_id,
         }))
     }
 
@@ -238,6 +240,36 @@ impl runtime::Shard for ShardProxy {
             .current_leader(self.shard_id)?
             .shard(self.shard_id)?
             .wait_meta_sync(ts)
+            .await
+    }
+
+    async fn tx_try_commit(
+        &self,
+        txid: Txid,
+        ts: Timestamp,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
+    ) -> anyhow::Result<TxOutcome> {
+        self.parent
+            .current_leader(self.shard_id)?
+            .shard(self.shard_id)?
+            .tx_try_commit(txid, ts, precond_keys, mut_keys)
+            .await
+    }
+
+    async fn tx_try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
+        self.parent
+            .current_leader(self.shard_id)?
+            .shard(self.shard_id)?
+            .tx_try_abort(txid)
+            .await
+    }
+
+    async fn tx_wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
+        self.parent
+            .current_leader(self.shard_id)?
+            .shard(self.shard_id)?
+            .tx_wait(txid)
             .await
     }
 }
@@ -320,26 +352,6 @@ impl runtime::Tablet for TabletProxy {
         self.get_tablet()?.prepare(txid, preconds, muts).await
     }
 
-    async fn try_commit(
-        &self,
-        txid: Txid,
-        ts: Timestamp,
-        precond_keys: BTreeSet<Key>,
-        mut_keys: BTreeSet<Key>,
-    ) -> anyhow::Result<TxOutcome> {
-        self.get_tablet()?
-            .try_commit(txid, ts, precond_keys, mut_keys)
-            .await
-    }
-
-    async fn try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
-        self.get_tablet()?.try_abort(txid).await
-    }
-
-    async fn wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
-        self.get_tablet()?.wait(txid).await
-    }
-
     async fn cleanup_committed(
         &self,
         txid: Txid,
@@ -350,10 +362,6 @@ impl runtime::Tablet for TabletProxy {
         self.get_tablet()?
             .cleanup_committed(txid, ts, precond_keys, mut_keys)
             .await
-    }
-
-    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
-        self.get_tablet()?.wait_meta_sync(ts).await
     }
 
     async fn manifest(&self) -> anyhow::Result<Manifest> {

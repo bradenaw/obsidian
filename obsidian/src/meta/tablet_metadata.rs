@@ -1,10 +1,10 @@
 use std::convert::TryFrom;
 
 use anyhow::anyhow;
+use obsidian_pb as pb;
 
 use crate::meta::MetaState;
 use crate::meta::TabletState;
-use crate::pb;
 use crate::ColoGroupId;
 use crate::Range;
 use crate::TransferId;

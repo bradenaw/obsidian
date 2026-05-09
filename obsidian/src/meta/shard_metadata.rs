@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
-use crate::pb;
+use obsidian_pb as pb;
+
 use crate::NodeId;
 
 #[derive(Clone, Debug)]

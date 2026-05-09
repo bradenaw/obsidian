@@ -4,13 +4,14 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use im::OrdSet;
+use obsidian_external::NodeDiscovery;
+use obsidian_util::Watchable;
 
 use crate::discovery::Discovery;
 use crate::runtime::Node;
 use crate::runtime::Nodes;
 use crate::runtime::Shards;
 use crate::test::TestNodeBuilder;
-use crate::util::Watchable;
 use crate::NodeId;
 
 pub(crate) struct TestNodes {
@@ -75,7 +76,9 @@ impl Nodes for TestNodes {
     fn node(&self, node_id: NodeId) -> anyhow::Result<Arc<dyn Node>> {
         self.inner.node(node_id)
     }
+}
 
+impl NodeDiscovery for TestNodes {
     fn node_ids(&self) -> (OrdSet<NodeId>, Box<dyn Future<Output = ()> + Send + Unpin>) {
         self.inner.node_ids()
     }
@@ -90,7 +93,9 @@ impl Nodes for TestNodesInner {
 
         Ok(Arc::clone(node_arc) as Arc<dyn Node>)
     }
+}
 
+impl NodeDiscovery for TestNodesInner {
     fn node_ids(&self) -> (OrdSet<NodeId>, Box<dyn Future<Output = ()> + Send + Unpin>) {
         let (node_ids, changed) = self.node_ids.get();
         (node_ids, Box::new(Box::pin(changed)))

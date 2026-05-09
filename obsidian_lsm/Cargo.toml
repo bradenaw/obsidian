@@ -1,0 +1,28 @@
+[package]
+name = "obsidian_lsm"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = { version = "1.0.58", features = ["backtrace"] }
+async-stream = "0.3.3"
+byteorder = "1.4.3"
+console-subscriber = "0.4.1"
+crossbeam = "0.8.4"
+crossbeam-skiplist = "0.1.3"
+futures = "0.3.23"
+im = "15.1.0"
+log = "^0.4"
+obsidian_common = { path = "../obsidian_common" }
+obsidian_external = { path = "../obsidian_external" }
+obsidian_olf = { path = "../obsidian_olf" }
+obsidian_util = { path = "../obsidian_util" }
+pretty_env_logger = "^0.5"
+rand = "0.8.5"
+tokio = { version = "1.47.1", features = [ "fs", "io-util", "macros", "rt", "rt-multi-thread", "sync", "time", "tracing" ] }
+uuid = { version = "1.18.1", features = ["v4", "v7"] }
+
+[dev-dependencies]
+proptest = "1.0.0"

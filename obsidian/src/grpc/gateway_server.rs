@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use obsidian_pb as pb;
 
 use crate::grpc::util::get_req_results;
 use crate::grpc::util::internal;
@@ -11,7 +12,6 @@ use crate::grpc::util::invalid_argument;
 use crate::grpc::util::parse_preconds_muts;
 use crate::grpc::util::parse_scan_req;
 use crate::grpc::util::required;
-use crate::pb;
 use crate::Bound;
 use crate::ColoGroupId;
 use crate::Direction;

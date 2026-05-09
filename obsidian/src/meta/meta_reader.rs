@@ -41,9 +41,7 @@ pub(crate) trait MetaReader {
         direction: Direction,
     ) -> Box<dyn Stream<Item = anyhow::Result<(MetaKey, MetaValue)>> + Unpin + Send + '_> {
         Box::new(self.scan_raw(range, direction).map(|result| {
-            result
-                .map(|(k, v)| Ok((MetaKey::decode(&k)?, MetaValue::decode(&v)?)))
-                .flatten()
+            result.and_then(|(k, v)| Ok((MetaKey::decode(&k)?, MetaValue::decode(&v)?)))
         }))
     }
 
@@ -54,7 +52,7 @@ pub(crate) trait MetaReader {
     ) -> Box<dyn Stream<Item = anyhow::Result<MetaKey>> + Unpin + Send + '_> {
         Box::new(
             self.scan_raw(range, direction)
-                .map(|result| result.map(|(k, _)| Ok(MetaKey::decode(&k)?)).flatten()),
+                .map(|result| result.and_then(|(k, _)| MetaKey::decode(&k))),
         )
     }
 
