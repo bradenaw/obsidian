@@ -20,8 +20,8 @@ pub fn merge_sorted<'a, T: Ord + 'a>(
 ) -> impl Iterator<Item = T> + 'a {
     let mut h: BinaryHeap<(std::cmp::Reverse<T>, usize)> = BinaryHeap::new();
     h.reserve_exact(iters.len());
-    for i in 0..iters.len() {
-        if let Some(t) = iters[i].next() {
+    for (i, it) in iters.iter_mut().enumerate() {
+        if let Some(t) = it.next() {
             h.push((std::cmp::Reverse(t), i));
         }
     }
@@ -40,9 +40,8 @@ pub fn merge_sorted_streams<T: Ord + Send>(
     try_stream! {
         let mut h: BinaryHeap<(std::cmp::Reverse<T>, usize)> = BinaryHeap::new();
         h.reserve_exact(streams.len());
-        let n = streams.len();
-        for i in 0..n {
-            if let Some(t) = streams[i].next().await.transpose()? {
+        for (i, stream) in streams.iter_mut().enumerate() {
+            if let Some(t) = stream.next().await.transpose()? {
                 h.push((std::cmp::Reverse(t), i));
             }
         }

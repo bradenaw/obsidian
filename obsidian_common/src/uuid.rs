@@ -3,10 +3,7 @@ use uuid::Uuid;
 
 pub fn uuid_to_proto(uuid: Uuid) -> pb::internal::Uuid {
     let (high, low) = uuid.as_u64_pair();
-    pb::internal::Uuid {
-        high: high,
-        low: low,
-    }
+    pb::internal::Uuid { high, low }
 }
 
 pub fn uuid_from_proto(uuid_pb: pb::internal::Uuid) -> Uuid {

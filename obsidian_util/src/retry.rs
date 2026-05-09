@@ -42,6 +42,12 @@ impl<T, E> From<Result<T, E>> for RetryResult<T, E> {
     }
 }
 
+impl Default for Retry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Retry {
     pub fn new() -> Self {
         Self {

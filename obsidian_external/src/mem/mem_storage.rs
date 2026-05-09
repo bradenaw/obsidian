@@ -119,9 +119,10 @@ impl FileWriter for MemStorageFileWriter {
     }
 
     async fn shutdown(&mut self) -> io::Result<()> {
-        let inner = self.inner.take().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, anyhow!("writer already closed"))
-        })?;
+        let inner = self
+            .inner
+            .take()
+            .ok_or_else(|| io::Error::other(anyhow!("writer already closed")))?;
         let mut parent = self.parent.lock().unwrap();
         parent
             .files

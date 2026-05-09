@@ -72,18 +72,15 @@ impl<T> WeakView<T> {
         F: AsyncFnOnce(&T) -> Result<U, E>,
         E: From<anyhow::Error>,
     {
-        let inner = self
-            .inner
-            .upgrade()
-            .ok_or_else(|| anyhow!("closed").into())?;
+        let inner = self.inner.upgrade().ok_or_else(|| anyhow!("closed"))?;
         select! {
             biased;
 
             _ = self.closed.wait() => {
-                return Err(anyhow!("closed").into());
+                Err(anyhow!("closed").into())
             }
             out = f(inner.deref()) => {
-                return out;
+                out
             },
         }
     }

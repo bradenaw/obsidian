@@ -57,8 +57,8 @@ impl DataTablet {
         srcs: Vec<TabletId>,
     ) -> Self {
         Self {
-            tablet_id: tablet_id,
-            colo_group_id: colo_group_id,
+            tablet_id,
+            colo_group_id,
             state_machine: StateMachine::new(DataTabletState::Hydrating(HydratingTablet::new(
                 tablet_id,
                 colo_group_id,

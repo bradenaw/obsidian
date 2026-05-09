@@ -87,9 +87,11 @@ impl TryFrom<pb::internal::InternalError> for InternalError {
 fn parse_tablet_id_error(
     value: pb::internal::internal_error::TabletIdError,
 ) -> anyhow::Result<TabletId> {
-    Ok(TabletId::try_from(value.tablet_id.ok_or_else(|| {
-        anyhow!("missing TabletIdError.tablet_id")
-    })?)?)
+    TabletId::try_from(
+        value
+            .tablet_id
+            .ok_or_else(|| anyhow!("missing TabletIdError.tablet_id"))?,
+    )
 }
 
 impl TryFrom<InternalError> for pb::internal::InternalError {

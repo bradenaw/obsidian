@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::future::Future;
-use std::mem;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::pin::Pin;
@@ -9,6 +8,12 @@ use std::sync::Arc;
 /// Background is a set of owned tasks which are aborted on drop.
 pub struct Background {
     tasks: std::sync::Arc<std::sync::Mutex<(u64, HashMap<u64, OwnedJoinHandle<()>>)>>,
+}
+
+impl Default for Background {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Background {
@@ -34,7 +39,7 @@ impl Background {
     pub async fn stop(self) {
         let tasks_map = {
             let mut guard = self.tasks.lock().unwrap();
-            mem::replace(guard.deref_mut(), (0, HashMap::new()))
+            std::mem::take(guard.deref_mut())
         };
         for (_, join_handle) in tasks_map.1.into_iter() {
             join_handle.cancel().await;
@@ -165,7 +170,7 @@ impl<T> Future for OwnedJoinHandle<T> {
         // 1. The task is aborted. This can't happen because we only abort on drop, which means we
         //    can't be polling.
         // 2. The task itself panics. We're allowed to panic the calling task by the API contract.
-        Pin::as_mut(&mut self.0.as_mut().unwrap())
+        Pin::as_mut(self.0.as_mut().unwrap())
             .poll(cx)
             .map(|result| result.unwrap())
     }

@@ -22,7 +22,7 @@ impl Precondition {
     }
     pub fn key(&self) -> &[u8] {
         match self {
-            Precondition::NotChangedSince(_, key, _) => &key,
+            Precondition::NotChangedSince(_, key, _) => key,
         }
     }
 }
@@ -41,7 +41,7 @@ impl TryFrom<pb::Precondition> for Precondition {
                 let ts = Timestamp::from_micros(not_changed_since.ts);
                 Ok(Precondition::NotChangedSince(keyspace_id, key_bytes, ts))
             }
-            None => return Err(anyhow!("missing precond_type on Precondition")),
+            None => Err(anyhow!("missing precond_type on Precondition")),
         }
     }
 }

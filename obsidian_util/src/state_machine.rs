@@ -63,7 +63,7 @@ impl<S> StateMachine<S> {
                     // future that then acquires those mutexes.
 
             _ = transition_requested => {
-                return Err(anyhow!("aborted operation: state transition requested").into());
+                Err(anyhow!("aborted operation: state transition requested").into())
             },
             out = f(guard.deref()) => {
                 out

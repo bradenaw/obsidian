@@ -43,7 +43,6 @@ pub fn longest_shared_prefix(a: &[u8], b: &[u8]) -> Vec<u8> {
 pub fn longest_shared_prefix_len(a: &[u8], b: &[u8]) -> usize {
     std::iter::zip(a.iter(), b.iter())
         .take_while(|(a, b)| *a == *b)
-        .map(|(a, _)| *a)
         .count()
 }
 

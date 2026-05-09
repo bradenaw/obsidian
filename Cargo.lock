@@ -1067,6 +1067,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "futures",
+ "im",
  "log",
  "obsidian_common",
  "pretty_env_logger",

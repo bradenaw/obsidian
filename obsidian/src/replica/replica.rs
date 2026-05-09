@@ -202,7 +202,7 @@ impl runtime::Shard for Replica {
             let mut tablets = self.tablets.write().unwrap();
             Ok(Arc::clone(tablets.entry(tablet_id).or_insert_with(|| {
                 Arc::new(ReplicaTablet {
-                    tablet_id: tablet_id,
+                    tablet_id,
                     participant: Arc::clone(&self.participant),
                 }) as Arc<dyn runtime::Tablet>
             })))

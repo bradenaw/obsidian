@@ -476,10 +476,7 @@ impl BlockTrailer {
         let mut trailer = [0u8; Self::ENCODED_LEN];
         LittleEndian::write_u32(&mut trailer[0..4], self.key_index_offset_in_block);
         LittleEndian::write_u32(&mut trailer[4..8], self.key_index_len);
-        LittleEndian::write_u32(
-            &mut trailer[8..12],
-            self.version_index_offset_in_block as u32,
-        );
+        LittleEndian::write_u32(&mut trailer[8..12], self.version_index_offset_in_block);
         LittleEndian::write_u32(&mut trailer[12..16], self.version_index_len);
         LittleEndian::write_u32(&mut trailer[16..20], self.block_size);
         out.extend_from_slice(&trailer[..]);
