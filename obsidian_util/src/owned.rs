@@ -77,10 +77,10 @@ impl<T> WeakView<T> {
             biased;
 
             _ = self.closed.wait() => {
-                return Err(anyhow!("closed").into());
+                Err(anyhow!("closed").into())
             }
             out = f(inner.deref()) => {
-                return out;
+                out
             },
         }
     }

@@ -103,10 +103,6 @@ impl<K: Key> RangeSet<K> {
         self.ranges.iter().map(|range| range.borrow())
     }
 
-    pub fn into_iter(self) -> impl Iterator<Item = Range<K>> {
-        self.ranges.into_iter().map(|range| range.into())
-    }
-
     pub fn first(&self) -> Option<&Range<K>> {
         self.ranges.first().map(|range| &range.0)
     }
@@ -230,6 +226,35 @@ where
             result.add_range(range);
         }
         result
+    }
+}
+
+impl<K> IntoIterator for RangeSet<K>
+where
+    K: Key,
+{
+    type Item = Range<K>;
+    type IntoIter = RangeSetIntoIter<K>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        RangeSetIntoIter {
+            inner: self.ranges.into_iter(),
+        }
+    }
+}
+
+pub struct RangeSetIntoIter<K> {
+    inner: std::collections::btree_set::IntoIter<RangeByLowerBound<K>>,
+}
+
+impl<K> Iterator for RangeSetIntoIter<K>
+where
+    K: Key,
+{
+    type Item = Range<K>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|range| range.into())
     }
 }
 
