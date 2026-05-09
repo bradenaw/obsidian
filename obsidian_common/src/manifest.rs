@@ -39,24 +39,22 @@ impl Manifest {
 
     /// Removes all runs from the manifest that are not fully contained within the given range.
     pub fn clip(&mut self, range: Range<&[u8]>) {
-        for (_, keyspace) in &mut self.keyspaces {
+        for keyspace in self.keyspaces.values_mut() {
             keyspace.clip(range);
         }
     }
 
     /// Returns an iterator of (keyspace_id, level_idx, run_manifest) for all runs in the manifest.
     pub fn runs(&self) -> impl Iterator<Item = (KeyspaceId, usize, &RunManifest)> {
-        self.keyspaces
-            .iter()
-            .map(|(keyspace_id, keyspace)| {
-                keyspace
-                    .levels
-                    .iter()
-                    .enumerate()
-                    .map(move |(i, level)| level.runs.iter().map(move |run| (*keyspace_id, i, run)))
-                    .flatten()
-            })
-            .flatten()
+        self.keyspaces.iter().flat_map(|(keyspace_id, keyspace)| {
+            keyspace
+                .levels
+                .iter()
+                .enumerate()
+                .flat_map(move |(i, level)| {
+                    level.runs.iter().map(move |run| (*keyspace_id, i, run))
+                })
+        })
     }
 }
 
@@ -65,16 +63,16 @@ impl Debug for Manifest {
         let mut keyspace_ids: Vec<_> = self.keyspaces.keys().collect();
         keyspace_ids.sort_unstable();
 
-        write!(f, "manifest\n")?;
+        writeln!(f, "manifest")?;
         for keyspace_id in keyspace_ids {
             let keyspace = &self.keyspaces[keyspace_id];
-            write!(f, "  {:?}\n", keyspace_id)?;
+            writeln!(f, "  {:?}", keyspace_id)?;
             for (i, level) in keyspace.levels.iter().enumerate() {
-                write!(f, "    l{}\n", i)?;
+                writeln!(f, "    l{}", i)?;
                 for run_manifest in &level.runs {
-                    write!(
+                    writeln!(
                         f,
-                        "      {:?} {:?}\n",
+                        "      {:?} {:?}",
                         run_manifest.run_id, run_manifest.range
                     )?;
                 }
@@ -175,13 +173,13 @@ impl KeyspaceManifest {
             levels: zip_max(self.levels.into_iter(), other.levels.into_iter())
                 .enumerate()
                 .map(|(i, (maybe_a, maybe_b))| {
-                    let a = maybe_a.unwrap_or_else(|| LevelManifest::empty());
-                    let mut b = maybe_b.unwrap_or_else(|| LevelManifest::empty());
+                    let a = maybe_a.unwrap_or_else(LevelManifest::empty);
+                    let mut b = maybe_b.unwrap_or_else(LevelManifest::empty);
                     if i == 0 {
                         // L0 is not sorted and overlaps are allowed.
                         let mut runs = a.runs;
                         runs.append(&mut b.runs);
-                        Ok(LevelManifest { runs: runs })
+                        Ok(LevelManifest { runs })
                     } else {
                         a.merge(b)
                     }
@@ -264,7 +262,7 @@ impl LevelManifest {
                 .map(|run| OrdEqByFirst(run.range.lower, (run.range.upper, run.run_id))),
         )
         .map(|OrdEqByFirst(lower, (upper, run_id))| RunManifest {
-            run_id: run_id,
+            run_id,
             range: Range { lower, upper },
         });
         for run in merged_runs {

@@ -166,12 +166,12 @@ impl<K: Deref<Target = [u8]>> Debug for Range<K> {
     }
 }
 
-impl Into<pb::Range> for Range<Vec<u8>> {
-    fn into(self) -> pb::Range {
-        return pb::Range {
-            lower: Some(self.lower.into()),
-            upper: Some(self.upper.into()),
-        };
+impl From<Range<Vec<u8>>> for pb::Range {
+    fn from(val: Range<Vec<u8>>) -> Self {
+        pb::Range {
+            lower: Some(val.lower.into()),
+            upper: Some(val.upper.into()),
+        }
     }
 }
 
@@ -194,7 +194,7 @@ pub fn ranges_to_splits(mut ranges: Vec<Range<Vec<u8>>>) -> anyhow::Result<Vec<B
     let mut out = Vec::with_capacity(ranges.len() - 1);
     let ranges_len = ranges.len();
     for (i, range) in ranges.into_iter().enumerate() {
-        if out.len() > 0 && out[out.len() - 1] != range.lower {
+        if !out.is_empty() && out[out.len() - 1] != range.lower {
             return Err(anyhow!(
                 "can't range_to_splits, ranges not contiguous: gap at {:?} {:?}",
                 out[out.len() - 1],

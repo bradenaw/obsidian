@@ -14,6 +14,15 @@ pub struct RangeMap<K, V> {
     m: BTreeMap<RangeByLowerBound<K>, V>,
 }
 
+impl<K, V> Default for RangeMap<K, V>
+where
+    K: Key,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<K, V> RangeMap<K, V>
 where
     K: Key,
@@ -84,7 +93,7 @@ where
         &self,
         lower: std::ops::Bound<&Bound<K>>, // TODO(bw): this should probably be Bound<Bound<&K>>
         upper: std::ops::Bound<&Bound<K>>,
-    ) -> impl Iterator<Item = (&Range<K>, &V)> + DoubleEndedIterator {
+    ) -> impl DoubleEndedIterator<Item = (&Range<K>, &V)> {
         self.m
             .range::<Bound<K>, (std::ops::Bound<&Bound<K>>, std::ops::Bound<&Bound<K>>)>((
                 lower, upper,
@@ -93,11 +102,8 @@ where
     }
 
     fn last_less_or_equal(&self, bound: &Bound<K>) -> Option<(&Range<K>, &V)> {
-        self.ranges_range(
-            std::ops::Bound::Unbounded,
-            std::ops::Bound::Included(&bound),
-        )
-        .next_back()
+        self.ranges_range(std::ops::Bound::Unbounded, std::ops::Bound::Included(bound))
+            .next_back()
     }
 }
 

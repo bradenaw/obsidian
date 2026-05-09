@@ -356,7 +356,7 @@ impl<K: Eq + Hash + Clone, V: Clone> CacheStripe<K, V> {
             // place to put our new item.
             if let Some(prev_entry) = maybe_entry.replace(CacheEntry {
                 k: k.clone(),
-                v: v,
+                v,
                 touched: AtomicBool::new(true),
             }) {
                 self.evictions += 1;

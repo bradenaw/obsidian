@@ -15,6 +15,12 @@ pub struct RangeSet<K> {
     ranges: BTreeSet<RangeByLowerBound<K>>,
 }
 
+impl<K: Key> Default for RangeSet<K> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<K: Key> RangeSet<K> {
     pub fn new() -> Self {
         Self {
@@ -27,7 +33,7 @@ impl<K: Key> RangeSet<K> {
     }
 
     pub fn contiguous(&self) -> Option<Range<K>> {
-        if self.ranges.len() == 0 {
+        if self.ranges.is_empty() {
             Some(Range::empty())
         } else if self.ranges.len() == 1 {
             self.ranges.iter().map(|r| r.0.clone()).next()
@@ -58,10 +64,7 @@ impl<K: Key> RangeSet<K> {
             }
         }
 
-        (
-            RangeSet::from_iter(below.into_iter()),
-            RangeSet::from_iter(above.into_iter()),
-        )
+        (RangeSet::from_iter(below), RangeSet::from_iter(above))
     }
 
     pub fn intersects(&self, other: &RangeSet<K>) -> bool {
@@ -120,7 +123,7 @@ impl<K: Key> RangeSet<K> {
         &self,
         lower: std::ops::Bound<&Bound<K>>, // TODO(bw): this should probably be Bound<Bound<&K>>
         upper: std::ops::Bound<&Bound<K>>,
-    ) -> impl Iterator<Item = &Range<K>> + DoubleEndedIterator {
+    ) -> impl DoubleEndedIterator<Item = &Range<K>> {
         self.ranges
             .range::<Bound<K>, (std::ops::Bound<&Bound<K>>, std::ops::Bound<&Bound<K>>)>((
                 lower, upper,
@@ -129,42 +132,33 @@ impl<K: Key> RangeSet<K> {
     }
 
     fn last_less_or_equal(&self, bound: &Bound<K>) -> Option<&Range<K>> {
-        self.ranges_range(
-            std::ops::Bound::Unbounded,
-            std::ops::Bound::Included(&bound),
-        )
-        .next_back()
+        self.ranges_range(std::ops::Bound::Unbounded, std::ops::Bound::Included(bound))
+            .next_back()
     }
 
     fn first_greater(&self, bound: &Bound<K>) -> Option<&Range<K>> {
-        self.ranges_range(
-            std::ops::Bound::Excluded(&bound),
-            std::ops::Bound::Unbounded,
-        )
-        .next()
+        self.ranges_range(std::ops::Bound::Excluded(bound), std::ops::Bound::Unbounded)
+            .next()
     }
 
     fn overlapping_ranges<'a>(&'a self, range: &'a Range<K>) -> Vec<Range<K>> {
         let mut result: Vec<Range<K>> = Vec::new();
-        match self
+        if let Some(next_below) = self
             .ranges_range(
                 std::ops::Bound::Unbounded,
                 std::ops::Bound::Included(&range.lower),
             )
             .next_back()
         {
-            Some(next_below) => {
-                if !range.intersection(next_below).is_empty() || range.adjacent(next_below) {
-                    result.push(next_below.clone().into());
-                }
+            if !range.intersection(next_below).is_empty() || range.adjacent(next_below) {
+                result.push(next_below.clone());
             }
-            None => {}
         };
         for overlapping_range in self.ranges_range(
             std::ops::Bound::Included(&range.lower),
             std::ops::Bound::Included(&range.upper),
         ) {
-            result.push(overlapping_range.clone().into());
+            result.push(overlapping_range.clone());
         }
         result
     }
@@ -186,7 +180,7 @@ impl<K: Key> RangeSet<K> {
             return;
         }
         let overlapping_ranges = self.overlapping_ranges(&range);
-        let prev = match overlapping_ranges.get(0) {
+        let prev = match overlapping_ranges.first() {
             Some(lowest) => Range {
                 lower: lowest.lower.clone(),
                 upper: range.lower,

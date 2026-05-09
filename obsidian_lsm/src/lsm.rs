@@ -302,8 +302,7 @@ impl<'a> KeyspaceReader<'a> {
             .0
             .l0_sealed
             .iter()
-            .map(|memtable| memtable.get(ts, k))
-            .flatten()
+            .filter_map(|memtable| memtable.get(ts, k))
             .max_by_key(|(ts, _)| *ts);
         if let Some((revision_ts, v)) = maybe_revision {
             return Ok(Some((revision_ts, v)));
@@ -458,14 +457,8 @@ impl<'a> KeyspaceReader<'a> {
             l0_streams.push(futures::stream::iter(revisions.into_iter()).boxed());
         }
         for l0_run in &self.0.l0_sealed {
-            l0_streams.push(
-                futures::stream::iter(
-                    l0_run
-                        .history(key, range, direction)
-                        .map(|revision| Ok(revision)),
-                )
-                .boxed(),
-            );
+            l0_streams
+                .push(futures::stream::iter(l0_run.history(key, range, direction).map(Ok)).boxed());
         }
 
         streams.push(match direction {

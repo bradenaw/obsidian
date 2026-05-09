@@ -34,9 +34,9 @@ impl<K: Key> Bound<K> {
     pub fn borrow(&self) -> Bound<&[u8]> {
         match self {
             Bound::BeforeAll => Bound::BeforeAll,
-            Bound::Before(v) => Bound::Before(&v),
-            Bound::After(v) => Bound::After(&v),
-            Bound::AfterPrefix(v) => Bound::AfterPrefix(&v),
+            Bound::Before(v) => Bound::Before(v),
+            Bound::After(v) => Bound::After(v),
+            Bound::AfterPrefix(v) => Bound::AfterPrefix(v),
             Bound::AfterAll => Bound::AfterAll,
         }
     }
@@ -44,7 +44,7 @@ impl<K: Key> Bound<K> {
 
 impl Bound<&[u8]> {
     pub fn to_vec(&self) -> Bound<Vec<u8>> {
-        self.clone().map(Vec::from)
+        (*self).map(Vec::from)
     }
 }
 
@@ -142,10 +142,10 @@ impl<K: Deref<Target = [u8]>> Debug for Bound<K> {
     }
 }
 
-impl Into<pb::Bound> for Bound<Vec<u8>> {
-    fn into(self) -> pb::Bound {
+impl From<Bound<Vec<u8>>> for pb::Bound {
+    fn from(val: Bound<Vec<u8>>) -> Self {
         pb::Bound {
-            bound_type: Some(match self {
+            bound_type: Some(match val {
                 Bound::BeforeAll => pb::bound::BoundType::BeforeAll(()),
                 Bound::Before(k) => pb::bound::BoundType::Before(k),
                 Bound::After(k) => pb::bound::BoundType::After(k),
