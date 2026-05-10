@@ -7,6 +7,7 @@ mod journal;
 mod journals;
 pub mod mem;
 mod node_discovery;
+mod s3_storage;
 mod storage;
 
 pub use file_reader::FileReader;
@@ -14,5 +15,6 @@ pub use file_writer::FileWriter;
 pub use journal::Journal;
 pub use journals::Journals;
 pub use node_discovery::NodeDiscovery;
+pub use s3_storage::S3Storage;
 pub use storage::FileName;
 pub use storage::Storage;
