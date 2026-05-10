@@ -4,6 +4,7 @@
 
 mod gateway_client;
 mod gateway_server;
+mod grpc_nodes;
 mod journals_client;
 mod journals_server;
 mod node_client;
