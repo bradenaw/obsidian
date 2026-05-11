@@ -13,7 +13,6 @@ use crate::Range;
 use crate::Record;
 use crate::Revision;
 use crate::ShardId;
-use crate::TabletId;
 use crate::Timestamp;
 
 #[async_trait]
@@ -37,8 +36,6 @@ pub(crate) trait Meta: Send + Sync {
         range: Range<Vec<u8>>,
     ) -> anyhow::Result<(Vec<Record>, Option<Range<Vec<u8>>>)>;
     async fn sync(&self, ts: Timestamp) -> anyhow::Result<(Vec<Revision>, Timestamp)>;
-
-    async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>>;
 
     async fn write(
         &self,
