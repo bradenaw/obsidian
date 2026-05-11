@@ -662,10 +662,6 @@ impl runtime::Meta for MetaProxy {
         Ok((revisions, ts))
     }
 
-    async fn tablet_ids(&self, _ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
-        todo!();
-    }
-
     async fn write(
         &self,
         snapshot_ts: Timestamp,

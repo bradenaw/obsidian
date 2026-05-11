@@ -423,11 +423,6 @@ impl runtime::Meta for WeakView<Meta> {
         self.or_closed(async |inner| inner.sync(ts).await).await
     }
 
-    async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
-        self.or_closed(async |inner| inner.tablet_ids(ts).await)
-            .await
-    }
-
     async fn write(
         &self,
         snapshot_ts: Timestamp,

@@ -242,11 +242,6 @@ impl runtime::Meta for Meta {
         Ok((out_page, new_ts))
     }
 
-    async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
-        let snapshot = self.snapshot_at(ts);
-        snapshot.tablet_ids().await
-    }
-
     /// Writes the given mutations if `Meta` has not changed since the given snapshot.
     ///
     /// Also includes a write to MetaKey::Sync.

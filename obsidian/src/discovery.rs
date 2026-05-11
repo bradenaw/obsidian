@@ -435,10 +435,6 @@ impl runtime::Meta for MetaProxy {
         self.get_meta()?.sync(ts).await
     }
 
-    async fn tablet_ids(&self, ts: Timestamp) -> anyhow::Result<Vec<TabletId>> {
-        self.get_meta()?.tablet_ids(ts).await
-    }
-
     async fn write(
         &self,
         snapshot_ts: Timestamp,
