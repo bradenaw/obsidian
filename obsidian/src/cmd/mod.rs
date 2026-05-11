@@ -13,6 +13,8 @@ use tonic::transport::server::TcpIncoming;
 
 use crate::discovery::Discovery;
 use crate::election::Proposal;
+use crate::gateway::Gateway;
+use crate::grpc::GatewayServer;
 use crate::grpc::GrpcNodes;
 use crate::grpc::JournalsClient;
 use crate::grpc::JournalsServer;
@@ -20,6 +22,7 @@ use crate::grpc::NodeServer;
 use crate::meta::MetaSynced;
 use crate::node::Node;
 use crate::runtime::Nodes;
+use crate::runtime::Shards;
 use crate::NodeId;
 
 #[derive(clap::Parser, Debug)]
@@ -78,7 +81,7 @@ async fn cmd_node(args: NodeArgs) -> anyhow::Result<()> {
 
     log::info!("starting {:?}", node_id);
 
-    let node_discovery = ConsulNodeDiscovery::new(
+    let node_discovery = ConsulNodeDiscovery::join(
         node_id,
         Consul::new({
             let mut config = rs_consul::Config::default();
@@ -89,14 +92,19 @@ async fn cmd_node(args: NodeArgs) -> anyhow::Result<()> {
     );
     let nodes = Arc::new(GrpcNodes::new(Arc::new(node_discovery)));
 
-    let discovery = Discovery::new(Arc::clone(&nodes) as Arc<dyn Nodes>);
+    let discovery = Arc::new(Discovery::new(Arc::clone(&nodes) as Arc<dyn Nodes>));
 
     let storage = S3Storage::new(
-        aws_sdk_s3::Client::new(&aws_config::load_from_env().await),
+        aws_sdk_s3::Client::new(
+            &aws_config::from_env()
+                .endpoint_url("http://[::1]:9000")
+                .load()
+                .await,
+        ),
         args.s3_bucket,
     );
 
-    let meta_synced = MetaSynced::new(discovery.meta());
+    let meta_synced = Arc::new(MetaSynced::new(discovery.meta()));
 
     let journals = JournalsClient::new(
         pb::external::journals_client::JournalsClient::connect(args.journals_addr).await?,
@@ -107,9 +115,15 @@ async fn cmd_node(args: NodeArgs) -> anyhow::Result<()> {
         nodes,
         Arc::new(storage),
         discovery.meta(),
-        Arc::new(discovery),
-        Arc::new(meta_synced),
+        Arc::clone(&discovery) as Arc<dyn Shards>,
+        Arc::clone(&meta_synced),
         Arc::new(journals),
+    );
+
+    let gateway = Gateway::new(
+        discovery.meta(),
+        MetaSynced::new(discovery.meta()),
+        discovery,
     );
 
     log::info!("starting to serve grpc");
@@ -117,6 +131,9 @@ async fn cmd_node(args: NodeArgs) -> anyhow::Result<()> {
         .add_service(pb::internal::node_server::NodeServer::new(NodeServer::new(
             Arc::new(node),
         )))
+        .add_service(pb::obsidian_server::ObsidianServer::new(
+            GatewayServer::new(Arc::new(gateway)),
+        ))
         .serve_with_incoming(
             TcpIncoming::from_listener(listener, true /*nodelay*/, None /*keepalive*/).unwrap(),
         )

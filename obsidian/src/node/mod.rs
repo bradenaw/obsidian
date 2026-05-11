@@ -263,8 +263,8 @@ impl NodeInner {
                         if let Ok(meta_tablet) = meta_shard.tablet(TabletId::META) {
                             log::info!(
                                 "{:?} is leader for {:?}, spawning meta and supervisor",
-                                ShardId::META,
                                 self.node_id,
+                                ShardId::META,
                             );
                             let meta = Owned::new(Meta::new(meta_tablet));
                             *supervisor = Some(Owned::new(Supervisor::new(

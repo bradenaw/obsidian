@@ -752,28 +752,36 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use obsidian_common::ShardId;
     use obsidian_external::mem::MemJournals;
     use obsidian_external::mem::MemStorage;
+    use obsidian_external::ConsulNodeDiscovery;
+    use obsidian_external::NodeDiscovery;
+    use rs_consul::Consul;
+    use tokio::time::sleep;
 
     use super::strongly_connected_components;
     use super::EdgeType;
     use super::Txid;
     use super::WorkloadAppend;
+    use crate::discovery::Discovery;
+    use crate::grpc::GatewayClient;
+    use crate::grpc::GrpcNodes;
     use crate::rtest::graph::Graph;
     use crate::rtest::workload_append::WorkloadAppendOptions;
     use crate::test::GrpcInProcessNodeBuilder;
     use crate::test::InProcessNodeBuilder;
-    use crate::test::ObsidianForTest;
     use crate::test::ObsidianForTestBuilder;
     use crate::Bound;
     use crate::ColoGroupId;
     use crate::KeyspaceId;
+    use crate::Obsidian;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_workload_append_in_process() -> anyhow::Result<()> {
         let _ = pretty_env_logger::try_init();
         let obs = ObsidianForTestBuilder::new().n_shards(2).build().await?;
-        test_workload_append(obs).await
+        test_workload_append(obs.gateway).await
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -788,26 +796,79 @@ mod tests {
             )))
             .build()
             .await?;
-        test_workload_append(obs).await
+        test_workload_append(obs.gateway).await
     }
 
-    async fn test_workload_append(obs: ObsidianForTest) -> anyhow::Result<()> {
-        obs.gateway
-            .create_colo_group(
-                ColoGroupId(1),
-                vec![Bound::Before(vec![2]), Bound::Before(vec![3])],
-            )
-            .await?;
+    #[ignore]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_workload_append_external() -> anyhow::Result<()> {
+        // Requires a bunch of running services:
+        //
+        // S3
+        //   podman run -p 9000:9000 -p 9001:9001 docker.io/minio/minio server /data --console-address :9001
+        //
+        // Consul
+        //   podman run -p 8500:8500 docker.io/hashicorp/consul
+        //
+        // Journals
+        //   RUST_LOG=info target/debug/obsidian test-journals --port 8000
+        //
+        // Node
+        //   RUST_BACKTRACE=1 RUST_LOG=info AWS_REGION=us-west-2 AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin target/debug/obsidian node --port 8001 --journals-addr 'http://[::1]:8000' --s3-bucket obsidian --consul-addr 'http://[::1]:8500' --consul-service obsidian
 
-        obs.gateway
-            .create_keyspace(KeyspaceId(ColoGroupId(1), 1))
-            .await?;
-        obs.gateway
-            .create_keyspace(KeyspaceId(ColoGroupId(1), 2))
-            .await?;
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .unwrap();
+        let _ = pretty_env_logger::try_init();
+        let node_discovery = Arc::new(ConsulNodeDiscovery::observe(
+            Consul::new({
+                let mut config = rs_consul::Config::default();
+                config.address = "http://[::1]:8500".to_string();
+                config
+            }),
+            "obsidian".to_string(), // service name
+        ));
+
+        // JANK
+        sleep(Duration::from_millis(1000)).await;
+
+        let nodes = Discovery::new(Arc::new(GrpcNodes::new(
+            Arc::clone(&node_discovery) as Arc<dyn NodeDiscovery + Send + Sync>
+        )));
+
+        sleep(Duration::from_millis(1000)).await;
+
+        log::info!("adding shards");
+        nodes.meta().add_shard(ShardId(1)).await?;
+        //nodes.meta().add_shard(ShardId(2)).await?;
+        log::info!("adding shards -> done");
+
+        // JANK
+        sleep(Duration::from_millis(1000)).await;
+
+        let node_ids = node_discovery.node_ids().0;
+        let some_node_id = node_ids.iter().next().unwrap();
+        let gateway = GatewayClient::connect(format!(
+            "http://[{}]:{}",
+            some_node_id.addr, some_node_id.port
+        ))
+        .await?;
+
+        test_workload_append(Arc::new(gateway)).await
+    }
+
+    async fn test_workload_append(obs: Arc<dyn Obsidian>) -> anyhow::Result<()> {
+        obs.create_colo_group(
+            ColoGroupId(1),
+            vec![Bound::Before(vec![2]), Bound::Before(vec![3])],
+        )
+        .await?;
+
+        obs.create_keyspace(KeyspaceId(ColoGroupId(1), 1)).await?;
+        obs.create_keyspace(KeyspaceId(ColoGroupId(1), 2)).await?;
 
         let wl = WorkloadAppend::new(
-            Arc::clone(&obs.gateway),
+            Arc::clone(&obs),
             WorkloadAppendOptions {
                 duration: Duration::from_millis(5000),
                 concurrency: 32,

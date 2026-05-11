@@ -32,6 +32,14 @@ impl GatewayClient {
             inner: Pool::new(32, inner),
         }
     }
+
+    pub async fn connect(url: String) -> anyhow::Result<Self> {
+        Ok(Self::new(
+            &pb::obsidian_client::ObsidianClient::connect(url)
+                .await
+                .map_err(anyhow::Error::from)?,
+        ))
+    }
 }
 
 #[async_trait]

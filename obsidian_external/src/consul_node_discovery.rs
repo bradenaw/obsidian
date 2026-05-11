@@ -23,17 +23,25 @@ pub struct ConsulNodeDiscovery(OwnedWithBackground<ConsulNodeDiscoveryInner>);
 struct ConsulNodeDiscoveryInner {
     consul: Consul,
     service: String,
-    node_id: NodeId,
+    node_id: Option<NodeId>,
     need_register: Notify,
     node_ids: Watchable<OrdSet<NodeId>>,
 }
 
 impl ConsulNodeDiscovery {
-    pub fn new(node_id: NodeId, consul: Consul, service: String) -> Self {
+    pub fn join(node_id: NodeId, consul: Consul, service: String) -> Self {
+        Self::new(Some(node_id), consul, service)
+    }
+
+    pub fn observe(consul: Consul, service: String) -> Self {
+        Self::new(None, consul, service)
+    }
+
+    fn new(node_id: Option<NodeId>, consul: Consul, service: String) -> Self {
         let inner = OwnedWithBackground::new(ConsulNodeDiscoveryInner {
             consul,
             service,
-            node_id,
+            node_id: node_id,
             need_register: Notify::new(),
             node_ids: Watchable::new(OrdSet::new()),
         });
@@ -42,9 +50,11 @@ impl ConsulNodeDiscovery {
             inner.watch().await;
         });
 
-        inner.spawn(async |inner| {
-            inner.keep_registered().await;
-        });
+        if node_id.is_some() {
+            inner.spawn(async |inner| {
+                inner.keep_registered().await;
+            });
+        }
 
         Self(inner)
     }
@@ -97,9 +107,11 @@ impl ConsulNodeDiscoveryInner {
                 })
             })
             .collect::<anyhow::Result<_>>()?;
-        if !node_ids.contains(&self.node_id) {
-            self.need_register.notify_one();
-            node_ids.insert(self.node_id);
+        if let Some(node_id) = self.node_id {
+            if !node_ids.contains(&node_id) {
+                self.need_register.notify_one();
+                node_ids.insert(node_id);
+            }
         }
         let prev_node_ids = self.node_ids.get().0;
         if node_ids != prev_node_ids {
@@ -109,11 +121,12 @@ impl ConsulNodeDiscoveryInner {
     }
 
     async fn keep_registered(&self) {
+        let node_id = self.node_id.unwrap();
         loop {
             let trigger = self.need_register.notified();
             Retry::new()
                 .indefinitely(&async || {
-                    self.register()
+                    self.register(node_id)
                         .await
                         .map_err(|e| anyhow!("failed to register with consul: {}", e))
                 })
@@ -121,21 +134,21 @@ impl ConsulNodeDiscoveryInner {
             trigger.await;
             log::warn!(
                 "consul registration for {:?} dropped, reregistering",
-                self.node_id
+                node_id
             );
         }
     }
 
-    async fn register(&self) -> anyhow::Result<()> {
+    async fn register(&self, node_id: NodeId) -> anyhow::Result<()> {
         self.consul
             .register_entity(
                 &RegisterEntityPayload::builder()
-                    .Node(self.node_id.uuid.to_string())
-                    .Address(self.node_id.addr.to_string())
+                    .Node(node_id.uuid.to_string())
+                    .Address(node_id.addr.to_string())
                     .Service(
                         RegisterEntityService::builder()
                             .Service(self.service.clone())
-                            .Port(self.node_id.port)
+                            .Port(node_id.port)
                             .build(),
                     )
                     .build(),

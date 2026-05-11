@@ -49,6 +49,7 @@ impl Storage for S3Storage {
             .get_object_attributes()
             .bucket(self.bucket.clone())
             .key(file_name_to_key(name.clone()))
+            .object_attributes(aws_sdk_s3::types::ObjectAttributes::ObjectSize)
             .send()
             .await?;
 
@@ -79,12 +80,21 @@ impl FileReader for S3FileReader {
     }
 
     async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> anyhow::Result<()> {
+        if buf.len() == 0 {
+            return Err(anyhow!("zero-length read"));
+        }
+
         let resp = self
             .client
             .get_object()
             .bucket(self.bucket.clone())
             .key(file_name_to_key(self.name.clone()))
-            .range(format!("bytes={}-{}", offset, offset + (buf.len() as u64)))
+            .range(format!(
+                "bytes={}-{}",
+                offset,
+                // HTTP ranges are inclusive
+                offset + (buf.len() as u64) - 1
+            ))
             .send()
             .await?;
 
@@ -143,6 +153,6 @@ impl FileWriter for S3FileWriter {
 
 fn file_name_to_key(file_name: FileName) -> String {
     match file_name {
-        FileName::Run(run_id) => format!("/run/{}", run_id),
+        FileName::Run(run_id) => format!("/run/{}.olf", run_id),
     }
 }
