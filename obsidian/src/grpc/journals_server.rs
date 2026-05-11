@@ -19,6 +19,12 @@ pub(crate) struct JournalsServer<E> {
     inner: Arc<dyn Journals<E>>,
 }
 
+impl<E> JournalsServer<E> {
+    pub fn new(inner: Arc<dyn Journals<E>>) -> Self {
+        Self { inner }
+    }
+}
+
 #[async_trait]
 impl<E> pb::external::journals_server::Journals for JournalsServer<E>
 where

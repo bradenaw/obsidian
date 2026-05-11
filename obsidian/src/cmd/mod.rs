@@ -2,6 +2,8 @@ use std::net::IpAddr;
 use std::net::Ipv6Addr;
 use std::sync::Arc;
 
+use obsidian_common::JournalEntry;
+use obsidian_external::mem::MemJournals;
 use obsidian_external::ConsulNodeDiscovery;
 use obsidian_external::S3Storage;
 use obsidian_pb as pb;
@@ -10,8 +12,10 @@ use tokio::net::TcpListener;
 use tonic::transport::server::TcpIncoming;
 
 use crate::discovery::Discovery;
+use crate::election::Proposal;
 use crate::grpc::GrpcNodes;
 use crate::grpc::JournalsClient;
+use crate::grpc::JournalsServer;
 use crate::grpc::NodeServer;
 use crate::meta::MetaSynced;
 use crate::node::Node;
@@ -28,6 +32,21 @@ struct Cli {
 enum Command {
     /// Run an Obsidian node.
     Node(NodeArgs),
+    /// Run an in-memory journals server for use in tests.
+    TestJournals(TestJournalsArgs),
+}
+
+pub async fn cmd_main() -> anyhow::Result<()> {
+    pretty_env_logger::init_timed();
+
+    let cli: Cli = clap::Parser::parse();
+
+    match cli.command {
+        Command::Node(args) => cmd_node(args).await?,
+        Command::TestJournals(args) => cmd_test_journals(args).await?,
+    }
+
+    Ok(())
 }
 
 #[derive(clap::Args, Debug)]
@@ -46,18 +65,6 @@ struct NodeArgs {
 
     #[arg(long, default_value_t = 0)]
     port: u16,
-}
-
-pub async fn cmd_main() -> anyhow::Result<()> {
-    pretty_env_logger::init();
-
-    let cli: Cli = clap::Parser::parse();
-
-    match cli.command {
-        Command::Node(args) => cmd_node(args).await?,
-    }
-
-    Ok(())
 }
 
 async fn cmd_node(args: NodeArgs) -> anyhow::Result<()> {
@@ -99,13 +106,37 @@ async fn cmd_node(args: NodeArgs) -> anyhow::Result<()> {
         Arc::new(journals),
     );
 
-    let serve = tonic::transport::Server::builder()
+    tonic::transport::Server::builder()
         .add_service(pb::internal::node_server::NodeServer::new(NodeServer::new(
             Arc::new(node),
         )))
         .serve_with_incoming(
             TcpIncoming::from_listener(listener, true /*nodelay*/, None /*keepalive*/).unwrap(),
-        );
-    serve.await?;
+        )
+        .await?;
+    Ok(())
+}
+
+#[derive(clap::Args, Debug)]
+struct TestJournalsArgs {
+    #[arg(long, default_value_t = 0)]
+    port: u16,
+}
+
+async fn cmd_test_journals(args: TestJournalsArgs) -> anyhow::Result<()> {
+    let addr = IpAddr::V6(Ipv6Addr::LOCALHOST);
+    let listener = TcpListener::bind(format!("{}:{}", addr, args.port)).await?;
+    log::info!(
+        "running test journals on port {}",
+        listener.local_addr()?.port(),
+    );
+    tonic::transport::Server::builder()
+        .add_service(pb::external::journals_server::JournalsServer::new(
+            JournalsServer::new(Arc::new(MemJournals::<Proposal<JournalEntry>>::new())),
+        ))
+        .serve_with_incoming(
+            TcpIncoming::from_listener(listener, true /*nodelay*/, None /*keepalive*/).unwrap(),
+        )
+        .await?;
     Ok(())
 }
