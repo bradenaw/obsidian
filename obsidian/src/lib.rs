@@ -5,6 +5,7 @@
 #![feature(iter_from_coroutine)]
 #![feature(thread_id_value)]
 
+pub mod cmd;
 mod discovery;
 mod election;
 mod gateway;
@@ -54,5 +55,6 @@ pub(crate) use obsidian_common::TxOutcome;
 pub(crate) use obsidian_common::Txid;
 pub(crate) use obsidian_common::WriteError;
 
+pub use crate::cmd::cmd_main;
 pub(crate) use crate::obsidian::Obsidian;
 pub(crate) use crate::obsidian::ObsidianExt;

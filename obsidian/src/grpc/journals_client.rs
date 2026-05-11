@@ -16,12 +16,23 @@ use obsidian_util::Encode;
 use crate::JournalSeq;
 use crate::ShardId;
 
-struct JournalsClient<E>
+pub(crate) struct JournalsClient<E> {
+    phantom: PhantomData<E>,
+    grpc_client: pb::external::journals_client::JournalsClient<tonic::transport::Channel>,
+}
+
+impl<E> JournalsClient<E>
 where
     E: Encode + Decode + Send + 'static,
 {
-    phantom: PhantomData<E>,
-    grpc_client: pb::external::journals_client::JournalsClient<tonic::transport::Channel>,
+    pub fn new(
+        grpc_client: pb::external::journals_client::JournalsClient<tonic::transport::Channel>,
+    ) -> Self {
+        Self {
+            phantom: PhantomData::default(),
+            grpc_client,
+        }
+    }
 }
 
 #[async_trait]
@@ -118,3 +129,4 @@ fn journal_name(shard_id: ShardId) -> pb::external::JournalName {
         journal_name: Some(pb::external::journal_name::JournalName::ShardId(shard_id.0)),
     }
 }
+

@@ -15,5 +15,8 @@ mod util;
 
 pub(crate) use crate::grpc::gateway_client::GatewayClient;
 pub(crate) use crate::grpc::gateway_server::GatewayServer;
+pub(crate) use crate::grpc::grpc_nodes::GrpcNodes;
+pub(crate) use crate::grpc::journals_client::JournalsClient;
+pub(crate) use crate::grpc::journals_server::JournalsServer;
 pub(crate) use crate::grpc::node_client::NodeClient;
 pub(crate) use crate::grpc::node_server::NodeServer;
