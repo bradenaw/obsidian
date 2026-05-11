@@ -13,19 +13,18 @@ use std::sync::Weak;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use async_stream::stream;
 use async_stream::try_stream;
 use async_trait::async_trait;
 use futures::future::pending;
 use futures::Stream;
 use futures::StreamExt;
 use obsidian_external::Journal;
+use obsidian_util::jittered_ticker;
 use obsidian_util::AtomicInstant;
 use obsidian_util::Retry;
 use obsidian_util::StateMachine;
 use obsidian_util::Watchable;
 use obsidian_util::WithBackground;
-use rand::Rng;
 use tokio::select;
 use tokio::sync::Notify;
 use tokio::time::interval;
@@ -605,17 +604,6 @@ where
 
 fn duration_until(ts: Timestamp) -> Duration {
     ts.saturating_duration_since(Timestamp::now())
-}
-
-fn jittered_ticker(x: Duration) -> impl Stream<Item = ()> {
-    let mut next = Instant::now();
-    stream! {
-        loop {
-            next += rand::thread_rng().gen_range(x / 2..x * 3/2);
-            yield ();
-            sleep_until(next).await;
-        }
-    }
 }
 
 fn ticker(x: Duration) -> IntervalStream {
