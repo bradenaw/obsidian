@@ -2321,6 +2321,7 @@ dependencies = [
  "rand 0.8.6",
  "regex",
  "rs-consul",
+ "rustls 0.23.40",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",

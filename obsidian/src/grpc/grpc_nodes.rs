@@ -109,10 +109,10 @@ impl GrpcNodesInner {
         let grpc_client = Retry::new()
             .indefinitely(&async || -> anyhow::Result<_> {
                 // TODO: https etc
-                let url = format!("http://{}:{}", node_id.addr, node_id.port);
-                pb::internal::node_client::NodeClient::connect(url)
+                let url = format!("http://[{}]:{}", node_id.addr, node_id.port);
+                pb::internal::node_client::NodeClient::connect(url.clone())
                     .await
-                    .map_err(|e| e.into())
+                    .map_err(|e| anyhow!("error connecting to {:?} at {}: {:?}", node_id, url, e))
             })
             .await;
 

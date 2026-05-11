@@ -2,6 +2,7 @@ use std::future::Future;
 use std::net::IpAddr;
 use std::str::FromStr;
 
+use anyhow::anyhow;
 use im::OrdSet;
 use obsidian_common::NodeId;
 use obsidian_util::OwnedWithBackground;
@@ -57,7 +58,11 @@ impl ConsulNodeDiscoveryInner {
 
         loop {
             let new_index = Retry::new()
-                .indefinitely(&async || self.poll(index).await)
+                .indefinitely(&async || {
+                    self.poll(index)
+                        .await
+                        .map_err(|e| anyhow!("during consul discovery poll: {}", e))
+                })
                 .await;
             index = Some(new_index);
         }
@@ -80,9 +85,15 @@ impl ConsulNodeDiscoveryInner {
             .into_iter()
             .map(|service_node| {
                 Ok(NodeId {
-                    addr: IpAddr::from_str(&service_node.service.address)?,
+                    addr: IpAddr::from_str(&service_node.node.address).map_err(|e| {
+                        anyhow!(
+                            "couldn't parse node address {:?}: {}",
+                            service_node.node.address,
+                            e
+                        )
+                    })?,
                     port: service_node.service.port,
-                    uuid: Uuid::try_from(service_node.node.id)?,
+                    uuid: Uuid::try_from(service_node.node.node)?,
                 })
             })
             .collect::<anyhow::Result<_>>()?;
@@ -101,7 +112,11 @@ impl ConsulNodeDiscoveryInner {
         loop {
             let trigger = self.need_register.notified();
             Retry::new()
-                .indefinitely(&async || self.register().await)
+                .indefinitely(&async || {
+                    self.register()
+                        .await
+                        .map_err(|e| anyhow!("failed to register with consul: {}", e))
+                })
                 .await;
             trigger.await;
             log::warn!(

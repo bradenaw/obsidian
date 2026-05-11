@@ -39,6 +39,10 @@ enum Command {
 pub async fn cmd_main() -> anyhow::Result<()> {
     pretty_env_logger::init_timed();
 
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .unwrap();
+
     let cli: Cli = clap::Parser::parse();
 
     match cli.command {
@@ -71,6 +75,8 @@ async fn cmd_node(args: NodeArgs) -> anyhow::Result<()> {
     let addr = IpAddr::V6(Ipv6Addr::LOCALHOST);
     let listener = TcpListener::bind(format!("{}:{}", addr, args.port)).await?;
     let node_id = NodeId::new(addr, listener.local_addr()?.port());
+
+    log::info!("starting {:?}", node_id);
 
     let node_discovery = ConsulNodeDiscovery::new(
         node_id,
@@ -106,6 +112,7 @@ async fn cmd_node(args: NodeArgs) -> anyhow::Result<()> {
         Arc::new(journals),
     );
 
+    log::info!("starting to serve grpc");
     tonic::transport::Server::builder()
         .add_service(pb::internal::node_server::NodeServer::new(NodeServer::new(
             Arc::new(node),
