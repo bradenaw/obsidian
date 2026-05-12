@@ -84,4 +84,13 @@ impl<T> WeakView<T> {
             },
         }
     }
+
+    pub fn or_closed_sync<F, U, E>(&self, f: F) -> Result<U, E>
+    where
+        F: FnOnce(&T) -> Result<U, E>,
+        E: From<anyhow::Error>,
+    {
+        let inner = self.inner.upgrade().ok_or_else(|| anyhow!("closed"))?;
+        f(inner.deref())
+    }
 }
