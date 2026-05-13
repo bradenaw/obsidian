@@ -441,6 +441,7 @@ where
                                 abandon: Arc::clone(&self.abandon),
                                 poison: Arc::clone(&self.poison),
                             };
+                            log::info!("{} promoting to leader", self.name);
                             follower.promote(journal_writer).await?
                         }
                     };

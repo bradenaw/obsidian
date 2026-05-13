@@ -37,6 +37,7 @@ impl<T> Owned<T> {
         }
     }
 
+    // TODO: Remove this Arc
     pub fn weak(this: &Self) -> Arc<WeakView<T>> {
         Arc::clone(&this.weak)
     }
