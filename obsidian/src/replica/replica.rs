@@ -267,7 +267,7 @@ impl runtime::Shard for Replica {
 
 struct ReplicaTablet {
     tablet_id: TabletId,
-    participant: Arc<WeakView<Participant<JournalEntry, LeaderReplica, FollowerReplica>>>,
+    participant: WeakView<Participant<JournalEntry, LeaderReplica, FollowerReplica>>,
 }
 
 #[async_trait]

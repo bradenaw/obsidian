@@ -114,7 +114,7 @@ impl Nodes for TestNodesInner {
 
         Ok(Arc::new(WeakNode {
             node_id: node_id,
-            inner: Owned::weak(node),
+            inner: Arc::new(Owned::weak(node)),
         }) as Arc<dyn Node>)
     }
 }

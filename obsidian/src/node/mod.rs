@@ -156,7 +156,7 @@ impl runtime::Node for Node {
         let meta = maybe_meta
             .as_ref()
             .ok_or_else(|| anyhow!("{:?} is not currently hosting meta", self.0.node_id))?;
-        Ok(Owned::weak(meta))
+        Ok(Arc::new(Owned::weak(meta)))
     }
 
     fn supervisor(&self) -> anyhow::Result<Arc<dyn runtime::Supervisor>> {
@@ -167,7 +167,7 @@ impl runtime::Node for Node {
                 self.0.node_id
             )
         })?;
-        Ok(Owned::weak(supervisor))
+        Ok(Arc::new(Owned::weak(supervisor)))
     }
 
     fn shards_subscribe(
@@ -266,7 +266,7 @@ impl NodeInner {
                         if let Ok(meta_tablet) = meta_shard.tablet(TabletId::META) {
                             let meta = Owned::new(Meta::new(meta_tablet));
                             *supervisor = Some(Owned::new(Supervisor::new(
-                                Owned::weak(&meta),
+                                Arc::new(Owned::weak(&meta)),
                                 Arc::clone(&self.meta_synced),
                                 Arc::clone(&self.shards),
                             )));
@@ -430,7 +430,7 @@ impl runtime::Meta for WeakView<Meta> {
 }
 
 #[async_trait]
-impl runtime::Shard for (ShardId, Arc<WeakView<Replica>>) {
+impl runtime::Shard for (ShardId, WeakView<Replica>) {
     fn id(&self) -> ShardId {
         self.0
     }

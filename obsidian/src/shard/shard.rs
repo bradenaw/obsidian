@@ -143,18 +143,18 @@ impl crate::runtime::Shard for Shard {
                 .meta_tablet
                 .as_ref()
                 .ok_or_else(|| anyhow!("{:?} not a member of {:?}", tablet_id, self.0.id))?;
-            return Ok(Owned::weak(meta_tablet) as Arc<dyn Tablet>);
+            return Ok(Arc::new(Owned::weak(meta_tablet)) as Arc<dyn Tablet>);
         }
         if tablet_id == TabletId::shard_meta(self.0.id) {
-            return Ok(Owned::weak(&self.0.shard_meta_tablet) as Arc<dyn Tablet>);
+            return Ok(Arc::new(Owned::weak(&self.0.shard_meta_tablet)) as Arc<dyn Tablet>);
         }
 
         let tablets = self.0.tablets.read().unwrap();
-        Ok(Owned::weak(
+        Ok(Arc::new(Owned::weak(
             tablets
                 .get(&tablet_id)
                 .ok_or_else(|| anyhow!("{:?} not found", tablet_id))?,
-        ))
+        )))
     }
 
     async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
