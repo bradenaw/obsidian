@@ -90,7 +90,7 @@ impl Node {
         meta_synced: Arc<MetaSynced>,
         journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
     ) -> Self {
-        let inner = Arc::new(NodeInner {
+        let node = Node(WithBackground::new(NodeInner {
             node_id,
             nodes,
             lsm_options: LsmOptions {
@@ -109,8 +109,7 @@ impl Node {
             maybe_meta: RwLock::new(None),
             replicas: RwLock::new(HashMap::new()),
             replicas_changed: Notify::new(),
-        });
-        let node = Node(WithBackground::new(Arc::clone(&inner)));
+        }));
 
         meta_synced.subscribe(&node.0);
 

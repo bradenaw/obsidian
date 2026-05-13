@@ -18,7 +18,6 @@ pub use atomic_instant::AtomicInstant;
 pub use background::spawn_owned;
 pub use background::Background;
 pub use background::OwnedJoinHandle;
-pub use background::OwnedWithBackground;
 pub use background::WithBackground;
 pub use binary_search_by_idx::binary_search_by_idx;
 pub use bytes::byte_width;

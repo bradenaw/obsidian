@@ -8,8 +8,8 @@ use futures::TryStreamExt;
 use obsidian_external::Storage;
 use obsidian_util::encode;
 use obsidian_util::Decode;
-use obsidian_util::OwnedWithBackground;
 use obsidian_util::Retry;
+use obsidian_util::WithBackground;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -42,7 +42,7 @@ use crate::Txid;
 
 const MAX_PRECOND_VALUE_LEN: usize = 256;
 
-pub(super) struct ActiveTablet(OwnedWithBackground<ActiveTabletInner>);
+pub(super) struct ActiveTablet(WithBackground<ActiveTabletInner>);
 
 struct ActiveTabletInner {
     inner: TabletInner<JournaledLsm>,
@@ -62,7 +62,7 @@ impl ActiveTablet {
     ) -> Self {
         let (prepare_sender, prepare_receiver) = mpsc::channel(1024);
 
-        let tablet = ActiveTablet(OwnedWithBackground::new(ActiveTabletInner {
+        let tablet = ActiveTablet(WithBackground::new(ActiveTabletInner {
             inner: TabletInner::new(tablet_id, colo_group_id, range, lsm),
             storage,
             shards,

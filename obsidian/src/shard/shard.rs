@@ -122,7 +122,7 @@ impl Shard {
             inner.add_data_tablet(tablet_id, tablet_metadata, lsm)?;
         }
 
-        let shard = Shard(WithBackground::new(Arc::new(inner)));
+        let shard = Shard(WithBackground::new(inner));
 
         meta_synced.subscribe(&shard.0);
 

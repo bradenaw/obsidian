@@ -56,44 +56,6 @@ impl<T> WithBackground<T>
 where
     T: Send + Sync + 'static,
 {
-    pub fn new(t: Arc<T>) -> Self {
-        Self {
-            inner: t,
-            bg: Background::new(),
-        }
-    }
-
-    pub fn spawn<F, Fut>(&self, f: F)
-    where
-        F: FnOnce(Arc<T>) -> Fut + Sync + Send + 'static,
-        Fut: Future<Output = ()> + Send,
-    {
-        self.bg.spawn({
-            let inner = self.inner.clone();
-            async move {
-                f(inner).await;
-            }
-        });
-    }
-}
-
-impl<T> Deref for WithBackground<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.inner.deref()
-    }
-}
-
-pub struct OwnedWithBackground<T> {
-    inner: Arc<T>,
-    bg: Background,
-}
-
-impl<T> OwnedWithBackground<T>
-where
-    T: Send + Sync + 'static,
-{
     pub fn new(t: T) -> Self {
         Self {
             inner: Arc::new(t),
@@ -124,7 +86,7 @@ where
     }
 }
 
-impl<T> Deref for OwnedWithBackground<T> {
+impl<T> Deref for WithBackground<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {

@@ -264,7 +264,7 @@ where
     where
         TFollowerBuilder: FollowerBuilder<TEntry, TFollower> + Send + Sync + 'static,
     {
-        let inner = WithBackground::new(Arc::new(ParticipantInner {
+        let inner = WithBackground::new(ParticipantInner {
             name,
             journal,
             accepted_seqs: Arc::new(SeqWaiters::new()),
@@ -278,7 +278,7 @@ where
             became_leader_at: Watchable::new(None),
             poison: Arc::new(AtomicBool::new(false)),
             abandon: Arc::new(Notify::new()),
-        }));
+        });
 
         inner.spawn(async move |participant| {
             Retry::new()

@@ -51,7 +51,7 @@ use crate::Txid;
 /// themselves, which means a logical shard moves around among nodes. Discovery keeps track of
 /// where that logical shard is.
 pub(crate) struct Discovery {
-    bg: WithBackground<DiscoveryInner>,
+    bg: WithBackground<Arc<DiscoveryInner>>,
     inner: Arc<DiscoveryInner>,
     meta_proxy: Arc<dyn runtime::Meta>,
     supervisor_proxy: Arc<dyn runtime::Supervisor>,
