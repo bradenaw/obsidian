@@ -284,6 +284,7 @@ where
             Retry::new()
                 .indefinitely(&|| async {
                     let participant_id = ParticipantId::new();
+                    log::info!("{} joining as {:?}", participant.name, participant_id);
                     if let Err(e) = participant.background_process(participant_id).await {
                         log::warn!(
                             "{} error during Participant::background_process: {}",

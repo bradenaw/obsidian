@@ -1,5 +1,8 @@
 //! Nodes represent a single process, and can be assigned shards to serve.
 
+#[cfg(test)]
+mod tests;
+
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Arc;

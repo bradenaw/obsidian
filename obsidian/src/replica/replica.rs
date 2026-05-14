@@ -52,6 +52,7 @@ use crate::Txid;
 const LEASE_DURATION: Duration = Duration::from_millis(10_000);
 
 pub(crate) struct Replica {
+    name: String,
     shard_id: ShardId,
     participant: Owned<Participant<JournalEntry, LeaderReplica, FollowerReplica>>,
 
@@ -69,6 +70,7 @@ impl Replica {
         journal: Arc<dyn Journal<Proposal<JournalEntry>>>,
     ) -> Replica {
         Replica {
+            name: name.clone(),
             shard_id,
             participant: Owned::new(Participant::new(
                 name,

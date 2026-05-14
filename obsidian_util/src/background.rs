@@ -26,11 +26,13 @@ impl Background {
     pub fn spawn<F: Future<Output = ()> + Send + 'static>(&self, f: F) {
         let mut guard = self.tasks.lock().unwrap();
         let id = guard.0;
-        let tasks_arc = self.tasks.clone();
+        let tasks_weak = Arc::downgrade(&self.tasks);
         let handle = spawn_owned(async move {
             f.await;
-            let mut guard = tasks_arc.lock().unwrap();
-            guard.1.remove(&id);
+            if let Some(tasks_arc) = tasks_weak.upgrade() {
+                let mut guard = tasks_arc.lock().unwrap();
+                guard.1.remove(&id);
+            }
         });
         guard.0 += 1;
         guard.1.insert(id, handle);

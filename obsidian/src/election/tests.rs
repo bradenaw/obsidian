@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::iter;
 use std::ops::Deref;
 use std::pin::Pin;
@@ -29,7 +30,7 @@ use crate::JournalSeq;
 struct TestEntry {}
 
 #[tokio::test]
-async fn test_election() -> anyhow::Result<()> {
+async fn test_election_by_pause() -> anyhow::Result<()> {
     let _ = pretty_env_logger::try_init();
 
     let lease_duration = Duration::from_millis(100);
@@ -67,9 +68,47 @@ async fn test_election() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn test_election_by_drop() -> anyhow::Result<()> {
+    let _ = pretty_env_logger::try_init();
+
+    let lease_duration = Duration::from_millis(100);
+
+    let mut replica_group = TestReplicaGroup::new(lease_duration);
+
+    let replica0_id = replica_group.add_replica();
+
+    assert_eq!(replica_group.leader().await.id, replica0_id);
+
+    log::info!("adding 1 and deleting 0");
+    let replica1_id = replica_group.add_replica();
+    replica_group.remove_replica(replica0_id);
+
+    tokio::time::sleep(lease_duration * 2).await;
+
+    let mut new_leader = false;
+    for _ in 0..20 {
+        let leader_id = replica_group.leader().await.id;
+        if leader_id == replica1_id {
+            new_leader = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if !new_leader {
+        panic!("no new leader elected");
+    }
+
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TestReplicaId(usize);
+
 struct TestReplicaGroup {
     journal: Arc<MemJournal<Proposal<TestEntry>>>,
-    replicas: Vec<TestReplica>,
+    next_id: usize,
+    replicas: HashMap<TestReplicaId, TestReplica>,
     lease_duration: Duration,
 }
 
@@ -77,32 +116,42 @@ impl TestReplicaGroup {
     fn new(lease_duration: Duration) -> Self {
         Self {
             journal: Arc::new(MemJournal::new()),
-            replicas: vec![],
+            next_id: 0,
+            replicas: HashMap::new(),
             lease_duration,
         }
     }
 
-    fn add_replica(&mut self) {
-        let offset = self.replicas.len();
+    fn add_replica(&mut self) -> TestReplicaId {
+        let id = TestReplicaId(self.next_id);
+        self.next_id += 1;
         let journal_view = Arc::new(TestJournal::new(
-            offset,
+            id.0,
             Arc::clone(&self.journal) as Arc<dyn Journal<Proposal<TestEntry>>>,
         ));
-        self.replicas.push(TestReplica {
-            id: offset,
-            journal_view: Arc::clone(&journal_view),
-            participant: Participant::new(
-                format!("{}", offset),
-                journal_view as Arc<dyn Journal<Proposal<TestEntry>>>,
-                TestFollowerBuilder { id: offset },
-                self.lease_duration,
-            ),
-        });
+        self.replicas.insert(
+            id,
+            TestReplica {
+                id,
+                journal_view: Arc::clone(&journal_view),
+                participant: Participant::new(
+                    format!("{}", id.0),
+                    journal_view as Arc<dyn Journal<Proposal<TestEntry>>>,
+                    TestFollowerBuilder { id: id.0 },
+                    self.lease_duration,
+                ),
+            },
+        );
+        id
+    }
+
+    fn remove_replica(&mut self, id: TestReplicaId) {
+        self.replicas.remove(&id);
     }
 
     async fn leader(&self) -> &TestReplica {
         for _ in 0..5 {
-            for replica in &self.replicas {
+            for replica in self.replicas.values() {
                 if replica.is_leader().await.unwrap() {
                     return replica;
                 }
@@ -115,7 +164,7 @@ impl TestReplicaGroup {
 }
 
 struct TestReplica {
-    id: usize,
+    id: TestReplicaId,
     journal_view: Arc<TestJournal>,
     participant: Participant<TestEntry, TestLeader, TestFollower>,
 }

@@ -122,6 +122,9 @@ impl TabletRecovery {
 
         for (_, ts, kvs) in self.writes {
             for (keyspace_id, key, value) in kvs {
+                // TODO: Journal this separately instead of doing it implicitly.
+                lsm.create_keyspace(keyspace_id);
+
                 // It's possible that this revision is already present since the seqno in
                 // TabletJournalEntry::Manifest is a lower bound, the manifest may already contain newer
                 // writes.

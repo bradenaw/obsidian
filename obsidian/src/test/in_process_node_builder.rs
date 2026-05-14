@@ -1,5 +1,7 @@
 use std::net::IpAddr;
 use std::net::Ipv6Addr;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -17,6 +19,7 @@ use crate::NodeId;
 pub(crate) struct InProcessNodeBuilder {
     storage: Arc<dyn Storage>,
     journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
+    next_fake_port: AtomicU64,
 }
 
 impl InProcessNodeBuilder {
@@ -24,7 +27,11 @@ impl InProcessNodeBuilder {
         storage: Arc<dyn Storage>,
         journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
     ) -> Self {
-        Self { storage, journals }
+        Self {
+            storage,
+            journals,
+            next_fake_port: AtomicU64::new(1),
+        }
     }
 }
 
@@ -36,7 +43,11 @@ impl TestNodeBuilder for InProcessNodeBuilder {
         meta: Arc<dyn runtime::Meta>,
         shards: Arc<dyn runtime::Shards>,
     ) -> anyhow::Result<Arc<dyn runtime::Node>> {
-        let node_id = NodeId::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 1);
+        let node_id = NodeId::new(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            // Just to make these a little easier to pick out in logs than reading the UUIDs.
+            self.next_fake_port.fetch_add(1, Ordering::SeqCst) as u16,
+        );
 
         let cached_storage = Arc::new(CachedStorage::new(
             Arc::clone(&self.storage),
