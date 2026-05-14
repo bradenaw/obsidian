@@ -14,12 +14,18 @@ use tokio::process::Command;
 use crate::discovery::Discovery;
 use crate::grpc::GrpcNodes;
 
-struct SubprocessNodes {
-    s3_port: u16,
-    consul_port: u16,
-    journals_port: u16,
-    consul_service: String,
+const S3_PORT: u16 = 9000;
+const S3_CONSOLE_PORT: u16 = 9001;
+const CONSUL_PORT: u16 = 8500;
+const JOURNALS_PORT: u16 = 8000;
+const NODE_PORTS_START: u16 = 8001;
 
+const MINIO_IMAGE: &str =
+    "docker.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e";
+const CONSUL_IMAGE: &str = "docker.io/hashicorp/consul@sha256:a230dcea0bb107bd7958a912d1429fb7f9d399637de7ffb814b34412b9e8c543";
+const CONSUL_SERVICE: &str = "obsidian";
+
+struct SubprocessNodes {
     discovery: Arc<Discovery>,
     cargo_bin: PathBuf,
     storage: Child,
@@ -31,11 +37,6 @@ struct SubprocessNodes {
 
 impl SubprocessNodes {
     fn new() -> anyhow::Result<Self> {
-        const S3_PORT: u16 = 9000;
-        const S3_CONSOLE_PORT: u16 = 9001;
-        const CONSUL_PORT: u16 = 8500;
-        const JOURNALS_PORT: u16 = 8000;
-
         let consul_service = "obsidian";
 
         let storage = Command::new("podman")
@@ -44,7 +45,7 @@ impl SubprocessNodes {
             .arg(format!("{}:{}", S3_PORT, S3_PORT))
             .arg("-p")
             .arg(format!("{}:{}", S3_CONSOLE_PORT, S3_CONSOLE_PORT))
-            .arg("docker.io/minio/minio")
+            .arg(MINIO_IMAGE.to_string())
             .arg("server")
             .arg("/data")
             .arg("--address")
@@ -54,12 +55,13 @@ impl SubprocessNodes {
             .kill_on_drop(true)
             .spawn()?;
 
-        // TODO: actually tell consul about CONSUL_PORT
         let consul = Command::new("podman")
             .arg("run")
             .arg("-p")
             .arg(format!("{}:{}", CONSUL_PORT, CONSUL_PORT))
-            .arg("docker.io/hashicorp/consul")
+            .arg(CONSUL_IMAGE.to_string())
+            .arg("--grpc-port")
+            .arg(CONSUL_PORT.to_string())
             .kill_on_drop(true)
             .spawn()?;
 
@@ -87,17 +89,13 @@ impl SubprocessNodes {
         let discovery = Arc::new(Discovery::new(Arc::new(nodes)));
 
         Ok(Self {
-            s3_port: S3_PORT,
-            consul_port: CONSUL_PORT,
-            journals_port: JOURNALS_PORT,
-            consul_service: consul_service.to_string(),
             cargo_bin,
 
             discovery,
             storage,
             consul,
             journals,
-            next_port: 8001,
+            next_port: NODE_PORTS_START,
             nodes: HashMap::new(),
         })
     }
@@ -124,15 +122,15 @@ impl SubprocessNodes {
             .arg("--port")
             .arg(format!("{}", port))
             .arg("--journals-addr")
-            .arg(format!("http://[::1]:{}", self.journals_port))
+            .arg(format!("http://[::1]:{}", JOURNALS_PORT))
             .arg("--s3-addr")
-            .arg(format!("http://[::1]:{}", self.s3_port))
+            .arg(format!("http://[::1]:{}", S3_PORT))
             .arg("--s3-bucket")
             .arg("obsidian")
             .arg("--consul-addr")
-            .arg(format!("http://[::1]:{}", self.consul_port))
+            .arg(format!("http://[::1]:{}", CONSUL_PORT))
             .arg("--consul-service")
-            .arg(self.consul_service.clone())
+            .arg(CONSUL_SERVICE.to_string())
             .kill_on_drop(true)
             .spawn()?;
 
