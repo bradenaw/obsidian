@@ -510,9 +510,7 @@ impl ActiveTabletInner {
                     BTreeMap::from([((keyspace_id, key.clone()), m)]),
                 )
                 .await?;
-            log::info!("cleanup_pending_key wait");
             cleanup_guard.wait().await;
-            log::info!("cleanup_pending_key wait -> done");
         }
         self.inner
             .lsm
