@@ -2,6 +2,7 @@ mod grpc_bridge;
 mod grpc_in_process_node_builder;
 mod in_process_node_builder;
 pub(crate) mod obsidian_suite;
+mod subprocess_nodes;
 pub(crate) mod tablet_suite;
 mod test_node_builder;
 mod test_nodes;
