@@ -2,12 +2,12 @@ use std::cmp::Reverse;
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
 
-pub(crate) struct LockMgr {
+pub(crate) struct KeyLocks {
     buckets: Vec<tokio::sync::RwLock<()>>,
     random_state: RandomState,
 }
 
-impl LockMgr {
+impl KeyLocks {
     pub fn new(n_buckets: usize) -> Self {
         Self {
             buckets: (0..n_buckets)
@@ -20,22 +20,22 @@ impl LockMgr {
     pub async fn read_lock_all<'a, 'b>(
         &'a self,
         read: impl Iterator<Item = &'b [u8]>,
-    ) -> Guard<'a> {
+    ) -> KeyLocksGuard<'a> {
         self.lock_all(read, std::iter::empty()).await
     }
 
-    pub async fn read_lock<'a>(&'a self, key: &[u8]) -> Guard<'a> {
+    pub async fn read_lock<'a>(&'a self, key: &[u8]) -> KeyLocksGuard<'a> {
         self.read_lock_all(std::iter::once(key)).await
     }
 
     pub async fn write_lock_all<'a, 'b>(
         &'a self,
         write: impl Iterator<Item = &'b [u8]>,
-    ) -> Guard<'a> {
+    ) -> KeyLocksGuard<'a> {
         self.lock_all(std::iter::empty(), write).await
     }
 
-    pub async fn write_lock<'a>(&'a self, key: &[u8]) -> Guard<'a> {
+    pub async fn write_lock<'a>(&'a self, key: &[u8]) -> KeyLocksGuard<'a> {
         self.write_lock_all(std::iter::once(key)).await
     }
 
@@ -43,7 +43,7 @@ impl LockMgr {
         &'a self,
         read: impl Iterator<Item = &'b [u8]>,
         write: impl Iterator<Item = &'c [u8]>,
-    ) -> Guard<'a> {
+    ) -> KeyLocksGuard<'a> {
         let (n_reads, _) = read.size_hint();
         let (n_writes, _) = write.size_hint();
 
@@ -71,7 +71,7 @@ impl LockMgr {
             }
         }
 
-        Guard {
+        KeyLocksGuard {
             read_guards,
             write_guards,
         }
@@ -82,7 +82,7 @@ impl LockMgr {
     }
 }
 
-pub(crate) struct Guard<'a> {
+pub(crate) struct KeyLocksGuard<'a> {
     read_guards: Vec<tokio::sync::RwLockReadGuard<'a, ()>>,
     write_guards: Vec<tokio::sync::RwLockWriteGuard<'a, ()>>,
 }

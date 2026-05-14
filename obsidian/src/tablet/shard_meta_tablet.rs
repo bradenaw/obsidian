@@ -141,7 +141,7 @@ impl ShardMetaTablet {
             .check_key(KeyspaceId::TX_OUTCOMES.0, &tx_outcome_key[..])?;
         loop {
             let wait = {
-                let _guard = self.0.inner.lock_mgr.read_lock(&tx_outcome_key[..]).await;
+                let _guard = self.0.inner.key_locks.read_lock(&tx_outcome_key[..]).await;
 
                 match self
                     .0
@@ -280,7 +280,7 @@ impl ShardMetaTabletInner {
             self.inner
                 .check_key(KeyspaceId::TX_OUTCOMES.0, &tx_outcome_key[..])?;
 
-            let _guard = self.inner.lock_mgr.write_lock(&tx_outcome_key[..]).await;
+            let _guard = self.inner.key_locks.write_lock(&tx_outcome_key[..]).await;
 
             if let Some((_, RevisionValue::Regular(tx_outcome_bytes))) = self
                 .inner

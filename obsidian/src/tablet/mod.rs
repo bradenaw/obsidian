@@ -11,7 +11,7 @@ mod data_tablet;
 mod frozen_tablet;
 mod hydrating_tablet;
 mod journaled_lsm;
-mod lock_mgr;
+mod key_locks;
 mod meta_tablet;
 mod read_only_lsm;
 mod scan_locks;

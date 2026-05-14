@@ -460,7 +460,7 @@ impl ActiveTabletInner {
             anyhow::anyhow!("attempted cleanup of non-data keyspace {:?}", keyspace_id)
         })?;
 
-        let _guard = self.inner.lock_mgr.write_lock(&key[..]).await;
+        let _guard = self.inner.key_locks.write_lock(&key[..]).await;
 
         let (pending_ts, value) = match self
             .inner
@@ -535,7 +535,7 @@ impl ActiveTabletInner {
         })?;
 
         let mut muts = BTreeMap::new();
-        let _guard = self.inner.lock_mgr.write_lock(&key[..]).await;
+        let _guard = self.inner.key_locks.write_lock(&key[..]).await;
 
         let (overwrite_ts, m) = if let Some((prepare_ts, RevisionValue::Regular(bytes))) = self
             .inner

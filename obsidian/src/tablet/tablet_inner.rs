@@ -12,8 +12,8 @@ use obsidian_util::Decode;
 use obsidian_util::Encode;
 
 use crate::tablet::journaled_lsm::LsmWrite;
-use crate::tablet::lock_mgr::Guard;
-use crate::tablet::lock_mgr::LockMgr;
+use crate::tablet::key_locks::KeyLocks;
+use crate::tablet::key_locks::KeyLocksGuard;
 use crate::tablet::read_only_lsm::LsmRead;
 use crate::tablet::scan_locks::ScanLocks;
 use crate::tablet::sequencer::Sequencer;
@@ -41,7 +41,7 @@ pub(super) struct TabletInner<L> {
 
     pub lsm: L,
     pub sequencer: Sequencer,
-    pub lock_mgr: LockMgr,
+    pub key_locks: KeyLocks,
     pub scan_locks: ScanLocks,
 }
 
@@ -61,7 +61,7 @@ where
             range,
             lsm,
             sequencer: Sequencer::new(),
-            lock_mgr: LockMgr::new(1 << 16 /*buckets*/),
+            key_locks: KeyLocks::new(1 << 16 /*buckets*/),
             scan_locks: ScanLocks::new(),
         }
     }
@@ -88,7 +88,7 @@ where
         // because they're non-transactional. For everything else, the wait_for_safe_read above is
         // sufficient.
         let _guard = self
-            .lock_mgr
+            .key_locks
             .read_lock_all(keys.iter().map(|(_, key_bytes)| &key_bytes[..]))
             .await;
 
@@ -130,7 +130,7 @@ where
         }
 
         let _guard = self
-            .lock_mgr
+            .key_locks
             .read_lock_all(keys.iter().map(|(_, key_bytes)| &key_bytes[..]))
             .await;
         let safe_read_ts = self.sequencer.safe_read_ts();
@@ -315,7 +315,7 @@ where
             }
         };
 
-        let _guard = self.lock_mgr.read_lock(&key.1).await;
+        let _guard = self.key_locks.read_lock(&key.1).await;
 
         let (page, continue_cursor) = self
             .lsm
@@ -350,7 +350,7 @@ where
         ))
     }
 
-    // TODO: make this take a lockmgr guard that proves the lock is held
+    // TODO: make this take a KeyLocks guard that proves the lock is held
     pub(super) async fn unsafe_get_latest_record(
         &self,
         keyspace_id: KeyspaceId,
@@ -468,7 +468,7 @@ where
         &'a self,
         preconds: &Vec<Precondition>,
         muts: &BTreeMap<Key, Mutation>,
-    ) -> anyhow::Result<Guard<'a>> {
+    ) -> anyhow::Result<KeyLocksGuard<'a>> {
         for precond in preconds {
             self.check_key(precond.keyspace_id().0, precond.key())?;
         }
@@ -476,7 +476,7 @@ where
             self.check_key(keyspace_id.0, key)?;
         }
         Ok(self
-            .lock_mgr
+            .key_locks
             .lock_all(
                 preconds.iter().map(|precond| precond.key()),
                 muts.keys().map(|(_, k)| &k[..]),
@@ -484,7 +484,7 @@ where
             .await)
     }
 
-    // TODO: make this take a lockmgr guard that proves the lock is held
+    // TODO: make this take a KeyLocks guard that proves the lock is held
     pub(super) async fn check_write_conflicts(
         &self,
         preconds: &[Precondition],
