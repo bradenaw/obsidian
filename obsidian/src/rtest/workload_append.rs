@@ -817,7 +817,7 @@ mod tests {
         let _ = pretty_env_logger::try_init();
 
         let obs = ObsidianForTestBuilder::new()
-            .nodes(Box::new(SubprocessNodes::new()?))
+            .nodes(Box::new(SubprocessNodes::new().await?))
             .build()
             .await?;
 

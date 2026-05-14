@@ -5,6 +5,7 @@ use std::net::IpAddr;
 use std::net::Ipv6Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -32,6 +33,7 @@ const MINIO_IMAGE: &str =
     "docker.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e";
 const CONSUL_IMAGE: &str = "docker.io/hashicorp/consul@sha256:a230dcea0bb107bd7958a912d1429fb7f9d399637de7ffb814b34412b9e8c543";
 const CONSUL_SERVICE: &str = "obsidian";
+const S3_BUCKET_NAME: &str = "obsidian";
 
 pub(crate) struct SubprocessNodes {
     discovery: Arc<Discovery>,
@@ -46,9 +48,12 @@ pub(crate) struct SubprocessNodes {
 }
 
 impl SubprocessNodes {
-    pub fn new() -> anyhow::Result<Self> {
+    pub async fn new() -> anyhow::Result<Self> {
         let storage = Command::new("podman")
             .arg("run")
+            .arg("--rm")
+            .arg("--name")
+            .arg("obsidian_test_minio")
             .arg("-p")
             .arg(format!("{}:{}", S3_PORT, S3_PORT))
             .arg("-p")
@@ -63,22 +68,38 @@ impl SubprocessNodes {
             .kill_on_drop(true)
             .spawn()?;
 
+        // JANK: need to wait for container to launch we try to make the bucket
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        Command::new("podman")
+            .arg("exec")
+            .arg("obsidian_test_minio")
+            .arg("mkdir")
+            .arg("-p")
+            .arg(format!("/data/{}", S3_BUCKET_NAME))
+            .spawn()?
+            .wait()
+            .await?;
+
         let consul = Command::new("podman")
             .arg("run")
+            .arg("--rm")
             .arg("-p")
             .arg(format!("{}:{}", CONSUL_PORT, CONSUL_PORT))
             .arg(CONSUL_IMAGE.to_string())
-            .arg("--grpc-port")
-            .arg(CONSUL_PORT.to_string())
+            //.arg("agent")
+            //.arg("--http-port")
+            //.arg(CONSUL_PORT.to_string())
             .kill_on_drop(true)
             .spawn()?;
 
         // TODO: Does this need to be in tests/ instead of src for this to work?
-        let cargo_bin = PathBuf::from(
-            env::var("CARGO_BIN_PATH")
-                .context("CARGO_BIN_PATH not found")?
-                .to_string(),
-        );
+        //let cargo_bin = PathBuf::from(
+        //    env::var("CARGO_BIN_PATH")
+        //        .context("CARGO_BIN_PATH not found")?
+        //        .to_string(),
+        //);
+        let cargo_bin = PathBuf::from("/home/bw/src/obsidian/target/debug");
 
         let journals = Command::new(cargo_bin.join("obsidian"))
             .env("RUST_LOG", "info")
@@ -136,14 +157,12 @@ impl TestNodes for SubprocessNodes {
             .arg("node")
             .arg("--node-id")
             .arg(node_id.to_string())
-            .arg("--port")
-            .arg(format!("{}", port))
             .arg("--journals-addr")
             .arg(format!("http://[::1]:{}", JOURNALS_PORT))
             .arg("--s3-addr")
             .arg(format!("http://[::1]:{}", S3_PORT))
             .arg("--s3-bucket")
-            .arg("obsidian")
+            .arg(S3_BUCKET_NAME.to_string())
             .arg("--consul-addr")
             .arg(format!("http://[::1]:{}", CONSUL_PORT))
             .arg("--consul-service")

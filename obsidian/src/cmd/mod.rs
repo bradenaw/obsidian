@@ -62,6 +62,9 @@ struct NodeArgs {
     journals_addr: String,
 
     #[arg(long)]
+    s3_addr: String,
+
+    #[arg(long)]
     s3_bucket: String,
 
     #[arg(long)]
@@ -72,12 +75,26 @@ struct NodeArgs {
 
     #[arg(long, default_value_t = 0)]
     port: u16,
+
+    #[arg(long, conflicts_with = "port")]
+    node_id: Option<NodeId>,
 }
 
 async fn cmd_node(args: NodeArgs) -> anyhow::Result<()> {
-    let addr = IpAddr::V6(Ipv6Addr::LOCALHOST);
-    let listener = TcpListener::bind(format!("{}:{}", addr, args.port)).await?;
-    let node_id = NodeId::new(addr, listener.local_addr()?.port());
+    let (node_id, listener) = match args.node_id {
+        Some(node_id) => {
+            let listener = TcpListener::bind(format!("{}:{}", node_id.addr, node_id.port)).await?;
+
+            (node_id, listener)
+        }
+        None => {
+            let addr = IpAddr::V6(Ipv6Addr::LOCALHOST);
+            let listener = TcpListener::bind(format!("{}:{}", addr, args.port)).await?;
+            let node_id = NodeId::new(addr, listener.local_addr()?.port());
+
+            (node_id, listener)
+        }
+    };
 
     log::info!("starting {:?}", node_id);
 
@@ -97,7 +114,7 @@ async fn cmd_node(args: NodeArgs) -> anyhow::Result<()> {
     let storage = S3Storage::new(
         aws_sdk_s3::Client::new(
             &aws_config::from_env()
-                .endpoint_url("http://[::1]:9000")
+                .endpoint_url(args.s3_addr)
                 .load()
                 .await,
         ),
