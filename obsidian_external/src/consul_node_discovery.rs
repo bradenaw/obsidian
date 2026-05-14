@@ -5,9 +5,9 @@ use std::str::FromStr;
 use anyhow::anyhow;
 use im::OrdSet;
 use obsidian_common::NodeId;
-use obsidian_util::OwnedWithBackground;
 use obsidian_util::Retry;
 use obsidian_util::Watchable;
+use obsidian_util::WithBackground;
 use rs_consul::Consul;
 use rs_consul::GetServiceNodesRequest;
 use rs_consul::QueryOptions;
@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::NodeDiscovery;
 
-pub struct ConsulNodeDiscovery(OwnedWithBackground<ConsulNodeDiscoveryInner>);
+pub struct ConsulNodeDiscovery(WithBackground<ConsulNodeDiscoveryInner>);
 
 struct ConsulNodeDiscoveryInner {
     consul: Consul,
@@ -38,7 +38,7 @@ impl ConsulNodeDiscovery {
     }
 
     fn new(node_id: Option<NodeId>, consul: Consul, service: String) -> Self {
-        let inner = OwnedWithBackground::new(ConsulNodeDiscoveryInner {
+        let inner = WithBackground::new(ConsulNodeDiscoveryInner {
             consul,
             service,
             node_id: node_id,

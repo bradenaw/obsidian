@@ -245,7 +245,7 @@ where
     where
         TFollowerBuilder: FollowerBuilder<TEntry, TFollower> + Send + Sync + 'static,
     {
-        let inner = WithBackground::new(Arc::new(ParticipantInner {
+        let inner = WithBackground::new(ParticipantInner {
             name,
             journal,
             accepted_seqs: Arc::new(SeqWaiters::new()),
@@ -259,12 +259,13 @@ where
             became_leader_at: Watchable::new(None),
             poison: Arc::new(AtomicBool::new(false)),
             abandon: Arc::new(Notify::new()),
-        }));
+        });
 
         inner.spawn(async move |participant| {
             Retry::new()
                 .indefinitely(&|| async {
                     let participant_id = ParticipantId::new();
+                    log::info!("{} joining as {:?}", participant.name, participant_id);
                     if let Err(e) = participant.background_process(participant_id).await {
                         log::warn!(
                             "{} error during Participant::background_process: {}",
@@ -422,6 +423,7 @@ where
                                 abandon: Arc::clone(&self.abandon),
                                 poison: Arc::clone(&self.poison),
                             };
+                            log::info!("{} promoting to leader", self.name);
                             follower.promote(journal_writer).await?
                         }
                     };

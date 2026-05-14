@@ -1,5 +1,9 @@
 //! Nodes represent a single process, and can be assigned shards to serve.
 
+#[cfg(test)]
+mod tests;
+
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -40,6 +44,7 @@ use crate::Bound;
 use crate::ColoGroupId;
 use crate::InternalError;
 use crate::JournalEntry;
+use crate::Key;
 use crate::KeyspaceId;
 use crate::NodeId;
 use crate::Range;
@@ -49,6 +54,8 @@ use crate::ShardId;
 use crate::TabletId;
 use crate::Timestamp;
 use crate::TransferId;
+use crate::TxOutcome;
+use crate::Txid;
 
 /// Node represents one of the processes of Obsidian running in a system. Nodes register themselves
 /// with meta to make themselves available to having shards assigned, at which point they join
@@ -72,7 +79,7 @@ struct NodeInner {
 
     supervisor: RwLock<Option<Owned<Supervisor>>>,
     maybe_meta: RwLock<Option<Owned<Meta>>>,
-    replicas: RwLock<HashMap<ShardId, Arc<Replica>>>,
+    replicas: RwLock<HashMap<ShardId, Owned<Replica>>>,
     replicas_changed: Notify,
 }
 
@@ -86,7 +93,7 @@ impl Node {
         meta_synced: Arc<MetaSynced>,
         journals: Arc<dyn Journals<Proposal<JournalEntry>>>,
     ) -> Self {
-        let inner = Arc::new(NodeInner {
+        let node = Node(WithBackground::new(NodeInner {
             node_id,
             nodes,
             lsm_options: LsmOptions {
@@ -105,8 +112,7 @@ impl Node {
             maybe_meta: RwLock::new(None),
             replicas: RwLock::new(HashMap::new()),
             replicas_changed: Notify::new(),
-        });
-        let node = Node(WithBackground::new(Arc::clone(&inner)));
+        }));
 
         meta_synced.subscribe(&node.0);
 
@@ -142,7 +148,7 @@ impl runtime::Node for Node {
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn runtime::Shard>> {
         let replicas = self.0.replicas.read().unwrap();
         if let Some(shard) = replicas.get(&shard_id).as_ref() {
-            Ok(Arc::clone(shard) as Arc<dyn runtime::Shard>)
+            Ok(Arc::new((shard_id, Owned::weak(shard))) as Arc<dyn runtime::Shard>)
         } else {
             Err(anyhow!("{:?} does not own {:?}", self.0.node_id, shard_id))
         }
@@ -153,7 +159,7 @@ impl runtime::Node for Node {
         let meta = maybe_meta
             .as_ref()
             .ok_or_else(|| anyhow!("{:?} is not currently hosting meta", self.0.node_id))?;
-        Ok(Owned::weak(meta))
+        Ok(Arc::new(Owned::weak(meta)))
     }
 
     fn supervisor(&self) -> anyhow::Result<Arc<dyn runtime::Supervisor>> {
@@ -164,7 +170,7 @@ impl runtime::Node for Node {
                 self.0.node_id
             )
         })?;
-        Ok(Owned::weak(supervisor))
+        Ok(Arc::new(Owned::weak(supervisor)))
     }
 
     fn shards_subscribe(
@@ -268,7 +274,7 @@ impl NodeInner {
                             );
                             let meta = Owned::new(Meta::new(meta_tablet));
                             *supervisor = Some(Owned::new(Supervisor::new(
-                                Owned::weak(&meta),
+                                Arc::new(Owned::weak(&meta)),
                                 Arc::clone(&self.meta_synced),
                                 Arc::clone(&self.shards),
                             )));
@@ -321,7 +327,7 @@ impl NodeInner {
         );
 
         let mut replicas = self.replicas.write().unwrap();
-        replicas.insert(shard_id, Arc::new(replica));
+        replicas.insert(shard_id, Owned::new(replica));
 
         self.replicas_changed.notify_waiters();
     }
@@ -429,6 +435,51 @@ impl runtime::Meta for WeakView<Meta> {
         muts: HashMap<MetaKey, MetaMutation>,
     ) -> Result<Timestamp, InternalError> {
         self.or_closed(async |inner| inner.write(snapshot_ts, muts).await)
+            .await
+    }
+}
+
+#[async_trait]
+impl runtime::Shard for (ShardId, WeakView<Replica>) {
+    fn id(&self) -> ShardId {
+        self.0
+    }
+
+    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn runtime::Tablet>> {
+        self.1.or_closed_sync(|replica| replica.tablet(tablet_id))
+    }
+
+    async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
+        self.1
+            .or_closed(async |replica| replica.wait_meta_sync(ts).await)
+            .await
+    }
+
+    async fn tx_try_commit(
+        &self,
+        txid: Txid,
+        ts: Timestamp,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
+    ) -> anyhow::Result<TxOutcome> {
+        self.1
+            .or_closed(async |replica| {
+                replica
+                    .tx_try_commit(txid, ts, precond_keys, mut_keys)
+                    .await
+            })
+            .await
+    }
+
+    async fn tx_try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome> {
+        self.1
+            .or_closed(async |replica| replica.tx_try_abort(txid).await)
+            .await
+    }
+
+    async fn tx_wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
+        self.1
+            .or_closed(async |replica| replica.tx_wait(txid).await)
             .await
     }
 }

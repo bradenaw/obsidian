@@ -26,11 +26,13 @@ impl Background {
     pub fn spawn<F: Future<Output = ()> + Send + 'static>(&self, f: F) {
         let mut guard = self.tasks.lock().unwrap();
         let id = guard.0;
-        let tasks_arc = self.tasks.clone();
+        let tasks_weak = Arc::downgrade(&self.tasks);
         let handle = spawn_owned(async move {
             f.await;
-            let mut guard = tasks_arc.lock().unwrap();
-            guard.1.remove(&id);
+            if let Some(tasks_arc) = tasks_weak.upgrade() {
+                let mut guard = tasks_arc.lock().unwrap();
+                guard.1.remove(&id);
+            }
         });
         guard.0 += 1;
         guard.1.insert(id, handle);
@@ -53,44 +55,6 @@ pub struct WithBackground<T> {
 }
 
 impl<T> WithBackground<T>
-where
-    T: Send + Sync + 'static,
-{
-    pub fn new(t: Arc<T>) -> Self {
-        Self {
-            inner: t,
-            bg: Background::new(),
-        }
-    }
-
-    pub fn spawn<F, Fut>(&self, f: F)
-    where
-        F: FnOnce(Arc<T>) -> Fut + Sync + Send + 'static,
-        Fut: Future<Output = ()> + Send,
-    {
-        self.bg.spawn({
-            let inner = self.inner.clone();
-            async move {
-                f(inner).await;
-            }
-        });
-    }
-}
-
-impl<T> Deref for WithBackground<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.inner.deref()
-    }
-}
-
-pub struct OwnedWithBackground<T> {
-    inner: Arc<T>,
-    bg: Background,
-}
-
-impl<T> OwnedWithBackground<T>
 where
     T: Send + Sync + 'static,
 {
@@ -124,7 +88,7 @@ where
     }
 }
 
-impl<T> Deref for OwnedWithBackground<T> {
+impl<T> Deref for WithBackground<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {

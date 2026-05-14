@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -9,7 +10,9 @@ use obsidian_common::ranges_to_splits;
 use obsidian_external::Storage;
 use obsidian_lsm::Lsm;
 use obsidian_lsm::LsmOptions;
+use obsidian_util::Owned;
 use obsidian_util::Retry;
+use obsidian_util::WeakView;
 use obsidian_util::WithBackground;
 
 use crate::meta::MetaKey;
@@ -20,6 +23,7 @@ use crate::meta::MetaSynced;
 use crate::meta::MetaSyncedSnapshot;
 use crate::meta::SyncType;
 use crate::meta::TabletState;
+use crate::runtime;
 use crate::runtime::Meta;
 use crate::runtime::Shards;
 use crate::runtime::Tablet;
@@ -29,11 +33,18 @@ use crate::tablet::ShardMetaTablet;
 use crate::tablet::TabletJournalWriter;
 use crate::Bound;
 use crate::ColoGroupId;
+use crate::Direction;
+use crate::HistoryRange;
 use crate::InternalError;
 use crate::JournalEntry;
 use crate::Key;
 use crate::KeyspaceId;
+use crate::Manifest;
+use crate::Mutation;
+use crate::Precondition;
 use crate::Range;
+use crate::Record;
+use crate::Revision;
 use crate::ShardId;
 use crate::TabletId;
 use crate::TabletJournalEntry;
@@ -81,7 +92,7 @@ impl Shard {
                 Some(meta_lsm) => meta_lsm,
                 None => Lsm::empty(lsm_options.clone(), Arc::clone(&storage)),
             };
-            Some(Arc::new(MetaTablet::new(
+            Some(Owned::new(MetaTablet::new(
                 meta_lsm,
                 Arc::new(ShardTabletJournalWriter::new(
                     TabletId::META,
@@ -99,7 +110,7 @@ impl Shard {
             meta_tablet,
             meta_synced: meta_synced.clone(),
             shards,
-            shard_meta_tablet: Arc::new(shard_meta_tablet),
+            shard_meta_tablet: Owned::new(shard_meta_tablet),
             tablets: ShardedLock::new(HashMap::new()),
             lsm_options,
             journal,
@@ -111,7 +122,7 @@ impl Shard {
             inner.add_data_tablet(tablet_id, tablet_metadata, lsm)?;
         }
 
-        let shard = Shard(WithBackground::new(Arc::new(inner)));
+        let shard = Shard(WithBackground::new(inner));
 
         meta_synced.subscribe(&shard.0);
 
@@ -132,17 +143,18 @@ impl crate::runtime::Shard for Shard {
                 .meta_tablet
                 .as_ref()
                 .ok_or_else(|| anyhow!("{:?} not a member of {:?}", tablet_id, self.0.id))?;
-            return Ok(Arc::clone(meta_tablet) as Arc<dyn Tablet>);
+            return Ok(Arc::new(Owned::weak(meta_tablet)) as Arc<dyn Tablet>);
         }
         if tablet_id == TabletId::shard_meta(self.0.id) {
-            return Ok(Arc::clone(&self.0.shard_meta_tablet) as Arc<dyn Tablet>);
+            return Ok(Arc::new(Owned::weak(&self.0.shard_meta_tablet)) as Arc<dyn Tablet>);
         }
 
         let tablets = self.0.tablets.read().unwrap();
-        Ok(tablets
-            .get(&tablet_id)
-            .ok_or_else(|| anyhow!("{:?} not found", tablet_id))?
-            .clone())
+        Ok(Arc::new(Owned::weak(
+            tablets
+                .get(&tablet_id)
+                .ok_or_else(|| anyhow!("{:?} not found", tablet_id))?,
+        )))
     }
 
     async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
@@ -182,16 +194,23 @@ struct ShardInner {
     journal: Arc<dyn ShardJournalWriter>,
     lsm_options: LsmOptions,
 
-    shard_meta_tablet: Arc<ShardMetaTablet>,
-    meta_tablet: Option<Arc<MetaTablet>>, // Present only if id==ShardId::META.
-    tablets: ShardedLock<HashMap<TabletId, Arc<DataTablet>>>,
+    shard_meta_tablet: Owned<ShardMetaTablet>,
+    meta_tablet: Option<Owned<MetaTablet>>, // Present only if id==ShardId::META.
+    // Careful: these are wrapped in an Arc to simplify interacting with this lock - there's a
+    // bunch of things that need to interact with the tablets inside but don't need to hold the
+    // lock while doing it. We need to not leak this Arc outside of this type, since we want to be
+    // able to brick tablets by dropping.
+    tablets: ShardedLock<HashMap<TabletId, Arc<Owned<DataTablet>>>>,
 }
 
 impl ShardInner {
     async fn ensure_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
         let tablets = {
             let tablets = self.tablets.read().unwrap();
-            tablets.values().cloned().collect::<Vec<_>>()
+            tablets
+                .values()
+                .map(|tablet| Arc::clone(&tablet))
+                .collect::<Vec<_>>()
         };
         for tablet in tablets {
             if tablet.colo_group_id() == keyspace_id.0 {
@@ -252,7 +271,11 @@ impl ShardInner {
         let mut tablets = self.tablets.write().unwrap();
         tablets.insert(
             tablet_id,
-            Arc::new(self.new_data_tablet(tablet_id, tablet_metadata, lsm)?),
+            Arc::new(Owned::new(self.new_data_tablet(
+                tablet_id,
+                tablet_metadata,
+                lsm,
+            )?)),
         );
         Ok(())
     }
@@ -385,11 +408,11 @@ impl ShardInner {
         let mut tablets = self.tablets.write().unwrap();
         tablets.insert(
             tablet_id,
-            Arc::new(self.new_data_tablet(
+            Arc::new(Owned::new(self.new_data_tablet(
                 tablet_id,
                 tablet_metadata,
                 Lsm::empty(self.lsm_options.clone(), Arc::clone(&self.storage)),
-            )?),
+            )?)),
         );
 
         Ok(())
@@ -491,4 +514,111 @@ struct ShardTabletMetadata {
 enum TabletTransfer {
     Src { splits: Vec<Bound<Vec<u8>>> },
     Dst { srcs: Vec<TabletId> },
+}
+
+#[async_trait]
+impl<T> runtime::Tablet for WeakView<T>
+where
+    T: runtime::Tablet,
+{
+    async fn get_multi(
+        &self,
+        ts: Timestamp,
+        keys: BTreeSet<Key>,
+    ) -> Result<BTreeMap<Key, Record>, InternalError> {
+        self.or_closed(async |tablet| tablet.get_multi(ts, keys).await)
+            .await
+    }
+
+    async fn get_latest_multi(
+        &self,
+        keys: BTreeSet<Key>,
+    ) -> Result<(Timestamp, BTreeMap<Key, Record>), InternalError> {
+        self.or_closed(async |tablet| tablet.get_latest_multi(keys).await)
+            .await
+    }
+
+    async fn latest_snapshot(&self, keys: BTreeSet<Key>) -> Result<Timestamp, InternalError> {
+        self.or_closed(async |tablet| tablet.latest_snapshot(keys).await)
+            .await
+    }
+
+    async fn scan_page(
+        &self,
+        ts: Timestamp,
+        keyspace_id: KeyspaceId,
+        range: Range<&[u8]>,
+        direction: Direction,
+        limit: usize,
+    ) -> Result<(Vec<Record>, Option<Range<Vec<u8>>>), InternalError> {
+        self.or_closed(async |tablet| {
+            tablet
+                .scan_page(ts, keyspace_id, range, direction, limit)
+                .await
+        })
+        .await
+    }
+
+    async fn history_page(
+        &self,
+        key: Key,
+        range: HistoryRange,
+        direction: Direction,
+        limit: usize,
+    ) -> Result<(Vec<Revision>, Option<HistoryRange>), InternalError> {
+        self.or_closed(async |tablet| tablet.history_page(key, range, direction, limit).await)
+            .await
+    }
+
+    async fn write(
+        &self,
+        preconds: Vec<Precondition>,
+        muts: BTreeMap<Key, Mutation>,
+    ) -> Result<Timestamp, InternalError> {
+        self.or_closed(async |tablet| tablet.write(preconds, muts).await)
+            .await
+    }
+
+    async fn prepare(
+        &self,
+        txid: Txid,
+        preconds: Vec<Precondition>,
+        muts: BTreeMap<Key, Mutation>,
+    ) -> Result<Timestamp, InternalError> {
+        self.or_closed(async |tablet| tablet.prepare(txid, preconds, muts).await)
+            .await
+    }
+
+    async fn cleanup_committed(
+        &self,
+        txid: Txid,
+        ts: Timestamp,
+        precond_keys: BTreeSet<Key>,
+        mut_keys: BTreeSet<Key>,
+    ) -> anyhow::Result<()> {
+        self.or_closed(async |tablet| {
+            tablet
+                .cleanup_committed(txid, ts, precond_keys, mut_keys)
+                .await
+        })
+        .await
+    }
+
+    async fn manifest(&self) -> anyhow::Result<Manifest> {
+        self.or_closed(async |tablet| tablet.manifest().await).await
+    }
+
+    async fn wait_mostly_hydrated(&self) -> anyhow::Result<()> {
+        self.or_closed(async |tablet| tablet.wait_mostly_hydrated().await)
+            .await
+    }
+
+    async fn catchup(&self) -> anyhow::Result<()> {
+        self.or_closed(async |tablet| tablet.catchup().await).await
+    }
+
+    async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
+        self.or_closed(async |tablet| tablet.find_split().await)
+            .await
+    }
 }

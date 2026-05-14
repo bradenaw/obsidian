@@ -19,26 +19,20 @@ use tokio::sync::SetOnce;
 pub struct Owned<T> {
     inner: Arc<T>,
     closed: Arc<SetOnce<()>>,
-    weak: Arc<WeakView<T>>,
 }
 
 impl<T> Owned<T> {
     pub fn new(inner: T) -> Self {
         let arc = Arc::new(inner);
         let closed = Arc::new(SetOnce::new());
-        let weak = WeakView {
-            inner: Arc::downgrade(&arc),
-            closed: Arc::clone(&closed),
-        };
-        Self {
-            inner: arc,
-            closed,
-            weak: Arc::new(weak),
-        }
+        Self { inner: arc, closed }
     }
 
-    pub fn weak(this: &Self) -> Arc<WeakView<T>> {
-        Arc::clone(&this.weak)
+    pub fn weak(this: &Self) -> WeakView<T> {
+        WeakView {
+            inner: Arc::downgrade(&this.inner),
+            closed: Arc::clone(&this.closed),
+        }
     }
 }
 
@@ -83,5 +77,14 @@ impl<T> WeakView<T> {
                 out
             },
         }
+    }
+
+    pub fn or_closed_sync<F, U, E>(&self, f: F) -> Result<U, E>
+    where
+        F: FnOnce(&T) -> Result<U, E>,
+        E: From<anyhow::Error>,
+    {
+        let inner = self.inner.upgrade().ok_or_else(|| anyhow!("closed"))?;
+        f(inner.deref())
     }
 }

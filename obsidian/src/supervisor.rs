@@ -57,12 +57,12 @@ impl Supervisor {
         shards: Arc<dyn Shards>,
     ) -> Self {
         // TODO: scan for transfers
-        let supervisor = Self(WithBackground::new(Arc::new(SupervisorInner {
+        let supervisor = Self(WithBackground::new(SupervisorInner {
             meta,
             meta_synced: Arc::clone(&meta_synced),
             shards,
             assign_shards_trigger: Notify::new(),
-        })));
+        }));
 
         meta_synced.subscribe(&supervisor.0);
 

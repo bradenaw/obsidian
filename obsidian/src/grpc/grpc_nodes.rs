@@ -12,8 +12,8 @@ use obsidian_external::NodeDiscovery;
 use obsidian_pb as pb;
 use obsidian_util::spawn_owned;
 use obsidian_util::OwnedJoinHandle;
-use obsidian_util::OwnedWithBackground;
 use obsidian_util::Retry;
+use obsidian_util::WithBackground;
 use tokio::select;
 use tokio::sync::mpsc;
 
@@ -21,11 +21,11 @@ use crate::grpc::NodeClient;
 use crate::runtime::Node;
 use crate::runtime::Nodes;
 
-pub(crate) struct GrpcNodes(OwnedWithBackground<GrpcNodesInner>);
+pub(crate) struct GrpcNodes(WithBackground<GrpcNodesInner>);
 
 impl GrpcNodes {
     pub fn new(node_discovery: Arc<dyn NodeDiscovery + Send + Sync>) -> GrpcNodes {
-        let inner = OwnedWithBackground::new(GrpcNodesInner {
+        let inner = WithBackground::new(GrpcNodesInner {
             node_discovery,
             clients: RwLock::new(HashMap::new()),
         });

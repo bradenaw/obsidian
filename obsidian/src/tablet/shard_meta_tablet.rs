@@ -85,7 +85,7 @@ impl ShardMetaTablet {
 
         let tablet_id = TabletId::shard_meta(shard_id);
 
-        let inner = Arc::new(ShardMetaTabletInner {
+        let inner = ShardMetaTabletInner {
             inner: TabletInner::new(
                 tablet_id,
                 ColoGroupId::SHARD_META,
@@ -96,7 +96,7 @@ impl ShardMetaTablet {
             meta_synced,
             shards,
             waiters: Waiters::new(),
-        });
+        };
 
         let tablet = ShardMetaTablet(WithBackground::new(inner));
 
