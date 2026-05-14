@@ -1,6 +1,7 @@
 mod grpc_bridge;
 mod grpc_in_process_node_builder;
 mod in_process_node_builder;
+mod in_process_nodes;
 pub(crate) mod obsidian_suite;
 mod subprocess_nodes;
 pub(crate) mod tablet_suite;
@@ -32,7 +33,9 @@ pub(crate) use crate::test::grpc_bridge::obsidian_grpc_bridge;
 pub(crate) use crate::test::grpc_bridge::GrpcBridge;
 pub(crate) use crate::test::grpc_in_process_node_builder::GrpcInProcessNodeBuilder;
 pub(crate) use crate::test::in_process_node_builder::InProcessNodeBuilder;
+pub(crate) use crate::test::in_process_nodes::InProcessNodes;
 pub(crate) use crate::test::obsidian_suite::obsidian_test_suite;
+pub(crate) use crate::test::subprocess_nodes::SubprocessNodes;
 pub(crate) use crate::test::tablet_suite::tablet_test_suite;
 pub(crate) use crate::test::test_node_builder::TestNodeBuilder;
 pub(crate) use crate::test::test_nodes::TestNodes;
@@ -44,14 +47,14 @@ use crate::TabletJournalEntry;
 
 pub(crate) struct ObsidianForTestBuilder {
     n_shards: usize,
-    node_builder: Option<Box<dyn TestNodeBuilder>>,
+    nodes: Option<Box<dyn TestNodes>>,
 }
 
 impl ObsidianForTestBuilder {
     pub fn new() -> ObsidianForTestBuilder {
         ObsidianForTestBuilder {
             n_shards: 1,
-            node_builder: None,
+            nodes: None,
         }
     }
 
@@ -60,8 +63,8 @@ impl ObsidianForTestBuilder {
         self
     }
 
-    pub fn node_builder(mut self, node_builder: Box<dyn TestNodeBuilder>) -> Self {
-        self.node_builder = Some(node_builder);
+    pub fn nodes(mut self, nodes: Box<dyn TestNodes>) -> Self {
+        self.nodes = Some(nodes);
         self
     }
 
@@ -70,12 +73,14 @@ impl ObsidianForTestBuilder {
             return Err(anyhow!("need at least one shard"));
         }
 
-        let nodes = TestNodes::new(self.node_builder.unwrap_or_else(|| {
+        let mut nodes = self.nodes.unwrap_or_else(|| {
             let storage = Arc::new(MemStorage::new());
             let journals =
                 Arc::new(MemJournals::new()) as Arc<dyn Journals<Proposal<JournalEntry>>>;
-            Box::new(InProcessNodeBuilder::new(storage, journals))
-        }));
+            Box::new(InProcessNodes::new(Box::new(InProcessNodeBuilder::new(
+                storage, journals,
+            ))))
+        });
 
         log::info!("making nodes");
 
@@ -119,7 +124,7 @@ impl ObsidianForTestBuilder {
         let gateway = Gateway::new(
             Arc::clone(&meta),
             MetaSynced::new(Arc::clone(&meta)),
-            nodes.shards(),
+            nodes.discovery(),
         );
 
         let meta_synced = Arc::new(MetaSynced::new(nodes.discovery().meta()));
@@ -138,7 +143,7 @@ pub(crate) struct ObsidianForTest {
     pub meta: Arc<dyn runtime::Meta>,
     pub meta_synced: Arc<MetaSynced>,
     pub supervisor: Arc<dyn runtime::Supervisor>,
-    pub nodes: TestNodes,
+    pub nodes: Box<dyn TestNodes>,
 }
 
 impl ObsidianForTest {

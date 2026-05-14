@@ -1,8 +1,6 @@
 use futures::StreamExt;
 use obsidian_common::ShardId;
-use obsidian_external::NodeDiscovery;
 
-use crate::runtime::Nodes;
 use crate::runtime::ReplicaState;
 use crate::test::ObsidianForTestBuilder;
 
@@ -10,7 +8,7 @@ use crate::test::ObsidianForTestBuilder;
 async fn test_meta_promotion() -> anyhow::Result<()> {
     let _ = pretty_env_logger::try_init_timed();
 
-    let obs = ObsidianForTestBuilder::new().build().await?;
+    let mut obs = ObsidianForTestBuilder::new().build().await?;
 
     let node_ids = obs.nodes.node_ids().0;
 

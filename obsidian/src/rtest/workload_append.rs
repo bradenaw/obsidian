@@ -752,26 +752,21 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use obsidian_common::ShardId;
     use obsidian_external::mem::MemJournals;
     use obsidian_external::mem::MemStorage;
-    use obsidian_external::ConsulNodeDiscovery;
-    use obsidian_external::NodeDiscovery;
-    use rs_consul::Consul;
-    use tokio::time::sleep;
 
     use super::strongly_connected_components;
     use super::EdgeType;
     use super::Txid;
     use super::WorkloadAppend;
-    use crate::discovery::Discovery;
     use crate::grpc::GatewayClient;
-    use crate::grpc::GrpcNodes;
     use crate::rtest::graph::Graph;
     use crate::rtest::workload_append::WorkloadAppendOptions;
     use crate::test::GrpcInProcessNodeBuilder;
     use crate::test::InProcessNodeBuilder;
+    use crate::test::InProcessNodes;
     use crate::test::ObsidianForTestBuilder;
+    use crate::test::SubprocessNodes;
     use crate::Bound;
     use crate::ColoGroupId;
     use crate::KeyspaceId;
@@ -791,9 +786,9 @@ mod tests {
         let journals = Arc::new(MemJournals::new());
         let obs = ObsidianForTestBuilder::new()
             .n_shards(2)
-            .node_builder(Box::new(GrpcInProcessNodeBuilder::new(
-                InProcessNodeBuilder::new(storage, journals),
-            )))
+            .nodes(Box::new(InProcessNodes::new(Box::new(
+                GrpcInProcessNodeBuilder::new(InProcessNodeBuilder::new(storage, journals)),
+            ))))
             .build()
             .await?;
         test_workload_append(obs.gateway).await
@@ -820,33 +815,13 @@ mod tests {
             .install_default()
             .unwrap();
         let _ = pretty_env_logger::try_init();
-        let node_discovery = Arc::new(ConsulNodeDiscovery::observe(
-            Consul::new({
-                let mut config = rs_consul::Config::default();
-                config.address = "http://[::1]:8500".to_string();
-                config
-            }),
-            "obsidian".to_string(), // service name
-        ));
 
-        // JANK
-        sleep(Duration::from_millis(1000)).await;
+        let obs = ObsidianForTestBuilder::new()
+            .nodes(Box::new(SubprocessNodes::new()?))
+            .build()
+            .await?;
 
-        let nodes = Discovery::new(Arc::new(GrpcNodes::new(
-            Arc::clone(&node_discovery) as Arc<dyn NodeDiscovery + Send + Sync>
-        )));
-
-        sleep(Duration::from_millis(1000)).await;
-
-        log::info!("adding shards");
-        nodes.meta().add_shard(ShardId(1)).await?;
-        //nodes.meta().add_shard(ShardId(2)).await?;
-        log::info!("adding shards -> done");
-
-        // JANK
-        sleep(Duration::from_millis(1000)).await;
-
-        let node_ids = node_discovery.node_ids().0;
+        let node_ids = obs.nodes.node_ids().0;
         let some_node_id = node_ids.iter().next().unwrap();
         let gateway = GatewayClient::connect(format!(
             "http://[{}]:{}",

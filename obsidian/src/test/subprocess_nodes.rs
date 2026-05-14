@@ -1,18 +1,26 @@
 use std::collections::HashMap;
 use std::env;
+use std::future::Future;
 use std::net::IpAddr;
 use std::net::Ipv6Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Context;
+use async_trait::async_trait;
+use im::OrdSet;
 use obsidian_common::NodeId;
 use obsidian_external::ConsulNodeDiscovery;
+use obsidian_external::NodeDiscovery;
 use rs_consul::Consul;
 use tokio::process::Child;
 use tokio::process::Command;
 
 use crate::discovery::Discovery;
 use crate::grpc::GrpcNodes;
+use crate::runtime::Node;
+use crate::runtime::Nodes;
+use crate::test::test_nodes::TestNodes;
 
 const S3_PORT: u16 = 9000;
 const S3_CONSOLE_PORT: u16 = 9001;
@@ -25,8 +33,10 @@ const MINIO_IMAGE: &str =
 const CONSUL_IMAGE: &str = "docker.io/hashicorp/consul@sha256:a230dcea0bb107bd7958a912d1429fb7f9d399637de7ffb814b34412b9e8c543";
 const CONSUL_SERVICE: &str = "obsidian";
 
-struct SubprocessNodes {
+pub(crate) struct SubprocessNodes {
     discovery: Arc<Discovery>,
+    inner_nodes: Arc<dyn Nodes>,
+
     cargo_bin: PathBuf,
     storage: Child,
     consul: Child,
@@ -36,9 +46,7 @@ struct SubprocessNodes {
 }
 
 impl SubprocessNodes {
-    fn new() -> anyhow::Result<Self> {
-        let consul_service = "obsidian";
-
+    pub fn new() -> anyhow::Result<Self> {
         let storage = Command::new("podman")
             .arg("run")
             .arg("-p")
@@ -65,7 +73,12 @@ impl SubprocessNodes {
             .kill_on_drop(true)
             .spawn()?;
 
-        let cargo_bin = PathBuf::from(env::var("CARGO_BIN_PATH")?.to_string());
+        // TODO: Does this need to be in tests/ instead of src for this to work?
+        let cargo_bin = PathBuf::from(
+            env::var("CARGO_BIN_PATH")
+                .context("CARGO_BIN_PATH not found")?
+                .to_string(),
+        );
 
         let journals = Command::new(cargo_bin.join("obsidian"))
             .env("RUST_LOG", "info")
@@ -82,16 +95,17 @@ impl SubprocessNodes {
                 config.address = format!("http://[::1]:{}", CONSUL_PORT);
                 config
             }),
-            consul_service.to_string(),
+            CONSUL_SERVICE.to_string(),
         );
 
-        let nodes = GrpcNodes::new(Arc::new(node_discovery));
-        let discovery = Arc::new(Discovery::new(Arc::new(nodes)));
+        let inner_nodes = Arc::new(GrpcNodes::new(Arc::new(node_discovery)));
+        let discovery = Arc::new(Discovery::new(Arc::clone(&inner_nodes) as Arc<dyn Nodes>));
 
         Ok(Self {
             cargo_bin,
 
             discovery,
+            inner_nodes,
             storage,
             consul,
             journals,
@@ -99,12 +113,15 @@ impl SubprocessNodes {
             nodes: HashMap::new(),
         })
     }
+}
 
-    pub fn discovery(&self) -> Arc<Discovery> {
+#[async_trait]
+impl TestNodes for SubprocessNodes {
+    fn discovery(&self) -> Arc<Discovery> {
         Arc::clone(&self.discovery)
     }
 
-    pub async fn create_node(&mut self) -> anyhow::Result<NodeId> {
+    async fn create_node(&mut self) -> anyhow::Result<NodeId> {
         let port = self.next_port;
         self.next_port += 1;
         let addr = IpAddr::V6(Ipv6Addr::LOCALHOST);
@@ -139,7 +156,19 @@ impl SubprocessNodes {
         Ok(node_id)
     }
 
-    pub fn remove_node(&mut self, node_id: NodeId) {
+    fn remove_node(&mut self, node_id: NodeId) {
         self.nodes.remove(&node_id);
+    }
+}
+
+impl Nodes for SubprocessNodes {
+    fn node(&self, node_id: NodeId) -> anyhow::Result<Arc<dyn Node>> {
+        self.inner_nodes.node(node_id)
+    }
+}
+
+impl NodeDiscovery for SubprocessNodes {
+    fn node_ids(&self) -> (OrdSet<NodeId>, Box<dyn Future<Output = ()> + Send + Unpin>) {
+        self.inner_nodes.node_ids()
     }
 }
