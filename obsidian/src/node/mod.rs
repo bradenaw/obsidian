@@ -267,6 +267,11 @@ impl NodeInner {
                     // leader and a later entry in `stream` should tell us that.
                     if let Some(meta_shard) = replicas.get(&ShardId::META) {
                         if let Ok(meta_tablet) = meta_shard.tablet(TabletId::META) {
+                            log::info!(
+                                "{:?} is leader for {:?}, spawning meta and supervisor",
+                                self.node_id,
+                                ShardId::META,
+                            );
                             let meta = Owned::new(Meta::new(meta_tablet));
                             *supervisor = Some(Owned::new(Supervisor::new(
                                 Arc::new(Owned::weak(&meta)),
@@ -308,6 +313,8 @@ impl NodeInner {
                 return;
             }
         }
+
+        log::info!("{:?} joining {:?}", self.node_id, shard_id);
 
         let replica = Replica::new(
             format!("{:?} {:?}", self.node_id, shard_id), // name, for logging

@@ -759,21 +759,24 @@ mod tests {
     use super::EdgeType;
     use super::Txid;
     use super::WorkloadAppend;
+    use crate::grpc::GatewayClient;
     use crate::rtest::graph::Graph;
     use crate::rtest::workload_append::WorkloadAppendOptions;
     use crate::test::GrpcInProcessNodeBuilder;
     use crate::test::InProcessNodeBuilder;
-    use crate::test::ObsidianForTest;
+    use crate::test::InProcessNodes;
     use crate::test::ObsidianForTestBuilder;
+    use crate::test::SubprocessNodes;
     use crate::Bound;
     use crate::ColoGroupId;
     use crate::KeyspaceId;
+    use crate::Obsidian;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_workload_append_in_process() -> anyhow::Result<()> {
         let _ = pretty_env_logger::try_init();
         let obs = ObsidianForTestBuilder::new().n_shards(2).build().await?;
-        test_workload_append(obs).await
+        test_workload_append(obs.gateway).await
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -783,31 +786,50 @@ mod tests {
         let journals = Arc::new(MemJournals::new());
         let obs = ObsidianForTestBuilder::new()
             .n_shards(2)
-            .node_builder(Box::new(GrpcInProcessNodeBuilder::new(
-                InProcessNodeBuilder::new(storage, journals),
-            )))
+            .nodes(Box::new(InProcessNodes::new(Box::new(
+                GrpcInProcessNodeBuilder::new(InProcessNodeBuilder::new(storage, journals)),
+            ))))
             .build()
             .await?;
-        test_workload_append(obs).await
+        test_workload_append(obs.gateway).await
     }
 
-    async fn test_workload_append(obs: ObsidianForTest) -> anyhow::Result<()> {
-        obs.gateway
-            .create_colo_group(
-                ColoGroupId(1),
-                vec![Bound::Before(vec![2]), Bound::Before(vec![3])],
-            )
+    #[ignore]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_workload_append_external() -> anyhow::Result<()> {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .unwrap();
+        let _ = pretty_env_logger::try_init();
+
+        let obs = ObsidianForTestBuilder::new()
+            .nodes(Box::new(SubprocessNodes::new().await?))
+            .build()
             .await?;
 
-        obs.gateway
-            .create_keyspace(KeyspaceId(ColoGroupId(1), 1))
-            .await?;
-        obs.gateway
-            .create_keyspace(KeyspaceId(ColoGroupId(1), 2))
-            .await?;
+        let node_ids = obs.nodes.node_ids().0;
+        let some_node_id = node_ids.iter().next().unwrap();
+        let gateway = GatewayClient::connect(format!(
+            "http://[{}]:{}",
+            some_node_id.addr, some_node_id.port
+        ))
+        .await?;
+
+        test_workload_append(Arc::new(gateway)).await
+    }
+
+    async fn test_workload_append(obs: Arc<dyn Obsidian>) -> anyhow::Result<()> {
+        obs.create_colo_group(
+            ColoGroupId(1),
+            vec![Bound::Before(vec![2]), Bound::Before(vec![3])],
+        )
+        .await?;
+
+        obs.create_keyspace(KeyspaceId(ColoGroupId(1), 1)).await?;
+        obs.create_keyspace(KeyspaceId(ColoGroupId(1), 2)).await?;
 
         let wl = WorkloadAppend::new(
-            Arc::clone(&obs.gateway),
+            Arc::clone(&obs),
             WorkloadAppendOptions {
                 duration: Duration::from_millis(5000),
                 concurrency: 32,

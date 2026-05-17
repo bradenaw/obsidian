@@ -6,9 +6,14 @@ fn main() -> std::io::Result<()> {
             "../proto/internal/internal.proto",
             "../proto/internal/meta.proto",
             "../proto/internal/node.proto",
+            "../proto/internal/proposal.proto",
             "../proto/internal/tablet.proto",
         ],
         &["../proto", "../proto/internal/"],
+    )?;
+    tonic_build::configure().compile(
+        &["../proto/external/journals.proto"],
+        &["../proto", "../proto/external/"],
     )?;
     Ok(())
 }

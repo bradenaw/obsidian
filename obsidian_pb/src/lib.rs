@@ -3,6 +3,9 @@
 mod obsidian {
     tonic::include_proto!("obsidian");
 }
+pub mod external {
+    tonic::include_proto!("obsidian_external");
+}
 pub mod internal {
     tonic::include_proto!("obsidian_internal");
 }

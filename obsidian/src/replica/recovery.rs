@@ -126,8 +126,8 @@ impl TabletRecovery {
                 lsm.create_keyspace(keyspace_id);
 
                 // It's possible that this revision is already present since the seqno in
-                // TabletJournalEntry::Manifest is a lower bound, the manifest may already contain newer
-                // writes.
+                // TabletJournalEntry::Manifest is a lower bound, the manifest may already contain
+                // newer writes.
                 if let Some((existing_ts, existing_value)) = lsm.get(ts, keyspace_id, &key).await? {
                     if existing_ts == ts {
                         if value != existing_value {

@@ -1,5 +1,6 @@
 //! Election provides leader election for a group of participants sharing a journal.
 
+mod proposal;
 mod seq_waiters;
 #[cfg(test)]
 mod tests;
@@ -12,19 +13,18 @@ use std::sync::Weak;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use async_stream::stream;
 use async_stream::try_stream;
 use async_trait::async_trait;
 use futures::future::pending;
 use futures::Stream;
 use futures::StreamExt;
 use obsidian_external::Journal;
+use obsidian_util::jittered_ticker;
 use obsidian_util::AtomicInstant;
 use obsidian_util::Retry;
 use obsidian_util::StateMachine;
 use obsidian_util::Watchable;
 use obsidian_util::WithBackground;
-use rand::Rng;
 use tokio::select;
 use tokio::sync::Notify;
 use tokio::time::interval;
@@ -33,6 +33,8 @@ use tokio::time::Instant;
 use tokio_stream::wrappers::IntervalStream;
 use uuid::Uuid;
 
+pub(crate) use crate::election::proposal::Proposal;
+use crate::election::proposal::ProposalType;
 use crate::election::seq_waiters::SeqWaiters;
 use crate::util::AtomicTimestamp;
 use crate::JournalSeq;
@@ -113,33 +115,12 @@ pub enum ParticipantState<'a, TLeader, TFollower> {
 // TODO: This is a pretty poor name for this because it doesn't last as long as a participant, if
 // we abandon a lease we have to change it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ParticipantId(Uuid);
+struct ParticipantId(Uuid);
 
 impl ParticipantId {
     fn new() -> Self {
         Self(Uuid::new_v4())
     }
-}
-
-#[derive(Clone)]
-pub struct Proposal<TEntry> {
-    participant_id: ParticipantId,
-    // Timestamps are not necessarily ordered the same way as JournalSeqs, since the leader may submit
-    // proposals concurrently that can be committed by the journal in any order.
-    timestamp: Timestamp,
-    proposal_type: ProposalType<TEntry>,
-}
-
-#[derive(Clone)]
-enum ProposalType<TEntry> {
-    // Acquires are only accepted if their timestamp is greater than the last non-relinquished
-    // lease_end.
-    Acquire { lease_end: Timestamp },
-    Relinquish,
-    // Appends are only accepted if they're made by the current leader.
-    Append(TEntry),
-    // Heartbeats are always accepted since they have no effect.
-    Heartbeat,
 }
 
 pub trait FollowerBuilder<TEntry, TFollower> {
@@ -625,17 +606,6 @@ where
 
 fn duration_until(ts: Timestamp) -> Duration {
     ts.saturating_duration_since(Timestamp::now())
-}
-
-fn jittered_ticker(x: Duration) -> impl Stream<Item = ()> {
-    let mut next = Instant::now();
-    stream! {
-        loop {
-            next += rand::thread_rng().gen_range(x / 2..x * 3/2);
-            yield ();
-            sleep_until(next).await;
-        }
-    }
 }
 
 fn ticker(x: Duration) -> IntervalStream {

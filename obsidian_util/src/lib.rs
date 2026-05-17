@@ -11,6 +11,7 @@ mod ord_eq_by_first;
 mod owned;
 mod retry;
 mod state_machine;
+mod time;
 mod waitable_ord;
 mod watchable;
 
@@ -39,5 +40,6 @@ pub use retry::sleep_for_retry;
 pub use retry::Retry;
 pub use retry::RetryResult;
 pub use state_machine::StateMachine;
+pub use time::jittered_ticker;
 pub use waitable_ord::WaitableOrd;
 pub use watchable::Watchable;
