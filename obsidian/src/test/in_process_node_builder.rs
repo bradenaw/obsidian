@@ -7,6 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use obsidian_external::Journals;
 use obsidian_external::Storage;
+use obsidian_lsm::LsmOptions;
 
 use crate::election::Proposal;
 use crate::meta::MetaSynced;
@@ -60,6 +61,12 @@ impl TestNodeBuilder for InProcessNodeBuilder {
 
         Ok(Arc::new(crate::node::Node::new(
             node_id,
+            LsmOptions {
+                l0_max_size: 256,
+                l1_max_size: 100_000,
+                run_size_target: 32768,
+                block_size_target: 4096,
+            },
             nodes,
             cached_storage,
             meta,

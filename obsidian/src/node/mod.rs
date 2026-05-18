@@ -86,6 +86,7 @@ struct NodeInner {
 impl Node {
     pub fn new(
         node_id: NodeId,
+        lsm_options: LsmOptions,
         nodes: Arc<dyn Nodes>,
         storage: Arc<dyn Storage>,
         meta: Arc<dyn runtime::Meta>,
@@ -96,12 +97,7 @@ impl Node {
         let node = Node(WithBackground::new(NodeInner {
             node_id,
             nodes,
-            lsm_options: LsmOptions {
-                l0_max_size: 256,
-                l1_max_size: 100_000,
-                run_size_target: 32768,
-                block_size_target: 4096,
-            },
+            lsm_options,
             storage,
             meta,
             shards,

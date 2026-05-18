@@ -6,6 +6,7 @@ use obsidian_common::JournalEntry;
 use obsidian_external::mem::MemJournals;
 use obsidian_external::ConsulNodeDiscovery;
 use obsidian_external::S3Storage;
+use obsidian_lsm::LsmOptions;
 use obsidian_pb as pb;
 use rs_consul::Consul;
 use tokio::net::TcpListener;
@@ -129,6 +130,7 @@ async fn cmd_node(args: NodeArgs) -> anyhow::Result<()> {
 
     let node = Node::new(
         node_id,
+        LsmOptions::default(),
         nodes,
         Arc::new(storage),
         discovery.meta(),
