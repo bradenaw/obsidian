@@ -27,15 +27,12 @@ use crate::TabletId;
 use crate::Timestamp;
 use crate::Txid;
 
-/// MetaTablets are special from LsmTablets in two necessary ways:
+/// MetaTablets are special from DataTablets in two necessary ways:
 ///
-/// 1. They always have TabletState::Active, and never transitions, because they can't participate
-///    in transfers. This is important because all other tablets default to having no RW
-///    permissions until they observe their own TabletMetadata. Obviously that doesn't work for the
-///    tablet hosting TabletId::META, because it needs to receive a write to make any
-///    TabletMetadata at all.
-/// 2. They cannot participate in 2PC. For the sake of the simplicity of the interface, it
-///    implements those methods, but always errors.
+/// 1. Their range cannot be moved. This is necessary because ranges move between tablets via
+///    metadata stored in Meta, which cannot work for Meta itself.
+/// 2. They cannot participate in cross-tablet transactions. For the sake of the simplicity of the
+///    interface, it implements those methods, but always errors.
 pub(crate) struct MetaTablet {
     inner: TabletInner<JournaledLsm>,
 }

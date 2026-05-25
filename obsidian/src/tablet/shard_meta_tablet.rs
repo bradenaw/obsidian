@@ -57,9 +57,9 @@ const WAIT_ABORT_TIMEOUT: Duration = Duration::from_millis(1_000);
 ///
 /// They are distinct from other kinds of tablets:
 ///
-/// 1. They always have TabletState::Active. Their range cannot be moved to another tablet.
+/// 1. Their range cannot be moved to another tablet.
 /// 2. They only host the TX_OUTCOMES keyspace so they refuse regular writes but do accept
-///    try_commit/try_abort.
+///    tx_try_commit/tx_try_abort.
 pub(crate) struct ShardMetaTablet(WithBackground<ShardMetaTabletInner>);
 
 struct ShardMetaTabletInner {
