@@ -131,4 +131,8 @@ impl MetaKey {
     pub fn tablets() -> Range<Vec<u8>> {
         Range::prefix(tuple_encode(&(Self::PFX_TABLETS,)))
     }
+
+    pub fn transfers() -> Range<Vec<u8>> {
+        Range::prefix(tuple_encode(&(Self::PFX_TRANSFERS,)))
+    }
 }

@@ -10,6 +10,7 @@ use std::time::SystemTime;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::stream::FuturesUnordered;
+use futures::StreamExt as _;
 use futures::TryStreamExt;
 use obsidian_util::Retry;
 use obsidian_util::WithBackground;
@@ -40,7 +41,9 @@ use crate::TransferId;
 
 const CATCHUP_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(crate) struct Supervisor(WithBackground<SupervisorInner>);
+// Weird double-wrapping here because meta_synced is spawned into the outer one but transfers are
+// spawned in the inner one.
+pub(crate) struct Supervisor(WithBackground<WithBackground<SupervisorInner>>);
 
 struct SupervisorInner {
     meta: Arc<dyn Meta>,
@@ -56,13 +59,12 @@ impl Supervisor {
         meta_synced: Arc<MetaSynced>,
         shards: Arc<dyn Shards>,
     ) -> Self {
-        // TODO: scan for transfers
-        let supervisor = Self(WithBackground::new(SupervisorInner {
+        let supervisor = Self(WithBackground::new(WithBackground::new(SupervisorInner {
             meta,
             meta_synced: Arc::clone(&meta_synced),
             shards,
             assign_shards_trigger: Notify::new(),
-        }));
+        })));
 
         meta_synced.subscribe(&supervisor.0);
 
@@ -190,10 +192,6 @@ impl Supervisor {
             srcs,
             dst_tablet_ids
         );
-
-        self.0.spawn(async move |inner| {
-            inner.transfer(transfer_id).await;
-        });
 
         Ok(transfer_id)
     }
@@ -575,20 +573,50 @@ impl SupervisorInner {
     }
 
     async fn try_sync_meta(
-        &self,
+        this: &WithBackground<Self>,
         sync_type: &SyncType,
-        _snapshot: &MetaSyncedSnapshot,
+        snapshot: &MetaSyncedSnapshot,
     ) -> anyhow::Result<()> {
         match sync_type {
             SyncType::Initial => {
-                self.assign_shards_trigger.notify_one();
+                this.assign_shards_trigger.notify_one();
+
+                let mut transfers_stream = snapshot.transfers();
+                while let Some((transfer_id, transfer_metadata)) =
+                    transfers_stream.next().await.transpose()?
+                {
+                    if matches!(
+                        transfer_metadata.state,
+                        MetaState::Stable(TransferState::Complete)
+                    ) {
+                        continue;
+                    }
+                    if matches!(
+                        transfer_metadata.state,
+                        MetaState::Stable(TransferState::Aborted)
+                    ) {
+                        continue;
+                    }
+
+                    this.spawn(async move |inner| {
+                        inner.transfer(transfer_id).await;
+                    });
+                }
             }
             SyncType::Tx(keys) => {
-                if keys
-                    .iter()
-                    .any(|key| matches!(key, MetaKey::Node(_) | MetaKey::Shard(_)))
-                {
-                    self.assign_shards_trigger.notify_one();
+                for key in keys {
+                    match key {
+                        MetaKey::Node(_) | MetaKey::Shard(_) => {
+                            this.assign_shards_trigger.notify_one();
+                        }
+                        MetaKey::Transfer(transfer_id) => {
+                            let transfer_id = *transfer_id;
+                            this.spawn(async move |inner| {
+                                inner.transfer(transfer_id).await;
+                            });
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -651,11 +679,11 @@ impl SupervisorInner {
 }
 
 #[async_trait]
-impl MetaSubscriber for SupervisorInner {
+impl MetaSubscriber for WithBackground<SupervisorInner> {
     async fn sync_meta(&self, sync_type: SyncType, snapshot: MetaSyncedSnapshot) {
         Retry::new()
             .indefinitely(&async || -> anyhow::Result<()> {
-                self.try_sync_meta(&sync_type, &snapshot).await
+                SupervisorInner::try_sync_meta(&self, &sync_type, &snapshot).await
             })
             .await;
     }
@@ -796,7 +824,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge() -> anyhow::Result<()> {
-        let _ = pretty_env_logger::try_init();
+        let _ = pretty_env_logger::try_init_timed();
 
         let obs = ObsidianForTestBuilder::new().n_shards(3).build().await?;
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);

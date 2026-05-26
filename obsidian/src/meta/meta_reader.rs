@@ -201,4 +201,25 @@ pub(crate) trait MetaReader {
             )),
         }
     }
+
+    fn transfers(
+        &self,
+    ) -> Box<dyn Stream<Item = anyhow::Result<(TransferId, TransferMetadata)>> + Unpin + Send + '_>
+    {
+        Box::new(
+            self.scan(MetaKey::transfers(), Direction::Asc)
+                .map(|result| match result {
+                    Ok((
+                        MetaKey::Transfer(transfer_id),
+                        MetaValue::TransferMetadata(transfer_metadata),
+                    )) => Ok((transfer_id, transfer_metadata)),
+                    Ok((meta_key, meta_value)) => Err(anyhow!(
+                        "wrong type for meta key/value, expected transfer: {:?} {:?}",
+                        meta_key,
+                        meta_value,
+                    )),
+                    Err(e) => Err(e),
+                }),
+        )
+    }
 }
