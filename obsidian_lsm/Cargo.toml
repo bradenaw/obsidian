@@ -20,7 +20,7 @@ obsidian_external = { path = "../obsidian_external" }
 obsidian_olf = { path = "../obsidian_olf" }
 obsidian_util = { path = "../obsidian_util" }
 pretty_env_logger = "^0.5"
-rand = "0.8.5"
+rand = "0.10"
 tokio = { version = "1.47.1", features = [ "fs", "io-util", "macros", "rt", "rt-multi-thread", "sync", "time", "tracing" ] }
 uuid = { version = "1.18.1", features = ["v4", "v7"] }
 

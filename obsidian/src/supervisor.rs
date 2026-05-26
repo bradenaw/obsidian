@@ -743,7 +743,6 @@ mod tests {
 
     use byteorder::BigEndian;
     use byteorder::ByteOrder;
-    use rand::RngCore;
 
     use crate::meta::MetaReader;
     use crate::test::ObsidianForTestBuilder;
@@ -918,7 +917,7 @@ mod tests {
                     key[0] = prefix;
 
                     let mut value = [0u8; 32];
-                    rand::thread_rng().fill_bytes(&mut value);
+                    rand::fill(&mut value);
 
                     expected.insert(key.to_vec(), value.to_vec());
                     muts.insert((keyspace_id, key.to_vec()), Mutation::Put(value.to_vec()));

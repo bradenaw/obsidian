@@ -19,7 +19,8 @@ use futures::TryStreamExt;
 use obsidian_util::sleep_for_retry;
 use obsidian_util::Retry;
 use obsidian_util::RetryResult;
-use rand::seq::SliceRandom;
+use rand::seq::IndexedRandom as _;
+use rand::seq::SliceRandom as _;
 
 use crate::meta::MetaReader;
 use crate::meta::MetaSynced;
@@ -230,7 +231,7 @@ fn choose_shard<I: Iterator<Item = TabletId>>(iter: I) -> Option<ShardId> {
     shard_ids.sort();
     shard_ids.dedup();
 
-    shard_ids.choose(&mut rand::thread_rng()).copied()
+    shard_ids.choose(&mut rand::rng()).copied()
 }
 
 impl Gateway {
@@ -498,7 +499,7 @@ impl Gateway {
 
         let tablet_ids = {
             let mut tablet_ids = snapshot.tablet_ids().await?;
-            tablet_ids.shuffle(&mut rand::thread_rng());
+            tablet_ids.shuffle(&mut rand::rng());
             tablet_ids
         };
 

@@ -112,7 +112,7 @@ impl runtime::Meta for Meta {
             }
 
             let mut shard_ids: Vec<_> = tx.shard_ids().await?;
-            shard_ids.shuffle(&mut rand::thread_rng());
+            shard_ids.shuffle(&mut rand::rng());
 
             tx.put(MetaKey::ColoGroup(colo_group_id), MetaValue::Empty);
 

@@ -24,8 +24,6 @@ use obsidian_util::merge_sorted;
 use obsidian_util::Decode;
 use obsidian_util::Encode;
 use obsidian_util::OrdEqByFirst;
-use rand::thread_rng;
-use rand::Rng;
 
 use crate::rtest::graph::Graph;
 use crate::Bound;
@@ -179,7 +177,7 @@ impl WorkloadAppend {
         while Instant::now() < deadline {
             let txid = self.new_txid();
 
-            let choice = thread_rng().gen_bool(self.options.write_fraction);
+            let choice = rand::random_bool(self.options.write_fraction);
             match choice {
                 true => {
                     let list_id = self.choose_list();
@@ -304,7 +302,7 @@ impl WorkloadAppend {
     }
 
     fn choose_list(&self) -> ListId {
-        ListId(thread_rng().gen_range(0..(self.options.n_lists as u64)))
+        ListId(rand::random_range(0..(self.options.n_lists as u64)))
     }
 
     fn new_txid(&self) -> Txid {

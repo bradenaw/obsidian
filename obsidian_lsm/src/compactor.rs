@@ -28,7 +28,6 @@ use obsidian_olf::OlfFileBuilder;
 use obsidian_util::merge_sorted_streams;
 use obsidian_util::spawn_owned;
 use obsidian_util::OwnedJoinHandle;
-use rand::Rng;
 use uuid::Uuid;
 
 use crate::index::Index;
@@ -307,7 +306,7 @@ impl CompactorInner {
 
             // Start at a random position so we don't always e.g. choose the lowest run in sorted
             // order.
-            let offset = rand::thread_rng().gen_range(0..level.runs.len());
+            let offset = rand::random_range(0..level.runs.len());
             for j in 0..level.runs.len() {
                 let run = &level.runs[(j + offset) % level.runs.len()];
 

@@ -490,7 +490,6 @@ mod tests {
     use obsidian_common::Timestamp;
     use obsidian_external::mem::MemFileWriter;
     use proptest::prelude::*;
-    use rand::RngCore;
     use uuid::Uuid;
 
     use super::dump_olf_file;
@@ -501,7 +500,7 @@ mod tests {
     async fn test_olf_file() -> anyhow::Result<()> {
         fn rand_bytes(n: usize) -> Vec<u8> {
             let mut out = vec![0u8; n];
-            rand::thread_rng().fill_bytes(&mut out);
+            rand::fill(&mut out);
             out
         }
         let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
