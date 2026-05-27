@@ -228,14 +228,16 @@ impl Lsm {
                     ((running_size as i64) - (total_size as i64 / 2)).unsigned_abs();
                 match maybe_candidate {
                     Some(ref candidate) => {
-                        let new_candidate = shortest_between(runs[0].0, lower);
-                        // If they're equal we'd prefer the one closer to the midpoint.
-                        if new_candidate.len() < candidate.len()
-                            || (new_candidate.len() == candidate.len()
-                                && new_candidate_distance_from_mid < candidate_distance_from_mid)
-                        {
-                            maybe_candidate = Some(new_candidate);
-                            candidate_distance_from_mid = new_candidate_distance_from_mid;
+                        if let Some(new_candidate) = shortest_between(runs[0].0, lower) {
+                            // If they're equal we'd prefer the one closer to the midpoint.
+                            if new_candidate.len() < candidate.len()
+                                || (new_candidate.len() == candidate.len()
+                                    && new_candidate_distance_from_mid
+                                        < candidate_distance_from_mid)
+                            {
+                                maybe_candidate = Some(new_candidate);
+                                candidate_distance_from_mid = new_candidate_distance_from_mid;
+                            }
                         }
                     }
                     None => {

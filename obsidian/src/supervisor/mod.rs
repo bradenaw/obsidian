@@ -1,6 +1,8 @@
 //! The supervisor handles system-wide tasks, like assigning shards to nodes and transferring key
 //! ranges between shards to rebalance.
 
+mod rebalance;
+
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;

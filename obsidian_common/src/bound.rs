@@ -11,7 +11,7 @@ pub trait Key: Deref<Target = [u8]> + Clone + Eq + Ord {}
 
 impl<T: Deref<Target = [u8]> + Clone + Eq + Ord> Key for T {}
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub enum Bound<K> {
     BeforeAll,
     Before(K),
