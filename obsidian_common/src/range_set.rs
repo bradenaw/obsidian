@@ -71,6 +71,16 @@ impl<K: Key> RangeSet<K> {
         self.intersections(other).next().is_some()
     }
 
+    pub fn intersects_range(&self, range: &Range<K>) -> bool {
+        for other in self.overlapping_ranges(range) {
+            // "overlapping" also returns adjacent
+            if other.intersects(range) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn union(&self, other: &RangeSet<K>) -> Self {
         let mut union = RangeSet::new();
         for range in self.iter() {

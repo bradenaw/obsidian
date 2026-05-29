@@ -160,7 +160,9 @@ fn plan_rebalance(
         };
 
         in_progress_shards.insert(tablet_id.0);
+        eligible_shards_by_size.remove(&tablet_id.0);
         in_progress_shards.insert(adjacent_tablet_id.0);
+        eligible_shards_by_size.remove(&adjacent_tablet_id.0);
         in_progress_shards.insert(shard_id);
         plan.push(TransferPlan::Merge(tablet_id, adjacent_tablet_id, shard_id));
     }
@@ -244,25 +246,153 @@ mod tests {
     use std::hash::Hash;
     use std::time::Instant;
 
+    use anyhow::anyhow;
     use obsidian_common::Bound;
     use obsidian_common::ColoGroupId;
     use obsidian_common::Range;
+    use obsidian_common::RangeSet;
     use obsidian_common::ShardId;
     use obsidian_common::TabletId;
     use obsidian_util::shortest_between;
     use rand::seq::IndexedRandom as _;
+    use rand::seq::SliceRandom;
     use rand_distr::Distribution as _;
     use rand_distr::Zipf;
 
     use super::plan_rebalance;
     use super::TransferPlan;
     use super::SHARD_CAPACITY;
+    use crate::supervisor::rebalance::MIN_SHARD_SIZE_FOR_MOVE;
+    use crate::supervisor::rebalance::RANGE_MERGE_SIZE;
+    use crate::supervisor::rebalance::RANGE_SPLIT_SIZE;
 
-    struct Tablet {
-        colo_group_id: ColoGroupId,
-        range: Range<Vec<u8>>,
-        size: u64,
-        active: bool,
+    #[test]
+    #[ignore]
+    // Ignored because a bit slow (~15s). Better starting conditions/configuration could do better.
+    fn test_plan_rebalance_converges() {
+        let mut tablets = vec![Tablet {
+            colo_group_id: ColoGroupId(1),
+            range: Range {
+                lower: Bound::BeforeAll,
+                upper: Bound::Before(vec![0x00, 0x00]),
+            },
+            size: 0,
+            active: true,
+        }];
+        for prefix in 0..=u16::MAX {
+            tablets.push(Tablet {
+                colo_group_id: ColoGroupId(1),
+                range: Range {
+                    lower: Bound::Before(prefix.to_be_bytes().to_vec()),
+                    upper: if prefix == u16::MAX {
+                        Bound::AfterAll
+                    } else {
+                        Bound::Before((prefix + 1).to_be_bytes().to_vec())
+                    },
+                },
+                size: (prefix as u64) * RANGE_SPLIT_SIZE * 4 / (3 * (u16::MAX as u64)),
+                active: true,
+            });
+        }
+        tablets.shuffle(&mut rand::rng());
+
+        let mut tablets_by_id = HashMap::new();
+        let mut target_fill = SHARD_CAPACITY * 72 / 100;
+        let mut current_size = 0u64;
+        let mut current_shard_id = ShardId(1);
+        let mut next_tablet_seq = 1u64;
+        for tablet in tablets {
+            if current_size + tablet.size > SHARD_CAPACITY || current_size > target_fill {
+                current_shard_id.0 += 1;
+                current_size = 0;
+                target_fill = max(
+                    target_fill - SHARD_CAPACITY / 1000,
+                    SHARD_CAPACITY * 65 / 100,
+                );
+            }
+            let tablet_id = TabletId(current_shard_id, next_tablet_seq);
+            next_tablet_seq += 1;
+            current_size += tablet.size;
+            tablets_by_id.insert(tablet_id, tablet);
+        }
+
+        let mut shards = Shards::from_tablets(tablets_by_id);
+        println!("starting shard sizes ------------");
+        shards.print_shard_sizes();
+        println!("starting tablet size distribution ------------");
+        shards.print_tablet_size_dist();
+
+        loop {
+            let plan = plan_rebalance(
+                shards.active_tablets(),
+                shards.shard_sizes(),
+                shards.in_progress_shards(),
+            );
+            if plan.is_empty() {
+                break;
+            }
+            for transfer_plan in plan {
+                let transfer_ids = shards.start_transfer(transfer_plan);
+                shards.finish_transfer(transfer_ids);
+            }
+        }
+
+        println!("ending shard sizes ------------");
+        shards.print_shard_sizes();
+        println!("ending tablet size distribution ------------");
+        shards.print_tablet_size_dist();
+
+        // Make sure we still have everything.
+        assert_eq!(
+            shards.tablets().filter(|(_, tablet)| !tablet.active).next(),
+            None,
+        );
+        let mut range_set = RangeSet::new();
+        for (_, tablet) in shards.tablets() {
+            assert!(!range_set.intersects_range(&tablet.range));
+            range_set.add_range(tablet.range.clone());
+        }
+        assert_eq!(range_set.contiguous(), Some(Range::all()));
+
+        // So happens that this is possible because we have enough empty space around by the way we
+        // constructed things. Otherwise should be that we balanced them to mean +/- some slop.
+        assert_eq!(
+            shards
+                .shard_sizes()
+                .iter()
+                .filter(|(_, size)| **size > MIN_SHARD_SIZE_FOR_MOVE)
+                .next(),
+            None,
+        );
+
+        // Make sure there aren't any tablets that should've been split.
+        assert_eq!(
+            shards
+                .tablets()
+                .filter(|(_, tablet)| tablet.size > RANGE_SPLIT_SIZE)
+                .next(),
+            None,
+        );
+
+        // Make sure there aren't any tablets that should've been merged.
+        let tablets_by_lower: HashMap<_, _> = shards
+            .tablets()
+            .map(|(tablet_id, tablet)| (tablet.range.lower.clone(), (tablet_id, tablet)))
+            .collect();
+        for (tablet_id, tablet) in shards.tablets() {
+            if let Some((next_tablet_id, next_tablet)) = tablets_by_lower.get(&tablet.range.upper) {
+                assert!(
+                    tablet.size + next_tablet.size > RANGE_MERGE_SIZE,
+                    "{:?} ({:?}, {}B) should have been merged with {:?} ({:?}, {}B)",
+                    tablet_id,
+                    tablet.range,
+                    tablet.size,
+                    next_tablet_id,
+                    next_tablet.range,
+                    next_tablet.size,
+                );
+            }
+        }
     }
 
     #[test]
@@ -329,15 +459,7 @@ mod tests {
 
             if i % 100 == 0 {
                 println!("------------------");
-                let shard_ids: BTreeSet<_> = shard_sizes.keys().collect();
-                for shard_id in shard_ids {
-                    println!(
-                        "{:?}: {:.2}%",
-                        shard_id,
-                        100f64 * (*shard_sizes.get(shard_id).unwrap() as f64)
-                            / (SHARD_CAPACITY as f64)
-                    );
-                }
+                shards.print_shard_sizes();
             }
 
             let start = Instant::now();
@@ -364,24 +486,18 @@ mod tests {
             }
         }
 
-        let tablets = shards.active_tablets();
         println!("{} merges", n_merges);
         println!("{} splits", n_splits);
         println!("{} moves", n_moves);
-        let mut size_bucket_counts: BTreeMap<u64, usize> = BTreeMap::new();
-        for (_, (_, _, size)) in tablets {
-            *size_bucket_counts
-                .entry((size / 500_000_000) * 500_000_000)
-                .or_default() += 1;
-        }
-        let max_count = size_bucket_counts.values().copied().max().unwrap();
-        for (size_bucket, count) in size_bucket_counts {
-            println!(
-                "{:>10.2} {}",
-                (size_bucket as f64) / 1_000_000_000f64,
-                "*".to_string().repeat(count * 100 / max_count)
-            );
-        }
+        shards.print_tablet_size_dist();
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct Tablet {
+        colo_group_id: ColoGroupId,
+        range: Range<Vec<u8>>,
+        size: u64,
+        active: bool,
     }
 
     struct Shards {
@@ -407,19 +523,49 @@ mod tests {
             }
         }
 
-        fn create_colo_group(&mut self) {
-            let shard_id = self.shard_ids.choose_uniform().unwrap();
+        fn from_tablets(tablets: HashMap<TabletId, Tablet>) -> Self {
+            let mut shards = Shards::new();
+            for (tablet_id, tablet) in tablets {
+                if tablet.active {
+                    shards.active_tablet_ids.insert(tablet_id);
+                }
+                shards.shard_ids.insert(tablet_id.0);
+                shards.next_colo_group = max(
+                    shards.next_colo_group,
+                    ColoGroupId(tablet.colo_group_id.0 + 1),
+                );
+                shards.next_tablet_id = max(shards.next_tablet_id, tablet_id.1 + 1);
+                shards
+                    .shards
+                    .entry(tablet_id.0)
+                    .or_default()
+                    .insert(tablet_id, tablet);
+            }
+            shards
+        }
+
+        fn create_colo_group(&mut self) -> ColoGroupId {
+            self.create_colo_group_with(vec![(Range::all(), 0)])
+        }
+
+        fn create_colo_group_with(&mut self, ranges: Vec<(Range<Vec<u8>>, u64)>) -> ColoGroupId {
             let colo_group_id = self.next_colo_group;
             self.next_colo_group.0 += 1;
-            self.create_tablet(
-                shard_id,
-                Tablet {
-                    colo_group_id: colo_group_id,
-                    range: Range::all(),
-                    size: 0,
-                    active: true,
-                },
-            );
+
+            for (range, size) in ranges {
+                let shard_id = self.shard_ids.choose_uniform().unwrap();
+                self.create_tablet(
+                    shard_id,
+                    Tablet {
+                        colo_group_id,
+                        range,
+                        size,
+                        active: true,
+                    },
+                );
+            }
+
+            colo_group_id
         }
 
         fn add_shard(&mut self) {
@@ -513,7 +659,10 @@ mod tests {
                     }
                 }
                 TransferPlan::Move(src_tablet_id, dst_shard_id) => {
-                    let src = self.tablet(src_tablet_id).unwrap();
+                    let src = self
+                        .tablet(src_tablet_id)
+                        .ok_or_else(|| anyhow!("missing {:?}", src_tablet_id))
+                        .unwrap();
                     let dst_tablet_id = self.create_tablet(
                         dst_shard_id,
                         Tablet {
@@ -549,17 +698,22 @@ mod tests {
                     transfer
                 );
             }
-            for tablet_id in transfer.srcs {
-                self.shards
+            for tablet_id in &transfer.srcs {
+                if self
+                    .shards
                     .get_mut(&tablet_id.0)
                     .unwrap()
-                    .remove(&tablet_id);
-                self.active_tablet_ids.remove(&tablet_id);
+                    .remove(tablet_id)
+                    .is_none()
+                {
+                    panic!("tried to remove non-existent {:?}", tablet_id);
+                }
+                self.active_tablet_ids.remove(tablet_id);
                 self.in_progress_shards.decr(&tablet_id.0);
             }
-            for tablet_id in transfer.dsts {
-                self.tablet_mut(tablet_id).unwrap().active = true;
-                self.active_tablet_ids.insert(tablet_id);
+            for tablet_id in &transfer.dsts {
+                self.tablet_mut(*tablet_id).unwrap().active = true;
+                self.active_tablet_ids.insert(*tablet_id);
                 self.in_progress_shards.decr(&tablet_id.0);
             }
         }
@@ -643,6 +797,49 @@ mod tests {
                 .filter(|shard_id| self.in_progress_shards.contains_key(shard_id))
                 .copied()
                 .collect()
+        }
+
+        fn tablets(&self) -> impl Iterator<Item = (TabletId, &Tablet)> {
+            self.shards
+                .values()
+                .flat_map(|tablets| tablets.iter())
+                .map(|(tablet_id, tablet)| (*tablet_id, tablet))
+        }
+
+        fn print_shard_sizes(&self) {
+            let shard_sizes = self.shard_sizes();
+            let shard_ids: BTreeSet<_> = shard_sizes.keys().collect();
+            for shard_id in shard_ids {
+                println!(
+                    "{:?}: {:.2}%",
+                    shard_id,
+                    100f64 * (*shard_sizes.get(shard_id).unwrap() as f64) / (SHARD_CAPACITY as f64)
+                );
+            }
+        }
+
+        fn print_tablet_size_dist(&self) {
+            let mut size_bucket_counts: BTreeMap<u64, usize> = BTreeMap::new();
+            const BUCKET_SIZE: u64 = 500_000_000;
+            for (_, tablet) in self.tablets() {
+                *size_bucket_counts
+                    .entry((tablet.size / BUCKET_SIZE) * BUCKET_SIZE)
+                    .or_default() += 1;
+            }
+            let max_count = size_bucket_counts.values().copied().max().unwrap();
+            if let (Some((min_bucket, _)), Some((max_bucket, _))) = (
+                size_bucket_counts.first_key_value(),
+                size_bucket_counts.last_key_value(),
+            ) {
+                for size_bucket in (*min_bucket..*max_bucket).step_by(BUCKET_SIZE as usize) {
+                    let count = size_bucket_counts.get(&size_bucket).copied().unwrap_or(0);
+                    println!(
+                        "{:>10.2}GB {}",
+                        (size_bucket as f64) / 1_000_000_000f64,
+                        "*".to_string().repeat(count * 100 / max_count)
+                    );
+                }
+            }
         }
     }
 
