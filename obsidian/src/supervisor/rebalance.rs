@@ -18,18 +18,50 @@ enum TransferPlan {
     Move(TabletId, ShardId),
 }
 
-const RANGE_TARGET_SIZE: u64 = 5_000_000_000;
-const RANGE_MERGE_SIZE: u64 = RANGE_TARGET_SIZE / 2;
-const RANGE_SPLIT_SIZE: u64 = RANGE_TARGET_SIZE * 2;
-// Only bother merging ranges if there are more than this many per shard for a given colo group.
-const MIN_RANGES_PER_SHARD: usize = 8;
-// Only bother merging ranges if there are more than this many for a given colo group.
-// Used to prevent e.g. immediately merging together the ranges made in create_colo_group().
-const MIN_RANGES: usize = 1024;
+#[derive(Clone)]
+struct RebalanceOptions {
+    // The target size for each range.
+    range_target_size: u64,
+    // The total storage capacity, in bytes, of each shard.
+    shard_capacity: u64,
+    // Only bother merging ranges if there are more than this many per shard for a given colo group.
+    merge_min_ranges_per_shard: usize,
+    // Only bother merging ranges if there are more than this many for a given colo group.
+    // Used to prevent e.g. immediately merging together the ranges made in create_colo_group().
+    merge_min_ranges: usize,
+    // Only bother moving ranges off of a shard if its utilization is above this amount.
+    min_shard_size_for_move: u64,
+}
 
-const SHARD_CAPACITY: u64 = 1_000_000_000_000;
-// Only bother moving ranges off of a shard if its utilization is above this amount.
-const MIN_SHARD_SIZE_FOR_MOVE: u64 = SHARD_CAPACITY * 7 / 10;
+impl RebalanceOptions {
+    // If two adjacent ranges together are smaller than this, they can be merged.
+    fn range_merge_size(&self) -> u64 {
+        self.range_target_size / 2
+    }
+
+    // If a range is larger than this, it can be split.
+    fn range_split_size(&self) -> u64 {
+        self.range_target_size * 2
+    }
+
+    // A shard has to be this much larger than another in order to bother moving a range between
+    // them to rebalance.
+    fn move_min_imbalance(&self) -> u64 {
+        self.range_target_size * 3
+    }
+}
+
+impl Default for RebalanceOptions {
+    fn default() -> Self {
+        Self {
+            range_target_size: 5_000_000_000,
+            shard_capacity: 1_000_000_000_000,
+            min_shard_size_for_move: 700_000_000_000,
+            merge_min_ranges_per_shard: 8,
+            merge_min_ranges: 1024,
+        }
+    }
+}
 
 /// Plan transfers to rebalance the system.
 ///
@@ -43,6 +75,7 @@ const MIN_SHARD_SIZE_FOR_MOVE: u64 = SHARD_CAPACITY * 7 / 10;
 /// tablet-sized resources like the sequencers. Keeping ranges from becoming too small reduces the
 /// size of the routing table that every node needs to hold.
 fn plan_rebalance(
+    options: RebalanceOptions,
     active_tablets: HashMap<TabletId, (ColoGroupId, Range<Vec<u8>>, u64)>,
     shard_sizes: HashMap<ShardId, u64>,
     mut in_progress_shards: HashSet<ShardId>,
@@ -62,7 +95,7 @@ fn plan_rebalance(
                 continue;
             }
 
-            if *size < RANGE_SPLIT_SIZE {
+            if *size < options.range_split_size() {
                 continue;
             }
 
@@ -86,7 +119,8 @@ fn plan_rebalance(
     let mergeable_colo_groups: HashSet<_> = tablets_per_colo_group
         .iter()
         .filter(|(_, n_tablets)| {
-            **n_tablets > n_shards * MIN_RANGES_PER_SHARD && **n_tablets > MIN_RANGES
+            **n_tablets > n_shards * options.merge_min_ranges_per_shard
+                && **n_tablets > options.merge_min_ranges
         })
         .map(|(colo_group_id, _)| *colo_group_id)
         .collect();
@@ -101,7 +135,7 @@ fn plan_rebalance(
             }
             // We only bother to merge if two adjacent tablets are less than RANGE_MERGE_SIZE,
             // which implies that at least one of them is less than half of that.
-            if *size > RANGE_MERGE_SIZE / 2 {
+            if *size > options.range_merge_size() / 2 {
                 continue;
             }
             if !mergeable_colo_groups.contains(&colo_group_id) {
@@ -149,7 +183,7 @@ fn plan_rebalance(
 
         let adjacent_tablet_size = active_tablets.get(&adjacent_tablet_id).unwrap().2;
 
-        if size + adjacent_tablet_size >= RANGE_MERGE_SIZE {
+        if size + adjacent_tablet_size >= options.range_merge_size() {
             continue;
         }
 
@@ -197,13 +231,13 @@ fn plan_rebalance(
             }
         };
 
-        if max_shard_size < MIN_SHARD_SIZE_FOR_MOVE {
+        if max_shard_size < options.min_shard_size_for_move {
             break;
         }
 
         // Only bother moving if there's enough imbalance that it'll matter, otherwise it's
         // just churn for no reason.
-        if max_shard_size - min_shard_size < 2 * RANGE_TARGET_SIZE {
+        if max_shard_size - min_shard_size < options.move_min_imbalance() {
             break;
         }
 
@@ -261,69 +295,78 @@ mod tests {
 
     use super::plan_rebalance;
     use super::TransferPlan;
-    use super::SHARD_CAPACITY;
-    use crate::supervisor::rebalance::MIN_SHARD_SIZE_FOR_MOVE;
-    use crate::supervisor::rebalance::RANGE_MERGE_SIZE;
-    use crate::supervisor::rebalance::RANGE_SPLIT_SIZE;
+    use crate::supervisor::rebalance::RebalanceOptions;
+
+    fn make_tablets(lower_to_size: BTreeMap<Bound<Vec<u8>>, u64>) -> HashMap<TabletId, Tablet> {
+        let mut iter = lower_to_size.into_iter().peekable();
+        let mut tablets = HashMap::new();
+        while let Some((lower, size)) = iter.next() {
+            let upper = iter
+                .peek()
+                .map(|(lower, _)| lower.clone())
+                .unwrap_or_else(|| Bound::AfterAll);
+            tablets.insert(
+                TabletId(ShardId(1), (tablets.len() as u64) + 1),
+                Tablet {
+                    colo_group_id: ColoGroupId(1),
+                    range: Range { lower, upper },
+                    size,
+                    active: true,
+                },
+            );
+        }
+        tablets
+    }
 
     #[test]
-    #[ignore]
-    // Ignored because a bit slow (~15s). Better starting conditions/configuration could do better.
-    fn test_plan_rebalance_converges() {
-        let mut tablets = vec![Tablet {
-            colo_group_id: ColoGroupId(1),
-            range: Range {
-                lower: Bound::BeforeAll,
-                upper: Bound::Before(vec![0x00, 0x00]),
-            },
-            size: 0,
-            active: true,
-        }];
-        for prefix in 0..=u16::MAX {
-            tablets.push(Tablet {
-                colo_group_id: ColoGroupId(1),
-                range: Range {
-                    lower: Bound::Before(prefix.to_be_bytes().to_vec()),
-                    upper: if prefix == u16::MAX {
-                        Bound::AfterAll
-                    } else {
-                        Bound::Before((prefix + 1).to_be_bytes().to_vec())
-                    },
-                },
-                size: (prefix as u64) * RANGE_SPLIT_SIZE * 4 / (3 * (u16::MAX as u64)),
-                active: true,
-            });
-        }
-        tablets.shuffle(&mut rand::rng());
+    fn test_plan_rebalance_merge() {
+        let options = {
+            let mut options = RebalanceOptions::default();
+            options.merge_min_ranges = 0;
+            options.merge_min_ranges_per_shard = 0;
+            options.min_shard_size_for_move = 0;
+            options.range_target_size = 5_000_000_000;
+            options
+        };
 
-        let mut tablets_by_id = HashMap::new();
-        let mut target_fill = SHARD_CAPACITY * 72 / 100;
-        let mut current_size = 0u64;
-        let mut current_shard_id = ShardId(1);
-        let mut next_tablet_seq = 1u64;
-        for tablet in tablets {
-            if current_size + tablet.size > SHARD_CAPACITY || current_size > target_fill {
-                current_shard_id.0 += 1;
-                current_size = 0;
-                target_fill = max(
-                    target_fill - SHARD_CAPACITY / 1000,
-                    SHARD_CAPACITY * 65 / 100,
-                );
-            }
-            let tablet_id = TabletId(current_shard_id, next_tablet_seq);
-            next_tablet_seq += 1;
-            current_size += tablet.size;
-            tablets_by_id.insert(tablet_id, tablet);
-        }
+        let mut shards = Shards::from_tablets(make_tablets(BTreeMap::from([
+            (Bound::BeforeAll, options.range_target_size),
+            (Bound::Before(vec![0x08, 0x1b]), 1267109177),
+            (Bound::Before(vec![0x08, 0x1e]), 845756719),
+            (Bound::Before(vec![0x08, 0x20]), options.range_target_size),
+        ])));
 
-        let mut shards = Shards::from_tablets(tablets_by_id);
-        println!("starting shard sizes ------------");
-        shards.print_shard_sizes();
-        println!("starting tablet size distribution ------------");
-        shards.print_tablet_size_dist();
+        rebalance_until_converge(&options, &mut shards);
+        assert_eq!(shards.n_active_tablets(), 3);
+        check_balance(&options, &shards);
+    }
 
+    #[test]
+    fn test_plan_rebalance_split() {
+        let options = {
+            let mut options = RebalanceOptions::default();
+            options.merge_min_ranges = 0;
+            options.merge_min_ranges_per_shard = 0;
+            options.min_shard_size_for_move = 0;
+            options.range_target_size = 5_000_000_000;
+            options
+        };
+
+        let mut shards = Shards::from_tablets(make_tablets(BTreeMap::from([
+            (Bound::BeforeAll, options.range_target_size),
+            (Bound::Before(vec![0x04]), options.range_split_size() + 5),
+            (Bound::Before(vec![0x09]), options.range_target_size),
+        ])));
+
+        rebalance_until_converge(&options, &mut shards);
+        assert_eq!(shards.n_active_tablets(), 4);
+        check_balance(&options, &shards);
+    }
+
+    fn rebalance_until_converge(options: &RebalanceOptions, shards: &mut Shards) {
         loop {
             let plan = plan_rebalance(
+                options.clone(),
                 shards.active_tablets(),
                 shards.shard_sizes(),
                 shards.in_progress_shards(),
@@ -336,12 +379,9 @@ mod tests {
                 shards.finish_transfer(transfer_ids);
             }
         }
+    }
 
-        println!("ending shard sizes ------------");
-        shards.print_shard_sizes();
-        println!("ending tablet size distribution ------------");
-        shards.print_tablet_size_dist();
-
+    fn check_balance(options: &RebalanceOptions, shards: &Shards) {
         // Make sure we still have everything.
         assert_eq!(
             shards.tablets().filter(|(_, tablet)| !tablet.active).next(),
@@ -354,13 +394,21 @@ mod tests {
         }
         assert_eq!(range_set.contiguous(), Some(Range::all()));
 
-        // So happens that this is possible because we have enough empty space around by the way we
-        // constructed things. Otherwise should be that we balanced them to mean +/- some slop.
+        // Make sure we actually did rebalance - there aren't any outlier shards.
+        let shard_sizes = shards.shard_sizes();
+        let total_bytes = shard_sizes.values().sum::<u64>();
+        let avg_shard_size = total_bytes / (shard_sizes.len() as u64);
+        let max_expected_shard_size = max(
+            // We should get every shard under min_shard_size_for_move if there's enough capacity.
+            options.min_shard_size_for_move,
+            // Otherwise they should end up roughly at the average.
+            avg_shard_size + options.move_min_imbalance(),
+        );
+
         assert_eq!(
-            shards
-                .shard_sizes()
+            shard_sizes
                 .iter()
-                .filter(|(_, size)| **size > MIN_SHARD_SIZE_FOR_MOVE)
+                .filter(|(_, size)| **size > max_expected_shard_size)
                 .next(),
             None,
         );
@@ -369,7 +417,7 @@ mod tests {
         assert_eq!(
             shards
                 .tablets()
-                .filter(|(_, tablet)| tablet.size > RANGE_SPLIT_SIZE)
+                .filter(|(_, tablet)| tablet.size > options.range_split_size())
                 .next(),
             None,
         );
@@ -382,7 +430,7 @@ mod tests {
         for (tablet_id, tablet) in shards.tablets() {
             if let Some((next_tablet_id, next_tablet)) = tablets_by_lower.get(&tablet.range.upper) {
                 assert!(
-                    tablet.size + next_tablet.size > RANGE_MERGE_SIZE,
+                    tablet.size + next_tablet.size > options.range_merge_size(),
                     "{:?} ({:?}, {}B) should have been merged with {:?} ({:?}, {}B)",
                     tablet_id,
                     tablet.range,
@@ -397,7 +445,82 @@ mod tests {
 
     #[test]
     #[ignore]
+    // Ignored because a bit slow (~15s). Better starting conditions/configuration could do better.
+    fn test_plan_rebalance_converges() {
+        let options = RebalanceOptions::default();
+
+        let mut tablets = vec![Tablet {
+            colo_group_id: ColoGroupId(1),
+            range: Range {
+                lower: Bound::BeforeAll,
+                upper: Bound::Before(vec![0x00, 0x00]),
+            },
+            size: 0,
+            active: true,
+        }];
+        for prefix in 0..u16::MAX {
+            tablets.push(Tablet {
+                colo_group_id: ColoGroupId(1),
+                range: Range {
+                    lower: Bound::Before(prefix.to_be_bytes().to_vec()),
+                    upper: Bound::Before((prefix + 1).to_be_bytes().to_vec()),
+                },
+                size: (prefix as u64) * options.range_split_size() * 4 / (3 * (u16::MAX as u64)),
+                active: true,
+            });
+        }
+        tablets.push(Tablet {
+            colo_group_id: ColoGroupId(1),
+            range: Range {
+                lower: tablets.last().unwrap().range.upper.clone(),
+                upper: Bound::AfterAll,
+            },
+            size: 0,
+            active: true,
+        });
+        tablets.shuffle(&mut rand::rng());
+
+        let mut tablets_by_id = HashMap::new();
+        // TODO: in terms of min_shard_size_for_move
+        let mut target_fill = options.shard_capacity * 72 / 100;
+        let mut current_size = 0u64;
+        let mut current_shard_id = ShardId(1);
+        let mut next_tablet_seq = 1u64;
+        for tablet in tablets {
+            if current_size + tablet.size > options.shard_capacity || current_size > target_fill {
+                current_shard_id.0 += 1;
+                current_size = 0;
+                target_fill = max(
+                    target_fill - options.shard_capacity / 1000,
+                    options.shard_capacity * 65 / 100,
+                );
+            }
+            let tablet_id = TabletId(current_shard_id, next_tablet_seq);
+            next_tablet_seq += 1;
+            current_size += tablet.size;
+            tablets_by_id.insert(tablet_id, tablet);
+        }
+
+        let mut shards = Shards::from_tablets(tablets_by_id);
+        println!("starting shard sizes ------------");
+        shards.print_shard_sizes(options.shard_capacity);
+        println!("starting tablet size distribution ------------");
+        shards.print_tablet_size_dist();
+
+        rebalance_until_converge(&options, &mut shards);
+
+        println!("ending shard sizes ------------");
+        shards.print_shard_sizes(options.shard_capacity);
+        println!("ending tablet size distribution ------------");
+        shards.print_tablet_size_dist();
+
+        check_balance(&options, &shards);
+    }
+
+    #[test]
+    #[ignore]
     fn test_plan_rebalance_sim() {
+        let options = RebalanceOptions::default();
         let mut shards = Shards::new();
 
         shards.add_shard();
@@ -432,7 +555,7 @@ mod tests {
             if shards
                 .shard_sizes()
                 .values()
-                .all(|size| *size < SHARD_CAPACITY * 9 / 10)
+                .all(|size| *size < options.shard_capacity * 9 / 10)
             {
                 let tablets_to_grow = max(1, shards.n_active_tablets() / 20);
                 for _ in 0..tablets_to_grow {
@@ -451,7 +574,7 @@ mod tests {
 
             let mut shard_sizes = shards.shard_sizes();
             if shard_sizes.values().copied().sum::<u64>()
-                > (shard_sizes.len() as u64) * SHARD_CAPACITY * 8 / 10
+                > (shard_sizes.len() as u64) * options.shard_capacity * 8 / 10
             {
                 shards.add_shard();
                 shard_sizes = shards.shard_sizes();
@@ -459,14 +582,19 @@ mod tests {
 
             if i % 100 == 0 {
                 println!("------------------");
-                shards.print_shard_sizes();
+                shards.print_shard_sizes(options.shard_capacity);
             }
 
             let start = Instant::now();
             let active_tablets = shards.active_tablets();
             let n_active_tablets = active_tablets.len();
             let n_shards = shard_sizes.len();
-            let plan = plan_rebalance(active_tablets, shard_sizes, shards.in_progress_shards());
+            let plan = plan_rebalance(
+                options.clone(),
+                active_tablets,
+                shard_sizes,
+                shards.in_progress_shards(),
+            );
             if i % 100 == 0 {
                 println!(
                     "plan_rebalance took {:?} for {:?} tablets and {:?} shards",
@@ -806,14 +934,14 @@ mod tests {
                 .map(|(tablet_id, tablet)| (*tablet_id, tablet))
         }
 
-        fn print_shard_sizes(&self) {
+        fn print_shard_sizes(&self, shard_capacity: u64) {
             let shard_sizes = self.shard_sizes();
             let shard_ids: BTreeSet<_> = shard_sizes.keys().collect();
             for shard_id in shard_ids {
                 println!(
                     "{:?}: {:.2}%",
                     shard_id,
-                    100f64 * (*shard_sizes.get(shard_id).unwrap() as f64) / (SHARD_CAPACITY as f64)
+                    100f64 * (*shard_sizes.get(shard_id).unwrap() as f64) / (shard_capacity as f64)
                 );
             }
         }
