@@ -524,6 +524,20 @@ impl runtime::Tablet for TabletProxy {
 
         Ok(bound)
     }
+
+    async fn physical_size(&self) -> anyhow::Result<u64> {
+        let resp = self
+            .grpc_client
+            .clone()
+            .tablet_physical_size(pb::internal::TabletEmptyReq {
+                tablet_id: Some(pb::internal::TabletId::from(self.tablet_id)),
+            })
+            .await
+            .map_err(internal_err_from_status)?
+            .into_inner();
+
+        Ok(resp.size)
+    }
 }
 
 struct MetaProxy {

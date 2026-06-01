@@ -283,6 +283,10 @@ impl ActiveTablet {
     pub async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
         self.0.find_split().await
     }
+
+    pub fn physical_size(&self) -> u64 {
+        self.0.inner.lsm.physical_size()
+    }
 }
 
 impl ActiveTabletInner {

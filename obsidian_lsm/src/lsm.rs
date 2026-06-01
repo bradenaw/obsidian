@@ -254,6 +254,26 @@ impl Lsm {
         maybe_candidate.map(Bound::Before)
     }
 
+    pub fn physical_size(&self) -> u64 {
+        let snapshot = self.index.snapshot();
+        let memtables_size = snapshot
+            .keyspaces
+            .values()
+            .map(|keyspace| {
+                (keyspace.l0_active.size() as u64)
+                    + keyspace
+                        .l0_sealed
+                        .iter()
+                        .map(|memtable| memtable.size() as u64)
+                        .sum::<u64>()
+            })
+            .sum::<u64>();
+
+        let runs_size = snapshot.runs().map(|run| run.size() as u64).sum::<u64>();
+
+        memtables_size + runs_size
+    }
+
     fn keyspace(
         snapshot: &IndexSnapshot,
         keyspace_id: KeyspaceId,

@@ -222,6 +222,13 @@ impl IndexSnapshot {
                 .collect(),
         }
     }
+
+    pub(super) fn runs(&self) -> impl Iterator<Item = &Arc<Run>> {
+        self.keyspaces
+            .values()
+            .flat_map(|keyspace| keyspace.runs())
+            .map(|(_, run)| run)
+    }
 }
 
 #[derive(Clone)]

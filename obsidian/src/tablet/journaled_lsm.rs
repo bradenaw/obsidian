@@ -102,6 +102,10 @@ impl LsmRead for JournaledLsm {
     fn find_split(&self) -> Option<Bound<Vec<u8>>> {
         self.lsm.find_split()
     }
+
+    fn physical_size(&self) -> u64 {
+        self.lsm.physical_size()
+    }
 }
 
 impl LsmWrite for JournaledLsm {

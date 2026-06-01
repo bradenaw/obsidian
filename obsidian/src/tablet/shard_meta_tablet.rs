@@ -26,6 +26,7 @@ use crate::runtime::Shards;
 use crate::runtime::Tablet;
 use crate::tablet::journaled_lsm::JournaledLsm;
 use crate::tablet::journaled_lsm::LsmWrite;
+use crate::tablet::read_only_lsm::LsmRead as _;
 use crate::tablet::tablet_inner::TabletInner;
 use crate::tablet::tablet_journal_writer::TabletJournalWriter;
 use crate::util::key_set_from_proto;
@@ -261,6 +262,10 @@ impl Tablet for ShardMetaTablet {
 
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
         Err(anyhow!("ShardMetaTablet::find_split not allowed"))
+    }
+
+    async fn physical_size(&self) -> anyhow::Result<u64> {
+        Ok(self.0.inner.lsm.physical_size())
     }
 }
 

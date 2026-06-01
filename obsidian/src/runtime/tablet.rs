@@ -90,4 +90,11 @@ pub(crate) trait Tablet: Send + Sync {
     async fn catchup(&self) -> anyhow::Result<()>;
 
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>>;
+
+    /// The size, in bytes, of the data in this tablet.
+    ///
+    /// This should be a representation of the amount of storage space this tablet consumes (which
+    /// would include e.g. compression and old revisions that are no longer visible), rather than
+    /// the logical size of the userland data.
+    async fn physical_size(&self) -> anyhow::Result<u64>;
 }

@@ -379,6 +379,10 @@ impl runtime::Tablet for TabletProxy {
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
         self.get_tablet()?.find_split().await
     }
+
+    async fn physical_size(&self) -> anyhow::Result<u64> {
+        self.get_tablet()?.physical_size().await
+    }
 }
 
 struct MetaProxy {

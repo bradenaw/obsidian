@@ -45,6 +45,8 @@ pub(super) trait LsmRead {
     fn keyspaces(&self) -> Vec<KeyspaceId>;
 
     fn find_split(&self) -> Option<Bound<Vec<u8>>>;
+
+    fn physical_size(&self) -> u64;
 }
 
 pub(super) struct ReadOnlyLsm {
@@ -109,5 +111,9 @@ impl LsmRead for ReadOnlyLsm {
 
     fn find_split(&self) -> Option<Bound<Vec<u8>>> {
         self.lsm.find_split()
+    }
+
+    fn physical_size(&self) -> u64 {
+        self.lsm.physical_size()
     }
 }

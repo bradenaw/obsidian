@@ -6,6 +6,7 @@ use obsidian_external::Storage;
 
 use crate::runtime::Shards;
 use crate::tablet::active_tablet::ActiveTablet;
+use crate::tablet::read_only_lsm::LsmRead as _;
 use crate::tablet::read_only_lsm::ReadOnlyLsm;
 use crate::tablet::tablet_inner::TabletInner;
 use crate::tablet::TabletJournalWriter;
@@ -107,5 +108,9 @@ impl FrozenTablet {
 
     pub async fn manifest(&self) -> anyhow::Result<Manifest> {
         Ok(self.inner.manifest())
+    }
+
+    pub fn physical_size(&self) -> u64 {
+        self.inner.lsm.physical_size()
     }
 }

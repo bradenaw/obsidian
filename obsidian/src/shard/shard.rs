@@ -621,4 +621,9 @@ where
         self.or_closed(async |tablet| tablet.find_split().await)
             .await
     }
+
+    async fn physical_size(&self) -> anyhow::Result<u64> {
+        self.or_closed(async |tablet| tablet.physical_size().await)
+            .await
+    }
 }

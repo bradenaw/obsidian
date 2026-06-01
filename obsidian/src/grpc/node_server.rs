@@ -362,6 +362,24 @@ impl pb::internal::node_server::Node for NodeServer {
         }))
     }
 
+    async fn tablet_physical_size(
+        &self,
+        req: tonic::Request<pb::internal::TabletEmptyReq>,
+    ) -> Result<tonic::Response<pb::internal::TabletPhysicalSizeResp>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let tablet_id: TabletId = required("tablet_id", req_inner.tablet_id)?;
+        let tablet = self.node.tablet(tablet_id).map_err(internal)?;
+
+        let size = tablet
+            .physical_size()
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        Ok(tonic::Response::new(pb::internal::TabletPhysicalSizeResp {
+            size,
+        }))
+    }
+
     async fn shard_wait_meta_sync(
         &self,
         req: tonic::Request<pb::internal::ShardWaitMetaSyncReq>,

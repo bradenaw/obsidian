@@ -516,6 +516,22 @@ impl runtime::Tablet for ReplicaTablet {
             })
             .await
     }
+
+    async fn physical_size(&self) -> anyhow::Result<u64> {
+        let tablet_id = self.tablet_id;
+        self.participant
+            .or_closed(async |participant| {
+                participant
+                    .with_state(async move |participant_state| {
+                        if let ParticipantState::Leader(leader) = participant_state {
+                            return leader.shard.tablet(tablet_id)?.physical_size().await;
+                        }
+                        Err(InternalError::NotLeader(tablet_id.0).into())
+                    })
+                    .await
+            })
+            .await
+    }
 }
 
 #[async_trait]

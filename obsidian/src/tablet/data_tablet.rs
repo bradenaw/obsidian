@@ -337,6 +337,12 @@ impl runtime::Tablet for DataTablet {
             .with_state(async |state| state.find_split().await)
             .await
     }
+
+    async fn physical_size(&self) -> anyhow::Result<u64> {
+        self.state_machine
+            .with_state(async |state| state.physical_size().await)
+            .await
+    }
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -510,6 +516,14 @@ impl runtime::Tablet for DataTabletState {
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
         match self {
             DataTabletState::Active(active_tablet) => active_tablet.find_split().await,
+            _ => Err(anyhow!("wrong state {}", self.name())),
+        }
+    }
+
+    async fn physical_size(&self) -> anyhow::Result<u64> {
+        match self {
+            DataTabletState::Active(active_tablet) => Ok(active_tablet.physical_size()),
+            DataTabletState::Frozen(frozen_tablet) => Ok(frozen_tablet.physical_size()),
             _ => Err(anyhow!("wrong state {}", self.name())),
         }
     }

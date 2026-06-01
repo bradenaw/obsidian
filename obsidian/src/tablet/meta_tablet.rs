@@ -8,6 +8,7 @@ use obsidian_lsm::Lsm;
 
 use crate::runtime::Tablet;
 use crate::tablet::journaled_lsm::JournaledLsm;
+use crate::tablet::read_only_lsm::LsmRead;
 use crate::tablet::tablet_inner::TabletInner;
 use crate::tablet::tablet_journal_writer::TabletJournalWriter;
 use crate::Bound;
@@ -137,5 +138,9 @@ impl Tablet for MetaTablet {
 
     async fn find_split(&self) -> anyhow::Result<Bound<Vec<u8>>> {
         Err(anyhow!("MetaTablet::find_split not allowed"))
+    }
+
+    async fn physical_size(&self) -> anyhow::Result<u64> {
+        Ok(self.inner.lsm.physical_size())
     }
 }

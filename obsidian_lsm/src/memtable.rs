@@ -42,7 +42,6 @@ impl Memtable {
         self.run_id
     }
 
-    #[cfg(test)]
     pub fn size(&self) -> u64 {
         self.stats.read().unwrap().size
     }
