@@ -12,25 +12,25 @@ use crate::ShardId;
 use crate::TabletId;
 
 #[derive(Debug)]
-enum TransferPlan {
+pub(super) enum TransferPlan {
     Merge(TabletId, TabletId, ShardId),
     Split(TabletId, ShardId, ShardId),
     Move(TabletId, ShardId),
 }
 
 #[derive(Clone)]
-struct RebalanceOptions {
+pub(super) struct RebalanceOptions {
     // The target size for each range.
-    range_target_size: u64,
+    pub(super) range_target_size: u64,
     // The total storage capacity, in bytes, of each shard.
-    shard_capacity: u64,
+    pub(super) shard_capacity: u64,
     // Only bother merging ranges if there are more than this many per shard for a given colo group.
-    merge_min_ranges_per_shard: usize,
+    pub(super) merge_min_ranges_per_shard: usize,
     // Only bother merging ranges if there are more than this many for a given colo group.
     // Used to prevent e.g. immediately merging together the ranges made in create_colo_group().
-    merge_min_ranges: usize,
+    pub(super) merge_min_ranges: usize,
     // Only bother moving ranges off of a shard if its utilization is above this amount.
-    min_shard_size_for_move: u64,
+    pub(super) min_shard_size_for_move: u64,
 }
 
 impl RebalanceOptions {
@@ -74,7 +74,7 @@ impl Default for RebalanceOptions {
 /// keeping splitting ranges to prevent them from becoming too large reduces contention of
 /// tablet-sized resources like the sequencers. Keeping ranges from becoming too small reduces the
 /// size of the routing table that every node needs to hold.
-fn plan_rebalance(
+pub(super) fn plan_rebalance(
     options: RebalanceOptions,
     active_tablets: HashMap<TabletId, (ColoGroupId, Range<Vec<u8>>, u64)>,
     shard_sizes: HashMap<ShardId, u64>,

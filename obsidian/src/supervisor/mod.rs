@@ -17,6 +17,7 @@ use futures::TryStreamExt;
 use obsidian_util::Retry;
 use obsidian_util::WithBackground;
 use tokio::sync::Notify;
+use tokio::time::sleep;
 
 use crate::meta::MetaKey;
 use crate::meta::MetaMutation;
@@ -34,6 +35,9 @@ use crate::meta::TransferState;
 use crate::runtime;
 use crate::runtime::Meta;
 use crate::runtime::Shards;
+use crate::supervisor::rebalance::plan_rebalance;
+use crate::supervisor::rebalance::RebalanceOptions;
+use crate::supervisor::rebalance::TransferPlan;
 use crate::Manifest;
 use crate::Range;
 use crate::RangeSet;
@@ -42,6 +46,8 @@ use crate::TabletId;
 use crate::TransferId;
 
 const CATCHUP_TIMEOUT: Duration = Duration::from_secs(30);
+// How often to evaluate range merges/splits/moves for rebalancing shards.
+const REBALANCE_INTERVAL: Duration = Duration::from_secs(60);
 
 // Weird double-wrapping here because meta_synced is spawned into the outer one but transfers are
 // spawned in the inner one.
@@ -74,7 +80,100 @@ impl Supervisor {
             inner.background_assign_shards().await;
         });
 
+        supervisor.0.spawn(async |inner| {
+            inner.background_rebalance().await;
+        });
+
         supervisor
+    }
+}
+
+#[async_trait]
+impl runtime::Supervisor for Supervisor {
+    async fn start_move(&self, src: TabletId, dst: ShardId) -> anyhow::Result<TransferId> {
+        self.0.start_move(src, dst).await
+    }
+
+    async fn start_split(
+        &self,
+        src: TabletId,
+        dst_a: ShardId,
+        dst_b: ShardId,
+    ) -> anyhow::Result<TransferId> {
+        self.0.start_split(src, dst_a, dst_b).await
+    }
+
+    async fn start_merge(&self, srcs: Vec<TabletId>, dst: ShardId) -> anyhow::Result<TransferId> {
+        self.0.start_merge(srcs, dst).await
+    }
+
+    async fn wait_transfer(&self, transfer_id: TransferId) -> anyhow::Result<()> {
+        loop {
+            let snapshot = self.0.latest_snapshot().await?;
+            let transfer_metadata = snapshot.transfer_metadata(transfer_id).await?;
+
+            match transfer_metadata.state {
+                MetaState::Stable(TransferState::Complete) => {
+                    return Ok(());
+                }
+                MetaState::Stable(TransferState::Aborted) => {
+                    return Err(anyhow!("{:?} aborted", transfer_id));
+                }
+                _ => {}
+            }
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+}
+
+impl SupervisorInner {
+    async fn start_move(&self, src: TabletId, dst: ShardId) -> anyhow::Result<TransferId> {
+        let snapshot = self.latest_snapshot().await?;
+        let src_metadata = snapshot.tablet_metadata(src).await?;
+
+        Ok(self
+            .start_transfer(vec![src], vec![(dst, src_metadata.range)])
+            .await?)
+    }
+
+    async fn start_split(
+        &self,
+        src: TabletId,
+        dst_a: ShardId,
+        dst_b: ShardId,
+    ) -> anyhow::Result<TransferId> {
+        let snapshot = self.latest_snapshot().await?;
+        let src_metadata = snapshot.tablet_metadata(src).await?;
+
+        let src_tablet = self.shards.tablet(src)?;
+        let split_point = src_tablet.find_split().await?;
+
+        log::debug!("selected {:?} for split of {:?}", split_point, src);
+
+        let (range_a, range_b) = src_metadata.range.split(&split_point);
+
+        self.start_transfer(vec![src], vec![(dst_a, range_a), (dst_b, range_b)])
+            .await
+    }
+
+    async fn start_merge(&self, srcs: Vec<TabletId>, dst: ShardId) -> anyhow::Result<TransferId> {
+        let snapshot = self.latest_snapshot().await?;
+        let mut src_range_set = RangeSet::new();
+        for src in &srcs {
+            let src_metadata = snapshot.tablet_metadata(*src).await?;
+            src_range_set.add_range(src_metadata.range);
+        }
+
+        let dst_range = src_range_set.contiguous().ok_or_else(|| {
+            anyhow!(
+                "can't start merge: source tablets not contiguous: {:?} own {:?}",
+                srcs,
+                src_range_set
+            )
+        })?;
+
+        Ok(self.start_transfer(srcs, vec![(dst, dst_range)]).await?)
     }
 
     async fn start_transfer(
@@ -82,7 +181,7 @@ impl Supervisor {
         srcs: Vec<TabletId>,
         dsts: Vec<(ShardId, Range<Vec<u8>>)>,
     ) -> anyhow::Result<TransferId> {
-        let snapshot = self.0.latest_snapshot().await?;
+        let snapshot = self.latest_snapshot().await?;
 
         if srcs.is_empty() {
             return Err(anyhow!("no sources"));
@@ -186,7 +285,7 @@ impl Supervisor {
             })),
         );
 
-        self.0.meta.write(snapshot.ts(), muts).await?;
+        self.meta.write(snapshot.ts(), muts).await?;
 
         log::info!(
             "{:?} started {:?} -> {:?}",
@@ -197,79 +296,7 @@ impl Supervisor {
 
         Ok(transfer_id)
     }
-}
 
-#[async_trait]
-impl runtime::Supervisor for Supervisor {
-    async fn start_move(&self, src: TabletId, dst: ShardId) -> anyhow::Result<TransferId> {
-        let snapshot = self.0.latest_snapshot().await?;
-        let src_metadata = snapshot.tablet_metadata(src).await?;
-
-        Ok(self
-            .start_transfer(vec![src], vec![(dst, src_metadata.range)])
-            .await?)
-    }
-
-    async fn start_split(
-        &self,
-        src: TabletId,
-        dst_a: ShardId,
-        dst_b: ShardId,
-    ) -> anyhow::Result<TransferId> {
-        let snapshot = self.0.latest_snapshot().await?;
-        let src_metadata = snapshot.tablet_metadata(src).await?;
-
-        let src_tablet = self.0.shards.tablet(src)?;
-        let split_point = src_tablet.find_split().await?;
-
-        log::debug!("selected {:?} for split of {:?}", split_point, src);
-
-        let (range_a, range_b) = src_metadata.range.split(&split_point);
-
-        self.start_transfer(vec![src], vec![(dst_a, range_a), (dst_b, range_b)])
-            .await
-    }
-
-    async fn start_merge(&self, srcs: Vec<TabletId>, dst: ShardId) -> anyhow::Result<TransferId> {
-        let snapshot = self.0.latest_snapshot().await?;
-        let mut src_range_set = RangeSet::new();
-        for src in &srcs {
-            let src_metadata = snapshot.tablet_metadata(*src).await?;
-            src_range_set.add_range(src_metadata.range);
-        }
-
-        let dst_range = src_range_set.contiguous().ok_or_else(|| {
-            anyhow!(
-                "can't start merge: source tablets not contiguous: {:?} own {:?}",
-                srcs,
-                src_range_set
-            )
-        })?;
-
-        Ok(self.start_transfer(srcs, vec![(dst, dst_range)]).await?)
-    }
-
-    async fn wait_transfer(&self, transfer_id: TransferId) -> anyhow::Result<()> {
-        loop {
-            let snapshot = self.0.latest_snapshot().await?;
-            let transfer_metadata = snapshot.transfer_metadata(transfer_id).await?;
-
-            match transfer_metadata.state {
-                MetaState::Stable(TransferState::Complete) => {
-                    return Ok(());
-                }
-                MetaState::Stable(TransferState::Aborted) => {
-                    return Err(anyhow!("{:?} aborted", transfer_id));
-                }
-                _ => {}
-            }
-
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    }
-}
-
-impl SupervisorInner {
     async fn transfer(&self, transfer_id: TransferId) {
         Retry::new()
             .indefinitely(&async || -> anyhow::Result<()> {
@@ -675,6 +702,84 @@ impl SupervisorInner {
         }
 
         let _ = self.meta.write(snapshot.ts(), muts).await?;
+
+        Ok(())
+    }
+
+    async fn background_rebalance(&self) {
+        loop {
+            Retry::new()
+                .indefinitely::<_, _, (), anyhow::Error>(&async || {
+                    self.rebalance().await?;
+                    Ok(())
+                })
+                .await;
+
+            sleep(REBALANCE_INTERVAL).await;
+        }
+    }
+
+    async fn rebalance(&self) -> anyhow::Result<()> {
+        let snapshot = self.meta_synced.snapshot();
+
+        let tablet_ids = snapshot.tablet_ids().await?;
+        let mut active_tablets_fetch = FuturesUnordered::new();
+        let mut in_progress_shards = HashSet::new();
+        for tablet_id in tablet_ids {
+            let tablet_metadata = snapshot.tablet_metadata(tablet_id).await?;
+            match tablet_metadata.state {
+                MetaState::Stable(TabletState::Active) => {
+                    active_tablets_fetch.push(async move {
+                        let size = self.shards.tablet(tablet_id)?.physical_size().await?;
+
+                        Ok::<_, anyhow::Error>((
+                            tablet_id,
+                            tablet_metadata.colo_group_id,
+                            tablet_metadata.range,
+                            size,
+                        ))
+                    });
+                }
+                MetaState::Stable(TabletState::Defunct) => {}
+                _ => {
+                    in_progress_shards.insert(tablet_id.0);
+                }
+            }
+        }
+
+        let mut active_tablets = HashMap::new();
+        // Only actually correct for shards that only have active tablets, but we exclude doing
+        // anything with the shards that are in in_progress_shards so it doesn't matter.
+        let mut shard_sizes: HashMap<ShardId, u64> = HashMap::new();
+        while let Some((tablet_id, colo_group_id, range, size)) =
+            active_tablets_fetch.try_next().await?
+        {
+            active_tablets.insert(tablet_id, (colo_group_id, range, size));
+            *shard_sizes.entry(tablet_id.0).or_default() += size;
+        }
+
+        let transfers = plan_rebalance(
+            RebalanceOptions::default(),
+            active_tablets,
+            shard_sizes,
+            in_progress_shards,
+        );
+
+        for transfer in transfers {
+            match transfer {
+                TransferPlan::Merge(src0_tablet_id, src1_tablet_id, dst_shard_id) => {
+                    self.start_merge(vec![src0_tablet_id, src1_tablet_id], dst_shard_id)
+                        .await?;
+                }
+                TransferPlan::Split(src_tablet_id, dst0_shard_id, dst1_shard_id) => {
+                    self.start_split(src_tablet_id, dst0_shard_id, dst1_shard_id)
+                        .await?;
+                }
+                TransferPlan::Move(src_tablet_id, dst_shard_id) => {
+                    self.start_move(src_tablet_id, dst_shard_id).await?;
+                }
+            }
+        }
 
         Ok(())
     }
