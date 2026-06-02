@@ -750,19 +750,21 @@ impl SupervisorInner {
         let mut active_tablets = HashMap::new();
         // Only actually correct for shards that only have active tablets, but we exclude doing
         // anything with the shards that are in in_progress_shards so it doesn't matter.
-        let mut shard_sizes: HashMap<ShardId, u64> = HashMap::new();
+        let mut eligible_shard_sizes: HashMap<ShardId, u64> = HashMap::new();
         while let Some((tablet_id, colo_group_id, range, size)) =
             active_tablets_fetch.try_next().await?
         {
             active_tablets.insert(tablet_id, (colo_group_id, range, size));
-            *shard_sizes.entry(tablet_id.0).or_default() += size;
+            *eligible_shard_sizes.entry(tablet_id.0).or_default() += size;
+        }
+        for shard_id in in_progress_shards {
+            eligible_shard_sizes.remove(&shard_id);
         }
 
         let transfers = plan_rebalance(
             RebalanceOptions::default(),
             active_tablets,
-            shard_sizes,
-            in_progress_shards,
+            eligible_shard_sizes,
         );
 
         for transfer in transfers {

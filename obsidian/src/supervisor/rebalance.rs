@@ -77,21 +77,18 @@ impl Default for RebalanceOptions {
 pub(super) fn plan_rebalance(
     options: RebalanceOptions,
     active_tablets: HashMap<TabletId, (ColoGroupId, Range<Vec<u8>>, u64)>,
-    shard_sizes: HashMap<ShardId, u64>,
-    mut in_progress_shards: HashSet<ShardId>,
+    eligible_shard_sizes: HashMap<ShardId, u64>,
 ) -> Vec<TransferPlan> {
     let mut plan = Vec::new();
 
-    let n_shards = shard_sizes.len();
-    let mut eligible_shards_by_size: DoublePriorityQueue<_, _> = shard_sizes.into_iter().collect();
-    for shard_id in &in_progress_shards {
-        eligible_shards_by_size.remove(shard_id);
-    }
+    let n_shards = eligible_shard_sizes.len();
+    let mut eligible_shards_by_size: DoublePriorityQueue<_, _> =
+        eligible_shard_sizes.into_iter().collect();
 
     let split_candidates = {
         let mut split_candidates = PriorityQueue::new();
         for (tablet_id, (_, _, size)) in &active_tablets {
-            if in_progress_shards.contains(&tablet_id.0) {
+            if !eligible_shards_by_size.contains(&tablet_id.0) {
                 continue;
             }
 
@@ -106,7 +103,6 @@ pub(super) fn plan_rebalance(
     for (tablet_id, _) in split_candidates.into_iter() {
         // Prefer to split in-place because it'll be almost free - the data is already in local
         // cache. If there's still imbalance after it's finished we can move one.
-        in_progress_shards.insert(tablet_id.0);
         eligible_shards_by_size.remove(&tablet_id.0);
         plan.push(TransferPlan::Split(tablet_id, tablet_id.0, tablet_id.0));
     }
@@ -130,7 +126,7 @@ pub(super) fn plan_rebalance(
     let merge_candidates = {
         let mut merge_candidates = PriorityQueue::new();
         for (tablet_id, (colo_group_id, _, size)) in &active_tablets {
-            if in_progress_shards.contains(&tablet_id.0) {
+            if !eligible_shards_by_size.contains(&tablet_id.0) {
                 continue;
             }
             // We only bother to merge if two adjacent tablets are less than RANGE_MERGE_SIZE,
@@ -154,7 +150,7 @@ pub(super) fn plan_rebalance(
 
     for (tablet_id, _) in merge_candidates.into_iter() {
         let (colo_group_id, range, size) = active_tablets.get(&tablet_id).unwrap();
-        if in_progress_shards.contains(&tablet_id.0) {
+        if !eligible_shards_by_size.contains(&tablet_id.0) {
             continue;
         }
 
@@ -177,7 +173,7 @@ pub(super) fn plan_rebalance(
             (None, None) => continue,
         };
 
-        if in_progress_shards.contains(&adjacent_tablet_id.0) {
+        if !eligible_shards_by_size.contains(&adjacent_tablet_id.0) {
             continue;
         }
 
@@ -193,11 +189,9 @@ pub(super) fn plan_rebalance(
             break;
         };
 
-        in_progress_shards.insert(tablet_id.0);
         eligible_shards_by_size.remove(&tablet_id.0);
-        in_progress_shards.insert(adjacent_tablet_id.0);
         eligible_shards_by_size.remove(&adjacent_tablet_id.0);
-        in_progress_shards.insert(shard_id);
+        eligible_shards_by_size.remove(&shard_id);
         plan.push(TransferPlan::Merge(tablet_id, adjacent_tablet_id, shard_id));
     }
 
@@ -249,8 +243,6 @@ pub(super) fn plan_rebalance(
 
         eligible_shards_by_size.pop_min();
         eligible_shards_by_size.pop_max();
-        in_progress_shards.insert(min_shard_id);
-        in_progress_shards.insert(max_shard_id);
         plan.push(TransferPlan::Move(*tablet_id, min_shard_id));
     }
 
@@ -368,8 +360,7 @@ mod tests {
             let plan = plan_rebalance(
                 options.clone(),
                 shards.active_tablets(),
-                shards.shard_sizes(),
-                shards.in_progress_shards(),
+                shards.eligible_shard_sizes(),
             );
             if plan.is_empty() {
                 break;
@@ -592,8 +583,7 @@ mod tests {
             let plan = plan_rebalance(
                 options.clone(),
                 active_tablets,
-                shard_sizes,
-                shards.in_progress_shards(),
+                shards.eligible_shard_sizes(),
             );
             if i % 100 == 0 {
                 println!(
@@ -899,6 +889,14 @@ mod tests {
                 for (_, tablet) in tablets {
                     *shard_sizes.entry(*shard_id).or_default() += tablet.size;
                 }
+            }
+            shard_sizes
+        }
+
+        fn eligible_shard_sizes(&self) -> HashMap<ShardId, u64> {
+            let mut shard_sizes = self.shard_sizes();
+            for shard_id in self.in_progress_shards() {
+                shard_sizes.remove(&shard_id);
             }
             shard_sizes
         }
