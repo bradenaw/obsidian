@@ -270,7 +270,6 @@ mod tests {
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::hash::Hash;
-    use std::time::Instant;
 
     use anyhow::anyhow;
     use obsidian_common::Bound;
@@ -280,10 +279,7 @@ mod tests {
     use obsidian_common::ShardId;
     use obsidian_common::TabletId;
     use obsidian_util::shortest_between;
-    use rand::seq::IndexedRandom as _;
     use rand::seq::SliceRandom;
-    use rand_distr::Distribution as _;
-    use rand_distr::Zipf;
 
     use super::plan_rebalance;
     use super::TransferPlan;
@@ -508,108 +504,6 @@ mod tests {
         check_balance(&options, &shards);
     }
 
-    #[test]
-    #[ignore]
-    fn test_plan_rebalance_sim() {
-        let options = RebalanceOptions::default();
-        let mut shards = Shards::new();
-
-        shards.add_shard();
-        shards.create_colo_group();
-        shards.create_colo_group();
-
-        let tablets = shards.active_tablets();
-        println!("starting tablets:");
-        for (tablet_id, (colo_group_id, range, size)) in tablets {
-            println!("{:?} {:?} {:?} {}", tablet_id, colo_group_id, range, size);
-        }
-
-        const N_ITERATIONS: usize = 5000;
-
-        let mut transfers_in_progress = Vec::new();
-        let mut n_merges = 0;
-        let mut n_splits = 0;
-        let mut n_moves = 0;
-
-        for i in 0..N_ITERATIONS {
-            if i % 5 == 0 {
-                for transfer in transfers_in_progress.drain(..) {
-                    shards.finish_transfer(transfer);
-                }
-            } else if !transfers_in_progress.is_empty() {
-                for _ in 0..=rand::random_range(0..transfers_in_progress.len()) {
-                    let transfer = unordered_random_remove(&mut transfers_in_progress).unwrap();
-                    shards.finish_transfer(transfer);
-                }
-            }
-
-            if shards
-                .shard_sizes()
-                .values()
-                .all(|size| *size < options.shard_capacity * 9 / 10)
-            {
-                let tablets_to_grow = max(1, shards.n_active_tablets() / 20);
-                for _ in 0..tablets_to_grow {
-                    let tablet_id = shards.choose_tablet_zipf().unwrap();
-                    shards.grow_tablet(tablet_id, rand::random_range(100_000_000..500_000_000));
-                }
-            }
-
-            if shards.n_active_tablets() > 10 {
-                let tablets_to_shrink = shards.n_active_tablets() / 40;
-                for _ in 0..tablets_to_shrink {
-                    let tablet_id = shards.choose_tablet_uniform().unwrap();
-                    shards.shrink_tablet(tablet_id, rand::random_range(100_000_000..200_000_000));
-                }
-            }
-
-            let mut shard_sizes = shards.shard_sizes();
-            if shard_sizes.values().copied().sum::<u64>()
-                > (shard_sizes.len() as u64) * options.shard_capacity * 8 / 10
-            {
-                shards.add_shard();
-                shard_sizes = shards.shard_sizes();
-            }
-
-            if i % 100 == 0 {
-                println!("------------------");
-                shards.print_shard_sizes(options.shard_capacity);
-            }
-
-            let start = Instant::now();
-            let active_tablets = shards.active_tablets();
-            let n_active_tablets = active_tablets.len();
-            let n_shards = shard_sizes.len();
-            let plan = plan_rebalance(
-                options.clone(),
-                active_tablets,
-                shards.eligible_shard_sizes(),
-            );
-            if i % 100 == 0 {
-                println!(
-                    "plan_rebalance took {:?} for {:?} tablets and {:?} shards",
-                    Instant::now().duration_since(start),
-                    n_active_tablets,
-                    n_shards,
-                );
-            }
-
-            for transfer in plan {
-                match transfer {
-                    TransferPlan::Merge(_, _, _) => n_merges += 1,
-                    TransferPlan::Split(_, _, _) => n_splits += 1,
-                    TransferPlan::Move(_, _) => n_moves += 1,
-                }
-                transfers_in_progress.push(shards.start_transfer(transfer));
-            }
-        }
-
-        println!("{} merges", n_merges);
-        println!("{} splits", n_splits);
-        println!("{} moves", n_moves);
-        shards.print_tablet_size_dist();
-    }
-
     #[derive(Debug, Eq, PartialEq)]
     struct Tablet {
         colo_group_id: ColoGroupId,
@@ -620,8 +514,8 @@ mod tests {
 
     struct Shards {
         shards: HashMap<ShardId, HashMap<TabletId, Tablet>>,
-        shard_ids: RandSet<ShardId>,
-        active_tablet_ids: RandSet<TabletId>,
+        shard_ids: HashSet<ShardId>,
+        active_tablet_ids: HashSet<TabletId>,
         next_tablet_id: u64,
         next_colo_group: ColoGroupId,
         in_progress: HashSet<TransferIds>,
@@ -632,9 +526,9 @@ mod tests {
         fn new() -> Self {
             Self {
                 shards: HashMap::new(),
-                active_tablet_ids: RandSet::new(),
+                active_tablet_ids: HashSet::new(),
                 next_tablet_id: 1,
-                shard_ids: RandSet::new(),
+                shard_ids: HashSet::new(),
                 next_colo_group: ColoGroupId(1),
                 in_progress: HashSet::new(),
                 in_progress_shards: RefCounts::new(),
@@ -660,30 +554,6 @@ mod tests {
                     .insert(tablet_id, tablet);
             }
             shards
-        }
-
-        fn create_colo_group(&mut self) -> ColoGroupId {
-            self.create_colo_group_with(vec![(Range::all(), 0)])
-        }
-
-        fn create_colo_group_with(&mut self, ranges: Vec<(Range<Vec<u8>>, u64)>) -> ColoGroupId {
-            let colo_group_id = self.next_colo_group;
-            self.next_colo_group.0 += 1;
-
-            for (range, size) in ranges {
-                let shard_id = self.shard_ids.choose_uniform().unwrap();
-                self.create_tablet(
-                    shard_id,
-                    Tablet {
-                        colo_group_id,
-                        range,
-                        size,
-                        active: true,
-                    },
-                );
-            }
-
-            colo_group_id
         }
 
         fn add_shard(&mut self) {
@@ -836,14 +706,6 @@ mod tests {
             }
         }
 
-        fn choose_tablet_zipf(&self) -> Option<TabletId> {
-            self.active_tablet_ids.choose_zipf()
-        }
-
-        fn choose_tablet_uniform(&self) -> Option<TabletId> {
-            self.active_tablet_ids.choose_uniform()
-        }
-
         fn n_active_tablets(&self) -> usize {
             self.active_tablet_ids.len()
         }
@@ -975,62 +837,6 @@ mod tests {
         dsts: Vec<TabletId>,
     }
 
-    struct RandSet<T> {
-        indexes: HashMap<T, usize>,
-        vec: Vec<T>,
-    }
-
-    impl<T> RandSet<T>
-    where
-        T: Hash + Eq + Clone,
-    {
-        fn new() -> Self {
-            Self {
-                indexes: HashMap::new(),
-                vec: Vec::new(),
-            }
-        }
-
-        fn len(&self) -> usize {
-            self.indexes.len()
-        }
-
-        fn insert(&mut self, item: T) {
-            if self.indexes.contains_key(&item) {
-                return;
-            }
-            self.indexes.insert(item.clone(), self.vec.len());
-            self.vec.push(item);
-        }
-
-        fn remove(&mut self, item: &T) {
-            if let Some(index) = self.indexes.remove(&item) {
-                let other_item = self.vec.pop().unwrap();
-                if &other_item == item {
-                    return;
-                }
-                self.vec[index] = other_item.clone();
-                self.indexes.insert(other_item, index);
-            }
-        }
-
-        fn choose_uniform(&self) -> Option<T> {
-            self.vec.choose(&mut rand::rng()).cloned()
-        }
-
-        fn choose_zipf(&self) -> Option<T> {
-            if self.vec.is_empty() {
-                return None;
-            }
-            let mut rng = rand::rng();
-            let index: f64 = Zipf::new(self.vec.len() as f64, 1.0f64)
-                .unwrap()
-                .sample(&mut rng)
-                - 1f64; // generates in [1, n] instead of [0, n)
-            Some(self.vec[index as usize].clone())
-        }
-    }
-
     struct RefCounts<K> {
         counts: HashMap<K, usize>,
     }
@@ -1064,16 +870,6 @@ mod tests {
         fn contains_key(&self, key: &K) -> bool {
             self.counts.contains_key(key)
         }
-    }
-
-    fn unordered_random_remove<T>(v: &mut Vec<T>) -> Option<T> {
-        if v.is_empty() {
-            return None;
-        }
-        let index = rand::random_range(0..v.len());
-        let last_index = v.len() - 1;
-        v.swap(index, last_index);
-        v.pop()
     }
 
     fn split_range(range: Range<Vec<u8>>) -> (Range<Vec<u8>>, Range<Vec<u8>>) {
