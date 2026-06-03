@@ -466,23 +466,26 @@ impl ActiveTabletInner {
 
         let _guard = self.inner.key_locks.write_lock(&key[..]).await;
 
-        let (pending_ts, value) = match self
+        let (pending_ts, pending_mut) = match self
             .inner
             .unsafe_get_latest_record(pending_keyspace_id, &key)
             .await?
         {
-            Some((pending_ts, value)) => (pending_ts, value),
-            None => return Ok(()),
-        };
-        let m = match value {
-            RevisionValue::Regular(v) => {
-                let pending_m = PendingMutation::decode(&v)?;
-                if pending_m.txid != txid {
+            Some((pending_ts, RevisionValue::Regular(raw_pending_mut))) => {
+                let pending_mut = PendingMutation::decode(&raw_pending_mut)?;
+                if pending_mut.txid != txid {
+                    // There is a pending mutation there but it's for a different transaction, which
+                    // presumably means the transaction we were here to clean up has already been
+                    // cleaned up and another one has already arrived.
                     return Ok(());
                 }
-                pending_m.m
+                (pending_ts, pending_mut.m)
             }
-            RevisionValue::Tombstone => return Ok(()),
+            // The pending mutation has already been cleaned up.
+            Some((_, RevisionValue::Tombstone)) => return Ok(()),
+            // There isn't any pending mutation there, possibly because it's already been cleaned
+            // up and garbage collected.
+            None => return Ok(()),
         };
         let resolve_ts = match tx_outcome {
             TxOutcome::Committed(commit_ts) => {
@@ -498,25 +501,47 @@ impl ActiveTabletInner {
             TxOutcome::Aborted => Timestamp(pending_ts.0 + 1),
         };
         if let TxOutcome::Committed(_) = tx_outcome {
-            // XXX: This is neither crash- nor cancel-safe. If we want to do this with two
-            // different writes (and so two journal entries), we need to recognize when the
-            // promoted record is already present.
-            self.inner
-                .lsm
-                .write(
-                    resolve_ts,
-                    BTreeMap::from([((keyspace_id, key.clone()), m)]),
-                )
-                .await?;
-            // Important: this fence protects against a race in scan. Without it, it would be
-            // possible for a scan to observe neither this promoted record nor the pending record,
-            // and elide this key entirely in its results: the scan reads the page of records, then
-            // we come and clean up, and then the scan looks for conflicts, not finding any because
-            // we already removed it.
-            //
-            // This fence guarantees that any concurrent scans complete before we remove the
-            // pending record.
-            self.inner.scan_locks.cleanup_fence().await;
+            let mut promote_needed = true;
+            // Important for crash-safety: see if this part of the cleanup is already done.
+            if let Some((existing_ts, _)) = self
+                .inner
+                .unsafe_get_latest_record(keyspace_id, &key)
+                .await?
+            {
+                if existing_ts > resolve_ts {
+                    return Err(anyhow!(
+                        "can't clean up {:?}: newer record already present: {:?} > {:?}",
+                        key,
+                        existing_ts,
+                        resolve_ts
+                    ));
+                }
+                if existing_ts == resolve_ts {
+                    promote_needed = false;
+                }
+            }
+
+            if promote_needed {
+                self.inner
+                    .lsm
+                    .write(
+                        resolve_ts,
+                        BTreeMap::from([((keyspace_id, key.clone()), pending_mut)]),
+                    )
+                    .await?;
+                // Important: this fence protects against a race in scan. Without it, it would be
+                // possible for a scan to observe neither this promoted record nor the pending
+                // record, and elide this key entirely in its results: the scan reads the page of
+                // records, then we come and clean up, and then the scan looks for conflicts, not
+                // finding any because we already removed it.
+                //
+                // This fence guarantees that any concurrent scans complete before we remove the
+                // pending record.
+                //
+                // TODO: It'd be nice to release the key lock while we wait here, but then we need
+                // to acquire it and read again before removing the pending record below.
+                self.inner.scan_locks.cleanup_fence().await;
+            }
         }
         self.inner
             .lsm
