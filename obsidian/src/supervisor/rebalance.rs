@@ -431,8 +431,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
-    // Ignored because a bit slow (~15s). Better starting conditions/configuration could do better.
     fn test_plan_rebalance_converges() {
         let options = RebalanceOptions::default();
 
@@ -445,14 +443,17 @@ mod tests {
             size: 0,
             active: true,
         }];
-        for prefix in 0..u16::MAX {
+        let max_prefix = u16::MAX / 6;
+        for prefix in 0..max_prefix {
             tablets.push(Tablet {
                 colo_group_id: ColoGroupId(1),
                 range: Range {
                     lower: Bound::Before(prefix.to_be_bytes().to_vec()),
                     upper: Bound::Before((prefix + 1).to_be_bytes().to_vec()),
                 },
-                size: (prefix as u64) * options.range_split_size() * 4 / (3 * (u16::MAX as u64)),
+                // Low prefixes are small and mergeable, large prefixes are large and splittable.
+                size: (prefix as u64) * options.range_split_size() * 12
+                    / (10 * (max_prefix as u64)),
                 active: true,
             });
         }
@@ -468,8 +469,9 @@ mod tests {
         tablets.shuffle(&mut rand::rng());
 
         let mut tablets_by_id = HashMap::new();
-        // TODO: in terms of min_shard_size_for_move
-        let mut target_fill = options.shard_capacity * 72 / 100;
+        // Create imbalance by filling up shards in order with a shrinking target_size, lower shard
+        // numbers are more full.
+        let mut target_fill = options.min_shard_size_for_move * 105 / 100;
         let mut current_size = 0u64;
         let mut current_shard_id = ShardId(1);
         let mut next_tablet_seq = 1u64;
