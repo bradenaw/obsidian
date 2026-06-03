@@ -50,22 +50,11 @@ impl ScanLocks {
     }
 
     pub fn cleanup(&self) -> CleanupGuard<'_> {
-        let mut inner = self.inner.lock().unwrap();
-        let seq = inner.next_seq();
-
-        if inner.scans.is_empty() {
-            return CleanupGuard {
-                parent: self,
-                seq,
-                recv: None,
-            };
-        }
-
         let (send, recv) = oneshot::channel();
-        inner.cleanups.insert(seq, send);
         CleanupGuard {
             parent: self,
-            seq,
+            seq: None,
+            send: Some(send),
             recv: Some(recv),
         }
     }
@@ -114,12 +103,22 @@ impl<'a> Drop for ScanGuard<'a> {
 
 pub(crate) struct CleanupGuard<'a> {
     parent: &'a ScanLocks,
-    seq: usize,
+    seq: Option<usize>,
+    send: Option<oneshot::Sender<()>>,
     recv: Option<oneshot::Receiver<()>>,
 }
 
 impl<'a> CleanupGuard<'a> {
     pub async fn wait(mut self) {
+        {
+            let mut inner = self.parent.inner.lock().unwrap();
+            if inner.scans.is_empty() {
+                return;
+            }
+            let seq = inner.next_seq();
+            self.seq = Some(seq);
+            inner.cleanups.insert(seq, self.send.take().unwrap());
+        }
         if let Some(recv) = self.recv.take() {
             let _ = recv.await;
         }
@@ -128,7 +127,9 @@ impl<'a> CleanupGuard<'a> {
 
 impl<'a> Drop for CleanupGuard<'a> {
     fn drop(&mut self) {
-        self.parent.inner.lock().unwrap().cleanups.remove(&self.seq);
+        if let Some(seq) = self.seq {
+            self.parent.inner.lock().unwrap().cleanups.remove(&seq);
+        }
     }
 }
 

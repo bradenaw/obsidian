@@ -488,7 +488,7 @@ impl ActiveTabletInner {
             TxOutcome::Committed(commit_ts) => {
                 if commit_ts <= pending_ts {
                     return Err(anyhow!(
-                        "commit_ts <= pending_ts: {} < {}",
+                        "commit_ts <= pending_ts: {} <= {}",
                         commit_ts,
                         pending_ts
                     ));
@@ -506,6 +506,10 @@ impl ActiveTabletInner {
             //
             // This guard guarantees that any concurrent scans complete before we remove the
             // pending record.
+            //
+            // XXX: This is neither crash- nor cancel-safe. If we want to do this with two
+            // different writes (and so two journal entries), we need to recognize when the
+            // promoted record is already present.
             let cleanup_guard = self.inner.scan_locks.cleanup();
             self.inner
                 .lsm
