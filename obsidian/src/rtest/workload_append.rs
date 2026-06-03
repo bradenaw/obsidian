@@ -829,7 +829,7 @@ mod tests {
         let wl = WorkloadAppend::new(
             Arc::clone(&obs),
             WorkloadAppendOptions {
-                duration: Duration::from_millis(5000),
+                duration: Duration::from_millis(5_000),
                 concurrency: 32,
                 n_lists: 10,
                 write_fraction: 0.1,
