@@ -263,6 +263,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::cmp::max;
     use std::cmp::min;
     use std::collections::BTreeMap;
@@ -317,16 +318,26 @@ mod tests {
             options
         };
 
-        let mut shards = Shards::from_tablets(make_tablets(BTreeMap::from([
+        let shards = Shards::from_tablets(make_tablets(BTreeMap::from([
             (Bound::BeforeAll, options.range_target_size),
             (Bound::Before(vec![0x08, 0x1b]), 1267109177),
             (Bound::Before(vec![0x08, 0x1e]), 845756719),
             (Bound::Before(vec![0x08, 0x20]), options.range_target_size),
         ])));
 
-        rebalance_until_converge(&options, &mut shards);
-        assert_eq!(shards.n_active_tablets(), 3);
-        check_balance(&options, &shards);
+        let transfers = plan_rebalance(
+            options.clone(),
+            shards.active_tablets(),
+            shards.eligible_shard_sizes(),
+        );
+        assert_matches!(
+            &transfers[..],
+            &[TransferPlan::Merge(
+                TabletId(ShardId(1), 3),
+                TabletId(ShardId(1), 2),
+                ShardId(1),
+            )]
+        );
     }
 
     #[test]
@@ -340,15 +351,25 @@ mod tests {
             options
         };
 
-        let mut shards = Shards::from_tablets(make_tablets(BTreeMap::from([
+        let shards = Shards::from_tablets(make_tablets(BTreeMap::from([
             (Bound::BeforeAll, options.range_target_size),
             (Bound::Before(vec![0x04]), options.range_split_size() + 5),
             (Bound::Before(vec![0x09]), options.range_target_size),
         ])));
 
-        rebalance_until_converge(&options, &mut shards);
-        assert_eq!(shards.n_active_tablets(), 4);
-        check_balance(&options, &shards);
+        let transfers = plan_rebalance(
+            options.clone(),
+            shards.active_tablets(),
+            shards.eligible_shard_sizes(),
+        );
+        assert_matches!(
+            &transfers[..],
+            &[TransferPlan::Split(
+                TabletId(ShardId(1), 2),
+                ShardId(1),
+                ShardId(1)
+            )]
+        );
     }
 
     fn rebalance_until_converge(options: &RebalanceOptions, shards: &mut Shards) {
