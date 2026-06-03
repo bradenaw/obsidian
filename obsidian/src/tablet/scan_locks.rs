@@ -49,14 +49,23 @@ impl ScanLocks {
         ScanGuard { parent: self, seq }
     }
 
-    pub fn cleanup(&self) -> CleanupGuard<'_> {
+    pub async fn cleanup_fence(&self) {
         let (send, recv) = oneshot::channel();
-        CleanupGuard {
-            parent: self,
-            seq: None,
-            send: Some(send),
-            recv: Some(recv),
-        }
+        let guard = {
+            let mut inner = self.inner.lock().unwrap();
+            let seq = inner.next_seq();
+            if inner.scans.is_empty() {
+                return;
+            }
+            inner.cleanups.insert(seq, send);
+            // Use drop on CleanupGuard to clean up after ourselves, otherwise we'll leak into
+            // `inner.cleanups` on a cancellation.
+            CleanupGuard { parent: self, seq }
+        };
+        let _ = recv.await;
+
+        // Ensure guard is still live on this side of the await.
+        drop(guard);
     }
 }
 
@@ -103,33 +112,12 @@ impl<'a> Drop for ScanGuard<'a> {
 
 pub(crate) struct CleanupGuard<'a> {
     parent: &'a ScanLocks,
-    seq: Option<usize>,
-    send: Option<oneshot::Sender<()>>,
-    recv: Option<oneshot::Receiver<()>>,
-}
-
-impl<'a> CleanupGuard<'a> {
-    pub async fn wait(mut self) {
-        {
-            let mut inner = self.parent.inner.lock().unwrap();
-            if inner.scans.is_empty() {
-                return;
-            }
-            let seq = inner.next_seq();
-            self.seq = Some(seq);
-            inner.cleanups.insert(seq, self.send.take().unwrap());
-        }
-        if let Some(recv) = self.recv.take() {
-            let _ = recv.await;
-        }
-    }
+    seq: usize,
 }
 
 impl<'a> Drop for CleanupGuard<'a> {
     fn drop(&mut self) {
-        if let Some(seq) = self.seq {
-            self.parent.inner.lock().unwrap().cleanups.remove(&seq);
-        }
+        self.parent.inner.lock().unwrap().cleanups.remove(&self.seq);
     }
 }
 
@@ -146,18 +134,16 @@ mod tests {
     #[tokio::test]
     async fn test_no_scans() {
         let scan_locks = ScanLocks::new();
-        let cleanup_guard = scan_locks.cleanup();
-        cleanup_guard.wait().await;
+        scan_locks.cleanup_fence().await;
     }
 
     #[tokio::test]
     async fn test_after_scan() {
         let scan_locks = ScanLocks::new();
-        let cleanup_guard = scan_locks.cleanup();
         {
             scan_locks.scan();
         }
-        cleanup_guard.wait().await;
+        scan_locks.cleanup_fence().await;
     }
 
     #[tokio::test]
@@ -170,9 +156,8 @@ mod tests {
         let join_handle = spawn({
             let scan_locks = Arc::clone(&scan_locks);
             async move {
-                let cleanup_guard = scan_locks.cleanup();
                 let _ = send.send(());
-                cleanup_guard.wait().await;
+                scan_locks.cleanup_fence().await;
             }
         });
 

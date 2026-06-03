@@ -498,19 +498,9 @@ impl ActiveTabletInner {
             TxOutcome::Aborted => Timestamp(pending_ts.0 + 1),
         };
         if let TxOutcome::Committed(_) = tx_outcome {
-            // Important: this guard protects against a race in scan. Without it, it would be
-            // possible for a scan to observe neither this promoted record nor the pending record,
-            // and elide this key entirely in its results: the scan reads the page of records, then
-            // we come and clean up, and then the scan looks for conflicts, not finding any because
-            // we already removed it.
-            //
-            // This guard guarantees that any concurrent scans complete before we remove the
-            // pending record.
-            //
             // XXX: This is neither crash- nor cancel-safe. If we want to do this with two
             // different writes (and so two journal entries), we need to recognize when the
             // promoted record is already present.
-            let cleanup_guard = self.inner.scan_locks.cleanup();
             self.inner
                 .lsm
                 .write(
@@ -518,7 +508,15 @@ impl ActiveTabletInner {
                     BTreeMap::from([((keyspace_id, key.clone()), m)]),
                 )
                 .await?;
-            cleanup_guard.wait().await;
+            // Important: this fence protects against a race in scan. Without it, it would be
+            // possible for a scan to observe neither this promoted record nor the pending record,
+            // and elide this key entirely in its results: the scan reads the page of records, then
+            // we come and clean up, and then the scan looks for conflicts, not finding any because
+            // we already removed it.
+            //
+            // This fence guarantees that any concurrent scans complete before we remove the
+            // pending record.
+            self.inner.scan_locks.cleanup_fence().await;
         }
         self.inner
             .lsm
