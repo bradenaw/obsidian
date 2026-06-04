@@ -1,10 +1,17 @@
 use std::io;
+use std::str::FromStr as _;
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 use anyhow::anyhow;
+use async_stream::try_stream;
 use async_trait::async_trait;
 use aws_sdk_s3::primitives::ByteStream;
+use futures::Stream;
+use obsidian_common::RunId;
+use regex::Regex;
 use tokio::io::AsyncReadExt;
+use uuid::Uuid;
 
 use crate::FileName;
 use crate::FileReader;
@@ -63,6 +70,28 @@ impl Storage for S3Storage {
             name,
             len,
         }))
+    }
+
+    fn list(&self) -> Box<dyn Stream<Item = anyhow::Result<FileName>>> {
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        Box::new(try_stream! {
+            let mut page_stream = client
+                .list_objects_v2()
+                .bucket(bucket)
+                .into_paginator()
+                .send();
+            while let Some(page) = page_stream.next().await.transpose()? {
+                for obj in page.contents() {
+                    let key = obj.key().ok_or_else(|| {
+                        anyhow!("list_objects_v2 returned object with no key")
+                    })?;
+                    let file_name = file_name_from_key(key)?;
+
+                    yield file_name;
+                }
+            }
+        })
     }
 }
 
@@ -154,5 +183,38 @@ impl FileWriter for S3FileWriter {
 fn file_name_to_key(file_name: FileName) -> String {
     match file_name {
         FileName::Run(run_id) => format!("/run/{}.olf", run_id),
+    }
+}
+
+static FILE_NAME_KEY_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^/run/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}).olf$")
+        .unwrap()
+});
+
+fn file_name_from_key(key: &str) -> anyhow::Result<FileName> {
+    let (_, [uuid_str]) = FILE_NAME_KEY_PATTERN
+        .captures(key)
+        .ok_or_else(|| anyhow!("key must match {:?}: {:?}", FILE_NAME_KEY_PATTERN, key))?
+        .extract();
+
+    Ok(FileName::Run(RunId::from(Uuid::from_str(uuid_str)?)))
+}
+
+#[cfg(test)]
+mod tests {
+    use obsidian_common::RunId;
+    use uuid::Uuid;
+
+    use super::file_name_from_key;
+    use super::file_name_to_key;
+    use crate::FileName;
+
+    #[test]
+    fn test_file_name_key_roundtrip() {
+        let name = FileName::Run(RunId::from(Uuid::new_v4()));
+        assert_eq!(
+            file_name_from_key(&file_name_to_key(name.clone())).unwrap(),
+            name
+        );
     }
 }

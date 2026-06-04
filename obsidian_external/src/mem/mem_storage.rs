@@ -7,6 +7,8 @@ use std::sync::Weak;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use futures::stream;
+use futures::Stream;
 
 use crate::mem::MemFileReader;
 use crate::mem::MemFileWriter;
@@ -75,6 +77,13 @@ impl Storage for MemStorage {
         self.inner.lock().unwrap().files.remove(&name);
         // Are names allowed to be reused?
         Ok(())
+    }
+
+    fn list(&self) -> Box<dyn Stream<Item = anyhow::Result<FileName>>> {
+        let inner = self.inner.lock().unwrap();
+        let names: Vec<_> = inner.files.keys().cloned().collect();
+
+        Box::new(stream::iter(names.into_iter().map(Ok::<_, anyhow::Error>)))
     }
 }
 

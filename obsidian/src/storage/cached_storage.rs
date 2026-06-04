@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
+use futures::Stream;
 use obsidian_external::FileName;
 use obsidian_external::FileReader;
 use obsidian_external::FileWriter;
@@ -92,6 +93,10 @@ impl<S: Storage> Storage for CachedStorage<S> {
 
     async fn delete(&self, name: FileName) -> anyhow::Result<()> {
         self.inner.delete(name).await
+    }
+
+    fn list(&self) -> Box<dyn Stream<Item = anyhow::Result<FileName>>> {
+        self.inner.list()
     }
 }
 

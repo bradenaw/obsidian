@@ -2,6 +2,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::Stream;
 use obsidian_common::RunId;
 
 use crate::FileReader;
@@ -14,6 +15,9 @@ pub trait Storage: Sync + Send + 'static {
     async fn delete(&self, name: FileName) -> anyhow::Result<()>;
 
     async fn get(&self, name: FileName) -> anyhow::Result<Arc<dyn FileReader>>;
+
+    /// List all of the files in storage. Files that are put() concurrently may or may not appear.
+    fn list(&self) -> Box<dyn Stream<Item = anyhow::Result<FileName>>>;
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -33,5 +37,9 @@ impl Storage for Arc<dyn Storage> {
 
     async fn get(&self, name: FileName) -> anyhow::Result<Arc<dyn FileReader>> {
         self.deref().get(name).await
+    }
+
+    fn list(&self) -> Box<dyn Stream<Item = anyhow::Result<FileName>>> {
+        self.deref().list()
     }
 }
