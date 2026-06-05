@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use tokio::time::sleep;
+use tokio::time::sleep_until;
 
 use crate::Retry;
 
@@ -97,7 +97,7 @@ where
 
                 Retry::new().indefinitely(&async || f(inner).await).await;
 
-                sleep(next.saturating_duration_since(Instant::now())).await;
+                sleep_until(next.into()).await;
             }
         });
     }
