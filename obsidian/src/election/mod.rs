@@ -177,7 +177,7 @@ where
     /// succeeded (and so appears in the journal before the lease acquisition), or it has yet to
     /// succeed in which case it will not be accepted because all future leaders will have a
     /// different participant ID than the one on the write.
-    pub async fn append(&self, entry: TEntry) -> anyhow::Result<()> {
+    pub async fn append(&self, entry: TEntry) -> anyhow::Result<JournalSeq> {
         let lease_end = {
             if let Some(lease_end) = self.lease_end.upgrade() {
                 lease_end.load()
@@ -231,7 +231,7 @@ where
             return Err(anyhow!("{} entry not accepted", self.name));
         }
 
-        Ok(())
+        Ok(seq)
     }
 
     /// Remove old entries from the journal. The journal will retain items _at least_ as old as

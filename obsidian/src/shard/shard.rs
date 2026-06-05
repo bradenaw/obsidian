@@ -7,6 +7,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use crossbeam::sync::ShardedLock;
 use obsidian_common::ranges_to_splits;
+use obsidian_common::JournalSeq;
 use obsidian_external::Storage;
 use obsidian_lsm::Lsm;
 use obsidian_lsm::LsmOptions;
@@ -478,7 +479,7 @@ impl MetaSubscriber for ShardInner {
 
 #[async_trait]
 pub(crate) trait ShardJournalWriter: Send + Sync + 'static {
-    async fn append(&self, entry: JournalEntry) -> anyhow::Result<()>;
+    async fn append(&self, entry: JournalEntry) -> anyhow::Result<JournalSeq>;
 }
 
 struct ShardTabletJournalWriter {
@@ -500,7 +501,8 @@ impl TabletJournalWriter for ShardTabletJournalWriter {
                 tablet_id: self.tablet_id,
                 entry,
             })
-            .await
+            .await?;
+        Ok(())
     }
 }
 
