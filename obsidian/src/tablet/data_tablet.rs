@@ -219,6 +219,25 @@ impl DataTablet {
             })
             .await
     }
+
+    pub async fn flush(&self) -> anyhow::Result<()> {
+        self.state_machine
+            .with_state(async |state| {
+                match state {
+                    DataTabletState::Defunct => {}
+                    DataTabletState::Hydrating(_) => {
+                        // Hydrating never has anything in L0, so nothing to flush.
+                    }
+                    DataTabletState::Active(active_tablet) => active_tablet.flush().await?,
+                    DataTabletState::Frozen(_) => {
+                        // Frozen never has anything in L0, so nothing to flush.
+                    }
+                }
+
+                Ok(())
+            })
+            .await
+    }
 }
 
 #[async_trait]

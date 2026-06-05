@@ -171,6 +171,10 @@ impl ShardMetaTablet {
             wait.await;
         }
     }
+
+    pub async fn flush(&self) -> anyhow::Result<()> {
+        self.0.inner.lsm.flush().await
+    }
 }
 
 #[async_trait]
