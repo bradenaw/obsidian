@@ -193,6 +193,12 @@ impl DataTablet {
             .await
     }
 
+    pub async fn is_defunct(&self) -> bool {
+        self.state_machine
+            .inspect(|state| matches!(state, DataTabletState::Defunct))
+            .await
+    }
+
     pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
         self.state_machine
             .with_state(async |state| {

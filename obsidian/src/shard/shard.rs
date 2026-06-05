@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -52,6 +53,9 @@ use crate::TabletJournalEntry;
 use crate::Timestamp;
 use crate::TxOutcome;
 use crate::Txid;
+
+// How often to trim the journalby writing out manifest snapshots.
+const TRIM_INTERVAL: Duration = Duration::from_secs(180);
 
 pub(crate) struct Shard(WithBackground<ShardInner>);
 
@@ -125,6 +129,12 @@ impl Shard {
 
         let shard = Shard(WithBackground::new(inner));
 
+        shard
+            .0
+            .spawn_jittered_periodic_retry(TRIM_INTERVAL, async |inner| {
+                inner.background_try_trim_journal().await
+            });
+
         meta_synced.subscribe(&shard.0);
 
         Ok(shard)
@@ -138,24 +148,7 @@ impl crate::runtime::Shard for Shard {
     }
 
     fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet>> {
-        if tablet_id == TabletId::META {
-            let meta_tablet = self
-                .0
-                .meta_tablet
-                .as_ref()
-                .ok_or_else(|| anyhow!("{:?} not a member of {:?}", tablet_id, self.0.id))?;
-            return Ok(Arc::new(Owned::weak(meta_tablet)) as Arc<dyn Tablet>);
-        }
-        if tablet_id == TabletId::shard_meta(self.0.id) {
-            return Ok(Arc::new(Owned::weak(&self.0.shard_meta_tablet)) as Arc<dyn Tablet>);
-        }
-
-        let tablets = self.0.tablets.read().unwrap();
-        Ok(Arc::new(Owned::weak(
-            tablets
-                .get(&tablet_id)
-                .ok_or_else(|| anyhow!("{:?} not found", tablet_id))?,
-        )))
+        self.0.tablet(tablet_id)
     }
 
     async fn wait_meta_sync(&self, ts: Timestamp) -> anyhow::Result<()> {
@@ -205,6 +198,26 @@ struct ShardInner {
 }
 
 impl ShardInner {
+    fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet>> {
+        if tablet_id == TabletId::META {
+            let meta_tablet = self
+                .meta_tablet
+                .as_ref()
+                .ok_or_else(|| anyhow!("{:?} not a member of {:?}", tablet_id, self.id))?;
+            return Ok(Arc::new(Owned::weak(meta_tablet)) as Arc<dyn Tablet>);
+        }
+        if tablet_id == TabletId::shard_meta(self.id) {
+            return Ok(Arc::new(Owned::weak(&self.shard_meta_tablet)) as Arc<dyn Tablet>);
+        }
+
+        let tablets = self.tablets.read().unwrap();
+        Ok(Arc::new(Owned::weak(
+            tablets
+                .get(&tablet_id)
+                .ok_or_else(|| anyhow!("{:?} not found", tablet_id))?,
+        )))
+    }
+
     async fn ensure_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
         let tablets = {
             let tablets = self.tablets.read().unwrap();
@@ -364,6 +377,8 @@ impl ShardInner {
             match tablet_metadata.state {
                 TabletState::Defunct => {
                     tablet.transition_defunct().await?;
+                    let mut tablets = self.tablets.write().unwrap();
+                    tablets.remove(&tablet_id);
                 }
                 TabletState::Hydrating => {
                     if !tablet.is_hydrating().await {
@@ -397,6 +412,10 @@ impl ShardInner {
                 tablet_id,
                 tablet_metadata.state,
             );
+            return Ok(());
+        }
+
+        if tablet_metadata.state == TabletState::Defunct {
             return Ok(());
         }
 
@@ -464,6 +483,75 @@ impl ShardInner {
             transfer: tablet_transfer,
         })
     }
+
+    async fn background_try_trim_journal(&self) -> anyhow::Result<()> {
+        let tablet_ids = self.tablet_ids().await;
+
+        let lower_bound_seq = self
+            .journal
+            .append(JournalEntry {
+                tablet_id: TabletId::shard_meta(self.id),
+                entry: TabletJournalEntry::NoOp,
+            })
+            .await?;
+
+        for tablet_id in tablet_ids {
+            self.flush_tablet(tablet_id).await?;
+            let tablet = self.tablet(tablet_id)?;
+            let manifest = tablet.manifest().await?;
+            self.journal
+                .append(JournalEntry {
+                    tablet_id,
+                    entry: TabletJournalEntry::Manifest(lower_bound_seq, manifest),
+                })
+                .await?;
+        }
+
+        self.journal.trim_upper_bound(lower_bound_seq).await?;
+
+        Ok(())
+    }
+
+    async fn flush_tablet(&self, tablet_id: TabletId) -> anyhow::Result<()> {
+        if tablet_id == TabletId::META {
+            return Owned::weak(
+                self.meta_tablet
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("no meta tablet"))?,
+            )
+            .or_closed(async |meta_tablet| meta_tablet.flush().await)
+            .await;
+        }
+        if tablet_id == TabletId::shard_meta(self.id) {
+            return self.shard_meta_tablet.flush().await;
+        }
+        let data_tablet = {
+            let tablets = self.tablets.read().unwrap();
+            tablets
+                .get(&tablet_id)
+                .ok_or_else(|| anyhow!("{:?} not present", tablet_id))?
+                .clone()
+        };
+        data_tablet.flush().await
+    }
+
+    async fn tablet_ids(&self) -> BTreeSet<TabletId> {
+        let mut tablet_ids = BTreeSet::new();
+        tablet_ids.insert(TabletId::shard_meta(self.id));
+        if self.meta_tablet.is_some() {
+            tablet_ids.insert(TabletId::META);
+        }
+        {
+            let tablets = self.tablets.read().unwrap().clone();
+            for (tablet_id, tablet) in tablets.iter() {
+                if tablet.is_defunct().await {
+                    continue;
+                }
+                tablet_ids.insert(*tablet_id);
+            }
+        }
+        tablet_ids
+    }
 }
 
 #[async_trait]
@@ -480,6 +568,7 @@ impl MetaSubscriber for ShardInner {
 #[async_trait]
 pub(crate) trait ShardJournalWriter: Send + Sync + 'static {
     async fn append(&self, entry: JournalEntry) -> anyhow::Result<JournalSeq>;
+    async fn trim_upper_bound(&self, seq: JournalSeq) -> anyhow::Result<JournalSeq>;
 }
 
 struct ShardTabletJournalWriter {

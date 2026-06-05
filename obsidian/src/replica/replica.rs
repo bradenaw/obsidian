@@ -539,4 +539,8 @@ impl ShardJournalWriter for JournalWriter<JournalEntry> {
     async fn append(&self, entry: JournalEntry) -> anyhow::Result<JournalSeq> {
         JournalWriter::append(self, entry).await
     }
+
+    async fn trim_upper_bound(&self, seq: JournalSeq) -> anyhow::Result<JournalSeq> {
+        JournalWriter::trim_upper_bound(self, seq).await
+    }
 }
