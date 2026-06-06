@@ -495,6 +495,11 @@ impl ShardInner {
             })
             .await?;
 
+        // TODO: Consider splaying over time and trim to only run IDs, no ranges.
+        //
+        // For example, a 1TB shard with 64MB runs would have ~15K runs at capacity. With 16B run
+        // IDs, that's 250KB worth, though each log write is about ~2.5KB (one per tablet), which
+        // is not unusually large compared to userland writes.
         for tablet_id in tablet_ids {
             self.flush_tablet(tablet_id).await?;
             let tablet = self.tablet(tablet_id)?;
