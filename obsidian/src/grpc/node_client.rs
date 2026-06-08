@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use futures::Stream;
 use futures::StreamExt;
 use obsidian_common::key_to_proto;
+use obsidian_common::RunId;
 use obsidian_pb as pb;
 use obsidian_util::Retry;
 
@@ -250,6 +251,24 @@ impl runtime::Shard for ShardProxy {
         )?;
 
         Ok(tx_outcome)
+    }
+
+    async fn live_runs(&self) -> anyhow::Result<BTreeSet<RunId>> {
+        let resp = self
+            .grpc_client
+            .clone()
+            .shard_live_runs(pb::internal::ShardIdReq {
+                shard_id: self.shard_id.0,
+            })
+            .await
+            .map_err(internal_err_from_status)?
+            .into_inner();
+
+        Ok(resp
+            .run_ids
+            .into_iter()
+            .map(|uuid_pb| RunId::from(uuid_pb))
+            .collect())
     }
 }
 

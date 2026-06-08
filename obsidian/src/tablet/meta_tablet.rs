@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use obsidian_common::RunId;
 use obsidian_lsm::Lsm;
 
 use crate::runtime::Tablet;
@@ -55,6 +56,10 @@ impl MetaTablet {
 
     pub async fn flush(&self) -> anyhow::Result<()> {
         self.inner.lsm.flush().await
+    }
+
+    pub async fn live_runs(&self) -> anyhow::Result<BTreeSet<RunId>> {
+        Ok(self.inner.lsm.live_runs())
     }
 }
 

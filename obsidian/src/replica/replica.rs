@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use obsidian_common::RunId;
 use obsidian_external::Journal;
 use obsidian_external::Storage;
 use obsidian_lsm::LsmOptions;
@@ -262,6 +263,17 @@ impl runtime::Shard for Replica {
                     return leader.shard.tx_wait(txid).await;
                 }
                 Err(InternalError::NotLeader(self.shard_id))
+            })
+            .await
+    }
+
+    async fn live_runs(&self) -> anyhow::Result<BTreeSet<RunId>> {
+        self.participant
+            .with_state(async move |participant_state| {
+                if let ParticipantState::Leader(leader) = participant_state {
+                    return leader.shard.live_runs().await;
+                }
+                Err(InternalError::NotLeader(self.shard_id).into())
             })
             .await
     }

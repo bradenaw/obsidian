@@ -15,6 +15,7 @@ use futures::future::Either;
 use futures::stream::FuturesUnordered;
 use futures::Stream;
 use futures::StreamExt;
+use obsidian_common::RunId;
 use obsidian_external::Journals;
 use obsidian_external::Storage;
 use obsidian_lsm::LsmOptions;
@@ -476,6 +477,12 @@ impl runtime::Shard for (ShardId, WeakView<Replica>) {
     async fn tx_wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
         self.1
             .or_closed(async |replica| replica.tx_wait(txid).await)
+            .await
+    }
+
+    async fn live_runs(&self) -> anyhow::Result<BTreeSet<RunId>> {
+        self.1
+            .or_closed(async |replica| replica.live_runs().await)
             .await
     }
 }

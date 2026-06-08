@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use obsidian_common::RunId;
 use obsidian_lsm::Lsm;
 use obsidian_util::Retry;
 
@@ -105,6 +107,10 @@ impl LsmRead for JournaledLsm {
 
     fn physical_size(&self) -> u64 {
         self.lsm.physical_size()
+    }
+
+    fn live_runs(&self) -> BTreeSet<RunId> {
+        self.lsm.live_runs()
     }
 }
 

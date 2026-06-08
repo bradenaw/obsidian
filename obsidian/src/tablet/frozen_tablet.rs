@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use obsidian_common::RunId;
 use obsidian_external::Storage;
 
 use crate::runtime::Shards;
@@ -112,5 +113,9 @@ impl FrozenTablet {
 
     pub fn physical_size(&self) -> u64 {
         self.inner.lsm.physical_size()
+    }
+
+    pub fn live_runs(&self) -> BTreeSet<RunId> {
+        self.inner.lsm.live_runs()
     }
 }

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use futures::StreamExt;
 use futures::TryStreamExt;
+use obsidian_common::RunId;
 use obsidian_external::Storage;
 use obsidian_util::encode;
 use obsidian_util::Decode;
@@ -286,6 +287,10 @@ impl ActiveTablet {
 
     pub fn physical_size(&self) -> u64 {
         self.0.inner.lsm.physical_size()
+    }
+
+    pub fn live_runs(&self) -> BTreeSet<RunId> {
+        self.0.inner.lsm.live_runs()
     }
 }
 

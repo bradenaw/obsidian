@@ -10,6 +10,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use im::OrdSet;
+use obsidian_common::RunId;
 use obsidian_util::spawn_owned;
 use obsidian_util::OwnedJoinHandle;
 use obsidian_util::Retry;
@@ -270,6 +271,14 @@ impl runtime::Shard for ShardProxy {
             .current_leader(self.shard_id)?
             .shard(self.shard_id)?
             .tx_wait(txid)
+            .await
+    }
+
+    async fn live_runs(&self) -> anyhow::Result<BTreeSet<RunId>> {
+        self.parent
+            .current_leader(self.shard_id)?
+            .shard(self.shard_id)?
+            .live_runs()
             .await
     }
 }

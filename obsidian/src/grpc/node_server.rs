@@ -6,6 +6,7 @@ use async_stream::stream;
 use async_trait::async_trait;
 use futures::Stream;
 use futures::StreamExt;
+use obsidian_common::RunId;
 use obsidian_pb as pb;
 use obsidian_util::hexlify;
 
@@ -270,6 +271,24 @@ impl pb::internal::node_server::Node for NodeServer {
 
         Ok(tonic::Response::new(pb::internal::TxOutcomeResp {
             tx_outcome: Some(pb::internal::TxOutcome::from(tx_outcome)),
+        }))
+    }
+
+    async fn shard_live_runs(
+        &self,
+        req: tonic::Request<pb::internal::ShardIdReq>,
+    ) -> Result<tonic::Response<pb::internal::ShardLiveRunsResp>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let shard_id = ShardId(req_inner.shard_id);
+        let shard = self.node.shard(shard_id).map_err(internal)?;
+
+        let live_runs = shard
+            .live_runs()
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        Ok(tonic::Response::new(pb::internal::ShardLiveRunsResp {
+            run_ids: live_runs.into_iter().map(RunId::into).collect(),
         }))
     }
 

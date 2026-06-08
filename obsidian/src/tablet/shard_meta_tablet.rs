@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use futures::future;
 use futures::StreamExt;
 use futures::TryStreamExt;
+use obsidian_common::RunId;
 use obsidian_lsm::Lsm;
 use obsidian_pb as pb;
 use obsidian_util::Decode;
@@ -174,6 +175,10 @@ impl ShardMetaTablet {
 
     pub async fn flush(&self) -> anyhow::Result<()> {
         self.0.inner.lsm.flush().await
+    }
+
+    pub async fn live_runs(&self) -> anyhow::Result<BTreeSet<RunId>> {
+        Ok(self.0.inner.lsm.live_runs())
     }
 }
 

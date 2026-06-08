@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use obsidian_common::RunId;
 use obsidian_external::Storage;
 use obsidian_lsm::Lsm;
 use obsidian_lsm::LsmOptions;
@@ -241,6 +242,23 @@ impl DataTablet {
                 }
 
                 Ok(())
+            })
+            .await
+    }
+
+    pub async fn live_runs(&self) -> anyhow::Result<BTreeSet<RunId>> {
+        self.state_machine
+            .with_state(async |state| {
+                Ok(match state {
+                    DataTabletState::Active(active_tablet) => active_tablet.live_runs(),
+                    DataTabletState::Frozen(frozen_tablet) => frozen_tablet.live_runs(),
+                    _ => {
+                        return Err(anyhow!(
+                            "wrong tablet state for live_runs {:?}",
+                            state.name()
+                        ));
+                    }
+                })
             })
             .await
     }

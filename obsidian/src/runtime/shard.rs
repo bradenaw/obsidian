@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use obsidian_common::RunId;
 
 use crate::runtime::Tablet;
 use crate::InternalError;
@@ -31,4 +32,9 @@ pub(crate) trait Shard: Send + Sync {
     async fn tx_try_abort(&self, txid: Txid) -> anyhow::Result<TxOutcome>;
 
     async fn tx_wait(&self, txid: Txid) -> Result<TxOutcome, InternalError>;
+
+    /// All of the runs that this shard is using. Includes the runs present in the current manifest
+    /// of each tablet, along with runs that are in the midst of being created by compaction, and
+    /// runs that are not currently used but are still reachable in the journal.
+    async fn live_runs(&self) -> anyhow::Result<BTreeSet<RunId>>;
 }

@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use crossbeam::sync::ShardedLock;
 use obsidian_common::ranges_to_splits;
 use obsidian_common::JournalSeq;
+use obsidian_common::RunId;
 use obsidian_external::Storage;
 use obsidian_lsm::Lsm;
 use obsidian_lsm::LsmOptions;
@@ -176,6 +177,24 @@ impl crate::runtime::Shard for Shard {
 
     async fn tx_wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
         self.0.shard_meta_tablet.tx_wait(txid).await
+    }
+
+    async fn live_runs(&self) -> anyhow::Result<BTreeSet<RunId>> {
+        let mut live_runs = self.0.shard_meta_tablet.live_runs().await?;
+        if let Some(meta_tablet) = self.0.meta_tablet.as_ref() {
+            let meta_live_runs = meta_tablet.live_runs().await?;
+            live_runs.extend(meta_live_runs);
+        }
+        let tablets: Vec<_> = {
+            let tablets = self.0.tablets.read().unwrap();
+            tablets.values().cloned().collect()
+        };
+        for tablet in tablets {
+            let tablet_live_runs = tablet.live_runs().await?;
+            live_runs.extend(tablet_live_runs);
+        }
+
+        Ok(live_runs)
     }
 }
 
