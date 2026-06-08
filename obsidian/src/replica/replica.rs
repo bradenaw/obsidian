@@ -536,7 +536,11 @@ impl runtime::Tablet for ReplicaTablet {
 
 #[async_trait]
 impl ShardJournalWriter for JournalWriter<JournalEntry> {
-    async fn append(&self, entry: JournalEntry) -> anyhow::Result<()> {
+    async fn append(&self, entry: JournalEntry) -> anyhow::Result<JournalSeq> {
         JournalWriter::append(self, entry).await
+    }
+
+    async fn trim_upper_bound(&self, seq: JournalSeq) -> anyhow::Result<JournalSeq> {
+        JournalWriter::trim_upper_bound(self, seq).await
     }
 }

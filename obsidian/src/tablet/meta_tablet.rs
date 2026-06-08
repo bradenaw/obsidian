@@ -8,6 +8,7 @@ use obsidian_lsm::Lsm;
 
 use crate::runtime::Tablet;
 use crate::tablet::journaled_lsm::JournaledLsm;
+use crate::tablet::journaled_lsm::LsmWrite as _;
 use crate::tablet::read_only_lsm::LsmRead;
 use crate::tablet::tablet_inner::TabletInner;
 use crate::tablet::tablet_journal_writer::TabletJournalWriter;
@@ -50,6 +51,10 @@ impl MetaTablet {
                 JournaledLsm::new(lsm, journal),
             ),
         }
+    }
+
+    pub async fn flush(&self) -> anyhow::Result<()> {
+        self.inner.lsm.flush().await
     }
 }
 

@@ -5,10 +5,12 @@ mod seq_waiters;
 #[cfg(test)]
 mod tests;
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::Weak;
 use std::time::Duration;
 
@@ -84,6 +86,8 @@ struct ParticipantInner<TEntry, TLeader, TFollower> {
     became_leader_at: Watchable<Option<JournalSeq>>,
     poison: Arc<AtomicBool>,
     abandon: Arc<Notify>,
+    // Sequence numbers that are appropriate to Journal::trim() to.
+    checkpoints: Arc<Mutex<RetainedSeqs>>,
 }
 
 enum InnerParticipantState<TLeader, TFollower> {
@@ -152,6 +156,7 @@ pub struct JournalWriter<TEntry> {
     accepted_seqs: Arc<SeqWaiters>,
     poison: Arc<AtomicBool>,
     abandon: Arc<Notify>,
+    checkpoints: Arc<Mutex<RetainedSeqs>>,
 }
 
 impl<TEntry> JournalWriter<TEntry>
@@ -172,7 +177,7 @@ where
     /// succeeded (and so appears in the journal before the lease acquisition), or it has yet to
     /// succeed in which case it will not be accepted because all future leaders will have a
     /// different participant ID than the one on the write.
-    pub async fn append(&self, entry: TEntry) -> anyhow::Result<()> {
+    pub async fn append(&self, entry: TEntry) -> anyhow::Result<JournalSeq> {
         let lease_end = {
             if let Some(lease_end) = self.lease_end.upgrade() {
                 lease_end.load()
@@ -226,7 +231,28 @@ where
             return Err(anyhow!("{} entry not accepted", self.name));
         }
 
-        Ok(())
+        Ok(seq)
+    }
+
+    /// Remove old entries from the journal. The journal will retain items _at least_ as old as
+    /// [`before`] but may retain more. Returns the actual sequence number trimmed to.
+    pub async fn trim_upper_bound(&self, before: JournalSeq) -> anyhow::Result<JournalSeq> {
+        // If we start with `accepted_proposals` just anywhere in the middle of the journal we
+        // might accept an acquire that should have been rejected based on an accept earlier in the
+        // journal than where we started. To avoid this, we need to guarantee that a trim always
+        // happens at a position with a successful acquire in it, which is what we place into
+        // `checkpoints`.
+
+        let checkpoint = self
+            .checkpoints
+            .lock()
+            .unwrap()
+            .last_less_or_equal(before)
+            .ok_or_else(|| anyhow!("no checkpoint available to trim to"))?;
+
+        self.journal.trim(checkpoint).await?;
+
+        Ok(checkpoint)
     }
 }
 
@@ -259,6 +285,24 @@ where
             became_leader_at: Watchable::new(None),
             poison: Arc::new(AtomicBool::new(false)),
             abandon: Arc::new(Notify::new()),
+            checkpoints: Arc::new(Mutex::new(RetainedSeqs::new(vec![
+                Retention {
+                    window: Duration::from_secs(60),
+                    interval: Duration::from_secs(5),
+                },
+                Retention {
+                    window: Duration::from_mins(5),
+                    interval: Duration::from_secs(30),
+                },
+                Retention {
+                    window: Duration::from_mins(30),
+                    interval: Duration::from_secs(60),
+                },
+                Retention {
+                    window: Duration::from_hours(6),
+                    interval: Duration::from_mins(5),
+                },
+            ]))),
         });
 
         inner.spawn(async move |participant| {
@@ -422,6 +466,7 @@ where
                                 accepted_seqs: Arc::clone(&self.accepted_seqs),
                                 abandon: Arc::clone(&self.abandon),
                                 poison: Arc::clone(&self.poison),
+                                checkpoints: Arc::clone(&self.checkpoints),
                             };
                             log::info!("{} promoting to leader", self.name);
                             follower.promote(journal_writer).await?
@@ -525,6 +570,7 @@ where
                     match ratification {
                         Ratification::Accepted(proposal) => match proposal.proposal_type {
                             ProposalType::Acquire{lease_end, ..} => {
+                                self.checkpoints.lock().unwrap().push(Instant::now(), seq);
                                 current_lease = Some((proposal.participant_id, lease_end));
                                 if proposal.participant_id == participant_id {
                                     let start = pending_acquire
@@ -697,6 +743,85 @@ where
             }
 
             yield (seq, Ratification::Accepted(proposal));
+        }
+    }
+}
+
+/// Holds onto ordered sequence numbers with varying retention over time. For example:
+/// - For the last 5 minutes, one per 10 seconds
+/// - For the last 30 minutes, one per minute
+/// - For the last 4 hours, one per 10 minutes
+struct RetainedSeqs {
+    // In increasing order of Retention::window.
+    entries: Vec<(Retention, VecDeque<(Instant, JournalSeq)>)>,
+}
+
+struct Retention {
+    window: Duration,
+    interval: Duration,
+}
+
+impl RetainedSeqs {
+    pub fn new(mut retention_policy: Vec<Retention>) -> Self {
+        retention_policy.sort_by_key(|retention| retention.window);
+
+        Self {
+            entries: retention_policy
+                .into_iter()
+                .map(|retention| (retention, VecDeque::new()))
+                .collect(),
+        }
+    }
+
+    pub fn push(&mut self, now: Instant, seq: JournalSeq) {
+        self.maybe_push_in_level(0, now, seq);
+        self.compact(now);
+    }
+
+    pub fn last_less_or_equal(&self, seq: JournalSeq) -> Option<JournalSeq> {
+        for (_, seqs) in &self.entries {
+            if seqs.is_empty() {
+                continue;
+            }
+
+            let idx = seqs.partition_point(|(_, other_seq)| *other_seq <= seq);
+            if idx == seqs.len() {
+                break;
+            }
+
+            if seqs[idx].1 <= seq {
+                return Some(seqs[0].1);
+            }
+        }
+        None
+    }
+
+    fn maybe_push_in_level(&mut self, level: usize, instant: Instant, seq: JournalSeq) {
+        let (retention, seqs) = &mut self.entries[level];
+        if let Some((back_seq_instant, _)) = seqs.back() {
+            if instant.duration_since(*back_seq_instant) >= retention.interval {
+                seqs.push_back((instant, seq));
+            }
+        } else {
+            seqs.push_back((instant, seq));
+        }
+    }
+
+    // Promote sequence numbers to a larger retention window if they are now too old for the window
+    // they're in, or remove them if there are already enough given the retention policy.
+    fn compact(&mut self, now: Instant) {
+        for i in 0..self.entries.len() {
+            let window = self.entries[i].0.window;
+            while let Some((seq_instant, seq)) = self.entries[i]
+                .1
+                .pop_front_if(|(seq_instant, _)| now.duration_since(*seq_instant) > window)
+            {
+                if i + 1 >= self.entries.len() {
+                    continue;
+                }
+
+                self.maybe_push_in_level(i + 1, seq_instant, seq);
+            }
         }
     }
 }

@@ -193,6 +193,12 @@ impl DataTablet {
             .await
     }
 
+    pub async fn is_defunct(&self) -> bool {
+        self.state_machine
+            .inspect(|state| matches!(state, DataTabletState::Defunct))
+            .await
+    }
+
     pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
         self.state_machine
             .with_state(async |state| {
@@ -212,6 +218,25 @@ impl DataTablet {
                             self.tablet_id,
                             state.name(),
                         ));
+                    }
+                }
+
+                Ok(())
+            })
+            .await
+    }
+
+    pub async fn flush(&self) -> anyhow::Result<()> {
+        self.state_machine
+            .with_state(async |state| {
+                match state {
+                    DataTabletState::Defunct => {}
+                    DataTabletState::Hydrating(_) => {
+                        // Hydrating never has anything in L0, so nothing to flush.
+                    }
+                    DataTabletState::Active(active_tablet) => active_tablet.flush().await?,
+                    DataTabletState::Frozen(_) => {
+                        // Frozen never has anything in L0, so nothing to flush.
                     }
                 }
 
