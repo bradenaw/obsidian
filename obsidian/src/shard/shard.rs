@@ -180,6 +180,8 @@ impl crate::runtime::Shard for Shard {
     }
 
     async fn live_runs(&self) -> anyhow::Result<BTreeSet<RunId>> {
+        // XXX: Include runs that appear in the journal's manifests not just the current ones,
+        // otherwise we might GC something we actually need to recover.
         let mut live_runs = self.0.shard_meta_tablet.live_runs().await?;
         if let Some(meta_tablet) = self.0.meta_tablet.as_ref() {
             let meta_live_runs = meta_tablet.live_runs().await?;
