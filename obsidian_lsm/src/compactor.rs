@@ -167,6 +167,9 @@ impl CompactorInner {
                             ) {
                                 log::error!("error in compaction: {:?}", e);
                             }
+                            // Ensure that this is still live at this point, since for correctness
+                            // we need to not drop these until after the index change.
+                            drop(compaction_result.in_flight);
                         },
                         Err(e) => {
                             log::error!("error in compaction: {:?}", e);
