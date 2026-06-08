@@ -1,4 +1,5 @@
 use std::cmp::Reverse;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -14,6 +15,7 @@ use obsidian_common::Mutation;
 use obsidian_common::Range;
 use obsidian_common::Revision;
 use obsidian_common::RevisionValue;
+use obsidian_common::RunId;
 use obsidian_common::Timestamp;
 use obsidian_external::Storage;
 use obsidian_util::hexlify;
@@ -306,6 +308,19 @@ impl Lsm {
 
     pub fn unpause_compaction(&self) {
         self.compactor.unpause();
+    }
+
+    /// The runs that the LSM is currently using, either because they appear in the current version
+    /// of the manifest or they're in the middle of being created via compaction.
+    pub fn live_runs(&self) -> BTreeSet<RunId> {
+        let mut live_runs = self.compactor.in_flight_runs();
+        let manifest = self.manifest();
+
+        for (_, _, run) in manifest.runs() {
+            live_runs.insert(run.run_id);
+        }
+
+        live_runs
     }
 }
 

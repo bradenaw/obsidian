@@ -3,6 +3,7 @@
 #![feature(thread_id_value)]
 
 mod compactor;
+mod in_flight_runs;
 mod index;
 mod lsm;
 mod memtable;

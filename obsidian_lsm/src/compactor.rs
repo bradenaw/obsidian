@@ -1,5 +1,6 @@
 use std::cmp;
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::future::Future;
 use std::iter;
@@ -30,6 +31,8 @@ use obsidian_util::spawn_owned;
 use obsidian_util::OwnedJoinHandle;
 use uuid::Uuid;
 
+use crate::in_flight_runs::InFlightRun;
+use crate::in_flight_runs::InFlightRuns;
 use crate::index::Index;
 use crate::index::IndexSnapshot;
 use crate::index::Keyspace;
@@ -61,6 +64,7 @@ impl Compactor {
             l1_max_size,
             run_size_target,
             block_size_target,
+            in_flight: InFlightRuns::new(),
         });
 
         let compactor = Self {
@@ -71,6 +75,10 @@ impl Compactor {
         compactor.unpause();
 
         compactor
+    }
+
+    pub fn in_flight_runs(&self) -> BTreeSet<RunId> {
+        self.inner.in_flight.runs()
     }
 
     pub(super) async fn pause(&self) {
@@ -102,6 +110,7 @@ struct CompactorInner {
     l1_max_size: u64,
     run_size_target: u64,
     block_size_target: u64,
+    in_flight: InFlightRuns,
 }
 
 impl CompactorInner {
@@ -499,7 +508,7 @@ impl CompactorInner {
             let from = from.to_vec();
             let into = into.to_vec();
             async move {
-                let add = self_.merge_l0(keyspace_id, &splits, &from, &into).await?;
+                let (add, in_flight) = self_.merge_l0(keyspace_id, &splits, &from, &into).await?;
 
                 log::trace!(
                     "compacted l0 {:?} + {:?}, producing {:?}",
@@ -513,6 +522,7 @@ impl CompactorInner {
                 Ok(CompactionResult {
                     keyspace_id,
                     add,
+                    in_flight,
                     remove,
                 })
             }
@@ -525,7 +535,7 @@ impl CompactorInner {
         splits: &[Bound<Vec<u8>>],
         memtables: &[Arc<Memtable>],
         runs: &[Arc<Run>],
-    ) -> anyhow::Result<Vec<Run>> {
+    ) -> anyhow::Result<(Vec<Run>, Vec<InFlightRun>)> {
         let streams = {
             let mut streams = Vec::with_capacity(memtables.len() + 1);
             for memtable in memtables {
@@ -571,7 +581,7 @@ impl CompactorInner {
             let splits = splits.to_vec();
             let self_ = Arc::clone(self);
             async move {
-                let add = self_.merge_runs(keyspace_id, &splits, &from, &into).await?;
+                let (add, in_flight) = self_.merge_runs(keyspace_id, &splits, &from, &into).await?;
                 log::trace!(
                     "compacted l{} {:?} + {:?}, producing {:?}",
                     from_level,
@@ -582,6 +592,7 @@ impl CompactorInner {
                 Ok(CompactionResult {
                     keyspace_id,
                     add,
+                    in_flight,
                     remove,
                 })
             }
@@ -594,7 +605,7 @@ impl CompactorInner {
         splits: &[Bound<Vec<u8>>],
         a: &Run,
         b: &[Arc<Run>],
-    ) -> anyhow::Result<Vec<Run>> {
+    ) -> anyhow::Result<(Vec<Run>, Vec<InFlightRun>)> {
         self.runs_from_revisions(
             keyspace_id,
             splits,
@@ -626,7 +637,7 @@ impl CompactorInner {
             let splits = splits.to_vec();
             let runs = runs.to_vec();
             async move {
-                let add = self_
+                let (add, in_flight) = self_
                     .runs_from_revisions(
                         keyspace_id,
                         &splits,
@@ -643,6 +654,7 @@ impl CompactorInner {
                 Ok(CompactionResult {
                     keyspace_id,
                     add,
+                    in_flight,
                     remove,
                 })
             }
@@ -654,8 +666,9 @@ impl CompactorInner {
         keyspace_id: KeyspaceId,
         splits: &[Bound<Vec<u8>>],
         entries: impl Stream<Item = anyhow::Result<Revision>> + Send,
-    ) -> anyhow::Result<Vec<Run>> {
+    ) -> anyhow::Result<(Vec<Run>, Vec<InFlightRun>)> {
         let mut revs_by_key = group_by_key(entries.boxed()).boxed().peekable();
+        let mut in_flight_handles = vec![];
         let mut runs = Vec::new();
 
         // The current key is before the bound at splits[split_idx].
@@ -667,7 +680,9 @@ impl CompactorInner {
             }
 
             let uuid = Uuid::new_v4();
-            let file_name = FileName::Run(RunId::from(uuid));
+            let run_id = RunId::from(uuid);
+            in_flight_handles.push(self.in_flight.insert(run_id));
+            let file_name = FileName::Run(run_id);
             let mut writer = self.storage.put(file_name.clone()).await?;
             let mut builder = OlfFileBuilder::new(
                 writer.deref_mut(),
@@ -715,7 +730,7 @@ impl CompactorInner {
                 OlfFile::open(self.storage.get(file_name).await?).await?,
             ));
         }
-        Ok(runs)
+        Ok((runs, in_flight_handles))
     }
 
     fn level_size_max(&self, level_idx: usize) -> u64 {
@@ -754,6 +769,7 @@ struct Compaction {
 struct CompactionResult {
     keyspace_id: KeyspaceId,
     add: Vec<Run>,
+    in_flight: Vec<InFlightRun>,
     remove: HashSet<RunId>,
 }
 
