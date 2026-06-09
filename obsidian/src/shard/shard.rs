@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -30,6 +31,7 @@ use crate::runtime;
 use crate::runtime::Meta;
 use crate::runtime::Shards;
 use crate::runtime::Tablet;
+use crate::shard::journal_live_runs::JournalLiveRuns;
 use crate::tablet::DataTablet;
 use crate::tablet::MetaTablet;
 use crate::tablet::ShardMetaTablet;
@@ -55,7 +57,7 @@ use crate::Timestamp;
 use crate::TxOutcome;
 use crate::Txid;
 
-// How often to trim the journalby writing out manifest snapshots.
+// How often to trim the journal by writing out manifest snapshots.
 const TRIM_INTERVAL: Duration = Duration::from_secs(180);
 
 pub(crate) struct Shard(WithBackground<ShardInner>);
@@ -113,13 +115,17 @@ impl Shard {
             id: shard_id,
             storage,
             meta,
-            meta_tablet,
             meta_synced: meta_synced.clone(),
             shards,
-            shard_meta_tablet: Owned::new(shard_meta_tablet),
-            tablets: ShardedLock::new(HashMap::new()),
             lsm_options,
             journal,
+
+            // TODO: init
+            journal_live_runs: Mutex::new((BTreeSet::new(), JournalLiveRuns::new())),
+
+            meta_tablet,
+            shard_meta_tablet: Owned::new(shard_meta_tablet),
+            tablets: ShardedLock::new(HashMap::new()),
         };
 
         let snapshot = meta_synced.snapshot();
@@ -180,9 +186,16 @@ impl crate::runtime::Shard for Shard {
     }
 
     async fn live_runs(&self) -> anyhow::Result<BTreeSet<RunId>> {
-        // XXX: Include runs that appear in the journal's manifests not just the current ones,
-        // otherwise we might GC something we actually need to recover.
-        let mut live_runs = self.0.shard_meta_tablet.live_runs().await?;
+        let mut live_runs = BTreeSet::new();
+
+        {
+            let journal_live_runs = self.0.journal_live_runs.lock().unwrap();
+            live_runs.extend(&journal_live_runs.0);
+            live_runs.extend(journal_live_runs.1.run_ids());
+        }
+
+        let shard_meta_live_runs = self.0.shard_meta_tablet.live_runs().await?;
+        live_runs.extend(shard_meta_live_runs);
         if let Some(meta_tablet) = self.0.meta_tablet.as_ref() {
             let meta_live_runs = meta_tablet.live_runs().await?;
             live_runs.extend(meta_live_runs);
@@ -208,6 +221,8 @@ struct ShardInner {
     shards: Arc<dyn Shards>,
     journal: Arc<dyn ShardJournalWriter>,
     lsm_options: LsmOptions,
+
+    journal_live_runs: Mutex<(BTreeSet<RunId>, JournalLiveRuns)>,
 
     shard_meta_tablet: Owned<ShardMetaTablet>,
     meta_tablet: Option<Owned<MetaTablet>>, // Present only if id==ShardId::META.
@@ -525,15 +540,31 @@ impl ShardInner {
             self.flush_tablet(tablet_id).await?;
             let tablet = self.tablet(tablet_id)?;
             let manifest = tablet.manifest().await?;
-            self.journal
+
+            {
+                let mut journal_live_runs = self.journal_live_runs.lock().unwrap();
+                for (_, _, run) in manifest.runs() {
+                    journal_live_runs.0.insert(run.run_id);
+                }
+            }
+            let append_seq = self
+                .journal
                 .append(JournalEntry {
                     tablet_id,
-                    entry: TabletJournalEntry::Manifest(lower_bound_seq, manifest),
+                    entry: TabletJournalEntry::Manifest(lower_bound_seq, manifest.clone()),
                 })
                 .await?;
+            {
+                let mut journal_live_runs = self.journal_live_runs.lock().unwrap();
+                for (_, _, run) in manifest.runs() {
+                    journal_live_runs.0.remove(&run.run_id);
+                    journal_live_runs.1.insert(append_seq, run.run_id);
+                }
+            }
         }
 
-        self.journal.trim_upper_bound(lower_bound_seq).await?;
+        let trimmed_seq = self.journal.trim_upper_bound(lower_bound_seq).await?;
+        self.journal_live_runs.lock().unwrap().1.trim(trimmed_seq);
 
         Ok(())
     }

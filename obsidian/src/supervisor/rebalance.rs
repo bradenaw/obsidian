@@ -280,6 +280,7 @@ mod tests {
     use obsidian_common::ShardId;
     use obsidian_common::TabletId;
     use obsidian_util::shortest_between;
+    use obsidian_util::KeyCounts;
     use rand::seq::SliceRandom;
 
     use super::plan_rebalance;
@@ -542,7 +543,7 @@ mod tests {
         next_tablet_id: u64,
         next_colo_group: ColoGroupId,
         in_progress: HashSet<TransferIds>,
-        in_progress_shards: RefCounts<ShardId>,
+        in_progress_shards: KeyCounts<ShardId>,
     }
 
     impl Shards {
@@ -554,7 +555,7 @@ mod tests {
                 shard_ids: HashSet::new(),
                 next_colo_group: ColoGroupId(1),
                 in_progress: HashSet::new(),
-                in_progress_shards: RefCounts::new(),
+                in_progress_shards: KeyCounts::new(),
             }
         }
 
@@ -858,41 +859,6 @@ mod tests {
     struct TransferIds {
         srcs: Vec<TabletId>,
         dsts: Vec<TabletId>,
-    }
-
-    struct RefCounts<K> {
-        counts: HashMap<K, usize>,
-    }
-
-    impl<K> RefCounts<K>
-    where
-        K: Eq + Hash,
-    {
-        fn new() -> Self {
-            Self {
-                counts: HashMap::new(),
-            }
-        }
-
-        fn incr(&mut self, key: K) {
-            *self.counts.entry(key).or_default() += 1;
-        }
-
-        fn decr(&mut self, key: &K) {
-            let remove = if let Some(count) = self.counts.get_mut(key) {
-                *count -= 1;
-                *count == 0
-            } else {
-                false
-            };
-            if remove {
-                self.counts.remove(key);
-            }
-        }
-
-        fn contains_key(&self, key: &K) -> bool {
-            self.counts.contains_key(key)
-        }
     }
 
     fn split_range(range: Range<Vec<u8>>) -> (Range<Vec<u8>>, Range<Vec<u8>>) {
