@@ -459,6 +459,14 @@ where
 
         let ts = self.sequencer.start_write();
 
+        // XXX: This chosen timestamp is not correct, since a key participating in a 2PC transaction
+        // may have already been assigned a higher timestamp. We need to either check the keys with
+        // unsafe_get_latest_record here, or advance the sequencer before cleaning up pending
+        // records.
+
+        // TODO: We can elide deletes for keys that don't exist so that we don't pile up tombstones
+        // that can't actually affect any reads.
+
         self.lsm.write(*ts, muts).await?;
 
         Ok(*ts)
