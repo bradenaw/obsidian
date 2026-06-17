@@ -118,6 +118,7 @@ impl TabletRecovery {
     async fn wait(self) -> anyhow::Result<Lsm> {
         let preloaded = self.preloader.load().await?;
 
+        // TODO: If this is a frozen tablet we need to disable compaction.
         let lsm = Lsm::open(self.lsm_options, self.storage, preloaded);
 
         for (_, ts, kvs) in self.writes {
