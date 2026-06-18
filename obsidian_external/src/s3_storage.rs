@@ -1,4 +1,5 @@
 use std::io;
+use std::pin::Pin;
 use std::str::FromStr as _;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -72,10 +73,10 @@ impl Storage for S3Storage {
         }))
     }
 
-    fn list(&self) -> Box<dyn Stream<Item = anyhow::Result<FileName>>> {
+    fn list(&self) -> Pin<Box<dyn Stream<Item = anyhow::Result<FileName>>>> {
         let client = self.client.clone();
         let bucket = self.bucket.clone();
-        Box::new(try_stream! {
+        Box::pin(try_stream! {
             let mut page_stream = client
                 .list_objects_v2()
                 .bucket(bucket)

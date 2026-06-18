@@ -5,6 +5,7 @@ use std::hash::BuildHasher;
 use std::hash::Hash;
 use std::hash::RandomState;
 use std::io;
+use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -95,7 +96,7 @@ impl<S: Storage> Storage for CachedStorage<S> {
         self.inner.delete(name).await
     }
 
-    fn list(&self) -> Box<dyn Stream<Item = anyhow::Result<FileName>>> {
+    fn list(&self) -> Pin<Box<dyn Stream<Item = anyhow::Result<FileName>>>> {
         self.inner.list()
     }
 }
