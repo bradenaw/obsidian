@@ -1,15 +1,26 @@
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
-use anyhow::anyhow;
 use futures::stream::FuturesUnordered;
 use futures::TryStreamExt;
+use obsidian_common::ColoGroupId;
+use obsidian_common::Key;
+use obsidian_common::KeyspaceId;
+use obsidian_common::Mutation;
 use obsidian_common::RunId;
+use obsidian_common::ShardId;
 use obsidian_common::TabletId;
+use obsidian_common::Timestamp;
 use obsidian_external::FileName;
 use obsidian_external::Storage;
 use obsidian_util::Retry;
 use obsidian_util::WithBackground;
+use tokio::time::sleep;
 
 use crate::meta::MetaReader;
 use crate::meta::MetaSynced;
@@ -17,6 +28,9 @@ use crate::meta::MetaSyncedSnapshot;
 use crate::meta::TabletState;
 use crate::runtime::Meta;
 use crate::runtime::Shards;
+use crate::Obsidian;
+
+const GC_PRUNE_WAIT: Duration = Duration::from_mins(15);
 
 /// [`Gc`] is the garbage collector for runs in storage.
 ///
@@ -56,6 +70,17 @@ impl GcInner {
         match self.gc_storage.phase().await? {
             GcPhase::Gather => {
                 self.gather().await?;
+                self.gc_storage.transition_wait().await?;
+            }
+            GcPhase::Wait { start } => {
+                let end = UNIX_EPOCH
+                    .saturating_add(Duration::from_micros(start.as_micros()))
+                    .saturating_add(GC_PRUNE_WAIT);
+                let remaining = end
+                    .duration_since(SystemTime::now())
+                    .unwrap_or(Duration::ZERO);
+                sleep(remaining).await;
+
                 self.gc_storage.transition_prune().await?;
             }
             GcPhase::Prune => {
@@ -83,36 +108,54 @@ impl GcInner {
 
     async fn prune(&self) -> anyhow::Result<()> {
         let meta_snapshot = self.meta_synced.snapshot();
-        let shard_ids = meta_snapshot.shard_ids().await?;
-        let starting_tablet_ids = active_frozen_tablet_ids(&meta_snapshot).await?;
+        let mut shard_ids = meta_snapshot.shard_ids().await?;
 
+        while !shard_ids.is_empty() {
+            let meta_snapshot = self.meta_synced.snapshot();
+            let starting_tablet_ids = {
+                let mut starting_tablet_ids = active_frozen_tablet_ids(&meta_snapshot).await?;
+                starting_tablet_ids.retain(|tablet_id| shard_ids.contains(&tablet_id.0));
+                starting_tablet_ids
+            };
+
+            self.prune_from(shard_ids.iter().copied()).await?;
+
+            self.meta_synced
+                .wait(self.meta.latest_snapshot().await?)
+                .await?;
+            let meta_snapshot = self.meta_synced.snapshot();
+            let ending_tablet_ids = active_frozen_tablet_ids(&meta_snapshot).await?;
+
+            // If a range moved from one tablet to another while we were pruning, it's possible we
+            // saw neither the source nor the destination as being live on their respective shards.
+            //
+            // e.g. we get live_runs() from shard 1, then range moves from shard 2 to shard 1, then
+            // we do live_runs() on shard 2.
+            //
+            // To avoid this race, we just see if the set of tablets changed between start and
+            // finish and re-check the shards involved.
+            let shards_with_possible_move = ending_tablet_ids
+                .difference(&starting_tablet_ids)
+                .map(|tablet_id| tablet_id.0);
+            shard_ids = shards_with_possible_move.collect();
+        }
+
+        Ok(())
+    }
+
+    async fn prune_from(&self, shard_ids: impl Iterator<Item = ShardId>) -> anyhow::Result<()> {
         let mut futures: FuturesUnordered<_> = shard_ids
-            .iter()
-            .map(|shard_id| async {
-                Ok::<_, anyhow::Error>(self.shards.shard(*shard_id)?.live_runs().await?)
+            .map(|shard_id| async move {
+                Ok::<_, anyhow::Error>(self.shards.shard(shard_id)?.live_runs().await?)
             })
             .collect();
 
         while let Some(shard_live_runs) = futures.try_next().await? {
             for run_id in shard_live_runs {
-                // TODO: batch
+                // TODO: Batch
                 self.gc_storage.remove_candidate(run_id).await?;
             }
         }
-
-        self.meta_synced
-            .wait(self.meta.latest_snapshot().await?)
-            .await?;
-        let meta_snapshot = self.meta_synced.snapshot();
-        let ending_tablet_ids = active_frozen_tablet_ids(&meta_snapshot).await?;
-
-        let mut new_tablet_ids = ending_tablet_ids.difference(&starting_tablet_ids);
-        if new_tablet_ids.next().is_some() {
-            return Err(anyhow!("tablets changed during prune"));
-        }
-
-        // TODO: Need to make sure that no ranges moved tablets during this phase, else we may have
-        // missed them.
 
         Ok(())
     }
@@ -133,6 +176,8 @@ impl GcInner {
     }
 }
 
+/// Returns all of the tablets in the given snapshot that are in [`TabletState::Active`] or
+/// [`TabletState::Frozen`].
 async fn active_frozen_tablet_ids(
     meta_snapshot: &MetaSyncedSnapshot,
 ) -> anyhow::Result<BTreeSet<TabletId>> {
@@ -151,16 +196,44 @@ async fn active_frozen_tablet_ids(
 }
 
 enum GcPhase {
+    /// Gather the list of candidates, that is, all of the runs that exist in storage.
     Gather,
+    /// Pause between gathering and pruning for retention. The `live_runs` algorithm is safe even
+    /// if the wait time is zero, but this wait is the minimum amount of time a run has to be
+    /// considered 'dead' to be garbage collected.
+    Wait { start: Timestamp },
+    /// Prune the candidate list by removing runs that are still live, leaving only dead runs in
+    /// the candidate list.
     Prune,
+    /// Delete the dead runs from storage.
     Sweep,
 }
 
 enum ListCandidatesCursor {
     Start,
+    Continue(RunId),
 }
 
-struct GcStorage {}
+struct GcStorage {
+    obsidian: Arc<dyn Obsidian>,
+}
+
+enum GcStorageKey {
+    Phase(u8),
+    Candidate(RunId),
+}
+
+impl GcStorageKey {
+    fn encode(&self) -> Key {
+        match self {
+            GcStorageKey::Phase(pfx) => (KeyspaceId::INTERNAL_GC_PHASE, vec![*pfx]),
+            GcStorageKey::Candidate(run_id) => (
+                KeyspaceId::INTERNAL_GC_CANDIDATE,
+                run_id.encode_fixed().to_vec(),
+            ),
+        }
+    }
+}
 
 impl GcStorage {
     async fn phase(&self) -> anyhow::Result<GcPhase> {
@@ -169,6 +242,24 @@ impl GcStorage {
 
     /// Adds a candidate to the set for this cycle. Errors in phases other than [`GcPhase::Gather`].
     async fn insert_candidate(&self, run_id: RunId) -> anyhow::Result<()> {
+        let pfx_key = GcStorageKey::Phase(run_id.encode_fixed()[0]).encode();
+        let snapshot_ts = self
+            .obsidian
+            .latest_snapshot(BTreeSet::from([pfx_key.clone()]))
+            .await?;
+        let record = self.obsidian.get(snapshot_ts, &pfx_key).await?;
+        self.obsidian
+            .write(
+                vec![],
+                BTreeMap::from([
+                    (pfx_key, Mutation::Put(vec![])),
+                    (
+                        GcStorageKey::Candidate(run_id).encode(),
+                        Mutation::Put(vec![]),
+                    ),
+                ]),
+            )
+            .await?;
         todo!();
     }
 
@@ -185,7 +276,12 @@ impl GcStorage {
         todo!();
     }
 
-    /// Transitions to [`GcPhase::Prune`], erroring if not in [`GcPhase::Gather`].
+    /// Transitions to [`GcPhase::Wait`], erroring if not in [`GcPhase::Gather`].
+    async fn transition_wait(&self) -> anyhow::Result<()> {
+        todo!();
+    }
+
+    /// Transitions to [`GcPhase::Prune`], erroring if not in [`GcPhase::Wait`].
     async fn transition_prune(&self) -> anyhow::Result<()> {
         todo!();
     }
@@ -201,3 +297,10 @@ impl GcStorage {
         todo!();
     }
 }
+
+struct GcStorageSnapshot {
+    ts: Timestamp,
+    obsidian: Arc<dyn Obsidian>,
+}
+
+impl GcStorageSnapshot {}

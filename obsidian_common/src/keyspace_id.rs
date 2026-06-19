@@ -13,6 +13,8 @@ pub struct KeyspaceId(pub ColoGroupId, pub u32);
 impl KeyspaceId {
     pub const META: Self = Self(ColoGroupId::META, 0xFF000000);
     pub const TX_OUTCOMES: Self = Self(ColoGroupId::SHARD_META, 0xFF000000);
+    pub const INTERNAL_GC_PHASE: Self = Self(ColoGroupId::INTERNAL_GC, 1);
+    pub const INTERNAL_GC_CANDIDATE: Self = Self(ColoGroupId::INTERNAL_GC, 2);
 
     /// If this is a pending or precond keyspace, returns the associated data keyspace.
     pub fn data(&self) -> Option<KeyspaceId> {
@@ -68,14 +70,17 @@ impl KeyspaceId {
 impl Display for KeyspaceId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/", self.0)?;
-        if *self == KeyspaceId::META {
-            f.write_str("meta")?;
+        if let Some(special) = match *self {
+            KeyspaceId::META => Some("meta"),
+            KeyspaceId::TX_OUTCOMES => Some("tx_outcomes"),
+            KeyspaceId::INTERNAL_GC_PHASE => Some("internal_gc_phase"),
+            KeyspaceId::INTERNAL_GC_CANDIDATE => Some("internal_gc_candidate"),
+            _ => None,
+        } {
+            f.write_str(special)?;
             return Ok(());
         }
-        if *self == KeyspaceId::TX_OUTCOMES {
-            f.write_str("tx_outcomes")?;
-            return Ok(());
-        }
+
         match self.data() {
             Some(data_keyspace_id) => {
                 if self.is_precond() {
