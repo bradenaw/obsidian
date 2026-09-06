@@ -73,7 +73,7 @@ impl Storage for S3Storage {
         }))
     }
 
-    fn list(&self) -> Pin<Box<dyn Stream<Item = anyhow::Result<FileName>>>> {
+    fn list(&self) -> Pin<Box<dyn Stream<Item = anyhow::Result<FileName>> + Send>> {
         let client = self.client.clone();
         let bucket = self.bucket.clone();
         Box::pin(try_stream! {

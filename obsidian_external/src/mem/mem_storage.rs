@@ -80,7 +80,7 @@ impl Storage for MemStorage {
         Ok(())
     }
 
-    fn list(&self) -> Pin<Box<dyn Stream<Item = anyhow::Result<FileName>>>> {
+    fn list(&self) -> Pin<Box<dyn Stream<Item = anyhow::Result<FileName>> + Send>> {
         let inner = self.inner.lock().unwrap();
         let names: Vec<_> = inner.files.keys().cloned().collect();
 

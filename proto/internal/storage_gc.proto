@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package obsidian_internal;
+
+import "google/protobuf/empty.proto";
+
+message GcPhase {
+    message Wait {
+        fixed64 start = 1;
+    }
+
+    oneof phase {
+        google.protobuf.Empty gather = 1;
+        Wait wait = 2;
+        google.protobuf.Empty prune = 3;
+        google.protobuf.Empty sweep = 4;
+    }
+}

@@ -96,7 +96,7 @@ impl<S: Storage> Storage for CachedStorage<S> {
         self.inner.delete(name).await
     }
 
-    fn list(&self) -> Pin<Box<dyn Stream<Item = anyhow::Result<FileName>>>> {
+    fn list(&self) -> Pin<Box<dyn Stream<Item = anyhow::Result<FileName>> + Send>> {
         self.inner.list()
     }
 }

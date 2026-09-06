@@ -1,26 +1,33 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use anyhow::anyhow;
 use futures::stream::FuturesUnordered;
 use futures::TryStreamExt;
-use obsidian_common::ColoGroupId;
+use obsidian_common::Direction;
 use obsidian_common::Key;
 use obsidian_common::KeyspaceId;
 use obsidian_common::Mutation;
+use obsidian_common::Precondition;
+use obsidian_common::Range;
 use obsidian_common::RunId;
 use obsidian_common::ShardId;
 use obsidian_common::TabletId;
 use obsidian_common::Timestamp;
 use obsidian_external::FileName;
 use obsidian_external::Storage;
+use obsidian_pb as pb;
+use obsidian_util::Decode;
 use obsidian_util::Retry;
 use obsidian_util::WithBackground;
+use prost::Message as _;
 use tokio::time::sleep;
+use uuid::Uuid;
 
 use crate::meta::MetaReader;
 use crate::meta::MetaSynced;
@@ -32,12 +39,12 @@ use crate::Obsidian;
 
 const GC_PRUNE_WAIT: Duration = Duration::from_mins(15);
 
-/// [`Gc`] is the garbage collector for runs in storage.
+/// [`StorageGc`] is the garbage collector for runs in storage.
 ///
 /// As LSMs receive writes, they compact revisions into runs. This creates many unreachable runs,
 /// which contain data that is often (mostly) redundant with the runs that the LSM is still using.
 ///
-/// [`Gc`] finds and removes unreachable runs by repeatedly moving through three phases:
+/// [`StorageGc`] finds and removes unreachable runs by repeatedly moving through three phases:
 ///
 /// 1. Gather a list of all runs that exist in storage into a candidate set.
 /// 2. Prune the candidate set by removing runs that are still live.
@@ -46,9 +53,33 @@ const GC_PRUNE_WAIT: Duration = Duration::from_mins(15);
 /// There is some subtlety in the prune phase, since we need to be sure to distinguish between runs
 /// that are not currently referenced because they have already been discarded, and runs that are
 /// just yet to be referenced but about to be.
-struct Gc(WithBackground<GcInner>);
+pub(crate) struct StorageGc(WithBackground<StorageGcInner>);
 
-struct GcInner {
+impl StorageGc {
+    pub fn new(
+        meta: Arc<dyn Meta>,
+        meta_synced: Arc<MetaSynced>,
+        shards: Arc<dyn Shards>,
+        storage: Arc<dyn Storage>,
+        obsidian: Arc<dyn Obsidian>,
+    ) -> Self {
+        let bg = WithBackground::new(StorageGcInner {
+            meta,
+            meta_synced,
+            shards,
+            storage,
+            gc_storage: GcStorage { obsidian },
+        });
+
+        bg.spawn(async |inner| {
+            inner.background_gc_cycle().await;
+        });
+
+        Self(bg)
+    }
+}
+
+struct StorageGcInner {
     meta: Arc<dyn Meta>,
     meta_synced: Arc<MetaSynced>,
     shards: Arc<dyn Shards>,
@@ -57,7 +88,7 @@ struct GcInner {
     gc_storage: GcStorage,
 }
 
-impl GcInner {
+impl StorageGcInner {
     async fn background_gc_cycle(&self) {
         loop {
             Retry::new()
@@ -161,15 +192,17 @@ impl GcInner {
     }
 
     async fn sweep(&self) -> anyhow::Result<()> {
-        let mut maybe_cursor = Some(ListCandidatesCursor::Start);
-        while let Some(cursor) = maybe_cursor {
-            let (page, next_cursor) = self.gc_storage.list_candidates_page(cursor).await?;
-            for run_id in page {
-                // TODO: Batch. We're going to have possibly millions of these to get through.
-                self.storage.delete(FileName::Run(run_id)).await?;
-                self.gc_storage.remove_candidate(run_id).await?;
+        for pfx in 0..=255 {
+            let mut maybe_cursor = Some(ListCandidatesCursor::Start(pfx));
+            while let Some(cursor) = maybe_cursor {
+                let (page, next_cursor) = self.gc_storage.list_candidates_page(cursor).await?;
+                for run_id in page {
+                    // TODO: Batch. We're going to have possibly millions of these to get through.
+                    self.storage.delete(FileName::Run(run_id)).await?;
+                    self.gc_storage.remove_candidate(run_id).await?;
+                }
+                maybe_cursor = next_cursor;
             }
-            maybe_cursor = next_cursor;
         }
 
         Ok(())
@@ -195,6 +228,7 @@ async fn active_frozen_tablet_ids(
     Ok(active_frozen_tablet_ids)
 }
 
+#[derive(Clone, Debug)]
 enum GcPhase {
     /// Gather the list of candidates, that is, all of the runs that exist in storage.
     Gather,
@@ -209,15 +243,65 @@ enum GcPhase {
     Sweep,
 }
 
+impl GcPhase {
+    fn can_transition(&self, to: &GcPhase) -> bool {
+        match self {
+            GcPhase::Gather => matches!(to, GcPhase::Wait { .. }),
+            GcPhase::Wait { .. } => matches!(to, GcPhase::Prune),
+            GcPhase::Prune => matches!(to, GcPhase::Sweep),
+            GcPhase::Sweep => matches!(to, GcPhase::Gather),
+        }
+    }
+}
+
+impl TryFrom<pb::internal::GcPhase> for GcPhase {
+    type Error = anyhow::Error;
+
+    fn try_from(value: pb::internal::GcPhase) -> Result<Self, Self::Error> {
+        Ok(match value.phase.ok_or_else(|| anyhow!("missing phase"))? {
+            obsidian_pb::internal::gc_phase::Phase::Gather(_) => Self::Gather,
+            obsidian_pb::internal::gc_phase::Phase::Wait(wait) => Self::Wait {
+                start: Timestamp::from_micros(wait.start),
+            },
+            obsidian_pb::internal::gc_phase::Phase::Prune(_) => Self::Prune,
+            obsidian_pb::internal::gc_phase::Phase::Sweep(_) => Self::Sweep,
+        })
+    }
+}
+
+impl From<GcPhase> for pb::internal::GcPhase {
+    fn from(value: GcPhase) -> Self {
+        Self {
+            phase: Some(match value {
+                GcPhase::Gather => obsidian_pb::internal::gc_phase::Phase::Gather(()),
+                GcPhase::Wait { start } => obsidian_pb::internal::gc_phase::Phase::Wait(
+                    obsidian_pb::internal::gc_phase::Wait {
+                        start: start.as_micros(),
+                    },
+                ),
+                GcPhase::Prune => obsidian_pb::internal::gc_phase::Phase::Prune(()),
+                GcPhase::Sweep => obsidian_pb::internal::gc_phase::Phase::Sweep(()),
+            }),
+        }
+    }
+}
+
+impl Decode for GcPhase {
+    fn decode(b: &[u8]) -> anyhow::Result<Self> {
+        GcPhase::try_from(pb::internal::GcPhase::decode(b)?)
+    }
+}
+
 enum ListCandidatesCursor {
-    Start,
-    Continue(RunId),
+    Start(u8),
+    Continue(u8, Range<Vec<u8>>),
 }
 
 struct GcStorage {
     obsidian: Arc<dyn Obsidian>,
 }
 
+#[derive(Eq, Hash, PartialEq)]
 enum GcStorageKey {
     Phase(u8),
     Candidate(RunId),
@@ -237,64 +321,204 @@ impl GcStorageKey {
 
 impl GcStorage {
     async fn phase(&self) -> anyhow::Result<GcPhase> {
-        todo!();
+        let (_, _, phase) = self.get_or_init_phase(0).await?;
+        Ok(phase)
     }
 
     /// Adds a candidate to the set for this cycle. Errors in phases other than [`GcPhase::Gather`].
     async fn insert_candidate(&self, run_id: RunId) -> anyhow::Result<()> {
-        let pfx_key = GcStorageKey::Phase(run_id.encode_fixed()[0]).encode();
-        let snapshot_ts = self
-            .obsidian
-            .latest_snapshot(BTreeSet::from([pfx_key.clone()]))
-            .await?;
-        let record = self.obsidian.get(snapshot_ts, &pfx_key).await?;
-        self.obsidian
-            .write(
-                vec![],
-                BTreeMap::from([
-                    (pfx_key, Mutation::Put(vec![])),
-                    (
-                        GcStorageKey::Candidate(run_id).encode(),
-                        Mutation::Put(vec![]),
-                    ),
-                ]),
-            )
-            .await?;
-        todo!();
+        self.transact(run_id.encode_fixed()[0], async |phase, _| {
+            if !matches!(phase, GcPhase::Gather) {
+                return Err(anyhow!("cannot insert_candidate not in GcPhase::Gather"));
+            }
+
+            Ok(HashMap::from([(
+                GcStorageKey::Candidate(run_id),
+                Mutation::Put(vec![]),
+            )]))
+        })
+        .await?;
+
+        Ok(())
     }
 
     /// Removes a candidate from the set for this cycle. Errors in phases other than
     /// [`GcPhase::Prune`], [`GcPhase::Sweep`].
     async fn remove_candidate(&self, run_id: RunId) -> anyhow::Result<()> {
-        todo!();
+        self.transact(run_id.encode_fixed()[0], async |phase, _| {
+            if !matches!(phase, GcPhase::Prune | GcPhase::Sweep) {
+                return Err(anyhow!(
+                    "cannot remove_candidate not in GcPhase::Prune or GcPhase::Sweep"
+                ));
+            }
+
+            Ok(HashMap::from([(
+                GcStorageKey::Candidate(run_id),
+                Mutation::Put(vec![]),
+            )]))
+        })
+        .await?;
+
+        Ok(())
     }
 
     async fn list_candidates_page(
         &self,
         cursor: ListCandidatesCursor,
     ) -> anyhow::Result<(Vec<RunId>, Option<ListCandidatesCursor>)> {
-        todo!();
+        let (pfx, range) = match cursor {
+            ListCandidatesCursor::Start(pfx) => (pfx, Range::prefix(vec![pfx])),
+            ListCandidatesCursor::Continue(pfx, range) => (pfx, range),
+        };
+
+        let (snapshot_ts, _, _) = self.get_or_init_phase(pfx).await?;
+
+        let (records, maybe_continue_cursor_raw) = self
+            .obsidian
+            .scan_page(
+                snapshot_ts,
+                KeyspaceId::INTERNAL_GC_CANDIDATE,
+                range.borrow(),
+                Direction::Asc,
+                1000, // page_size
+            )
+            .await?;
+
+        let run_ids = records
+            .into_iter()
+            .map(|record| -> anyhow::Result<_> {
+                Ok(RunId::from(
+                    Uuid::from_bytes_ref((&record.key.1[..]).try_into()?).clone(),
+                ))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let maybe_continue_cursor =
+            maybe_continue_cursor_raw.map(|range| ListCandidatesCursor::Continue(pfx, range));
+
+        Ok((run_ids, maybe_continue_cursor))
     }
 
     /// Transitions to [`GcPhase::Wait`], erroring if not in [`GcPhase::Gather`].
     async fn transition_wait(&self) -> anyhow::Result<()> {
-        todo!();
+        self.transition(GcPhase::Wait {
+            start: Timestamp::now(),
+        })
+        .await
     }
 
     /// Transitions to [`GcPhase::Prune`], erroring if not in [`GcPhase::Wait`].
     async fn transition_prune(&self) -> anyhow::Result<()> {
-        todo!();
+        self.transition(GcPhase::Prune).await
     }
 
     /// Transitions to [`GcPhase::Sweep`], erroring if not in [`GcPhase::Prune`].
     async fn transition_sweep(&self) -> anyhow::Result<()> {
-        todo!();
+        self.transition(GcPhase::Sweep).await
     }
 
-    /// Transitions to [`GcPhase::Gather`], erroring if not in [`GcPhase::Sweep`] or if the
-    /// candidate set is non-empty.
+    /// Transitions to [`GcPhase::Gather`], erroring if not in [`GcPhase::Sweep`].
     async fn transition_gather(&self) -> anyhow::Result<()> {
-        todo!();
+        self.transition(GcPhase::Gather).await
+    }
+
+    async fn transition(&self, target_phase: GcPhase) -> anyhow::Result<()> {
+        let mut preconds = Vec::new();
+        let mut muts = BTreeMap::new();
+        for pfx in 0..255 {
+            let (snapshot_ts, phase_key, phase) = self.get_or_init_phase(pfx).await?;
+
+            if !phase.can_transition(&target_phase) {
+                return Err(anyhow!(
+                    "cannot transition from {:?} to {:?}",
+                    phase,
+                    target_phase
+                ));
+            }
+
+            preconds.push(Precondition::NotChangedSince(
+                phase_key.0,
+                phase_key.1,
+                snapshot_ts,
+            ));
+            muts.insert(
+                GcStorageKey::Phase(pfx).encode(),
+                Mutation::Put(pb::internal::GcPhase::from(target_phase.clone()).encode_to_vec()),
+            );
+        }
+
+        self.obsidian.write(preconds, muts).await?;
+
+        Ok(())
+    }
+
+    async fn get_phase(&self, pfx: u8) -> anyhow::Result<(Timestamp, Key, Option<GcPhase>)> {
+        let phase_key = GcStorageKey::Phase(pfx).encode();
+        let snapshot_ts = self
+            .obsidian
+            .latest_snapshot(BTreeSet::from([phase_key.clone()]))
+            .await?;
+        let maybe_phase_record = self.obsidian.get(snapshot_ts, &phase_key).await?;
+        let maybe_phase = maybe_phase_record
+            .map(|phase_record| GcPhase::decode(&phase_record.value))
+            .transpose()?;
+
+        Ok((snapshot_ts, phase_key, maybe_phase))
+    }
+
+    async fn get_or_init_phase(&self, pfx: u8) -> anyhow::Result<(Timestamp, Key, GcPhase)> {
+        let (snapshot_ts, phase_key, maybe_phase) = self.get_phase(pfx).await?;
+
+        if let Some(phase) = maybe_phase {
+            return Ok((snapshot_ts, phase_key, phase));
+        }
+
+        let write_ts = self
+            .obsidian
+            .write(
+                vec![Precondition::NotChangedSince(
+                    phase_key.0,
+                    phase_key.1.clone(),
+                    snapshot_ts,
+                )],
+                BTreeMap::from([(
+                    phase_key.clone(),
+                    Mutation::Put(pb::internal::GcPhase::from(GcPhase::Gather).encode_to_vec()),
+                )]),
+            )
+            .await?;
+
+        Ok((write_ts, phase_key, GcPhase::Gather))
+    }
+
+    async fn transact(
+        &self,
+        pfx: u8,
+        f: impl AsyncFnOnce(GcPhase, Timestamp) -> anyhow::Result<HashMap<GcStorageKey, Mutation>>,
+    ) -> anyhow::Result<()> {
+        let (snapshot_ts, phase_key, phase) = self.get_or_init_phase(pfx).await?;
+
+        let mut muts = f(phase.clone(), snapshot_ts).await?;
+
+        muts.insert(
+            GcStorageKey::Phase(pfx),
+            Mutation::Put(pb::internal::GcPhase::from(phase).encode_to_vec()),
+        );
+
+        self.obsidian
+            .write(
+                vec![Precondition::NotChangedSince(
+                    phase_key.0,
+                    phase_key.1,
+                    snapshot_ts,
+                )],
+                muts.into_iter()
+                    .map(|(storage_key, mutation)| (storage_key.encode(), mutation))
+                    .collect(),
+            )
+            .await?;
+
+        Ok(())
     }
 }
 
