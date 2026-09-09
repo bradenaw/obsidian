@@ -37,7 +37,8 @@ use crate::runtime::Meta;
 use crate::runtime::Shards;
 use crate::Obsidian;
 
-const GC_PRUNE_WAIT: Duration = Duration::from_mins(15);
+//const GC_PRUNE_WAIT: Duration = Duration::from_mins(15);
+const GC_PRUNE_WAIT: Duration = Duration::from_secs(3);
 
 /// [`StorageGc`] is the garbage collector for runs in storage.
 ///
@@ -100,25 +101,30 @@ impl StorageGcInner {
     async fn try_next_gc_phase(&self) -> anyhow::Result<()> {
         match self.gc_storage.phase().await? {
             GcPhase::Gather => {
+                log::info!("GcPhase::Gather");
                 self.gather().await?;
                 self.gc_storage.transition_wait().await?;
             }
             GcPhase::Wait { start } => {
+                log::info!("GcPhase::Wait");
                 let end = UNIX_EPOCH
                     .saturating_add(Duration::from_micros(start.as_micros()))
                     .saturating_add(GC_PRUNE_WAIT);
                 let remaining = end
                     .duration_since(SystemTime::now())
                     .unwrap_or(Duration::ZERO);
+                log::info!("GcPhase::Wait for {:?}", remaining);
                 sleep(remaining).await;
 
                 self.gc_storage.transition_prune().await?;
             }
             GcPhase::Prune => {
+                log::info!("GcPhase::Prune");
                 self.prune().await?;
                 self.gc_storage.transition_sweep().await?;
             }
             GcPhase::Sweep => {
+                log::info!("GcPhase::Sweep");
                 self.sweep().await?;
                 self.gc_storage.transition_gather().await?;
             }
@@ -131,6 +137,7 @@ impl StorageGcInner {
 
         while let Some(file_name) = s.try_next().await? {
             let FileName::Run(run_id) = file_name;
+            log::trace!("GcPhase::Gather adding {:?}", run_id);
             self.gc_storage.insert_candidate(run_id).await?;
         }
 
@@ -183,6 +190,7 @@ impl StorageGcInner {
 
         while let Some(shard_live_runs) = futures.try_next().await? {
             for run_id in shard_live_runs {
+                log::trace!("GcPhase::Prune pruning {:?}", run_id);
                 // TODO: Batch
                 self.gc_storage.remove_candidate(run_id).await?;
             }
@@ -198,6 +206,7 @@ impl StorageGcInner {
                 let (page, next_cursor) = self.gc_storage.list_candidates_page(cursor).await?;
                 for run_id in page {
                     // TODO: Batch. We're going to have possibly millions of these to get through.
+                    log::trace!("GcPhase::Sweep deleting {:?}", run_id);
                     self.storage.delete(FileName::Run(run_id)).await?;
                     self.gc_storage.remove_candidate(run_id).await?;
                 }
@@ -354,7 +363,7 @@ impl GcStorage {
 
             Ok(HashMap::from([(
                 GcStorageKey::Candidate(run_id),
-                Mutation::Put(vec![]),
+                Mutation::Delete,
             )]))
         })
         .await?;
@@ -425,7 +434,7 @@ impl GcStorage {
     async fn transition(&self, target_phase: GcPhase) -> anyhow::Result<()> {
         let mut preconds = Vec::new();
         let mut muts = BTreeMap::new();
-        for pfx in 0..255 {
+        for pfx in 0..=255 {
             let (snapshot_ts, phase_key, phase) = self.get_or_init_phase(pfx).await?;
 
             if !phase.can_transition(&target_phase) {
@@ -522,9 +531,123 @@ impl GcStorage {
     }
 }
 
-struct GcStorageSnapshot {
-    ts: Timestamp,
-    obsidian: Arc<dyn Obsidian>,
-}
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::time::Duration;
 
-impl GcStorageSnapshot {}
+    use futures::TryStreamExt;
+    use obsidian_common::ColoGroupId;
+    use obsidian_common::KeyspaceId;
+    use obsidian_common::Mutation;
+    use obsidian_common::RunId;
+    use obsidian_external::mem::MemStorage;
+    use obsidian_external::FileName;
+    use obsidian_external::Storage;
+
+    use super::StorageGc;
+    use crate::test::single_byte_splits;
+    use crate::test::ObsidianForTestBuilder;
+
+    #[tokio::test]
+    async fn test_gc_cycle() -> anyhow::Result<()> {
+        let _ = pretty_env_logger::try_init();
+
+        log::info!("test is starting");
+
+        let storage = Arc::new(MemStorage::new());
+        let obsidian = ObsidianForTestBuilder::new()
+            .n_shards(3)
+            .in_process_nodes_with(Arc::clone(&storage) as Arc<dyn Storage>)
+            .build()
+            .await?;
+
+        obsidian
+            .gateway
+            .create_colo_group(ColoGroupId::INTERNAL_GC, vec![])
+            .await?;
+        obsidian
+            .gateway
+            .create_keyspace(KeyspaceId::INTERNAL_GC_CANDIDATE)
+            .await?;
+        obsidian
+            .gateway
+            .create_keyspace(KeyspaceId::INTERNAL_GC_PHASE)
+            .await?;
+
+        obsidian
+            .gateway
+            .create_colo_group(ColoGroupId(1), single_byte_splits(3))
+            .await?;
+        let keyspace_id = KeyspaceId(ColoGroupId(1), 1);
+        obsidian.gateway.create_keyspace(keyspace_id).await?;
+
+        let value = vec![
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+
+        loop {
+            for i in 0..1000usize {
+                obsidian
+                    .gateway
+                    .write(
+                        vec![],
+                        BTreeMap::from([(
+                            (keyspace_id, vec![(i % 3) as u8, i as u8]),
+                            Mutation::Put(value.clone()),
+                        )]),
+                    )
+                    .await?;
+            }
+
+            let run_ids: HashSet<_> = storage.list().try_collect().await?;
+            if run_ids.len() > 15 {
+                break;
+            }
+        }
+
+        let run_ids: HashSet<_> = storage.list().try_collect().await?;
+        for run_id in run_ids {
+            println!("real run_id: {:?}", run_id);
+        }
+
+        let mut garbage_run_ids = HashSet::new();
+        for _ in 0..10 {
+            let run_id = RunId::new();
+            let mut file_writer = storage.put(FileName::Run(run_id)).await?;
+            file_writer.write_all(&[]).await?;
+            file_writer.shutdown().await?;
+            garbage_run_ids.insert(run_id);
+            println!("definitely garbage run_id: {:?}", run_id);
+        }
+
+        // just being in scope is enough
+        let _gc = StorageGc::new(
+            obsidian.meta,
+            obsidian.meta_synced,
+            obsidian.nodes.discovery(),
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            obsidian.gateway,
+        );
+
+        loop {
+            let filenames: HashSet<_> = storage.list().try_collect().await?;
+
+            if garbage_run_ids
+                .iter()
+                .all(|run_id| !filenames.contains(&FileName::Run(*run_id)))
+            {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        Ok(())
+    }
+}
