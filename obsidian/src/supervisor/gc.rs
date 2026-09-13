@@ -3,8 +3,6 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 use anyhow::anyhow;
 use futures::stream::FuturesUnordered;
@@ -37,8 +35,7 @@ use crate::runtime::Meta;
 use crate::runtime::Shards;
 use crate::Obsidian;
 
-//const GC_PRUNE_WAIT: Duration = Duration::from_mins(15);
-const GC_PRUNE_WAIT: Duration = Duration::from_secs(3);
+const GC_PHASE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// [`StorageGc`] is the garbage collector for runs in storage.
 ///
@@ -95,6 +92,8 @@ impl StorageGcInner {
             Retry::new()
                 .indefinitely(&async move || self.try_next_gc_phase().await)
                 .await;
+
+            sleep(GC_PHASE_INTERVAL).await;
         }
     }
 
@@ -103,19 +102,6 @@ impl StorageGcInner {
             GcPhase::Gather => {
                 log::info!("GcPhase::Gather");
                 self.gather().await?;
-                self.gc_storage.transition_wait().await?;
-            }
-            GcPhase::Wait { start } => {
-                log::info!("GcPhase::Wait");
-                let end = UNIX_EPOCH
-                    .saturating_add(Duration::from_micros(start.as_micros()))
-                    .saturating_add(GC_PRUNE_WAIT);
-                let remaining = end
-                    .duration_since(SystemTime::now())
-                    .unwrap_or(Duration::ZERO);
-                log::info!("GcPhase::Wait for {:?}", remaining);
-                sleep(remaining).await;
-
                 self.gc_storage.transition_prune().await?;
             }
             GcPhase::Prune => {
@@ -241,10 +227,6 @@ async fn active_frozen_tablet_ids(
 enum GcPhase {
     /// Gather the list of candidates, that is, all of the runs that exist in storage.
     Gather,
-    /// Pause between gathering and pruning for retention. The `live_runs` algorithm is safe even
-    /// if the wait time is zero, but this wait is the minimum amount of time a run has to be
-    /// considered 'dead' to be garbage collected.
-    Wait { start: Timestamp },
     /// Prune the candidate list by removing runs that are still live, leaving only dead runs in
     /// the candidate list.
     Prune,
@@ -255,8 +237,7 @@ enum GcPhase {
 impl GcPhase {
     fn can_transition(&self, to: &GcPhase) -> bool {
         match self {
-            GcPhase::Gather => matches!(to, GcPhase::Wait { .. }),
-            GcPhase::Wait { .. } => matches!(to, GcPhase::Prune),
+            GcPhase::Gather => matches!(to, GcPhase::Prune { .. }),
             GcPhase::Prune => matches!(to, GcPhase::Sweep),
             GcPhase::Sweep => matches!(to, GcPhase::Gather),
         }
@@ -269,9 +250,6 @@ impl TryFrom<pb::internal::GcPhase> for GcPhase {
     fn try_from(value: pb::internal::GcPhase) -> Result<Self, Self::Error> {
         Ok(match value.phase.ok_or_else(|| anyhow!("missing phase"))? {
             obsidian_pb::internal::gc_phase::Phase::Gather(_) => Self::Gather,
-            obsidian_pb::internal::gc_phase::Phase::Wait(wait) => Self::Wait {
-                start: Timestamp::from_micros(wait.start),
-            },
             obsidian_pb::internal::gc_phase::Phase::Prune(_) => Self::Prune,
             obsidian_pb::internal::gc_phase::Phase::Sweep(_) => Self::Sweep,
         })
@@ -283,11 +261,6 @@ impl From<GcPhase> for pb::internal::GcPhase {
         Self {
             phase: Some(match value {
                 GcPhase::Gather => obsidian_pb::internal::gc_phase::Phase::Gather(()),
-                GcPhase::Wait { start } => obsidian_pb::internal::gc_phase::Phase::Wait(
-                    obsidian_pb::internal::gc_phase::Wait {
-                        start: start.as_micros(),
-                    },
-                ),
                 GcPhase::Prune => obsidian_pb::internal::gc_phase::Phase::Prune(()),
                 GcPhase::Sweep => obsidian_pb::internal::gc_phase::Phase::Sweep(()),
             }),
@@ -406,14 +379,6 @@ impl GcStorage {
             maybe_continue_cursor_raw.map(|range| ListCandidatesCursor::Continue(pfx, range));
 
         Ok((run_ids, maybe_continue_cursor))
-    }
-
-    /// Transitions to [`GcPhase::Wait`], erroring if not in [`GcPhase::Gather`].
-    async fn transition_wait(&self) -> anyhow::Result<()> {
-        self.transition(GcPhase::Wait {
-            start: Timestamp::now(),
-        })
-        .await
     }
 
     /// Transitions to [`GcPhase::Prune`], erroring if not in [`GcPhase::Wait`].
