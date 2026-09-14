@@ -15,11 +15,13 @@ use async_trait::async_trait;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt as _;
 use futures::TryStreamExt;
+use obsidian_external::Storage;
 use obsidian_util::Retry;
 use obsidian_util::WithBackground;
 use tokio::sync::Notify;
 use tokio::time::sleep;
 
+use crate::gateway::Gateway;
 use crate::meta::MetaKey;
 use crate::meta::MetaMutation;
 use crate::meta::MetaReader;
@@ -36,6 +38,7 @@ use crate::meta::TransferState;
 use crate::runtime;
 use crate::runtime::Meta;
 use crate::runtime::Shards;
+use crate::supervisor::gc::StorageGc;
 use crate::supervisor::rebalance::plan_rebalance;
 use crate::supervisor::rebalance::RebalanceOptions;
 use crate::supervisor::rebalance::TransferPlan;
@@ -58,6 +61,7 @@ struct SupervisorInner {
     meta: Arc<dyn Meta>,
     meta_synced: Arc<MetaSynced>,
     shards: Arc<dyn Shards>,
+    storage_gc: StorageGc,
 
     assign_shards_trigger: Notify,
 }
@@ -67,11 +71,25 @@ impl Supervisor {
         meta: Arc<dyn Meta>,
         meta_synced: Arc<MetaSynced>,
         shards: Arc<dyn Shards>,
+        storage: Arc<dyn Storage>,
     ) -> Self {
+        let storage_gc = StorageGc::new(
+            Arc::clone(&meta),
+            Arc::clone(&meta_synced),
+            Arc::clone(&shards),
+            Arc::clone(&storage),
+            Arc::new(Gateway::new(
+                Arc::clone(&meta),
+                Arc::clone(&meta_synced),
+                Arc::clone(&shards),
+            )),
+        );
+
         let supervisor = Self(WithBackground::new(WithBackground::new(SupervisorInner {
             meta,
             meta_synced: Arc::clone(&meta_synced),
             shards,
+            storage_gc,
             assign_shards_trigger: Notify::new(),
         })));
 

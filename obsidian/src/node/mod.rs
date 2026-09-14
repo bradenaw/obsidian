@@ -274,6 +274,7 @@ impl NodeInner {
                                 Arc::new(Owned::weak(&meta)),
                                 Arc::clone(&self.meta_synced),
                                 Arc::clone(&self.shards),
+                                Arc::clone(&self.storage),
                             )));
                             *maybe_meta = Some(meta);
                         }

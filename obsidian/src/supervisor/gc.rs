@@ -512,15 +512,12 @@ mod tests {
     use obsidian_external::FileName;
     use obsidian_external::Storage;
 
-    use super::StorageGc;
     use crate::test::single_byte_splits;
     use crate::test::ObsidianForTestBuilder;
 
     #[tokio::test]
     async fn test_gc_cycle() -> anyhow::Result<()> {
         let _ = pretty_env_logger::try_init();
-
-        log::info!("test is starting");
 
         let storage = Arc::new(MemStorage::new());
         let obsidian = ObsidianForTestBuilder::new()
@@ -529,6 +526,7 @@ mod tests {
             .build()
             .await?;
 
+        // TODO: These need to be bootstrapped into existence.
         obsidian
             .gateway
             .create_colo_group(ColoGroupId::INTERNAL_GC, vec![])
@@ -591,15 +589,7 @@ mod tests {
             println!("definitely garbage run_id: {:?}", run_id);
         }
 
-        // just being in scope is enough
-        let _gc = StorageGc::new(
-            obsidian.meta,
-            obsidian.meta_synced,
-            obsidian.nodes.discovery(),
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            obsidian.gateway,
-        );
-
+        // The GC should spawn as a part of the supervisor, so the dead runs should get cleaned up.
         loop {
             let filenames: HashSet<_> = storage.list().try_collect().await?;
 

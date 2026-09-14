@@ -132,7 +132,7 @@ impl ObsidianForTestBuilder {
 
         let gateway = Gateway::new(
             Arc::clone(&meta),
-            MetaSynced::new(Arc::clone(&meta)),
+            Arc::new(MetaSynced::new(Arc::clone(&meta))),
             nodes.discovery(),
         );
 

@@ -46,7 +46,7 @@ use crate::WriteError;
 
 pub(crate) struct Gateway {
     meta: Arc<dyn Meta>,
-    meta_synced: MetaSynced,
+    meta_synced: Arc<MetaSynced>,
     shards: Arc<dyn Shards>,
 }
 
@@ -237,7 +237,7 @@ fn choose_shard<I: Iterator<Item = TabletId>>(iter: I) -> Option<ShardId> {
 impl Gateway {
     pub(crate) fn new(
         meta: Arc<dyn Meta>,
-        meta_synced: MetaSynced,
+        meta_synced: Arc<MetaSynced>,
         shards: Arc<dyn Shards>,
     ) -> Self {
         Self {
