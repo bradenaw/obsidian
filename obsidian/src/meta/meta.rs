@@ -105,10 +105,13 @@ impl runtime::Meta for Meta {
 
         self.transact(&async move |tx| {
             if tx.colo_group_exists(colo_group_id).await? {
-                return Err(anyhow!("{:?} already exists", colo_group_id).into());
+                return Err(InternalError::ColoGroupExists(colo_group_id).into());
             }
 
             let mut shard_ids: Vec<_> = tx.shard_ids().await?;
+            if shard_ids.is_empty() {
+                return Err(anyhow!("no shards").into());
+            }
             shard_ids.shuffle(&mut rand::rng());
 
             tx.put(MetaKey::ColoGroup(colo_group_id), MetaValue::Empty);
@@ -157,7 +160,7 @@ impl runtime::Meta for Meta {
             let keyspace_key = MetaKey::Keyspace(keyspace_id);
 
             if tx.exists(&keyspace_key).await? {
-                return Err(anyhow!("{:?} already exists", keyspace_id).into());
+                return Err(InternalError::KeyspaceExists(keyspace_id).into());
             }
 
             tx.put(keyspace_key, MetaValue::Empty);

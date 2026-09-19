@@ -5,6 +5,7 @@ package obsidian_internal;
 import "google/protobuf/empty.proto";
 
 import "internal/internal.proto";
+import "obsidian.proto";
 
 message InternalError {
     message Conflict {
@@ -30,6 +31,8 @@ message InternalError {
         TabletIdError tablet_not_hydrating = 8;
         // PartialGet is not returned this way.
         ShardIdError not_leader = 9;
-        string other = 10;
+        uint32 colo_group_exists = 10;
+        obsidian.KeyspaceId keyspace_exists = 11;
+        string other = 12;
     }
 }

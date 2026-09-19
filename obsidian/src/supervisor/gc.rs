@@ -526,20 +526,6 @@ mod tests {
             .build()
             .await?;
 
-        // TODO: These need to be bootstrapped into existence.
-        obsidian
-            .gateway
-            .create_colo_group(ColoGroupId::INTERNAL_GC, vec![])
-            .await?;
-        obsidian
-            .gateway
-            .create_keyspace(KeyspaceId::INTERNAL_GC_CANDIDATE)
-            .await?;
-        obsidian
-            .gateway
-            .create_keyspace(KeyspaceId::INTERNAL_GC_PHASE)
-            .await?;
-
         obsidian
             .gateway
             .create_colo_group(ColoGroupId(1), single_byte_splits(3))

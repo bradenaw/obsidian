@@ -15,6 +15,9 @@ use async_trait::async_trait;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt as _;
 use futures::TryStreamExt;
+use obsidian_common::ColoGroupId;
+use obsidian_common::InternalError;
+use obsidian_common::KeyspaceId;
 use obsidian_external::Storage;
 use obsidian_util::Retry;
 use obsidian_util::WithBackground;
@@ -94,6 +97,10 @@ impl Supervisor {
         })));
 
         meta_synced.subscribe(&supervisor.0);
+
+        supervisor.0.spawn(async |inner| {
+            inner.background_bootstrap().await;
+        });
 
         supervisor.0.spawn(async |inner| {
             inner.background_assign_shards().await;
@@ -672,6 +679,46 @@ impl SupervisorInner {
         Ok(())
     }
 
+    async fn background_bootstrap(&self) {
+        Retry::new()
+            .indefinitely(&async || -> anyhow::Result<()> {
+                let _ = self
+                    .meta
+                    .create_colo_group(ColoGroupId::INTERNAL_GC, vec![])
+                    .await
+                    .or_else(|err| {
+                        if matches!(err, InternalError::ColoGroupExists(_)) {
+                            return Ok(());
+                        }
+                        Err(err)
+                    })?;
+                let _ = self
+                    .meta
+                    .create_keyspace(KeyspaceId::INTERNAL_GC_CANDIDATE)
+                    .await
+                    .or_else(|err| {
+                        if matches!(err, InternalError::KeyspaceExists(_)) {
+                            return Ok(());
+                        }
+                        Err(err)
+                    })?;
+                let _ = self
+                    .meta
+                    .create_keyspace(KeyspaceId::INTERNAL_GC_PHASE)
+                    .await
+                    .or_else(|err| {
+                        if matches!(err, InternalError::KeyspaceExists(_)) {
+                            return Ok(());
+                        }
+                        Err(err)
+                    })?;
+
+                Ok(())
+            })
+            .await;
+        log::info!("bootstrap completed successfully");
+    }
+
     // This must be done out-of-band from try_sync_meta because we need to get up-to-date snapshots
     // of meta in order to make progress if we ever run into a precondition failure, and
     // meta_synced.wait from inside a meta_synced.subscribe deadlocks.
@@ -871,8 +918,11 @@ mod tests {
 
     use byteorder::BigEndian;
     use byteorder::ByteOrder;
+    use obsidian_common::TabletId;
 
     use crate::meta::MetaReader;
+    use crate::meta::MetaSyncedSnapshot;
+    use crate::meta::TabletState;
     use crate::test::ObsidianForTestBuilder;
     use crate::Bound;
     use crate::ColoGroupId;
@@ -981,7 +1031,7 @@ mod tests {
         }
 
         let meta_snapshot = obs.latest_meta_snapshot().await?;
-        let tablet_ids = meta_snapshot.tablet_ids().await?;
+        let tablet_ids = tablet_ids_for_colo_group(&meta_snapshot, keyspace_id.0).await?;
         let shard_ids = meta_snapshot.shard_ids().await?;
 
         let target_shard_id = shard_ids
@@ -1063,7 +1113,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let meta_snapshot = obs.latest_meta_snapshot().await?;
-        let tablet_ids = meta_snapshot.tablet_ids().await?;
+        let tablet_ids = tablet_ids_for_colo_group(&meta_snapshot, keyspace_id.0).await?;
         let shard_ids = meta_snapshot.shard_ids().await?;
 
         let target_shard_ids: Vec<_> = shard_ids
@@ -1098,5 +1148,25 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    async fn tablet_ids_for_colo_group(
+        meta_snapshot: &MetaSyncedSnapshot,
+        colo_group_id: ColoGroupId,
+    ) -> anyhow::Result<Vec<TabletId>> {
+        let all_tablet_ids = meta_snapshot.tablet_ids().await?;
+        let mut filtered_tablet_ids = Vec::new();
+
+        for tablet_id in &all_tablet_ids {
+            let tablet_metadata = meta_snapshot.tablet_metadata(*tablet_id).await?;
+
+            if tablet_metadata.colo_group_id == colo_group_id
+                && matches!(tablet_metadata.state.current(), TabletState::Active)
+            {
+                filtered_tablet_ids.push(*tablet_id);
+            }
+        }
+
+        Ok(filtered_tablet_ids)
     }
 }
