@@ -595,7 +595,7 @@ impl runtime::Meta for MetaProxy {
         &self,
         colo_group_id: ColoGroupId,
         initial_splits: Vec<Bound<Vec<u8>>>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), InternalError> {
         self.grpc_client
             .clone()
             .meta_create_colo_group(pb::CreateColoGroupReq {
@@ -612,7 +612,7 @@ impl runtime::Meta for MetaProxy {
         Ok(())
     }
 
-    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> Result<(), InternalError> {
         self.grpc_client
             .clone()
             .meta_create_keyspace(pb::CreateKeyspaceReq {

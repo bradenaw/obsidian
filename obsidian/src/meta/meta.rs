@@ -96,12 +96,9 @@ impl runtime::Meta for Meta {
         &self,
         colo_group_id: ColoGroupId,
         initial_splits: Vec<Bound<Vec<u8>>>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), InternalError> {
         if colo_group_id == ColoGroupId::META || colo_group_id == ColoGroupId::SHARD_META {
-            return Err(anyhow!(
-                "{:?} cannot be created, it is implicit",
-                colo_group_id,
-            ));
+            return Err(anyhow!("{:?} cannot be created, it is implicit", colo_group_id,).into());
         }
 
         let ranges = ranges_from_splits(initial_splits)?;
@@ -151,7 +148,7 @@ impl runtime::Meta for Meta {
         Ok(())
     }
 
-    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> Result<(), InternalError> {
         self.transact(&async move |tx| {
             if !tx.colo_group_exists(keyspace_id.0).await? {
                 return Err(anyhow!("{:?} does not exist", keyspace_id.0).into());
@@ -166,8 +163,9 @@ impl runtime::Meta for Meta {
             tx.put(keyspace_key, MetaValue::Empty);
             Ok(())
         })
-        .await
-        .map_err(anyhow::Error::from)
+        .await?;
+
+        Ok(())
     }
 
     async fn latest_snapshot(&self) -> anyhow::Result<Timestamp> {

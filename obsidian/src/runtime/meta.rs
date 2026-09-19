@@ -25,8 +25,8 @@ pub(crate) trait Meta: Send + Sync {
         &self,
         colo_group_id: ColoGroupId,
         initial_splits: Vec<Bound<Vec<u8>>>,
-    ) -> anyhow::Result<()>;
-    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()>;
+    ) -> Result<(), InternalError>;
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> Result<(), InternalError>;
 
     async fn latest_snapshot(&self) -> anyhow::Result<Timestamp>;
     async fn wait_for_newer(&self, ts: Timestamp) -> anyhow::Result<()>;

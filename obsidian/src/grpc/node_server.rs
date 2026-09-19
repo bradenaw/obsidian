@@ -465,7 +465,7 @@ impl pb::internal::node_server::Node for NodeServer {
             .map_err(|e| tonic::Status::failed_precondition(e.to_string()))?
             .create_colo_group(colo_group_id, initial_splits)
             .await
-            .map_err(internal)?;
+            .map_err(internal_err_to_status)?;
 
         Ok(tonic::Response::new(()))
     }
@@ -482,7 +482,7 @@ impl pb::internal::node_server::Node for NodeServer {
             .map_err(|e| tonic::Status::failed_precondition(e.to_string()))?
             .create_keyspace(keyspace_id)
             .await
-            .map_err(internal)?;
+            .map_err(internal_err_to_status)?;
 
         Ok(tonic::Response::new(()))
     }
