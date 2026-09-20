@@ -1,5 +1,7 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use obsidian_common::RunId;
 use obsidian_lsm::Lsm;
 
 use crate::tablet::journaled_lsm::JournaledLsm;
@@ -47,6 +49,8 @@ pub(super) trait LsmRead {
     fn find_split(&self) -> Option<Bound<Vec<u8>>>;
 
     fn physical_size(&self) -> u64;
+
+    fn live_runs(&self) -> BTreeSet<RunId>;
 }
 
 pub(super) struct ReadOnlyLsm {
@@ -115,5 +119,9 @@ impl LsmRead for ReadOnlyLsm {
 
     fn physical_size(&self) -> u64 {
         self.lsm.physical_size()
+    }
+
+    fn live_runs(&self) -> BTreeSet<RunId> {
+        self.lsm.live_runs()
     }
 }

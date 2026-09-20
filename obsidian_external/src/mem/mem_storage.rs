@@ -1,12 +1,15 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use futures::stream;
+use futures::Stream;
 
 use crate::mem::MemFileReader;
 use crate::mem::MemFileWriter;
@@ -75,6 +78,13 @@ impl Storage for MemStorage {
         self.inner.lock().unwrap().files.remove(&name);
         // Are names allowed to be reused?
         Ok(())
+    }
+
+    fn list(&self) -> Pin<Box<dyn Stream<Item = anyhow::Result<FileName>> + Send>> {
+        let inner = self.inner.lock().unwrap();
+        let names: Vec<_> = inner.files.keys().cloned().collect();
+
+        Box::pin(stream::iter(names.into_iter().map(Ok::<_, anyhow::Error>)))
     }
 }
 

@@ -4,6 +4,12 @@ use std::ops::Deref;
 use std::ops::DerefMut;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
+
+use tokio::time::sleep_until;
+
+use crate::Retry;
 
 /// Background is a set of owned tasks which are aborted on drop.
 pub struct Background {
@@ -75,6 +81,23 @@ where
             async move {
                 let inner2 = Arc::clone(&inner);
                 f(inner2.deref()).await;
+            }
+        });
+    }
+
+    pub fn spawn_jittered_periodic_retry<F>(&self, avg_interval: Duration, f: F)
+    where
+        F: AsyncFn(&T) -> anyhow::Result<()> + Send + Sync + 'static,
+        for<'a, 'b> <F as AsyncFnMut<(&'a T,)>>::CallRefFuture<'b>: Send,
+    {
+        self.spawn(async move |inner| loop {
+            loop {
+                let next =
+                    Instant::now() + rand::random_range(avg_interval / 2..avg_interval * 3 / 2);
+
+                Retry::new().indefinitely(&async || f(inner).await).await;
+
+                sleep_until(next.into()).await;
             }
         });
     }

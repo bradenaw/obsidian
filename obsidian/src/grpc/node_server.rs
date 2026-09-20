@@ -6,6 +6,7 @@ use async_stream::stream;
 use async_trait::async_trait;
 use futures::Stream;
 use futures::StreamExt;
+use obsidian_common::RunId;
 use obsidian_pb as pb;
 use obsidian_util::hexlify;
 
@@ -273,6 +274,24 @@ impl pb::internal::node_server::Node for NodeServer {
         }))
     }
 
+    async fn shard_live_runs(
+        &self,
+        req: tonic::Request<pb::internal::ShardIdReq>,
+    ) -> Result<tonic::Response<pb::internal::ShardLiveRunsResp>, tonic::Status> {
+        let req_inner = req.into_inner();
+        let shard_id = ShardId(req_inner.shard_id);
+        let shard = self.node.shard(shard_id).map_err(internal)?;
+
+        let live_runs = shard
+            .live_runs()
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+
+        Ok(tonic::Response::new(pb::internal::ShardLiveRunsResp {
+            run_ids: live_runs.into_iter().map(RunId::into).collect(),
+        }))
+    }
+
     async fn tablet_cleanup_committed(
         &self,
         req: tonic::Request<pb::internal::TabletCleanupCommittedReq>,
@@ -446,7 +465,7 @@ impl pb::internal::node_server::Node for NodeServer {
             .map_err(|e| tonic::Status::failed_precondition(e.to_string()))?
             .create_colo_group(colo_group_id, initial_splits)
             .await
-            .map_err(internal)?;
+            .map_err(internal_err_to_status)?;
 
         Ok(tonic::Response::new(()))
     }
@@ -463,7 +482,7 @@ impl pb::internal::node_server::Node for NodeServer {
             .map_err(|e| tonic::Status::failed_precondition(e.to_string()))?
             .create_keyspace(keyspace_id)
             .await
-            .map_err(internal)?;
+            .map_err(internal_err_to_status)?;
 
         Ok(tonic::Response::new(()))
     }

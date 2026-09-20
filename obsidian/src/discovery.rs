@@ -10,6 +10,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use im::OrdSet;
+use obsidian_common::RunId;
 use obsidian_util::spawn_owned;
 use obsidian_util::OwnedJoinHandle;
 use obsidian_util::Retry;
@@ -272,6 +273,14 @@ impl runtime::Shard for ShardProxy {
             .tx_wait(txid)
             .await
     }
+
+    async fn live_runs(&self) -> anyhow::Result<BTreeSet<RunId>> {
+        self.parent
+            .current_leader(self.shard_id)?
+            .shard(self.shard_id)?
+            .live_runs()
+            .await
+    }
 }
 
 // The leader for a tablet can change but we want to hand out an object that can be used
@@ -409,13 +418,13 @@ impl runtime::Meta for MetaProxy {
         &self,
         colo_group_id: ColoGroupId,
         initial_splits: Vec<Bound<Vec<u8>>>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), InternalError> {
         self.get_meta()?
             .create_colo_group(colo_group_id, initial_splits)
             .await
     }
 
-    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> Result<(), InternalError> {
         self.get_meta()?.create_keyspace(keyspace_id).await
     }
 

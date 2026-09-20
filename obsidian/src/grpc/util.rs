@@ -291,6 +291,8 @@ pub(super) fn internal_err_to_status(err: InternalError) -> tonic::Status {
         // This is not supposed to be returned this way.
         InternalError::PartialGet { .. } => tonic::Status::internal(msg),
         InternalError::NotLeader(_) => tonic::Status::failed_precondition(msg),
+        InternalError::ColoGroupExists(_) => tonic::Status::failed_precondition(msg),
+        InternalError::KeyspaceExists(_) => tonic::Status::failed_precondition(msg),
         InternalError::Other(_) => tonic::Status::internal(msg),
     };
 

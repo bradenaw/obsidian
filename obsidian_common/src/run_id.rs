@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::uuid_from_proto;
 use crate::uuid_to_proto;
 
-#[derive(Eq, PartialEq, Hash, Clone, Copy)]
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RunId(Uuid);
 
 impl RunId {

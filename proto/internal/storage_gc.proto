@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package obsidian_internal;
+
+import "google/protobuf/empty.proto";
+
+message GcPhase {
+    oneof phase {
+        google.protobuf.Empty gather = 1;
+        google.protobuf.Empty prune = 2;
+        google.protobuf.Empty sweep = 3;
+    }
+}

@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use obsidian_external::mem::MemJournals;
 use obsidian_external::mem::MemStorage;
 use obsidian_external::Journals;
+use obsidian_external::Storage;
 use obsidian_util::encode;
 use obsidian_util::Decode;
 use obsidian_util::Encode;
@@ -65,6 +66,14 @@ impl ObsidianForTestBuilder {
 
     pub fn nodes(mut self, nodes: Box<dyn TestNodes>) -> Self {
         self.nodes = Some(nodes);
+        self
+    }
+
+    pub fn in_process_nodes_with(mut self, storage: Arc<dyn Storage>) -> Self {
+        let journals = Arc::new(MemJournals::new()) as Arc<dyn Journals<Proposal<JournalEntry>>>;
+        self.nodes = Some(Box::new(InProcessNodes::new(Box::new(
+            InProcessNodeBuilder::new(storage, journals),
+        ))));
         self
     }
 
@@ -123,7 +132,7 @@ impl ObsidianForTestBuilder {
 
         let gateway = Gateway::new(
             Arc::clone(&meta),
-            MetaSynced::new(Arc::clone(&meta)),
+            Arc::new(MetaSynced::new(Arc::clone(&meta))),
             nodes.discovery(),
         );
 
@@ -186,7 +195,13 @@ where
     Ok(())
 }
 
-struct NoopJournalWriter {}
+pub(crate) struct NoopJournalWriter {}
+
+impl NoopJournalWriter {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
 
 #[async_trait]
 impl TabletJournalWriter for NoopJournalWriter {

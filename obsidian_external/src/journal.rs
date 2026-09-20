@@ -17,5 +17,7 @@ pub trait Journal<E>: Send + Sync + 'static {
 
     async fn latest(&self) -> anyhow::Result<JournalSeq>;
 
+    /// Remove entries in the journal that are older than `before`. When trim returns,
+    /// [`Self::oldest_available`] should return `before`.
     async fn trim(&self, before: JournalSeq) -> anyhow::Result<()>;
 }

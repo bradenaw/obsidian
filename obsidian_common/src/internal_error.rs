@@ -6,7 +6,9 @@ use anyhow::anyhow;
 use obsidian_pb as pb;
 use thiserror::Error;
 
+use crate::ColoGroupId;
 use crate::Key;
+use crate::KeyspaceId;
 use crate::Record;
 use crate::ShardId;
 use crate::TabletId;
@@ -43,6 +45,10 @@ pub enum InternalError {
     },
     #[error("node not currently leader for {0:?}")]
     NotLeader(ShardId),
+    #[error("{0:?} exists")]
+    ColoGroupExists(ColoGroupId),
+    #[error("{0:?} exists")]
+    KeyspaceExists(KeyspaceId),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -77,6 +83,12 @@ impl TryFrom<pb::internal::InternalError> for InternalError {
                 }
                 ErrorType::NotLeader(shard_id_error) => {
                     InternalError::NotLeader(ShardId(shard_id_error.shard_id))
+                }
+                ErrorType::ColoGroupExists(colo_group_id_raw) => {
+                    InternalError::ColoGroupExists(ColoGroupId(colo_group_id_raw))
+                }
+                ErrorType::KeyspaceExists(keyspace_id_pb) => {
+                    InternalError::KeyspaceExists(KeyspaceId::try_from(keyspace_id_pb)?)
                 }
                 ErrorType::Other(msg) => InternalError::Other(anyhow::Error::msg(msg)),
             },
@@ -134,6 +146,12 @@ impl TryFrom<InternalError> for pb::internal::InternalError {
                     ErrorType::NotLeader(pb::internal::internal_error::ShardIdError {
                         shard_id: shard_id.0,
                     })
+                }
+                InternalError::ColoGroupExists(colo_group_id) => {
+                    ErrorType::ColoGroupExists(colo_group_id.0)
+                }
+                InternalError::KeyspaceExists(keyspace_id) => {
+                    ErrorType::KeyspaceExists(keyspace_id.into())
                 }
                 InternalError::Other(error) => ErrorType::Other(error.to_string()),
             }),

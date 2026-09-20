@@ -26,6 +26,7 @@ service Node {
     rpc ShardTxTryCommit(ShardTxTryCommitReq) returns (TxOutcomeResp);
     rpc ShardTxTryAbort(ShardTxidReq) returns (TxOutcomeResp);
     rpc ShardTxWait(ShardTxidReq) returns (TxOutcomeResp);
+    rpc ShardLiveRuns(ShardIdReq) returns (ShardLiveRunsResp);
 
     rpc MetaAddShard(ShardIdReq) returns (google.protobuf.Empty);
     rpc MetaAddNode(NodeIdReq) returns (google.protobuf.Empty);
@@ -93,6 +94,10 @@ message ShardTxidReq {
 
 message TxOutcomeResp {
     TxOutcome tx_outcome = 1;
+}
+
+message ShardLiveRunsResp {
+    repeated Uuid run_ids = 1;
 }
 
 message TabletCleanupCommittedReq {

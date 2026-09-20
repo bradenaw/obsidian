@@ -15,6 +15,7 @@ use futures::future::Either;
 use futures::stream::FuturesUnordered;
 use futures::Stream;
 use futures::StreamExt;
+use obsidian_common::RunId;
 use obsidian_external::Journals;
 use obsidian_external::Storage;
 use obsidian_lsm::LsmOptions;
@@ -273,6 +274,7 @@ impl NodeInner {
                                 Arc::new(Owned::weak(&meta)),
                                 Arc::clone(&self.meta_synced),
                                 Arc::clone(&self.shards),
+                                Arc::clone(&self.storage),
                             )));
                             *maybe_meta = Some(meta);
                         }
@@ -392,12 +394,12 @@ impl runtime::Meta for WeakView<Meta> {
         &self,
         colo_group_id: ColoGroupId,
         initial_splits: Vec<Bound<Vec<u8>>>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), InternalError> {
         self.or_closed(async |inner| inner.create_colo_group(colo_group_id, initial_splits).await)
             .await
     }
 
-    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> Result<(), InternalError> {
         self.or_closed(async |inner| inner.create_keyspace(keyspace_id).await)
             .await
     }
@@ -476,6 +478,12 @@ impl runtime::Shard for (ShardId, WeakView<Replica>) {
     async fn tx_wait(&self, txid: Txid) -> Result<TxOutcome, InternalError> {
         self.1
             .or_closed(async |replica| replica.tx_wait(txid).await)
+            .await
+    }
+
+    async fn live_runs(&self) -> anyhow::Result<BTreeSet<RunId>> {
+        self.1
+            .or_closed(async |replica| replica.live_runs().await)
             .await
     }
 }

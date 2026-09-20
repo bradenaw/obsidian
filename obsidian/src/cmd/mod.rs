@@ -141,7 +141,7 @@ async fn cmd_node(args: NodeArgs) -> anyhow::Result<()> {
 
     let gateway = Gateway::new(
         discovery.meta(),
-        MetaSynced::new(discovery.meta()),
+        Arc::new(MetaSynced::new(discovery.meta())),
         discovery,
     );
 

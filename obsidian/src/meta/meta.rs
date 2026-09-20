@@ -96,22 +96,22 @@ impl runtime::Meta for Meta {
         &self,
         colo_group_id: ColoGroupId,
         initial_splits: Vec<Bound<Vec<u8>>>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), InternalError> {
         if colo_group_id == ColoGroupId::META || colo_group_id == ColoGroupId::SHARD_META {
-            return Err(anyhow!(
-                "{:?} cannot be created, it is implicit",
-                colo_group_id,
-            ));
+            return Err(anyhow!("{:?} cannot be created, it is implicit", colo_group_id,).into());
         }
 
         let ranges = ranges_from_splits(initial_splits)?;
 
         self.transact(&async move |tx| {
             if tx.colo_group_exists(colo_group_id).await? {
-                return Err(anyhow!("{:?} already exists", colo_group_id).into());
+                return Err(InternalError::ColoGroupExists(colo_group_id).into());
             }
 
             let mut shard_ids: Vec<_> = tx.shard_ids().await?;
+            if shard_ids.is_empty() {
+                return Err(anyhow!("no shards").into());
+            }
             shard_ids.shuffle(&mut rand::rng());
 
             tx.put(MetaKey::ColoGroup(colo_group_id), MetaValue::Empty);
@@ -151,7 +151,7 @@ impl runtime::Meta for Meta {
         Ok(())
     }
 
-    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
+    async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> Result<(), InternalError> {
         self.transact(&async move |tx| {
             if !tx.colo_group_exists(keyspace_id.0).await? {
                 return Err(anyhow!("{:?} does not exist", keyspace_id.0).into());
@@ -160,14 +160,15 @@ impl runtime::Meta for Meta {
             let keyspace_key = MetaKey::Keyspace(keyspace_id);
 
             if tx.exists(&keyspace_key).await? {
-                return Err(anyhow!("{:?} already exists", keyspace_id).into());
+                return Err(InternalError::KeyspaceExists(keyspace_id).into());
             }
 
             tx.put(keyspace_key, MetaValue::Empty);
             Ok(())
         })
-        .await
-        .map_err(anyhow::Error::from)
+        .await?;
+
+        Ok(())
     }
 
     async fn latest_snapshot(&self) -> anyhow::Result<Timestamp> {

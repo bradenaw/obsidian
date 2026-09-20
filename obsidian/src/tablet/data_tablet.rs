@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use obsidian_common::RunId;
 use obsidian_external::Storage;
 use obsidian_lsm::Lsm;
 use obsidian_lsm::LsmOptions;
@@ -193,6 +194,12 @@ impl DataTablet {
             .await
     }
 
+    pub async fn is_defunct(&self) -> bool {
+        self.state_machine
+            .inspect(|state| matches!(state, DataTabletState::Defunct))
+            .await
+    }
+
     pub async fn create_keyspace(&self, keyspace_id: KeyspaceId) -> anyhow::Result<()> {
         self.state_machine
             .with_state(async |state| {
@@ -216,6 +223,42 @@ impl DataTablet {
                 }
 
                 Ok(())
+            })
+            .await
+    }
+
+    pub async fn flush(&self) -> anyhow::Result<()> {
+        self.state_machine
+            .with_state(async |state| {
+                match state {
+                    DataTabletState::Defunct => {}
+                    DataTabletState::Hydrating(_) => {
+                        // Hydrating never has anything in L0, so nothing to flush.
+                    }
+                    DataTabletState::Active(active_tablet) => active_tablet.flush().await?,
+                    DataTabletState::Frozen(_) => {
+                        // Frozen never has anything in L0, so nothing to flush.
+                    }
+                }
+
+                Ok(())
+            })
+            .await
+    }
+
+    pub async fn live_runs(&self) -> anyhow::Result<BTreeSet<RunId>> {
+        self.state_machine
+            .with_state(async |state| {
+                Ok(match state {
+                    DataTabletState::Active(active_tablet) => active_tablet.live_runs(),
+                    DataTabletState::Frozen(frozen_tablet) => frozen_tablet.live_runs(),
+                    _ => {
+                        return Err(anyhow!(
+                            "wrong tablet state for live_runs {:?}",
+                            state.name()
+                        ));
+                    }
+                })
             })
             .await
     }

@@ -7,6 +7,7 @@ fn main() -> std::io::Result<()> {
             "../proto/internal/meta.proto",
             "../proto/internal/node.proto",
             "../proto/internal/proposal.proto",
+            "../proto/internal/storage_gc.proto",
         ],
         &["../proto", "../proto/internal/"],
     )?;
