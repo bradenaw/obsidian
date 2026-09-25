@@ -5,18 +5,14 @@ single-shot atomic preconditioned writes.
 
 ## Architecture
 
-The architecture bears some similarity to [Bigtable][1], in that the base is an LSM hosted in shared
+The architecture bears some similarity to Bigtable[1], in that the base is an LSM hosted in shared
 blob storage (like S3, GCP Cloud Storage, Azure Blob Storage); partitioned into ranges and assigned
 to tablets with leader election.
 
-[1][https://storage.googleapis.com/gweb-research2023-media/pubtools/4443.pdf]
-
-It uses [Hybrid Logical Clocks][2] to assign versions to transactions, and the read APIs allow
+It uses Hybrid Logical Clocks[2] to assign versions to transactions, and the read APIs allow
 observing the state of the whole store as of a particular version. Cross-shard transactions are
-handled with [two-phase commit][3].
+handled with two-phase commit[3].
 
-[2][https://cse.buffalo.edu/tech-reports/2014-04.pdf]
-[3][https://en.wikipedia.org/wiki/Commit_(data_management)#Two-Phase_Commit_(2PC)]
 
 ```
                                       shard:1  keys [a, m)
@@ -54,3 +50,7 @@ versions to transactions indepentently. This provides greater reliability but me
 may exhibit causal reverse: a later transaction can be assigned a lower timestamp than an earlier
 one, meaning that it is possible to view a snapshot that contains the results of the later
 transaction without the results of the earlier one.
+
+[1][https://storage.googleapis.com/gweb-research2023-media/pubtools/4443.pdf]
+[2][https://cse.buffalo.edu/tech-reports/2014-04.pdf]
+[3][https://en.wikipedia.org/wiki/Commit_(data_management)#Two-Phase_Commit_(2PC)]
