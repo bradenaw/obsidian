@@ -51,6 +51,6 @@ may exhibit causal reverse: a later transaction can be assigned a lower timestam
 one, meaning that it is possible to view a snapshot that contains the results of the later
 transaction without the results of the earlier one.
 
-[1][https://storage.googleapis.com/gweb-research2023-media/pubtools/4443.pdf]
-[2][https://cse.buffalo.edu/tech-reports/2014-04.pdf]
-[3][https://en.wikipedia.org/wiki/Commit_(data_management)#Two-Phase_Commit_(2PC)]
+[1]: https://storage.googleapis.com/gweb-research2023-media/pubtools/4443.pdf
+[2]: https://cse.buffalo.edu/tech-reports/2014-04.pdf
+[3]: https://en.wikipedia.org/wiki/Commit_(data_management)#Two-Phase_Commit_(2PC)
