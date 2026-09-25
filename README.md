@@ -5,13 +5,13 @@ single-shot atomic preconditioned writes.
 
 ## Architecture
 
-The architecture bears some similarity to Bigtable[1], in that the base is an LSM hosted in shared
+The architecture bears some similarity to [Bigtable][1], in that the base is an LSM hosted in shared
 blob storage (like S3, GCP Cloud Storage, Azure Blob Storage); partitioned into ranges and assigned
 to tablets with leader election.
 
-It uses Hybrid Logical Clocks[2] to assign versions to transactions, and the read APIs allow
+It uses [Hybrid Logical Clocks[2]] to assign versions to transactions, and the read APIs allow
 observing the state of the whole store as of a particular version. Cross-shard transactions are
-handled with two-phase commit[3].
+handled with [two-phase commit][3].
 
 
 ```
