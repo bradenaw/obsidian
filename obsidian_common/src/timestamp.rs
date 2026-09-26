@@ -3,7 +3,7 @@ use std::fmt::Display;
 use std::time::Duration;
 use std::time::SystemTime;
 
-#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy)]
+#[derive(Ord, PartialOrd, Eq, Hash, PartialEq, Clone, Copy)]
 pub struct Timestamp(pub u64);
 
 impl Timestamp {

@@ -1,5 +1,4 @@
 use std::fmt::Debug;
-use std::time::SystemTime;
 
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
@@ -9,10 +8,11 @@ use obsidian_util::Decode;
 use obsidian_util::Encode;
 
 use crate::ShardId;
+use crate::Timestamp;
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Txid {
-    pub ts: u64,
+    pub ts: Timestamp,
     pub rand: [u8; 16],
     /// The shard that will host the TxOutcome for this transaction in its ShardMetaTablet.
     pub owner: ShardId,
@@ -23,10 +23,7 @@ impl Txid {
 
     pub fn new(owner: ShardId) -> Self {
         Txid {
-            ts: SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_micros() as u64,
+            ts: Timestamp::now(),
             rand: rand::random(),
             owner,
         }
@@ -34,7 +31,7 @@ impl Txid {
 
     pub fn next(mut self) -> Self {
         self.rand = rand::random();
-        self.ts -= 1;
+        self.ts = self.ts.minus_one();
         self
     }
 
@@ -51,7 +48,7 @@ impl Txid {
         // when used as a key.
         let mut out = [0u8; Self::ENCODED_LEN];
         BigEndian::write_u32(&mut out[0..4], self.owner.0);
-        BigEndian::write_u64(&mut out[4..12], self.ts);
+        BigEndian::write_u64(&mut out[4..12], self.ts.as_micros());
         out[12..28].copy_from_slice(&self.rand[..]);
         out
     }
@@ -73,7 +70,7 @@ impl Decode for Txid {
             anyhow::bail!("txid not {} bytes", Txid::ENCODED_LEN);
         }
         let owner = ShardId(BigEndian::read_u32(&value[0..4]));
-        let ts = BigEndian::read_u64(&value[4..12]);
+        let ts = Timestamp::from_micros(BigEndian::read_u64(&value[4..12]));
         let mut rand = [0u8; 16];
         rand.copy_from_slice(&value[12..28]);
 
@@ -95,7 +92,7 @@ impl TryFrom<pb::internal::Txid> for Txid {
         BigEndian::write_u64(&mut rand[..8], value.rand0);
         BigEndian::write_u64(&mut rand[8..], value.rand1);
         Ok(Txid {
-            ts: value.ts,
+            ts: Timestamp::from_micros(value.ts),
             rand,
             owner: ShardId(value.owner_shard_id),
         })
@@ -105,7 +102,7 @@ impl TryFrom<pb::internal::Txid> for Txid {
 impl From<Txid> for pb::internal::Txid {
     fn from(value: Txid) -> Self {
         pb::internal::Txid {
-            ts: value.ts,
+            ts: value.ts.as_micros(),
             rand0: BigEndian::read_u64(&value.rand[..8]),
             rand1: BigEndian::read_u64(&value.rand[8..]),
             owner_shard_id: value.owner.0,
