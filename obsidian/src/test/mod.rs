@@ -1,3 +1,4 @@
+mod containers;
 mod grpc_bridge;
 mod grpc_in_process_node_builder;
 mod in_process_node_builder;
