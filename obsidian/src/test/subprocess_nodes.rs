@@ -6,7 +6,6 @@ use std::net::Ipv6Addr;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use im::OrdSet;
@@ -24,14 +23,13 @@ use crate::runtime::Node;
 use crate::runtime::Nodes;
 use crate::test::test_nodes::TestNodes;
 
-const S3_PORT: u16 = 9000;
-const S3_CONSOLE_PORT: u16 = 9001;
+const S3_PORT: u16 = 9090;
 const CONSUL_PORT: u16 = 8500;
 const JOURNALS_PORT: u16 = 8000;
 const NODE_PORTS_START: u16 = 8001;
 
-const MINIO_IMAGE: &str =
-    "docker.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e";
+const S3MOCK_IMAGE: &str =
+    "docker.io/adobe/s3mock@sha256:ab01a6946750f451ca215a47e91030695b260e4003b8a5a6201d25029b8fca92";
 const CONSUL_IMAGE: &str = "docker.io/hashicorp/consul@sha256:a230dcea0bb107bd7958a912d1429fb7f9d399637de7ffb814b34412b9e8c543";
 const CONSUL_SERVICE: &str = "obsidian";
 const S3_BUCKET_NAME: &str = "obsidian";
@@ -74,35 +72,19 @@ impl SubprocessNodes {
             .arg("run")
             .arg("--rm")
             .arg("--name")
-            .arg("obsidian_test_minio")
+            .arg("obsidian_test_s3mock")
             .arg("--label")
             .arg(label.clone())
             .arg("-p")
             .arg(format!("{}:{}", S3_PORT, S3_PORT))
-            .arg("-p")
-            .arg(format!("{}:{}", S3_CONSOLE_PORT, S3_CONSOLE_PORT))
-            .arg(MINIO_IMAGE.to_string())
-            .arg("server")
-            .arg("/data")
-            .arg("--address")
-            .arg(format!(":{}", S3_PORT))
-            .arg("--console-address")
-            .arg(format!(":{}", S3_CONSOLE_PORT))
+            .arg("--env")
+            .arg(format!(
+                "COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS={}",
+                S3_BUCKET_NAME
+            ))
+            .arg(S3MOCK_IMAGE.to_string())
             .kill_on_drop(true)
             .spawn()?;
-
-        // JANK: need to wait for container to launch we try to make the bucket
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        Command::new("podman")
-            .arg("exec")
-            .arg("obsidian_test_minio")
-            .arg("mkdir")
-            .arg("-p")
-            .arg(format!("/data/{}", S3_BUCKET_NAME))
-            .spawn()?
-            .wait()
-            .await?;
 
         let consul = Command::new("podman")
             .arg("run")
@@ -184,9 +166,7 @@ impl TestNodes for SubprocessNodes {
         let node = Command::new(self.cargo_bin.join("obsidian"))
             .env("RUST_BACKTRACE", "1")
             .env("RUST_LOG", "info")
-            .env("AWS_REGION", "us-west-2")
-            .env("AWS_ACCESS_KEY_ID", "minioadmin")
-            .env("AWS_SECRET_ACCESS_KEY", "minioadmin")
+            .env("AWS_REGION", "us-east-1")
             .arg("node")
             .arg("--node-id")
             .arg(node_id.to_string())

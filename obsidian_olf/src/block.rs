@@ -231,12 +231,14 @@ impl<'a> Block<'a> {
         let value_len = value_end_in_block - value_start_in_block;
 
         let mut value = vec![0u8; value_len as usize];
-        self.reader
-            .read_exact_at(
-                &mut value[..],
-                self.values_offset_in_file + (value_start_in_block as u64),
-            )
-            .await?;
+        if value_len > 0 {
+            self.reader
+                .read_exact_at(
+                    &mut value[..],
+                    self.values_offset_in_file + (value_start_in_block as u64),
+                )
+                .await?;
+        }
 
         Ok(RevisionValue::Regular(value))
     }

@@ -112,15 +112,34 @@ async fn cmd_node(args: NodeArgs) -> anyhow::Result<()> {
 
     let discovery = Arc::new(Discovery::new(Arc::clone(&nodes) as Arc<dyn Nodes>));
 
-    let storage = S3Storage::new(
+    let s3_client = if args.s3_addr.starts_with("http://[::1]:") {
+        aws_sdk_s3::Client::from_conf(
+            aws_sdk_s3::config::Builder::from(
+                &aws_config::from_env()
+                    .endpoint_url(args.s3_addr)
+                    .credentials_provider(aws_credential_types::Credentials::new(
+                        "dummy-access-key",
+                        "dummy-secret-key",
+                        None,
+                        None,
+                        "static",
+                    ))
+                    .load()
+                    .await,
+            )
+            .force_path_style(true)
+            .build(),
+        )
+    } else {
         aws_sdk_s3::Client::new(
             &aws_config::from_env()
                 .endpoint_url(args.s3_addr)
                 .load()
                 .await,
-        ),
-        args.s3_bucket,
-    );
+        )
+    };
+
+    let storage = S3Storage::new(s3_client, args.s3_bucket);
 
     let meta_synced = Arc::new(MetaSynced::new(discovery.meta()));
 

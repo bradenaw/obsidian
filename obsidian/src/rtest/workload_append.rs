@@ -805,6 +805,8 @@ mod tests {
             .build()
             .await?;
 
+        tokio::time::sleep(Duration::from_secs(600)).await;
+
         let node_ids = obs.nodes.node_ids().0;
         let some_node_id = node_ids.iter().next().unwrap();
         let gateway = GatewayClient::connect(format!(
