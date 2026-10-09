@@ -64,6 +64,9 @@ pub(crate) trait MetaReader {
         Ok(!(self.exists(&MetaKey::Sync).await?))
     }
 
+    /// Returns the IDs of all of the shards that exist in meta.
+    ///
+    /// Note that ShardId::META is implicit, and thus not included here.
     async fn shard_ids(&self) -> anyhow::Result<Vec<ShardId>> {
         let mut out = vec![];
         let mut s = self.scan_keys(MetaKey::shards(), Direction::Asc);

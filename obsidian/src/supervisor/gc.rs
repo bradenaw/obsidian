@@ -133,6 +133,7 @@ impl StorageGcInner {
     async fn prune(&self) -> anyhow::Result<()> {
         let meta_snapshot = self.meta_synced.snapshot();
         let mut shard_ids = meta_snapshot.shard_ids().await?;
+        shard_ids.push(ShardId::META);
 
         while !shard_ids.is_empty() {
             let meta_snapshot = self.meta_synced.snapshot();
