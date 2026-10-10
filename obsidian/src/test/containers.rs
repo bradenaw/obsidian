@@ -15,22 +15,22 @@ use tokio::process::Command;
 use tokio::spawn;
 
 const COLOR_ESCAPES: &[&'static str] = &[
-    "\x1b[33m",   // yellow
     "\x1b[34m",   // blue
     "\x1b[35m",   // magenta
     "\x1b[36m",   // cyan
-    "\x1b[31m",   // red
-    "\x1b[32m",   // green
-    "\x1b[1;33m", // bright yellow
+    "\x1b[37m",   // white
     "\x1b[1;34m", // bright blue
     "\x1b[1;35m", // bright magenta
     "\x1b[1;36m", // bright cyan
+    "\x1b[1;37m", // bright white
+    "\x1b[33m",   // yellow
+    "\x1b[31m",   // red
+    "\x1b[32m",   // green
+    "\x1b[1;33m", // bright yellow
     "\x1b[1;31m", // bright red
     "\x1b[1;32m", // bright green
     "\x1b[1;30m", // bright black
-    "\x1b[1;37m", // bright white
-    //"\x1b[30m",   // black
-    "\x1b[37m", // white
+                  //"\x1b[30m",   // black
 ];
 
 const RESET_ESCAPE: &'static str = "\x1b[0m";
@@ -165,11 +165,11 @@ impl<'a> ContainerBuilder<'a> {
     }
 
     pub fn mount(
-        &'a mut self,
+        mut self,
         host_dir: impl Into<String>,
         container_dir: impl Into<String>,
         read_only: bool,
-    ) -> &'a mut ContainerBuilder<'a> {
+    ) -> Self {
         self.mounts
             .push((host_dir.into(), container_dir.into(), read_only));
         self

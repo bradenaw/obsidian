@@ -39,7 +39,6 @@ pub(crate) struct SubprocessNodes {
 
     cargo_bin: PathBuf,
     containers: Containers,
-    journals: Child,
     next_port: u16,
     nodes: HashMap<NodeId, Child>,
 }
@@ -82,19 +81,22 @@ impl SubprocessNodes {
             path
         })?;
 
-        let journals = Command::new(cargo_bin.join("obsidian"))
+        let _journals_container = containers
+            .new_container("obsidian_test_journals")
+            .port(JOURNALS_PORT)
+            .mount(cargo_bin.to_string_lossy(), "/cargo-bin", true /*ro*/)
             .env("RUST_LOG", "info")
             .env("RUST_BACKTRACE", "1")
+            .arg("/cargo-bin/obsidian")
             .arg("test-journals")
             .arg("--port")
             .arg(JOURNALS_PORT.to_string())
-            .kill_on_drop(true)
             .spawn()?;
 
         let node_discovery = ConsulNodeDiscovery::observe(
             Consul::new({
                 let mut config = rs_consul::Config::default();
-                config.address = format!("http://[::1]:{}", CONSUL_PORT);
+                config.address = format!("http://localhost:{}", CONSUL_PORT);
                 config
             }),
             CONSUL_SERVICE.to_string(),
@@ -109,7 +111,6 @@ impl SubprocessNodes {
             discovery,
             inner_nodes,
             containers,
-            journals,
             next_port: NODE_PORTS_START,
             nodes: HashMap::new(),
         })
@@ -136,13 +137,13 @@ impl TestNodes for SubprocessNodes {
             .arg("--node-id")
             .arg(node_id.to_string())
             .arg("--journals-addr")
-            .arg(format!("http://[::1]:{}", JOURNALS_PORT))
+            .arg(format!("http://localhost:{}", JOURNALS_PORT))
             .arg("--s3-addr")
-            .arg(format!("http://[::1]:{}", S3_PORT))
+            .arg(format!("http://localhost:{}", S3_PORT))
             .arg("--s3-bucket")
             .arg(S3_BUCKET_NAME.to_string())
             .arg("--consul-addr")
-            .arg(format!("http://[::1]:{}", CONSUL_PORT))
+            .arg(format!("http://localhost:{}", CONSUL_PORT))
             .arg("--consul-service")
             .arg(CONSUL_SERVICE.to_string())
             .kill_on_drop(true)

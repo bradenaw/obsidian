@@ -143,9 +143,9 @@ async fn cmd_node(args: NodeArgs) -> anyhow::Result<()> {
 
     let meta_synced = Arc::new(MetaSynced::new(discovery.meta()));
 
-    let journals = JournalsClient::new(
-        pb::external::journals_client::JournalsClient::connect(args.journals_addr).await?,
-    );
+    let journals = JournalsClient::new(pb::external::journals_client::JournalsClient::new(
+        tonic::transport::Endpoint::from_shared(args.journals_addr)?.connect_lazy(),
+    ));
 
     let node = Node::new(
         node_id,
@@ -186,8 +186,7 @@ struct TestJournalsArgs {
 }
 
 async fn cmd_test_journals(args: TestJournalsArgs) -> anyhow::Result<()> {
-    let addr = IpAddr::V6(Ipv6Addr::LOCALHOST);
-    let listener = TcpListener::bind(format!("{}:{}", addr, args.port)).await?;
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", args.port)).await?;
     log::info!(
         "running test journals on port {}",
         listener.local_addr()?.port(),
