@@ -47,7 +47,7 @@ impl SubprocessNodes {
         let mut containers = Containers::new(label.into()).await?;
 
         let _s3_container = containers
-            .new_container("obsidian_test_s3mock")
+            .new_container("s3mock")
             .image(S3MOCK_IMAGE)
             .port(S3_PORT)
             .env(
@@ -57,7 +57,7 @@ impl SubprocessNodes {
             .spawn()?;
 
         let _consul_container = containers
-            .new_container("obisidan_test_consul")
+            .new_container("consul")
             .image(CONSUL_IMAGE)
             .port(CONSUL_PORT)
             .arg("agent")
@@ -81,7 +81,7 @@ impl SubprocessNodes {
         })?;
 
         let _journals_container = containers
-            .new_container("obsidian_test_journals")
+            .new_container("journals")
             .port(JOURNALS_PORT)
             .mount(cargo_bin.to_string_lossy(), "/cargo-bin", true /*ro*/)
             .env("RUST_LOG", "info")
@@ -137,6 +137,7 @@ impl TestNodes for SubprocessNodes {
                 "/cargo-bin",
                 true, /*ro*/
             )
+            // Necessary to trick rustls, needed for S3 client.
             .mount("/etc/ssl/certs", "/etc/ssl/certs", true /*ro*/)
             .env("RUST_BACKTRACE", "1")
             .env("RUST_LOG", "info")
