@@ -35,6 +35,8 @@ const COLOR_ESCAPES: &[&'static str] = &[
 
 const RESET_ESCAPE: &'static str = "\x1b[0m";
 
+const UBUNTU_24_04_IMAGE: &str = "docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55";
+
 /// Manages a set of containers, useful for doing fault injection between networked components.
 pub(crate) struct Containers {
     label: String,
@@ -48,49 +50,29 @@ impl Containers {
     pub async fn new(label: String) -> anyhow::Result<Self> {
         // TODO: flock
 
-        let network_ls_output = run(Command::new("podman").args([
-            "network",
-            "ls",
-            "--quiet", // only names
-            "--filter",
-            &format!("label={}", label),
-        ]))
-        .await?;
-        println!("network_ls_output={:?}", network_ls_output);
-        for network_name in BufRead::lines(Cursor::new(network_ls_output)) {
-            let network_name = network_name.unwrap();
-            log::info!("removing old network {}", network_name);
-            run(Command::new("podman").args(["network", "rm", &network_name])).await?;
-        }
-        let container_ps_output = run(Command::new("podman").args([
-            "container",
-            "ps",
-            "--quiet", // only names
-            "--filter",
-            &format!("label={}", label),
-        ]))
-        .await?;
-        for container_name in BufRead::lines(Cursor::new(container_ps_output)) {
-            run(Command::new("podman").args(["container", "rm", &container_name.unwrap()])).await?;
-        }
+        log::info!("using label={} on all containers and networks", label);
 
-        //run(Command::new("podman").args([
-        //    "network",
-        //    "create",
-        //    // Don't allow access to the outside.
-        //    "--internal",
-        //    "--label",
-        //    &label,
-        //    &label, // name
-        //]))
-        //.await?;
+        cleanup_old(&label).await?;
+
+        let main_network_name = format!("{}-internal-net", label);
+        run(Command::new("podman").args([
+            "network",
+            "create",
+            // Don't allow access to the outside.
+            "--internal",
+            "--label",
+            &label,
+            &main_network_name,
+        ]))
+        .await?;
 
         // Slightly hacky: `podman run` runs the containers in the background. Even if the `podman
         // run` process dies, the containers still stick around. That's not the behavior we want,
         // when the test ends (or gets sigtermed etc.) we want it to clean up after itself.
         //
         // The hacky solution is to spawn this process that waits for its own stdin to close (which
-        // happens when we die), and then kills the containers with the label we made.
+        // happens when _we_ die, because we're holding the other end of the file), and then kills
+        // the containers with the label we made.
         //
         // There's still a race here where if we die while spawning a container, this reaper
         // process might clean up too early. Oh well.
@@ -102,11 +84,11 @@ impl Containers {
             .stderr(Stdio::null())
             .spawn()?;
 
-        // TODO: need to spawn a network proxy to get through the --internal
+        // TODO: need to spawn a network proxy to get through the --internal?
 
         Ok(Self {
-            label: label.clone(),
-            main_network_name: label.clone(),
+            label,
+            main_network_name,
             color_idx: 0,
             containers: BTreeSet::new(),
             kill_on_exit,
@@ -115,16 +97,14 @@ impl Containers {
 
     pub fn new_container(
         &mut self,
-        name: String,
-        image: impl Into<String>,
-        _location: String,
+        name: impl Into<String>,
         command: impl Into<String>,
     ) -> ContainerBuilder<'_> {
         ContainerBuilder {
             parent: self,
 
-            name,
-            image: image.into(),
+            name: name.into(),
+            image: None,
             command: command.into(),
             env: BTreeMap::new(),
             args: Vec::new(),
@@ -160,7 +140,7 @@ pub(crate) struct ContainerBuilder<'a> {
     parent: &'a mut Containers,
 
     name: String,
-    image: String,
+    image: Option<String>,
     command: String,
     ports: BTreeSet<u16>,
     env: BTreeMap<String, String>,
@@ -185,13 +165,19 @@ impl<'a> ContainerBuilder<'a> {
         self
     }
 
+    pub fn image(mut self, image: impl Into<String>) -> Self {
+        self.image = Some(image.into());
+        self
+    }
+
     pub fn mount(
         &'a mut self,
-        host_dir: String,
-        container_dir: String,
+        host_dir: impl Into<String>,
+        container_dir: impl Into<String>,
         read_only: bool,
     ) -> &'a mut ContainerBuilder<'a> {
-        self.mounts.push((host_dir, container_dir, read_only));
+        self.mounts
+            .push((host_dir.into(), container_dir.into(), read_only));
         self
     }
 
@@ -211,6 +197,8 @@ impl<'a> ContainerBuilder<'a> {
                 "--label",
                 &self.parent.label,
                 "--rm",
+                "--network",
+                &self.parent.main_network_name,
             ])
             .args(
                 self.ports
@@ -234,7 +222,7 @@ impl<'a> ContainerBuilder<'a> {
                         )
                     }),
             )
-            .arg(self.image)
+            .arg(self.image.unwrap_or(UBUNTU_24_04_IMAGE.into()))
             .arg(self.command)
             .args(self.args)
             .kill_on_drop(true)
@@ -306,6 +294,40 @@ impl Container {
     }
 }
 
+async fn cleanup_old(label: &str) -> anyhow::Result<()> {
+    log::debug!("cleaning up old containers");
+    let container_ps_output = run(Command::new("podman").args([
+        "container",
+        "ps",
+        "--quiet", // only names
+        "--all",   // also stopped
+        "--filter",
+        &format!("label={}", label),
+    ]))
+    .await?;
+    for container_name in BufRead::lines(Cursor::new(container_ps_output)) {
+        let container_name = container_name.unwrap();
+        log::debug!("cleaning up old containers: {}", container_name);
+        run(Command::new("podman").args(["container", "rm", "--force", &container_name])).await?;
+    }
+    log::debug!("cleaning up old container networks");
+    let network_ls_output = run(Command::new("podman").args([
+        "network",
+        "ls",
+        "--quiet", // only names
+        "--filter",
+        &format!("label={}", label),
+    ]))
+    .await?;
+    for network_name in BufRead::lines(Cursor::new(network_ls_output)) {
+        let network_name = network_name.unwrap();
+        log::debug!("cleaning up old container networks: {}", network_name);
+        run(Command::new("podman").args(["network", "rm", &network_name])).await?;
+    }
+
+    Ok(())
+}
+
 /// Run the given command returning stdout. If the command does not exit with code 0, returns a
 /// SubprocessError that holds its stderr.
 async fn run(command: &mut Command) -> Result<Vec<u8>, SubprocessError> {
@@ -326,7 +348,7 @@ async fn run(command: &mut Command) -> Result<Vec<u8>, SubprocessError> {
             stderr: output.stderr,
         });
     }
-    Ok(output.stderr)
+    Ok(output.stdout)
 }
 
 #[derive(Debug)]
@@ -355,20 +377,23 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn run_output() -> anyhow::Result<()> {
+        let out = run(&mut Command::new("echo").arg("foo")).await?;
+
+        assert_eq!(out, "foo\n".as_bytes());
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn containers() -> anyhow::Result<()> {
         let _ = pretty_env_logger::try_init();
         let mut containers = Containers::new("containers_own_test".to_string()).await?;
         let _node0 = containers
-            .new_container(
-                "node0".to_string(),
-                "docker.io/ubuntu/noble", //@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55",
-                "location".to_string(),
-                "bash",
-            )
+            .new_container("node0".to_string(), "bash")
             .arg("-c")
-            .arg("sleep 10000".to_string())
+            .arg("echo hello world")
             .spawn()?;
-        tokio::time::sleep(Duration::from_secs(500)).await;
         Ok(())
     }
 }
