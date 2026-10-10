@@ -95,17 +95,12 @@ impl Containers {
         })
     }
 
-    pub fn new_container(
-        &mut self,
-        name: impl Into<String>,
-        command: impl Into<String>,
-    ) -> ContainerBuilder<'_> {
+    pub fn new_container(&mut self, name: impl Into<String>) -> ContainerBuilder<'_> {
         ContainerBuilder {
             parent: self,
 
             name: name.into(),
             image: None,
-            command: command.into(),
             env: BTreeMap::new(),
             args: Vec::new(),
             ports: BTreeSet::new(),
@@ -141,7 +136,6 @@ pub(crate) struct ContainerBuilder<'a> {
 
     name: String,
     image: Option<String>,
-    command: String,
     ports: BTreeSet<u16>,
     env: BTreeMap<String, String>,
     args: Vec<String>,
@@ -223,7 +217,6 @@ impl<'a> ContainerBuilder<'a> {
                     }),
             )
             .arg(self.image.unwrap_or(UBUNTU_24_04_IMAGE.into()))
-            .arg(self.command)
             .args(self.args)
             .kill_on_drop(true)
             .stdout(Stdio::piped())
@@ -241,6 +234,7 @@ impl<'a> ContainerBuilder<'a> {
             while let Ok(Some(line)) = lines.next_line().await {
                 println!("{}{}{} | {}", color_escape, name, RESET_ESCAPE, line);
             }
+            println!("{}{}{} | <stdout closed>", color_escape, name, RESET_ESCAPE);
         });
         let name = self.name.clone();
         spawn(async move {
@@ -249,19 +243,34 @@ impl<'a> ContainerBuilder<'a> {
             while let Ok(Some(line)) = lines.next_line().await {
                 eprintln!("{}{}{} | {}", color_escape, name, RESET_ESCAPE, line);
             }
+            eprintln!("{}{}{} | <stderr closed>", color_escape, name, RESET_ESCAPE);
+        });
+        let name = self.name.clone();
+        spawn(async move {
+            match proc.wait().await {
+                Ok(exit_status) => eprintln!(
+                    "{}{}{} | process exited with code {}",
+                    color_escape,
+                    name,
+                    RESET_ESCAPE,
+                    exit_status.code().unwrap()
+                ),
+                Err(err) => {
+                    eprintln!(
+                        "{}{}{} | error while waiting for process: {:?}",
+                        color_escape, name, RESET_ESCAPE, err
+                    );
+                }
+            }
         });
 
         self.parent.containers.insert(self.name.clone());
 
-        Ok(Container {
-            proc,
-            name: self.name,
-        })
+        Ok(Container { name: self.name })
     }
 }
 
 pub(crate) struct Container {
-    proc: Child,
     name: String,
 }
 
@@ -390,7 +399,8 @@ mod tests {
         let _ = pretty_env_logger::try_init();
         let mut containers = Containers::new("containers_own_test".to_string()).await?;
         let _node0 = containers
-            .new_container("node0".to_string(), "bash")
+            .new_container("node0".to_string())
+            .arg("bash")
             .arg("-c")
             .arg("echo hello world")
             .spawn()?;

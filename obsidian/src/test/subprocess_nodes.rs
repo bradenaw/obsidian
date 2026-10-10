@@ -4,7 +4,6 @@ use std::future::Future;
 use std::net::IpAddr;
 use std::net::Ipv6Addr;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -15,12 +14,12 @@ use obsidian_external::NodeDiscovery;
 use rs_consul::Consul;
 use tokio::process::Child;
 use tokio::process::Command;
-use uuid::Uuid;
 
 use crate::discovery::Discovery;
 use crate::grpc::GrpcNodes;
 use crate::runtime::Node;
 use crate::runtime::Nodes;
+use crate::test::containers::Containers;
 use crate::test::test_nodes::TestNodes;
 
 const S3_PORT: u16 = 9090;
@@ -39,68 +38,36 @@ pub(crate) struct SubprocessNodes {
     inner_nodes: Arc<dyn Nodes>,
 
     cargo_bin: PathBuf,
-    kill_on_exit: Child,
-    storage: Child,
-    consul: Child,
+    containers: Containers,
     journals: Child,
     next_port: u16,
     nodes: HashMap<NodeId, Child>,
 }
 
 impl SubprocessNodes {
-    pub async fn new() -> anyhow::Result<Self> {
-        let label = format!("obsidian-test-{}", Uuid::new_v4());
+    pub async fn new(label: impl Into<String>) -> anyhow::Result<Self> {
+        let mut containers = Containers::new(label.into()).await?;
 
-        // Slightly hacky: `podman run` runs the containers in the background. Even if the `podman
-        // run` process dies, the containers still stick around. That's not the behavior we want,
-        // when the test ends (or gets sigtermed etc.) we want it to clean up after itself.
-        //
-        // The hacky solution is to spawn this process that waits for its own stdin to close (which
-        // happens when we die), and then kills the containers with the label we made.
-        //
-        // There's still a race here where if we die while spawning a container, this reaper
-        // process might clean up too early. Oh well.
-        let kill_on_exit = Command::new("bash")
-            .arg("-c")
-            .arg(format!("while read line; do true; done; podman ps --quiet --filter 'label={}' | xargs podman kill", label.clone()))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+        let _s3_container = containers
+            .new_container("obsidian_test_s3mock")
+            .image(S3MOCK_IMAGE)
+            .port(S3_PORT)
+            .env(
+                "COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS",
+                S3_BUCKET_NAME,
+            )
             .spawn()?;
 
-        let storage = Command::new("podman")
-            .arg("run")
-            .arg("--rm")
-            .arg("--name")
-            .arg("obsidian_test_s3mock")
-            .arg("--label")
-            .arg(label.clone())
-            .arg("-p")
-            .arg(format!("{}:{}", S3_PORT, S3_PORT))
-            .arg("--env")
-            .arg(format!(
-                "COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS={}",
-                S3_BUCKET_NAME
-            ))
-            .arg(S3MOCK_IMAGE.to_string())
-            .kill_on_drop(true)
-            .spawn()?;
-
-        let consul = Command::new("podman")
-            .arg("run")
-            .arg("--rm")
-            .arg("--label")
-            .arg(label)
-            .arg("-p")
-            .arg(format!("{}:{}", CONSUL_PORT, CONSUL_PORT))
-            .arg(CONSUL_IMAGE.to_string())
+        let _consul_container = containers
+            .new_container("obisidan_test_consul")
+            .image(CONSUL_IMAGE)
+            .port(CONSUL_PORT)
             .arg("agent")
             .arg("--dev") // allow single-node cluster
             .arg("--client")
             .arg("[::]") // defaults to localhost
             .arg("--http-port")
             .arg(CONSUL_PORT.to_string())
-            .kill_on_drop(true)
             .spawn()?;
 
         // The obsidian binary gets built and dumped into the same directory as the binary that is
@@ -141,9 +108,7 @@ impl SubprocessNodes {
 
             discovery,
             inner_nodes,
-            kill_on_exit,
-            storage,
-            consul,
+            containers,
             journals,
             next_port: NODE_PORTS_START,
             nodes: HashMap::new(),
