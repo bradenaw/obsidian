@@ -12,13 +12,12 @@ use obsidian_common::NodeId;
 use obsidian_external::ConsulNodeDiscovery;
 use obsidian_external::NodeDiscovery;
 use rs_consul::Consul;
-use tokio::process::Child;
-use tokio::process::Command;
 
 use crate::discovery::Discovery;
 use crate::grpc::GrpcNodes;
 use crate::runtime::Node;
 use crate::runtime::Nodes;
+use crate::test::containers::Container;
 use crate::test::containers::Containers;
 use crate::test::test_nodes::TestNodes;
 
@@ -40,7 +39,7 @@ pub(crate) struct SubprocessNodes {
     cargo_bin: PathBuf,
     containers: Containers,
     next_port: u16,
-    nodes: HashMap<NodeId, Child>,
+    nodes: HashMap<NodeId, Container>,
 }
 
 impl SubprocessNodes {
@@ -129,10 +128,20 @@ impl TestNodes for SubprocessNodes {
         let addr = IpAddr::V6(Ipv6Addr::LOCALHOST);
         let node_id = NodeId::new(addr, port);
 
-        let node = Command::new(self.cargo_bin.join("obsidian"))
+        let node = self
+            .containers
+            .new_container(format!("node{}", port))
+            .port(port)
+            .mount(
+                self.cargo_bin.to_string_lossy(),
+                "/cargo-bin",
+                true, /*ro*/
+            )
+            .mount("/etc/ssl/certs", "/etc/ssl/certs", true /*ro*/)
             .env("RUST_BACKTRACE", "1")
             .env("RUST_LOG", "info")
             .env("AWS_REGION", "us-east-1")
+            .arg("/cargo-bin/obsidian")
             .arg("node")
             .arg("--node-id")
             .arg(node_id.to_string())
@@ -146,7 +155,6 @@ impl TestNodes for SubprocessNodes {
             .arg(format!("http://localhost:{}", CONSUL_PORT))
             .arg("--consul-service")
             .arg(CONSUL_SERVICE.to_string())
-            .kill_on_drop(true)
             .spawn()?;
 
         self.nodes.insert(node_id, node);

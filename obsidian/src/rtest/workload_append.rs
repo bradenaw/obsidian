@@ -804,6 +804,7 @@ mod tests {
             .nodes(Box::new(
                 SubprocessNodes::new("test_workload_append_external").await?,
             ))
+            .n_shards(1) // TODO: the nodes can't address each other yet
             .build()
             .await?;
 

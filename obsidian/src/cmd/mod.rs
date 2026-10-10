@@ -112,7 +112,7 @@ async fn cmd_node(args: NodeArgs) -> anyhow::Result<()> {
 
     let discovery = Arc::new(Discovery::new(Arc::clone(&nodes) as Arc<dyn Nodes>));
 
-    let s3_client = if args.s3_addr.starts_with("http://[::1]:") {
+    let s3_client = if args.s3_addr.starts_with("http://localhost:") {
         aws_sdk_s3::Client::from_conf(
             aws_sdk_s3::config::Builder::from(
                 &aws_config::from_env()

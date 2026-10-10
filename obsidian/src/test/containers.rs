@@ -2,9 +2,13 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt::Display;
+use std::io;
 use std::io::BufRead;
 use std::io::Cursor;
+use std::io::Write;
 use std::process::Stdio;
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -16,8 +20,11 @@ use tokio::spawn;
 
 const COLOR_ESCAPES: &[&'static str] = &[
     "\x1b[34m",   // blue
+    "\x1b[1;33m", // bright yellow
     "\x1b[35m",   // magenta
+    "\x1b[1;31m", // bright red
     "\x1b[36m",   // cyan
+    "\x1b[1;32m", // bright green
     "\x1b[37m",   // white
     "\x1b[1;34m", // bright blue
     "\x1b[1;35m", // bright magenta
@@ -26,9 +33,6 @@ const COLOR_ESCAPES: &[&'static str] = &[
     "\x1b[33m",   // yellow
     "\x1b[31m",   // red
     "\x1b[32m",   // green
-    "\x1b[1;33m", // bright yellow
-    "\x1b[1;31m", // bright red
-    "\x1b[1;32m", // bright green
     "\x1b[1;30m", // bright black
                   //"\x1b[30m",   // black
 ];
@@ -44,6 +48,7 @@ pub(crate) struct Containers {
     color_idx: usize,
     containers: BTreeSet<String>,
     kill_on_exit: Child,
+    longest_name: Arc<AtomicUsize>,
 }
 
 impl Containers {
@@ -92,6 +97,7 @@ impl Containers {
             color_idx: 0,
             containers: BTreeSet::new(),
             kill_on_exit,
+            longest_name: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -182,6 +188,9 @@ impl<'a> ContainerBuilder<'a> {
                 self.name
             ));
         }
+        self.parent
+            .longest_name
+            .fetch_max(self.name.len(), std::sync::atomic::Ordering::SeqCst);
         let mut proc = Command::new("podman")
             .args([
                 "container",
@@ -191,8 +200,9 @@ impl<'a> ContainerBuilder<'a> {
                 "--label",
                 &self.parent.label,
                 "--rm",
-                "--network",
-                &self.parent.main_network_name,
+                "--network=host",
+                //"--network",
+                //&self.parent.main_network_name,
             ])
             .args(
                 self.ports
@@ -226,40 +236,50 @@ impl<'a> ContainerBuilder<'a> {
         let stdout = proc.stdout.take().unwrap();
         let stderr = proc.stderr.take().unwrap();
 
-        let color_escape = self.parent.next_color_escape();
-        let name = self.name.clone();
-        spawn(async move {
-            let reader = BufReader::new(stdout);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                println!("{}{}{} | {}", color_escape, name, RESET_ESCAPE, line);
+        let prefix_writer = PrefixWriter {
+            color_escape: self.parent.next_color_escape().to_string(),
+            prefix: self.name.clone(),
+            prefix_width: Arc::clone(&self.parent.longest_name),
+        };
+
+        spawn({
+            let prefix_writer = prefix_writer.clone();
+            async move {
+                let reader = BufReader::new(stdout);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    prefix_writer.write_line(&mut io::stdout().lock(), &line);
+                }
+                prefix_writer.write_line(&mut io::stdout().lock(), "<stdout closed>");
             }
-            println!("{}{}{} | <stdout closed>", color_escape, name, RESET_ESCAPE);
         });
-        let name = self.name.clone();
-        spawn(async move {
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                eprintln!("{}{}{} | {}", color_escape, name, RESET_ESCAPE, line);
+        spawn({
+            let prefix_writer = prefix_writer.clone();
+            async move {
+                let reader = BufReader::new(stderr);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    prefix_writer.write_line(&mut io::stderr().lock(), &line);
+                }
+                prefix_writer.write_line(&mut io::stderr().lock(), "<stderr closed>");
             }
-            eprintln!("{}{}{} | <stderr closed>", color_escape, name, RESET_ESCAPE);
         });
-        let name = self.name.clone();
-        spawn(async move {
-            match proc.wait().await {
-                Ok(exit_status) => eprintln!(
-                    "{}{}{} | process exited with code {}",
-                    color_escape,
-                    name,
-                    RESET_ESCAPE,
-                    exit_status.code().unwrap()
-                ),
-                Err(err) => {
-                    eprintln!(
-                        "{}{}{} | error while waiting for process: {:?}",
-                        color_escape, name, RESET_ESCAPE, err
-                    );
+        spawn({
+            let prefix_writer = prefix_writer.clone();
+            async move {
+                match proc.wait().await {
+                    Ok(exit_status) => {
+                        prefix_writer.write_line(
+                            &mut io::stderr().lock(),
+                            &format!("process exited with code {}", exit_status.code().unwrap()),
+                        );
+                    }
+                    Err(err) => {
+                        prefix_writer.write_line(
+                            &mut io::stderr().lock(),
+                            &format!("error while waiting for process: {:?}", err),
+                        );
+                    }
                 }
             }
         });
@@ -300,6 +320,29 @@ impl Container {
     pub async fn kill(self) -> anyhow::Result<()> {
         run(Command::new("podman").arg("kill").arg(&self.name)).await?;
         Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct PrefixWriter {
+    color_escape: String,
+    prefix: String,
+    prefix_width: Arc<AtomicUsize>,
+}
+
+impl PrefixWriter {
+    pub fn write_line(&self, out: &mut impl Write, line: &str) {
+        let _ = write!(
+            out,
+            "{}{}{}{} | {}\n",
+            self.color_escape,
+            self.prefix,
+            RESET_ESCAPE,
+            " ".repeat(
+                self.prefix_width.load(std::sync::atomic::Ordering::SeqCst) - self.prefix.len()
+            ),
+            line,
+        );
     }
 }
 
