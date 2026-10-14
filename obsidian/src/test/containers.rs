@@ -19,16 +19,16 @@ use tokio::process::Command;
 use tokio::spawn;
 
 const COLOR_ESCAPES: &[&'static str] = &[
-    "\x1b[34m",   // blue
     "\x1b[1;33m", // bright yellow
-    "\x1b[35m",   // magenta
-    "\x1b[1;31m", // bright red
-    "\x1b[36m",   // cyan
-    "\x1b[1;32m", // bright green
     "\x1b[37m",   // white
+    "\x1b[34m",   // blue
+    "\x1b[35m",   // magenta
+    "\x1b[36m",   // cyan
     "\x1b[1;34m", // bright blue
     "\x1b[1;35m", // bright magenta
     "\x1b[1;36m", // bright cyan
+    "\x1b[1;31m", // bright red
+    "\x1b[1;32m", // bright green
     "\x1b[1;37m", // bright white
     "\x1b[33m",   // yellow
     "\x1b[31m",   // red

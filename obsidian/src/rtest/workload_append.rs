@@ -107,6 +107,30 @@ impl WorkloadAppend {
             histories.iter().map(Vec::len).sum::<usize>(),
         );
 
+        println!(
+            "{} write attempts, {} successful commits",
+            histories
+                .iter()
+                .map(|thread_history| thread_history
+                    .iter()
+                    .filter(|(_, history_item)| matches!(
+                        history_item,
+                        HistoryItem::StartAppend(_, _)
+                    ))
+                    .count())
+                .sum::<usize>(),
+            histories
+                .iter()
+                .map(|thread_history| thread_history
+                    .iter()
+                    .filter(|(_, history_item)| matches!(
+                        history_item,
+                        HistoryItem::Commit(_, _, _)
+                    ))
+                    .count())
+                .sum::<usize>()
+        );
+
         let gen_graph_start = Instant::now();
         let graph = gen_graph(&histories)?;
 
