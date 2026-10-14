@@ -826,7 +826,7 @@ mod tests {
 
         let obs = ObsidianForTestBuilder::new()
             .nodes(Box::new(SubprocessNodes::new().await?))
-            .n_shards(1) // TODO: the nodes can't address each other yet
+            .n_shards(2)
             .build()
             .await?;
 

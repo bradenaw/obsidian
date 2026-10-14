@@ -135,11 +135,13 @@ impl TestNodes for SubprocessNodes {
     async fn create_node(&mut self) -> anyhow::Result<NodeId> {
         let port = self.next_port;
         self.next_port += 1;
-        let node_id = NodeId::new("localhost".to_string(), port);
+
+        let container_name = format!("node{}", port);
+        let node_id = NodeId::new(container_name.clone(), port);
 
         let node = self
             .containers
-            .new_container(format!("node{}", port))
+            .new_container(container_name)
             .port(port)
             .mount(
                 self.cargo_bin.to_string_lossy(),
