@@ -1,5 +1,3 @@
-use std::net::IpAddr;
-use std::net::Ipv6Addr;
 use std::sync::Arc;
 
 use obsidian_common::JournalEntry;
