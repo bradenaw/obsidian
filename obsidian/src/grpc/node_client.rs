@@ -99,13 +99,13 @@ impl NodeClient {
 }
 
 impl runtime::Node for NodeClient {
-    fn id(&self) -> NodeId {
-        self.node_id
+    fn id(&self) -> &NodeId {
+        &self.node_id
     }
 
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn Shard>> {
         Ok(Arc::new(ShardProxy {
-            node_id: self.node_id,
+            node_id: self.node_id.clone(),
             shard_id,
             grpc_client: self.grpc_client.clone(),
         }))
@@ -113,7 +113,7 @@ impl runtime::Node for NodeClient {
 
     fn tablet(&self, tablet_id: TabletId) -> anyhow::Result<Arc<dyn Tablet>> {
         Ok(Arc::new(TabletProxy {
-            node_id: self.node_id,
+            node_id: self.node_id.clone(),
             tablet_id,
             grpc_client: self.grpc_client.clone(),
         }))
@@ -166,7 +166,7 @@ impl runtime::Shard for ShardProxy {
             ));
         }
         Ok(Arc::new(TabletProxy {
-            node_id: self.node_id,
+            node_id: self.node_id.clone(),
             tablet_id,
             grpc_client: self.grpc_client.clone(),
         }))

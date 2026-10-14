@@ -47,7 +47,7 @@ message TabletId {
 }
 
 message NodeId {
-    IpAddr addr = 1;
+    string host = 1;
     uint32 port = 2;
     Uuid uuid = 3;
 }

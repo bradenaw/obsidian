@@ -10,5 +10,5 @@ use crate::runtime::Nodes;
 pub(crate) trait TestNodes: Nodes {
     fn discovery(&self) -> Arc<Discovery>;
     async fn create_node(&mut self) -> anyhow::Result<NodeId>;
-    fn remove_node(&mut self, node_id: NodeId);
+    fn remove_node(&mut self, node_id: &NodeId);
 }

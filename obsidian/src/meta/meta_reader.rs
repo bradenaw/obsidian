@@ -95,8 +95,8 @@ pub(crate) trait MetaReader {
         }
     }
 
-    async fn node_exists(&self, node_id: NodeId) -> anyhow::Result<bool> {
-        self.exists(&MetaKey::Node(node_id)).await
+    async fn node_exists(&self, node_id: &NodeId) -> anyhow::Result<bool> {
+        self.exists(&MetaKey::Node(node_id.clone())).await
     }
 
     fn node_ids(&self) -> Box<dyn Stream<Item = anyhow::Result<NodeId>> + Unpin + Send + '_> {

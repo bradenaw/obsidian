@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::env;
 use std::future::Future;
-use std::net::IpAddr;
-use std::net::Ipv6Addr;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -160,8 +158,7 @@ impl TestNodes for SubprocessNodes {
     async fn create_node(&mut self) -> anyhow::Result<NodeId> {
         let port = self.next_port;
         self.next_port += 1;
-        let addr = IpAddr::V6(Ipv6Addr::LOCALHOST);
-        let node_id = NodeId::new(addr, port);
+        let node_id = NodeId::new("localhost".to_string(), port);
 
         let node = Command::new(self.cargo_bin.join("obsidian"))
             .env("RUST_BACKTRACE", "1")
@@ -183,18 +180,18 @@ impl TestNodes for SubprocessNodes {
             .kill_on_drop(true)
             .spawn()?;
 
-        self.nodes.insert(node_id, node);
+        self.nodes.insert(node_id.clone(), node);
 
         Ok(node_id)
     }
 
-    fn remove_node(&mut self, node_id: NodeId) {
-        self.nodes.remove(&node_id);
+    fn remove_node(&mut self, node_id: &NodeId) {
+        self.nodes.remove(node_id);
     }
 }
 
 impl Nodes for SubprocessNodes {
-    fn node(&self, node_id: NodeId) -> anyhow::Result<Arc<dyn Node>> {
+    fn node(&self, node_id: &NodeId) -> anyhow::Result<Arc<dyn Node>> {
         self.inner_nodes.node(node_id)
     }
 }

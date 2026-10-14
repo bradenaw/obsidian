@@ -126,7 +126,8 @@ impl DiscoveryInner {
                     im::ordset::DiffItem::Add(node_id) => {
                         if !leader_subscriptions.contains_key(node_id) {
                             log::debug!("discovery subscribing to {:?}", node_id);
-                            leader_subscriptions.insert(*node_id, self.subscribe_leader(*node_id));
+                            leader_subscriptions
+                                .insert(node_id.clone(), self.subscribe_leader(node_id.clone()));
                         }
                     }
                     im::ordset::DiffItem::Update { .. } => {}
@@ -149,7 +150,7 @@ impl DiscoveryInner {
         spawn_owned(async move {
             Retry::new()
                 .indefinitely(&async || {
-                    let node = nodes.node(node_id)?;
+                    let node = nodes.node(&node_id)?;
 
                     let mut stream = node.shards_subscribe();
                     while let Some(shards) = stream.try_next().await? {
@@ -166,10 +167,10 @@ impl DiscoveryInner {
                                     routing.entry(shard_id).or_insert_with(ShardRouting::empty);
                                 if let Some((_, other_seq)) = shard_routing.leader {
                                     if seq > other_seq {
-                                        shard_routing.leader = Some((node_id, seq));
+                                        shard_routing.leader = Some((node_id.clone(), seq));
                                     }
                                 } else {
-                                    shard_routing.leader = Some((node_id, seq));
+                                    shard_routing.leader = Some((node_id.clone(), seq));
                                 }
                             }
                         }
@@ -182,7 +183,7 @@ impl DiscoveryInner {
     }
 
     fn current_leader(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn runtime::Node>> {
-        self.nodes.node(self.current_leader_id(shard_id)?)
+        self.nodes.node(&self.current_leader_id(shard_id)?)
     }
 
     fn current_leader_id(&self, shard_id: ShardId) -> anyhow::Result<NodeId> {
@@ -191,7 +192,8 @@ impl DiscoveryInner {
             .get(&shard_id)
             .ok_or_else(|| anyhow!("{:?} not in the routing table", shard_id))?
             .leader
-            .map(|(node_id, _)| node_id)
+            .as_ref()
+            .map(|(node_id, _)| node_id.clone())
             .ok_or_else(|| anyhow!("{:?}'s leader is not known", shard_id))
     }
 }
