@@ -811,8 +811,8 @@ mod tests {
         let node_ids = obs.nodes.node_ids().0;
         let some_node_id = node_ids.iter().next().unwrap();
         let gateway = GatewayClient::connect(format!(
-            "http://[{}]:{}",
-            some_node_id.addr, some_node_id.port
+            "http://{}:{}",
+            some_node_id.host, some_node_id.port
         ))
         .await?;
 

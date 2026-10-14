@@ -77,29 +77,29 @@ impl TestNodes for InProcessNodes {
             .await?;
 
         let mut nodes = self.inner.nodes.lock().unwrap();
-        let node_id = node.id();
+        let node_id = node.id().clone();
 
-        nodes.insert(node_id, Owned::new(node));
+        nodes.insert(node_id.clone(), Owned::new(node));
         let mut node_ids = self.inner.node_ids.get().0.clone();
-        node_ids.insert(node_id);
+        node_ids.insert(node_id.clone());
         log::info!("{:?} created", node_id);
         log::info!("new set of nodes {:?}", node_ids);
         self.inner.node_ids.set(node_ids);
 
-        Ok(node_id)
+        Ok(node_id.clone())
     }
 
-    fn remove_node(&mut self, node_id: NodeId) {
+    fn remove_node(&mut self, node_id: &NodeId) {
         let mut nodes = self.inner.nodes.lock().unwrap();
-        nodes.remove(&node_id);
+        nodes.remove(node_id);
         let mut node_ids = self.inner.node_ids.get().0.clone();
-        node_ids.remove(&node_id);
+        node_ids.remove(node_id);
         self.inner.node_ids.set(node_ids);
     }
 }
 
 impl Nodes for InProcessNodes {
-    fn node(&self, node_id: NodeId) -> anyhow::Result<Arc<dyn Node>> {
+    fn node(&self, node_id: &NodeId) -> anyhow::Result<Arc<dyn Node>> {
         self.inner.node(node_id)
     }
 }
@@ -111,14 +111,14 @@ impl NodeDiscovery for InProcessNodes {
 }
 
 impl Nodes for InProcessNodesInner {
-    fn node(&self, node_id: NodeId) -> anyhow::Result<Arc<dyn Node>> {
+    fn node(&self, node_id: &NodeId) -> anyhow::Result<Arc<dyn Node>> {
         let nodes = self.nodes.lock().unwrap();
         let node = nodes
             .get(&node_id)
             .ok_or_else(|| anyhow::anyhow!("{:?} does not exist", node_id))?;
 
         Ok(Arc::new(WeakNode {
-            node_id: node_id,
+            node_id: node_id.clone(),
             inner: Arc::new(Owned::weak(node)),
         }) as Arc<dyn Node>)
     }
@@ -140,8 +140,8 @@ impl<N> Node for WeakNode<N>
 where
     N: Node + 'static,
 {
-    fn id(&self) -> NodeId {
-        self.node_id
+    fn id(&self) -> &NodeId {
+        &self.node_id
     }
 
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn Shard>> {
@@ -190,7 +190,7 @@ where
 }
 
 impl Node for Arc<dyn Node> {
-    fn id(&self) -> NodeId {
+    fn id(&self) -> &NodeId {
         self.deref().id()
     }
 

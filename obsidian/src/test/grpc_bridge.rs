@@ -75,7 +75,7 @@ pub(crate) async fn obsidian_grpc_bridge(
 pub(crate) async fn node_grpc_bridge(
     node: Arc<dyn Node>,
 ) -> anyhow::Result<GrpcBridge<Arc<dyn Node>>> {
-    let node_id = node.id();
+    let node_id = node.id().clone();
 
     let (url, shutdown) = spawn_server!(pb::internal::node_server::NodeServer::new(
         NodeServer::new(node),
@@ -124,7 +124,7 @@ impl<T> Drop for GrpcBridge<T> {
 }
 
 impl Node for GrpcBridge<Arc<dyn Node>> {
-    fn id(&self) -> NodeId {
+    fn id(&self) -> &NodeId {
         self.client.id()
     }
 

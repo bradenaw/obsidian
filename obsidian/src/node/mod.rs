@@ -119,7 +119,7 @@ impl Node {
             // so we need to wait to do this until after the leader election is finished.
             Retry::new()
                 .indefinitely(&async || {
-                    inner.meta.add_node(inner.node_id).await?;
+                    inner.meta.add_node(inner.node_id.clone()).await?;
                     Ok::<(), anyhow::Error>(())
                 })
                 .await;
@@ -138,8 +138,8 @@ impl Node {
 }
 
 impl runtime::Node for Node {
-    fn id(&self) -> NodeId {
-        self.0.node_id
+    fn id(&self) -> &NodeId {
+        &self.0.node_id
     }
 
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn runtime::Shard>> {

@@ -54,7 +54,7 @@ impl NodeServer {
         maybe_node_id_pb: Option<pb::internal::NodeId>,
     ) -> Result<(), tonic::Status> {
         let node_id: NodeId = required("node_id", maybe_node_id_pb)?;
-        if node_id != self.node.id() {
+        if &node_id != self.node.id() {
             return Err(tonic::Status::not_found(format!(
                 "request for {:?} arrived at {:?}",
                 node_id,

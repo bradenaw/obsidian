@@ -74,33 +74,17 @@ struct NodeArgs {
     #[arg(long)]
     consul_service: String,
 
-    #[arg(long, default_value_t = 0)]
-    port: u16,
-
-    #[arg(long, conflicts_with = "port")]
-    node_id: Option<NodeId>,
+    #[arg(long)]
+    node_id: NodeId,
 }
 
 async fn cmd_node(args: NodeArgs) -> anyhow::Result<()> {
-    let (node_id, listener) = match args.node_id {
-        Some(node_id) => {
-            let listener = TcpListener::bind(format!("{}:{}", node_id.addr, node_id.port)).await?;
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", args.node_id.port)).await?;
 
-            (node_id, listener)
-        }
-        None => {
-            let addr = IpAddr::V6(Ipv6Addr::LOCALHOST);
-            let listener = TcpListener::bind(format!("{}:{}", addr, args.port)).await?;
-            let node_id = NodeId::new(addr, listener.local_addr()?.port());
-
-            (node_id, listener)
-        }
-    };
-
-    log::info!("starting {:?}", node_id);
+    log::info!("starting {:?}", args.node_id);
 
     let node_discovery = ConsulNodeDiscovery::join(
-        node_id,
+        args.node_id.clone(),
         Consul::new({
             let mut config = rs_consul::Config::default();
             config.address = args.consul_addr;
@@ -148,7 +132,7 @@ async fn cmd_node(args: NodeArgs) -> anyhow::Result<()> {
     ));
 
     let node = Node::new(
-        node_id,
+        args.node_id,
         LsmOptions::default(),
         nodes,
         Arc::new(storage),

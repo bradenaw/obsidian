@@ -13,7 +13,7 @@ use crate::ShardId;
 use crate::TabletId;
 
 pub(crate) trait Node: Send + Sync {
-    fn id(&self) -> NodeId;
+    fn id(&self) -> &NodeId;
 
     fn shard(&self, shard_id: ShardId) -> anyhow::Result<Arc<dyn Shard>>;
 

@@ -1,5 +1,3 @@
-use std::net::IpAddr;
-use std::net::Ipv6Addr;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -45,7 +43,7 @@ impl TestNodeBuilder for InProcessNodeBuilder {
         shards: Arc<dyn runtime::Shards>,
     ) -> anyhow::Result<Arc<dyn runtime::Node>> {
         let node_id = NodeId::new(
-            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            "localhost".to_string(),
             // Just to make these a little easier to pick out in logs than reading the UUIDs.
             self.next_fake_port.fetch_add(1, Ordering::SeqCst) as u16,
         );

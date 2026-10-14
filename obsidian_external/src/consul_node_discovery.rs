@@ -1,6 +1,4 @@
 use std::future::Future;
-use std::net::IpAddr;
-use std::str::FromStr;
 
 use anyhow::anyhow;
 use im::OrdSet;
@@ -41,7 +39,7 @@ impl ConsulNodeDiscovery {
         let inner = WithBackground::new(ConsulNodeDiscoveryInner {
             consul,
             service,
-            node_id: node_id,
+            node_id: node_id.clone(),
             need_register: Notify::new(),
             node_ids: Watchable::new(OrdSet::new()),
         });
@@ -95,22 +93,16 @@ impl ConsulNodeDiscoveryInner {
             .into_iter()
             .map(|service_node| {
                 Ok(NodeId {
-                    addr: IpAddr::from_str(&service_node.node.address).map_err(|e| {
-                        anyhow!(
-                            "couldn't parse node address {:?}: {}",
-                            service_node.node.address,
-                            e
-                        )
-                    })?,
+                    host: service_node.node.address,
                     port: service_node.service.port,
                     uuid: Uuid::try_from(service_node.node.node)?,
                 })
             })
             .collect::<anyhow::Result<_>>()?;
-        if let Some(node_id) = self.node_id {
+        if let Some(node_id) = self.node_id.as_ref() {
             if !node_ids.contains(&node_id) {
                 self.need_register.notify_one();
-                node_ids.insert(node_id);
+                node_ids.insert(node_id.clone());
             }
         }
         let prev_node_ids = self.node_ids.get().0;
@@ -121,12 +113,12 @@ impl ConsulNodeDiscoveryInner {
     }
 
     async fn keep_registered(&self) {
-        let node_id = self.node_id.unwrap();
+        let node_id = self.node_id.as_ref().unwrap().clone();
         loop {
             let trigger = self.need_register.notified();
             Retry::new()
                 .indefinitely(&async || {
-                    self.register(node_id)
+                    self.register(node_id.clone())
                         .await
                         .map_err(|e| anyhow!("failed to register with consul: {}", e))
                 })
@@ -144,7 +136,7 @@ impl ConsulNodeDiscoveryInner {
             .register_entity(
                 &RegisterEntityPayload::builder()
                     .Node(node_id.uuid.to_string())
-                    .Address(node_id.addr.to_string())
+                    .Address(node_id.host.clone())
                     .Service(
                         RegisterEntityService::builder()
                             .Service(self.service.clone())

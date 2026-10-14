@@ -80,7 +80,9 @@ impl runtime::Meta for Meta {
 
     async fn add_node(&self, node_id: NodeId) -> anyhow::Result<()> {
         self.transact(&async move |tx| {
-            if tx.node_exists(node_id).await? {
+            let node_id = node_id.clone();
+
+            if tx.node_exists(&node_id).await? {
                 return Err(anyhow!("{:?} already exists", node_id).into());
             }
 
