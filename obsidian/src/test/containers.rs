@@ -52,8 +52,10 @@ pub(crate) struct Containers {
 }
 
 impl Containers {
-    pub async fn new(label: String) -> anyhow::Result<Self> {
+    pub async fn new() -> anyhow::Result<Self> {
         // TODO: flock
+
+        let label = "obsidian_test";
 
         log::info!("using label={} on all containers and networks", label);
 
@@ -83,7 +85,7 @@ impl Containers {
         // process might clean up too early. Oh well.
         let kill_on_exit = Command::new("bash")
             .arg("-c")
-            .arg(format!("while read line; do true; done; podman ps --quiet --filter 'label={}' | xargs podman kill", label.clone()))
+            .arg(format!("while read line; do true; done; podman ps --quiet --filter 'label={}' | xargs podman kill", label))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -92,7 +94,7 @@ impl Containers {
         // TODO: need to spawn a network proxy to get through the --internal?
 
         Ok(Self {
-            label,
+            label: label.to_string(),
             main_network_name,
             color_idx: 0,
             containers: BTreeSet::new(),
@@ -200,9 +202,9 @@ impl<'a> ContainerBuilder<'a> {
                 "--label",
                 &self.parent.label,
                 "--rm",
-                "--network=host",
-                //"--network",
-                //&self.parent.main_network_name,
+                //"--network=host",
+                "--network",
+                &self.parent.main_network_name,
             ])
             .args(
                 self.ports
@@ -440,7 +442,7 @@ mod tests {
     #[tokio::test]
     async fn containers() -> anyhow::Result<()> {
         let _ = pretty_env_logger::try_init();
-        let mut containers = Containers::new("containers_own_test".to_string()).await?;
+        let mut containers = Containers::new().await?;
         let _node0 = containers
             .new_container("node0".to_string())
             .arg("bash")

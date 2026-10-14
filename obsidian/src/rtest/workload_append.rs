@@ -801,9 +801,7 @@ mod tests {
         let _ = pretty_env_logger::try_init();
 
         let obs = ObsidianForTestBuilder::new()
-            .nodes(Box::new(
-                SubprocessNodes::new("test_workload_append_external").await?,
-            ))
+            .nodes(Box::new(SubprocessNodes::new().await?))
             .n_shards(1) // TODO: the nodes can't address each other yet
             .build()
             .await?;

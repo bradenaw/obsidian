@@ -67,6 +67,9 @@ struct NodeArgs {
     s3_bucket: String,
 
     #[arg(long)]
+    s3_disable_credentials: bool,
+
+    #[arg(long)]
     consul_addr: String,
 
     #[arg(long)]
@@ -94,7 +97,7 @@ async fn cmd_node(args: NodeArgs) -> anyhow::Result<()> {
 
     let discovery = Arc::new(Discovery::new(Arc::clone(&nodes) as Arc<dyn Nodes>));
 
-    let s3_client = if args.s3_addr.starts_with("http://localhost:") {
+    let s3_client = if args.s3_disable_credentials {
         aws_sdk_s3::Client::from_conf(
             aws_sdk_s3::config::Builder::from(
                 &aws_config::from_env()

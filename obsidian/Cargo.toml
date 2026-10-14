@@ -41,6 +41,7 @@ uuid = { version = "1.18.1", features = ["v4", "v7"] }
 
 [dev-dependencies]
 proptest = "1.0.0"
+reqwest = "0.13"
 
 [build-dependencies]
 tonic-build = "0.9"
