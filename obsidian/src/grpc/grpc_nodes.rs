@@ -25,8 +25,22 @@ pub(crate) struct GrpcNodes(WithBackground<GrpcNodesInner>);
 
 impl GrpcNodes {
     pub fn new(node_discovery: Arc<dyn NodeDiscovery + Send + Sync>) -> GrpcNodes {
+        Self::new_with_resolve(node_discovery, |node_id| {
+            format!("http://{}:{}", node_id.host, node_id.port)
+        })
+    }
+
+    /// Use the function `resolve` to get an address to connect to for the node.
+    pub fn new_with_resolve<F>(
+        node_discovery: Arc<dyn NodeDiscovery + Send + Sync>,
+        resolve: F,
+    ) -> GrpcNodes
+    where
+        F: Fn(&NodeId) -> String + Send + Sync + 'static,
+    {
         let inner = WithBackground::new(GrpcNodesInner {
             node_discovery,
+            resolve: Box::new(resolve),
             clients: RwLock::new(HashMap::new()),
         });
 
@@ -56,6 +70,7 @@ impl NodeDiscovery for GrpcNodes {
 
 struct GrpcNodesInner {
     node_discovery: Arc<dyn NodeDiscovery + Send + Sync>,
+    resolve: Box<dyn Fn(&NodeId) -> String + Send + Sync>,
     clients: RwLock<HashMap<NodeId, Arc<dyn Node>>>,
 }
 
@@ -73,10 +88,11 @@ impl GrpcNodesInner {
                     DiffItem::Add(node_id) => {
                         let node_id = node_id.clone();
                         let finished_send = finished_send.clone();
+                        let url = (self.resolve)(&node_id);
                         connects.insert(
                             node_id.clone(),
                             spawn_owned(async move {
-                                let client = Self::connect(node_id.clone()).await;
+                                let client = Self::connect(node_id.clone(), url).await;
                                 let _ = finished_send.send(node_id.clone()).await;
                                 client
                             }),
@@ -105,11 +121,9 @@ impl GrpcNodesInner {
         }
     }
 
-    async fn connect(node_id: NodeId) -> Arc<dyn Node> {
+    async fn connect(node_id: NodeId, url: String) -> Arc<dyn Node> {
         let grpc_client = Retry::new()
             .indefinitely(&async || -> anyhow::Result<_> {
-                // TODO: https etc
-                let url = format!("http://{}:{}", node_id.host, node_id.port);
                 pb::internal::node_client::NodeClient::connect(url.clone())
                     .await
                     .map_err(|e| anyhow!("error connecting to {:?} at {}: {:?}", node_id, url, e))

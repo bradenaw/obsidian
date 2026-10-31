@@ -28,6 +28,7 @@ const JOURNALS_PORT: u16 = 8000;
 const S3MOCK_IMAGE: &str =
     "docker.io/adobe/s3mock@sha256:ab01a6946750f451ca215a47e91030695b260e4003b8a5a6201d25029b8fca92";
 const S3MOCK_CONTAINER_NAME: &str = "s3mock";
+const AWS_REGION: &str = "us-east-1";
 const S3_PORT: u16 = 9090;
 const S3_BUCKET_NAME: &str = "obsidian";
 
@@ -69,7 +70,7 @@ impl SubprocessNodes {
             .arg("agent")
             .arg("--dev") // allow single-node cluster
             .arg("--client")
-            .arg("[::]") // defaults to localhost
+            .arg("0.0.0.0") // defaults to localhost
             .arg("--http-port")
             .arg(CONSUL_PORT.to_string())
             .spawn()?;
@@ -98,7 +99,11 @@ impl SubprocessNodes {
             .arg(JOURNALS_PORT.to_string())
             .spawn()?;
 
-        wait_http(&format!("http://localhost:{}/actuator/health", S3_PORT)).await;
+        wait_http(&format!(
+            "http://localhost:{}/?bucket-region={}",
+            S3_PORT, AWS_REGION
+        ))
+        .await;
         wait_port(CONSUL_PORT).await;
         wait_port(JOURNALS_PORT).await;
 
@@ -111,7 +116,13 @@ impl SubprocessNodes {
             CONSUL_SERVICE.to_string(),
         );
 
-        let inner_nodes = Arc::new(GrpcNodes::new(Arc::new(node_discovery)));
+        let inner_nodes = Arc::new(GrpcNodes::new_with_resolve(
+            Arc::new(node_discovery),
+            // The nodes talk to each other from inside the container network using their container
+            // names as hostnames. We're outside that network, but they all pick unique ports and
+            // publish them so we can just use localhost.
+            |node_id| format!("http://localhost:{}", node_id.port),
+        ));
         let discovery = Arc::new(Discovery::new(Arc::clone(&inner_nodes) as Arc<dyn Nodes>));
 
         Ok(Self {
@@ -152,7 +163,7 @@ impl TestNodes for SubprocessNodes {
             .mount("/etc/ssl/certs", "/etc/ssl/certs", true /*ro*/)
             .env("RUST_BACKTRACE", "1")
             .env("RUST_LOG", "info")
-            .env("AWS_REGION", "us-east-1")
+            .env("AWS_REGION", AWS_REGION)
             .arg("/cargo-bin/obsidian")
             .arg("node")
             .arg("--node-id")
@@ -209,7 +220,10 @@ async fn wait_port(port: u16) {
 async fn wait_http(addr: &str) {
     Retry::new()
         .indefinitely(&async || -> anyhow::Result<()> {
-            reqwest::get(addr).await?.error_for_status()?;
+            reqwest::get(addr)
+                .await?
+                .error_for_status()
+                .context(format!("while waiting for {} to return 200 OK", addr))?;
             Ok(())
         })
         .await;
@@ -237,7 +251,7 @@ mod tests {
             aws_sdk_s3::config::Builder::from(
                 &aws_config::from_env()
                     .endpoint_url(format!("http://localhost:{}", S3_PORT))
-                    .region("us-east-1")
+                    .region(AWS_REGION)
                     .credentials_provider(aws_credential_types::Credentials::new(
                         "dummy-access-key",
                         "dummy-secret-key",

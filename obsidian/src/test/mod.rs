@@ -13,6 +13,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use anyhow::anyhow;
+use anyhow::Context as _;
 use async_trait::async_trait;
 use obsidian_external::mem::MemJournals;
 use obsidian_external::mem::MemStorage;
@@ -123,8 +124,8 @@ impl ObsidianForTestBuilder {
         for shard_id in &shard_ids {
             Retry::new()
                 .indefinitely(&async || {
-                    let shard = nodes.discovery().shard(*shard_id)?;
-                    shard.wait_meta_sync(meta_ts).await?;
+                    let shard = nodes.discovery().shard(*shard_id).context(format!("waiting for shard assignment and leader election for {:?}", shard_id))?;
+                    shard.wait_meta_sync(meta_ts).await.context(format!("waiting for shard assignment and leader election: waiting for meta_sync for {:?} to {:?}",shard_id, meta_ts))?;
                     Ok::<(), anyhow::Error>(())
                 })
                 .await;

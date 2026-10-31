@@ -832,11 +832,10 @@ mod tests {
 
         let node_ids = obs.nodes.node_ids().0;
         let some_node_id = node_ids.iter().next().unwrap();
-        let gateway = GatewayClient::connect(format!(
-            "http://{}:{}",
-            some_node_id.host, some_node_id.port
-        ))
-        .await?;
+        // TODO: not going to work if we want to kill nodes so we'll have to either make another
+        // gateway that doesn't die (maybe easier) or load balance using Channel::balance_channel
+        let gateway =
+            GatewayClient::connect(format!("http://localhost:{}", some_node_id.port)).await?;
 
         test_workload_append(Arc::new(gateway)).await
     }
