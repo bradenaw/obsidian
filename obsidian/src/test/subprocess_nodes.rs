@@ -209,7 +209,7 @@ async fn wait_port(port: u16) {
 async fn wait_http(addr: &str) {
     Retry::new()
         .indefinitely(&async || -> anyhow::Result<()> {
-            reqwest::get(addr).await?;
+            reqwest::get(addr).await?.error_for_status()?;
             Ok(())
         })
         .await;
