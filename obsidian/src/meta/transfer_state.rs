@@ -2,6 +2,7 @@ use std::fmt::Debug;
 
 use anyhow::anyhow;
 use obsidian_pb as pb;
+use obsidian_util::FromProtoEnum;
 
 use crate::meta::TabletState;
 
@@ -98,6 +99,17 @@ impl TransferState {
 
             _ => false,
         }
+    }
+}
+
+impl FromProtoEnum for TransferState {
+    fn try_from_i32(v: i32) -> anyhow::Result<Option<Self>> {
+        if v == 0 {
+            return Ok(None);
+        }
+        Ok(Some(TransferState::try_from(
+            pb::internal::TransferState::try_from(v)?,
+        )?))
     }
 }
 

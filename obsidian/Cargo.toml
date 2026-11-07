@@ -28,7 +28,7 @@ obsidian_pb = { path = "../obsidian_pb" }
 obsidian_util = { path = "../obsidian_util" }
 pretty_env_logger = "^0.5"
 priority-queue = "2.7"
-prost = "0.11.9"
+prost = "0.14"
 rand = "0.10"
 regex = "1.12.3"
 rs-consul = "0.13.0"
@@ -36,11 +36,8 @@ rustls = "0.23"
 thiserror = "^1.0"
 tokio = { version = "1.47.1", features = [ "fs", "io-util", "macros", "rt", "rt-multi-thread", "sync", "time", "tracing" ] }
 tokio-stream = "0.1.18"
-tonic = "0.9"
+tonic = "0.14"
 uuid = { version = "1.18.1", features = ["v4", "v7"] }
 
 [dev-dependencies]
 proptest = "1.0.0"
-
-[build-dependencies]
-tonic-build = "0.9"

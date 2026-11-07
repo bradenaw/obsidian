@@ -2,6 +2,7 @@ use std::fmt::Debug;
 
 use anyhow::anyhow;
 use obsidian_pb as pb;
+use obsidian_util::FromProtoEnum;
 
 /// TabletState facilitates transfers of key ranges between tablets.
 ///
@@ -42,6 +43,17 @@ pub(crate) enum TabletState {
     Active,
     /// The tablet holds a full copy of the data, but can only accept reads and not writes.
     Frozen,
+}
+
+impl FromProtoEnum for TabletState {
+    fn try_from_i32(v: i32) -> anyhow::Result<Option<Self>> {
+        if v == 0 {
+            return Ok(None);
+        }
+        Ok(Some(TabletState::try_from(
+            pb::internal::TabletState::try_from(v)?,
+        )?))
+    }
 }
 
 impl From<TabletState> for pb::internal::TabletState {

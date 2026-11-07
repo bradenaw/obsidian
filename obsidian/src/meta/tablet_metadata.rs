@@ -2,6 +2,7 @@ use std::convert::TryFrom;
 
 use anyhow::anyhow;
 use obsidian_pb as pb;
+use obsidian_util::FromProtoEnum as _;
 
 use crate::meta::MetaState;
 use crate::meta::TabletState;
@@ -25,15 +26,9 @@ impl TryFrom<pb::internal::TabletMetadata> for TabletMetadata {
             colo_group_id: ColoGroupId(value_pb.colo_group_id),
             range: Range::try_from(value_pb.range.ok_or_else(|| anyhow!("missing range"))?)?,
             state: MetaState::from((
-                TabletState::try_from(
-                    pb::internal::TabletState::from_i32(value_pb.state)
-                        .ok_or_else(|| anyhow!("missing state"))?,
-                )?,
-                match pb::internal::TabletState::from_i32(value_pb.next_state) {
-                    Some(pb::internal::TabletState::Unknown) => None,
-                    None => None,
-                    Some(state_pb) => Some(TabletState::try_from(state_pb)?),
-                },
+                TabletState::try_from_i32(value_pb.state)?
+                    .ok_or_else(|| anyhow!("missing state"))?,
+                TabletState::try_from_i32(value_pb.next_state)?,
             )),
             transfer_id: value_pb.transfer_id.map(TransferId::try_from).transpose()?,
         })

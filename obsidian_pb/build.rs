@@ -1,6 +1,6 @@
 fn main() -> std::io::Result<()> {
-    tonic_build::configure().compile(&["../proto/obsidian.proto"], &["../proto/"])?;
-    tonic_build::configure().compile(
+    tonic_prost_build::configure().compile_protos(&["../proto/obsidian.proto"], &["../proto/"])?;
+    tonic_prost_build::configure().compile_protos(
         &[
             "../proto/internal/error.proto",
             "../proto/internal/internal.proto",
@@ -11,7 +11,7 @@ fn main() -> std::io::Result<()> {
         ],
         &["../proto", "../proto/internal/"],
     )?;
-    tonic_build::configure().compile(
+    tonic_prost_build::configure().compile_protos(
         &["../proto/external/journals.proto"],
         &["../proto", "../proto/external/"],
     )?;
