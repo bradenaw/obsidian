@@ -37,6 +37,12 @@ const CONSUL_CONTAINER_NAME: &str = "consul";
 const CONSUL_PORT: u16 = 8500;
 const CONSUL_SERVICE: &str = "obsidian";
 
+const OTEL_IMAGE: &str =
+    "docker.io/grafana/otel-lgtm@sha256:72e05804790e6e0d8c0b70a6d5ff1f721ef7b203463374631e99aa3429bd0cf6";
+const OTEL_UI_PORT: u16 = 3000;
+const OTEL_OTLP_GRPC_PORT: u16 = 4317;
+const OTEL_OTLP_HTTP_PORT: u16 = 4318;
+
 const NODE_PORTS_START: u16 = 8001;
 
 pub(crate) struct SubprocessNodes {
@@ -52,6 +58,14 @@ pub(crate) struct SubprocessNodes {
 impl SubprocessNodes {
     pub async fn new() -> anyhow::Result<Self> {
         let mut containers = Containers::new().await?;
+
+        let _otel_container = containers
+            .new_container("otel")
+            .image(OTEL_IMAGE)
+            .port(OTEL_UI_PORT)
+            .port(OTEL_OTLP_GRPC_PORT)
+            .port(OTEL_OTLP_HTTP_PORT)
+            .spawn()?;
 
         let _s3_container = containers
             .new_container(S3MOCK_CONTAINER_NAME)

@@ -1,0 +1,53 @@
+// use opentelemetry::KeyValue;
+// use opentelemetry_otlp::WithExportConfig;
+// use opentelemetry_sdk::trace as sdktrace;
+// use opentelemetry_sdk::Resource;
+// use tracing_subscriber::layer::SubscriberExt;
+// use tracing_subscriber::util::SubscriberInitExt;
+
+// use opentelemetry::trace::TracerProvider as _;
+
+use opentelemetry_otlp::WithExportConfig as _;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
+
+pub(crate) fn init_telemetry() -> anyhow::Result<()> {
+    let meter_exporter = opentelemetry_otlp::MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint("http://localhost:4317")
+        .build()?;
+
+    let meter_provider = SdkMeterProvider::builder()
+        .with_periodic_exporter(meter_exporter)
+        .build();
+
+    opentelemetry::global::set_meter_provider(meter_provider);
+
+    let meter = opentelemetry::global::meter("foo");
+    let gauge = meter.u64_gauge("obsidian_hello_world").build();
+    gauge.record(1, &[]);
+
+    let otlp_exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .build()?;
+
+    let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(otlp_exporter)
+        .build();
+
+    //let tracer = tracer_provider.tracer("obsidian");
+
+    opentelemetry::global::set_tracer_provider(tracer_provider);
+
+    //let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
+    // tracing_subscriber::registry()
+    //     .with(
+    //         tracing_subscriber::EnvFilter::from_default_env()
+    //             .add_directive(tracing::Level::INFO.into()),
+    //     )
+    //     //.with(tracing_subscriber::fmt::layer()) // Log to stdout
+    //     .with(telemetry_layer) // Export to OTel gRPC
+    //     .init();
+
+    Ok(())
+}

@@ -27,6 +27,9 @@ obsidian_lsm = { path = "../obsidian_lsm" }
 obsidian_olf = { path = "../obsidian_olf" }
 obsidian_pb = { path = "../obsidian_pb" }
 obsidian_util = { path = "../obsidian_util" }
+opentelemetry = { version = "0.33", features = ["metrics"] }
+opentelemetry_sdk = { version = "0.33", features = ["metrics", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.33", features = ["grpc-tonic", "metrics"] }
 pretty_env_logger = "^0.5"
 priority-queue = "2.7"
 prost = "0.14"
@@ -38,6 +41,10 @@ thiserror = "^1.0"
 tokio = { version = "1.47.1", features = [ "fs", "io-util", "macros", "rt", "rt-multi-thread", "sync", "time", "tracing" ] }
 tokio-stream = "0.1.18"
 tonic = "0.14"
+tonic-tracing-opentelemetry = "0.42.1"
+tracing = "0.1.44"
+tracing-opentelemetry = "0.34.0"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.18.1", features = ["v4", "v7"] }
 
 [dev-dependencies]

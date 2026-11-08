@@ -22,6 +22,7 @@ mod shard;
 mod storage;
 mod supervisor;
 mod tablet;
+mod telemetry;
 mod tuple_encoding;
 mod util;
 
