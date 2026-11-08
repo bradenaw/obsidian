@@ -12,6 +12,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
+use named_lock::NamedLock;
+use named_lock::NamedLockGuard;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
 use tokio::process::Child;
@@ -39,11 +41,14 @@ const COLOR_ESCAPES: &[&'static str] = &[
 
 const RESET_ESCAPE: &'static str = "\x1b[0m";
 
+const FLOCK_PATH: &'static str = "/tmp/obsidian_test.lock";
+
 const UBUNTU_24_04_IMAGE: &str = "docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55";
 
 /// Manages a set of containers, useful for doing fault injection between networked components.
 pub(crate) struct Containers {
     label: String,
+    flock: NamedLockGuard,
     main_network_name: String,
     color_idx: usize,
     containers: BTreeSet<String>,
@@ -53,7 +58,18 @@ pub(crate) struct Containers {
 
 impl Containers {
     pub async fn new() -> anyhow::Result<Self> {
-        // TODO: flock
+        // We create all of the podman resources with stable names because it's possible for them to
+        // be left as orphans, so we want the next test run to clean up after them if so.
+        //
+        // The downside is that only one Containers can be running on the machine at a time.
+        //
+        // It'd be possible to make the tests run well in parallel by adding a nonce to each of the
+        // resource names and using a pidfile to disambiguate between running tests and orphans.
+        let flock = tokio::task::spawn_blocking(|| -> anyhow::Result<_> {
+            let lock = NamedLock::with_path(FLOCK_PATH)?;
+            Ok(lock.lock()?)
+        })
+        .await??;
 
         let label = "obsidian_test";
 
@@ -93,6 +109,7 @@ impl Containers {
 
         Ok(Self {
             label: label.to_string(),
+            flock,
             main_network_name,
             color_idx: 0,
             containers: BTreeSet::new(),
