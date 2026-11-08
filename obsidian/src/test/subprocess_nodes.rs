@@ -39,6 +39,7 @@ const CONSUL_SERVICE: &str = "obsidian";
 
 const OTEL_IMAGE: &str =
     "docker.io/grafana/otel-lgtm@sha256:72e05804790e6e0d8c0b70a6d5ff1f721ef7b203463374631e99aa3429bd0cf6";
+const OTEL_CONTAINER_NAME: &str = "otel";
 const OTEL_UI_PORT: u16 = 3000;
 const OTEL_OTLP_GRPC_PORT: u16 = 4317;
 const OTEL_OTLP_HTTP_PORT: u16 = 4318;
@@ -60,7 +61,7 @@ impl SubprocessNodes {
         let mut containers = Containers::new().await?;
 
         let _otel_container = containers
-            .new_container("otel")
+            .new_container(OTEL_CONTAINER_NAME)
             .image(OTEL_IMAGE)
             .port(OTEL_UI_PORT)
             .port(OTEL_OTLP_GRPC_PORT)
@@ -175,9 +176,16 @@ impl TestNodes for SubprocessNodes {
             )
             // Necessary to trick rustls, needed for S3 client.
             .mount("/etc/ssl/certs", "/etc/ssl/certs", true /*ro*/)
-            .env("RUST_BACKTRACE", "1")
-            .env("RUST_LOG", "info")
             .env("AWS_REGION", AWS_REGION)
+            .env(
+                "OTEL_EXPORTER_OTLP_ENDPOINT",
+                format!("http://{}:{}", OTEL_CONTAINER_NAME, OTEL_OTLP_GRPC_PORT),
+            )
+            .env("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
+            .env("OTEL_EXPORTER_OTLP_INSECURE", "true")
+            .env("OTEL_METRIC_EXPORT_INTERVAL", "1000") // milliseconds
+            .env("RUST_BACKTRACE", "1")
+            .env("RUST_LOG", "debug")
             .arg("/cargo-bin/obsidian")
             .arg("node")
             .arg("--node-id")

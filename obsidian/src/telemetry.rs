@@ -7,13 +7,14 @@
 
 // use opentelemetry::trace::TracerProvider as _;
 
-use opentelemetry_otlp::WithExportConfig as _;
+use std::time::Duration;
+
 use opentelemetry_sdk::metrics::SdkMeterProvider;
+use tokio::spawn;
 
 pub(crate) fn init_telemetry() -> anyhow::Result<()> {
     let meter_exporter = opentelemetry_otlp::MetricExporter::builder()
         .with_tonic()
-        .with_endpoint("http://localhost:4317")
         .build()?;
 
     let meter_provider = SdkMeterProvider::builder()
@@ -25,6 +26,15 @@ pub(crate) fn init_telemetry() -> anyhow::Result<()> {
     let meter = opentelemetry::global::meter("foo");
     let gauge = meter.u64_gauge("obsidian_hello_world").build();
     gauge.record(1, &[]);
+    spawn(async {
+        loop {
+            let meter = opentelemetry::global::meter("foo");
+            let counter = meter.u64_counter("obsidian_hello_world_ctr").build();
+            counter.add(1, &[]);
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    });
 
     let otlp_exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
