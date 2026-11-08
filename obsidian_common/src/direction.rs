@@ -2,6 +2,7 @@ use std::fmt::Debug;
 
 use anyhow::anyhow;
 use obsidian_pb as pb;
+use obsidian_util::FromProtoEnum;
 
 #[derive(Eq, PartialEq, Copy, Clone)]
 pub enum Direction {
@@ -15,6 +16,15 @@ impl Debug for Direction {
             Direction::Asc => f.write_str("asc"),
             Direction::Desc => f.write_str("desc"),
         }
+    }
+}
+
+impl FromProtoEnum for Direction {
+    fn try_from_i32(v: i32) -> anyhow::Result<Option<Self>> {
+        if v == 0 {
+            return Ok(None);
+        }
+        Ok(Some(Direction::try_from(pb::Direction::try_from(v)?)?))
     }
 }
 

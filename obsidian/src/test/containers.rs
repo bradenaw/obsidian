@@ -91,8 +91,6 @@ impl Containers {
             .stderr(Stdio::null())
             .spawn()?;
 
-        // TODO: need to spawn a network proxy to get through the --internal?
-
         Ok(Self {
             label: label.to_string(),
             main_network_name,
@@ -202,7 +200,6 @@ impl<'a> ContainerBuilder<'a> {
                 "--label",
                 &self.parent.label,
                 "--rm",
-                //"--network=host",
                 "--network",
                 &self.parent.main_network_name,
             ])

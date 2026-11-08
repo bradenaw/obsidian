@@ -157,9 +157,7 @@ async fn cmd_node(args: NodeArgs) -> anyhow::Result<()> {
         .add_service(pb::obsidian_server::ObsidianServer::new(
             GatewayServer::new(Arc::new(gateway)),
         ))
-        .serve_with_incoming(
-            TcpIncoming::from_listener(listener, true /*nodelay*/, None /*keepalive*/).unwrap(),
-        )
+        .serve_with_incoming(TcpIncoming::from(listener))
         .await?;
     Ok(())
 }
@@ -180,9 +178,7 @@ async fn cmd_test_journals(args: TestJournalsArgs) -> anyhow::Result<()> {
         .add_service(pb::external::journals_server::JournalsServer::new(
             JournalsServer::new(Arc::new(MemJournals::<Proposal<JournalEntry>>::new())),
         ))
-        .serve_with_incoming(
-            TcpIncoming::from_listener(listener, true /*nodelay*/, None /*keepalive*/).unwrap(),
-        )
+        .serve_with_incoming(TcpIncoming::from(listener))
         .await?;
     Ok(())
 }

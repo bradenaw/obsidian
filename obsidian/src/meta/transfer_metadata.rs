@@ -4,6 +4,7 @@ use std::time::SystemTime;
 
 use anyhow::anyhow;
 use obsidian_pb as pb;
+use obsidian_util::FromProtoEnum as _;
 
 use crate::meta::MetaState;
 use crate::meta::TransferState;
@@ -23,15 +24,9 @@ impl TryFrom<pb::internal::TransferMetadata> for TransferMetadata {
     fn try_from(value_pb: pb::internal::TransferMetadata) -> Result<Self, Self::Error> {
         Ok(Self {
             state: MetaState::from((
-                TransferState::try_from(
-                    pb::internal::TransferState::from_i32(value_pb.state)
-                        .ok_or_else(|| anyhow!("missing state"))?,
-                )?,
-                match pb::internal::TransferState::from_i32(value_pb.next_state) {
-                    Some(pb::internal::TransferState::Unknown) => None,
-                    None => None,
-                    Some(state_pb) => Some(TransferState::try_from(state_pb)?),
-                },
+                TransferState::try_from_i32(value_pb.state)?
+                    .ok_or_else(|| anyhow!("missing state"))?,
+                TransferState::try_from_i32(value_pb.next_state)?,
             )),
             srcs: value_pb
                 .srcs

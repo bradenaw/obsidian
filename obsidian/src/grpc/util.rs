@@ -1,3 +1,4 @@
+use std::any::type_name;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::iter;
@@ -9,6 +10,7 @@ use obsidian_common::key_from_proto;
 use obsidian_common::key_to_proto;
 use obsidian_pb as pb;
 use prost::Message;
+use prost::UnknownEnumValue;
 use tonic::metadata::MetadataValue;
 
 use crate::Direction;
@@ -100,10 +102,8 @@ pub(super) fn parse_scan_req(
     let snapshot_ts = Timestamp::from_micros(req_pb.snapshot_ts);
     let keyspace_id: KeyspaceId = required("keyspace_id", req_pb.keyspace_id)?;
     let range: Range<Vec<u8>> = required("range", req_pb.range)?;
-    let direction: Direction = pb::Direction::from_i32(req_pb.direction)
-        .ok_or_else(|| anyhow!("unknown direction"))?
-        .try_into()
-        .map_err(invalid_argument)?;
+    let direction: Direction =
+        required_enum::<pb::Direction, Direction>("direction", req_pb.direction)?;
     let limit = usize::try_from(req_pb.limit).map_err(|_| anyhow!("invalid limit"))?;
 
     Ok((snapshot_ts, keyspace_id, range, direction, limit))
@@ -187,6 +187,22 @@ where
         .map_err(|e: anyhow::Error| {
             tonic::Status::invalid_argument(format!("couldn't parse {}: {}", name, e))
         })
+}
+
+pub(super) fn required_enum<P, T>(name: &str, v: i32) -> Result<T, tonic::Status>
+where
+    P: TryFrom<i32, Error = UnknownEnumValue>,
+    T: TryFrom<P, Error = anyhow::Error>,
+{
+    Ok(T::try_from(P::try_from(v).map_err(|e| {
+        tonic::Status::invalid_argument(format!(
+            "unknown value for {}: enum {} value {}",
+            name,
+            type_name::<P>(),
+            e.0
+        ))
+    })?)
+    .map_err(invalid_argument)?)
 }
 
 pub(super) fn invalid_argument(e: anyhow::Error) -> tonic::Status {

@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use anyhow::anyhow;
 use futures::FutureExt;
 use futures::Stream;
 use obsidian_pb as pb;
@@ -37,12 +36,7 @@ macro_rules! spawn_server {
                 let serve = tonic::transport::Server::builder()
                     .add_service($server)
                     .serve_with_incoming_shutdown(
-                        TcpIncoming::from_listener(
-                            listener, true, /*nodelay*/
-                            None, /*keepalive*/
-                        )
-                        .map_err(|e| anyhow!("{}", e))
-                        .unwrap(),
+                        TcpIncoming::from(listener),
                         on_shutdown.map(|_| ()),
                     );
 

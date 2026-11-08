@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
 
+use anyhow::anyhow;
 use obsidian_util::spawn_owned;
 use obsidian_util::OrdEqByFirst;
 use obsidian_util::OwnedJoinHandle;
@@ -12,6 +13,7 @@ use obsidian_util::OwnedJoinHandle;
 use crate::Timestamp;
 
 const ADVANCE_TICK: Duration = Duration::from_millis(25);
+const MAX_WAIT: Duration = Duration::from_millis(100);
 
 pub struct Sequencer {
     inner: Arc<RwLock<SequencerInner>>,
@@ -61,8 +63,14 @@ impl Sequencer {
     pub async fn wait_for_safe_read(&self, ts: Timestamp) -> anyhow::Result<()> {
         // Straight reject - it's going to be a while before this timestamp is safe to read and we
         // may as well let the client wait instead of us.
-        if ts.saturating_duration_since(Timestamp::now()) > Duration::from_millis(100) {
-            anyhow::bail!("timestamp too far in the future");
+        let in_future = ts.saturating_duration_since(Timestamp::now());
+        if in_future > MAX_WAIT {
+            return Err(anyhow!(
+                "{:?} too far in the future: {:?} greater than max wait {:?}",
+                ts,
+                in_future,
+                MAX_WAIT
+            ));
         }
         loop {
             if ts <= self.safe_read_ts() {
