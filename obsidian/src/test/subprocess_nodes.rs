@@ -181,9 +181,11 @@ impl TestNodes for SubprocessNodes {
                 "OTEL_EXPORTER_OTLP_ENDPOINT",
                 format!("http://{}:{}", OTEL_CONTAINER_NAME, OTEL_OTLP_GRPC_PORT),
             )
-            .env("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
             .env("OTEL_EXPORTER_OTLP_INSECURE", "true")
+            .env("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
             .env("OTEL_METRIC_EXPORT_INTERVAL", "1000") // milliseconds
+            .env("OTEL_SERVICE_NAME", "obsidian")
+            .env("OTEL_TRACES_SAMPLER", "parentbased_always_on")
             .env("RUST_BACKTRACE", "1")
             .env("RUST_LOG", "debug")
             .arg("/cargo-bin/obsidian")

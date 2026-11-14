@@ -155,7 +155,8 @@ async fn cmd_node(args: NodeArgs) -> anyhow::Result<()> {
     log::info!("starting to serve grpc");
     tonic::transport::Server::builder()
         .layer(
-            tonic_tracing_opentelemetry::middleware::server::OtelGrpcLayer::default(), //.filter(tonic_tracing_opentelemetry::middleware::filters::reject_healthcheck),
+            tonic_tracing_opentelemetry::middleware::server::OtelGrpcLayer::default()
+                .filter(tonic_tracing_opentelemetry::middleware::filters::reject_healthcheck),
         )
         .add_service(pb::internal::node_server::NodeServer::new(NodeServer::new(
             Arc::new(node),

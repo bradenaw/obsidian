@@ -44,7 +44,12 @@ tonic = "0.14"
 tonic-tracing-opentelemetry = "0.42.1"
 tracing = "0.1.44"
 tracing-opentelemetry = "0.34.0"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = {
+    version = "0.3",
+    # tracing-log is default which competes with pretty_env_logger for being the logging backend.
+    default-features = false,
+    features = ["env-filter"],
+}
 uuid = { version = "1.18.1", features = ["v4", "v7"] }
 
 [dev-dependencies]
