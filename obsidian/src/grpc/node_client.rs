@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -12,6 +14,7 @@ use obsidian_common::key_to_proto;
 use obsidian_common::RunId;
 use obsidian_pb as pb;
 use obsidian_util::Retry;
+use tower::util::BoxCloneSyncService;
 
 use crate::grpc::util::internal_err_from_status;
 use crate::grpc::util::preconds_muts_to_proto;
@@ -46,16 +49,21 @@ use crate::Timestamp;
 use crate::TxOutcome;
 use crate::Txid;
 
+pub type NodeClientInner = pb::internal::node_client::NodeClient<
+    BoxCloneSyncService<
+        tonic::codegen::http::Request<tonic::body::Body>,
+        tonic::codegen::http::Response<tonic::body::Body>,
+        tonic::transport::Error,
+    >,
+>;
+
 pub(crate) struct NodeClient {
     node_id: NodeId,
-    grpc_client: pb::internal::node_client::NodeClient<tonic::transport::Channel>,
+    grpc_client: NodeClientInner,
 }
 
 impl NodeClient {
-    pub fn new(
-        node_id: NodeId,
-        grpc_client: pb::internal::node_client::NodeClient<tonic::transport::Channel>,
-    ) -> Self {
+    pub fn new(node_id: NodeId, grpc_client: NodeClientInner) -> Self {
         Self {
             node_id,
             grpc_client,
@@ -63,7 +71,7 @@ impl NodeClient {
     }
 
     fn shards_subscribe_inner(
-        grpc_client: pb::internal::node_client::NodeClient<tonic::transport::Channel>,
+        grpc_client: NodeClientInner,
     ) -> impl Stream<Item = anyhow::Result<HashMap<ShardId, ReplicaState>>> + Send + Unpin {
         Box::pin(try_stream! {
             let mut s = grpc_client.clone().shards_subscribe(()).await?.into_inner();
@@ -148,7 +156,7 @@ impl runtime::Node for NodeClient {
 struct ShardProxy {
     node_id: NodeId,
     shard_id: ShardId,
-    grpc_client: pb::internal::node_client::NodeClient<tonic::transport::Channel>,
+    grpc_client: NodeClientInner,
 }
 
 #[async_trait]
@@ -275,7 +283,7 @@ impl runtime::Shard for ShardProxy {
 struct TabletProxy {
     node_id: NodeId,
     tablet_id: TabletId,
-    grpc_client: pb::internal::node_client::NodeClient<tonic::transport::Channel>,
+    grpc_client: NodeClientInner,
 }
 
 #[async_trait]
@@ -560,7 +568,7 @@ impl runtime::Tablet for TabletProxy {
 }
 
 struct MetaProxy {
-    grpc_client: pb::internal::node_client::NodeClient<tonic::transport::Channel>,
+    grpc_client: NodeClientInner,
 }
 
 #[async_trait]

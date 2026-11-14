@@ -18,7 +18,15 @@ use obsidian_util::Retry;
 use obsidian_util::WithBackground;
 use tokio::select;
 use tokio::sync::mpsc;
+use tonic::transport::Channel;
+use tonic::transport::Uri;
+use tonic_tracing_opentelemetry::middleware::client::OtelGrpcLayer;
+use tonic_tracing_opentelemetry::middleware::client::OtelGrpcService;
+use tower::util::BoxCloneSyncService;
+use tower::ServiceBuilder;
+use tower::ServiceExt;
 
+use crate::grpc::node_client::NodeClientInner;
 use crate::grpc::NodeClient;
 use crate::runtime::Node;
 use crate::runtime::Nodes;
@@ -130,10 +138,25 @@ impl GrpcNodesInner {
         }
     }
 
+    async fn connect_once(uri: Uri) -> anyhow::Result<NodeClientInner> {
+        let channel = Channel::builder(uri)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .connect()
+            .await?;
+
+        let instrumented_channel = ServiceBuilder::new()
+            .layer(OtelGrpcLayer::default())
+            .service(channel);
+
+        Ok(pb::internal::node_client::NodeClient::new(
+            BoxCloneSyncService::new(instrumented_channel),
+        ))
+    }
+
     async fn connect(node_id: NodeId, url: String) -> Arc<dyn Node> {
         let grpc_client = Retry::new()
             .indefinitely(&async || -> anyhow::Result<_> {
-                pb::internal::node_client::NodeClient::connect(url.clone())
+                Self::connect_once(url.parse::<Uri>()?)
                     .await
                     .context(format!("error connecting to {:?} at {}", node_id, url))
             })

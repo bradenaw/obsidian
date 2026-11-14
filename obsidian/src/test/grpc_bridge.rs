@@ -8,6 +8,10 @@ use obsidian_pb as pb;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tonic::transport::server::TcpIncoming;
+use tonic::transport::Channel;
+use tonic::transport::Uri;
+use tower::util::BoxCloneSyncService;
+use tower::ServiceBuilder;
 
 use crate::grpc::GatewayClient;
 use crate::grpc::GatewayServer;
@@ -76,10 +80,14 @@ pub(crate) async fn node_grpc_bridge(
     ))
     .await?;
 
+    let channel = Channel::builder(url.parse::<Uri>()?).connect().await?;
+
+    let service = ServiceBuilder::new().service(channel);
+
     Ok(GrpcBridge {
         client: Arc::new(NodeClient::new(
             node_id,
-            pb::internal::node_client::NodeClient::connect(url).await?,
+            pb::internal::node_client::NodeClient::new(BoxCloneSyncService::new(service)),
         )),
         shutdown: Some(shutdown),
     })
