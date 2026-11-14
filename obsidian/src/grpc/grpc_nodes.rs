@@ -2,8 +2,10 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::time::Duration;
 
 use anyhow::anyhow;
+use anyhow::Context as _;
 use futures::stream::FuturesUnordered;
 use im::ordset::DiffItem;
 use im::OrdSet;
@@ -20,6 +22,8 @@ use tokio::sync::mpsc;
 use crate::grpc::NodeClient;
 use crate::runtime::Node;
 use crate::runtime::Nodes;
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) struct GrpcNodes(WithBackground<GrpcNodesInner>);
 
@@ -76,7 +80,7 @@ struct GrpcNodesInner {
 
 impl GrpcNodesInner {
     async fn populate(&self) {
-        let prev = OrdSet::new();
+        let mut prev = OrdSet::new();
         let mut connects: HashMap<NodeId, OwnedJoinHandle<Arc<dyn Node>>> = HashMap::new();
         let (finished_send, mut finished_recv) = mpsc::channel(1 /*buffer*/);
 
@@ -111,13 +115,18 @@ impl GrpcNodesInner {
                 _ = node_ids_changed => {},
                 maybe_node_id = finished_recv.recv() => {
                     let node_id = maybe_node_id.unwrap();
-                    if let Some(client_fut) = connects.remove(&node_id) {
-                        let client = client_fut.await;
-                        let mut clients = self.clients.write().unwrap();
-                        clients.insert(node_id, client);
+                    // It's possible the connect already finished before the node got removed.
+                    if node_ids.contains(&node_id) {
+                        if let Some(client_fut) = connects.remove(&node_id) {
+                            let client = client_fut.await;
+                            let mut clients = self.clients.write().unwrap();
+                            clients.insert(node_id, client);
+                        }
                     }
                 }
             }
+
+            prev = node_ids;
         }
     }
 
@@ -126,7 +135,7 @@ impl GrpcNodesInner {
             .indefinitely(&async || -> anyhow::Result<_> {
                 pb::internal::node_client::NodeClient::connect(url.clone())
                     .await
-                    .map_err(|e| anyhow!("error connecting to {:?} at {}: {:?}", node_id, url, e))
+                    .context(format!("error connecting to {:?} at {}", node_id, url))
             })
             .await;
 
